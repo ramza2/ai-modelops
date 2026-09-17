@@ -1,0 +1,29 @@
+---
+description: ModelOps repository implementation rules. Always follow the root AGENTS.md and design documents before making changes.
+globs:
+alwaysApply: true
+---
+
+# ModelOps Cursor Rule
+
+Before editing code in this repository:
+
+1. Read and follow `/AGENTS.md`.
+2. Read the design documents relevant to the task under `/docs`.
+3. Treat `/AGENTS.md` as the default coding-agent instruction and `/docs` as the source of truth for architecture, data model, state machines, API contracts, deployment, and migration behavior.
+4. Do not silently diverge from the documented architecture. If implementation requires a design change, update the relevant document in the same change.
+5. Never commit secrets, real internal addresses, credentials, tokens, `.env` contents, or sensitive request/response payloads. This repository is public.
+
+Key boundaries that must always be preserved:
+
+- Management API does not control Docker directly.
+- Worker controls model lifecycle only through Node Agent APIs.
+- Node Agent is the only component that directly uses Docker Engine/NVML/host metrics.
+- Gateway owns AI Endpoint Alias routing and inference proxying, not model lifecycle.
+- Traefik owns ingress/TLS; Gateway owns model routing.
+- Long-running lifecycle changes return an Operation and execute asynchronously.
+- Gateway must not query PostgreSQL on every inference request.
+- Cold Switch and rollback behavior must follow `/docs/state-machines/01-cold-switch.md`.
+- GPU VRAM is evaluated per physical GPU; do not treat multiple GPUs as one pooled VRAM device.
+
+When there is no task-specific instruction, implement according to the milestone order defined in `/AGENTS.md`.
