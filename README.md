@@ -39,6 +39,12 @@ ai-modelops/
 │   │   └── 03-cold-switch-adjustments.md
 │   ├── state-machines/
 │   │   └── 01-cold-switch.md
+│   ├── api/
+│   │   ├── 00-api-conventions.md
+│   │   ├── 01-management-api.md
+│   │   ├── 02-gateway-api.md
+│   │   ├── 03-node-agent-api.md
+│   │   └── 04-endpoint-matrix.md
 │   └── decisions/
 │       ├── ADR-001-control-data-plane-separation.md
 │       └── ADR-002-node-agent-boundary.md
@@ -75,5 +81,5 @@ ai-modelops/
 - [x] Traefik label 기반 배포 전제 반영
 - [x] 데이터 모델 / ERD
 - [x] Cold Switch 상태머신
-- [ ] API 명세
+- [x] API 명세
 - [ ] 초기 구현
