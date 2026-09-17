@@ -23,10 +23,20 @@
 6. 현재 서버 운영 방식인 Traefik label 기반 배포를 유지한다.
 7. 모델 컨테이너는 기본적으로 내부 Docker Network에만 노출하고, 외부 진입점은 Gateway로 일원화한다.
 
+## Coding Agent / Cursor
+
+Cursor, Codex 등 coding agent로 구현을 시작할 때는 루트의 `AGENTS.md`를 먼저 읽는다.
+
+Cursor에서는 `.cursor/rules/modelops.mdc`가 항상 적용되며 `AGENTS.md`와 관련 `docs/` 문서를 source of truth로 사용하도록 구성되어 있다.
+
 ## Repository Structure
 
 ```text
 ai-modelops/
+├── AGENTS.md                 # Coding agent 구현 지침
+├── .cursor/
+│   └── rules/
+│       └── modelops.mdc      # Cursor always-apply rule
 ├── README.md
 ├── docs/
 │   ├── 00-project-overview.md
@@ -85,4 +95,5 @@ ai-modelops/
 - [x] Cold Switch 상태머신
 - [x] API 명세
 - [x] 개발·배포·이관 전략
+- [x] Coding agent / Cursor 작업 지침
 - [ ] 초기 구현
