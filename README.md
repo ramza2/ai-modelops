@@ -35,7 +35,10 @@ ai-modelops/
 │   │   └── 02-traefik-deployment.md
 │   ├── data-model/
 │   │   ├── 01-erd.md
-│   │   └── 02-table-spec.md
+│   │   ├── 02-table-spec.md
+│   │   └── 03-cold-switch-adjustments.md
+│   ├── state-machines/
+│   │   └── 01-cold-switch.md
 │   └── decisions/
 │       ├── ADR-001-control-data-plane-separation.md
 │       └── ADR-002-node-agent-boundary.md
@@ -71,6 +74,6 @@ ai-modelops/
 - [x] MVP 아키텍처 초안
 - [x] Traefik label 기반 배포 전제 반영
 - [x] 데이터 모델 / ERD
-- [ ] Cold Switch 상태머신
+- [x] Cold Switch 상태머신
 - [ ] API 명세
 - [ ] 초기 구현
