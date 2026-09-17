@@ -45,6 +45,8 @@ ai-modelops/
 │   │   ├── 02-gateway-api.md
 │   │   ├── 03-node-agent-api.md
 │   │   └── 04-endpoint-matrix.md
+│   ├── deployment/
+│   │   └── 01-development-and-migration-strategy.md
 │   └── decisions/
 │       ├── ADR-001-control-data-plane-separation.md
 │       └── ADR-002-node-agent-boundary.md
@@ -82,4 +84,5 @@ ai-modelops/
 - [x] 데이터 모델 / ERD
 - [x] Cold Switch 상태머신
 - [x] API 명세
+- [x] 개발·배포·이관 전략
 - [ ] 초기 구현
