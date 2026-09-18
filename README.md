@@ -147,4 +147,5 @@ Cloud Agent 환경(`.cursor/environment.json`)은 `scripts/cloud-install.sh`(ins
 - [x] 개발·배포·이관 전략
 - [x] Coding agent / Cursor 작업 지침
 - [x] 초기 구현 — Milestone 1 (Foundation): Backend bootstrap, 공통 enum/error, DB 모델 + Alembic 초기 migration, `/health`·`/ready`, pytest
+  - 참고: Docker Compose 실환경 검증은 로컬 PC에서 별도 수행 예정 (Cloud Agent에는 Docker Engine 없음)
 - [ ] Milestone 2 이후 (Node/Resource, Registry/Deployment, Gateway, Switch, Admin UI)
