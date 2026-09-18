@@ -1,6 +1,7 @@
 # Local development Control Plane compose (Milestone 1: PostgreSQL + backend).
-# Values come from the repo-root .env (copy from .env.example). No secrets are
-# committed here; only safe local-dev defaults are used as fallbacks.
+# Values come from the repo-root .env (via `./scripts/deploy.sh` or
+# `docker compose --env-file .env ...`). No secrets are committed here; only
+# safe local-dev defaults are used as fallbacks.
 
 services:
   postgres:
@@ -26,7 +27,8 @@ services:
     environment:
       # Inside the compose network the DB host is the service name "postgres".
       MODELOPS_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-modelops}:${POSTGRES_PASSWORD:-modelops}@postgres:5432/${POSTGRES_DB:-modelops}
-      MODELOPS_ENVIRONMENT: local
+      MODELOPS_ENVIRONMENT: ${MODELOPS_ENVIRONMENT:-local}
+      MODELOPS_DEBUG: ${MODELOPS_DEBUG:-false}
     depends_on:
       postgres:
         condition: service_healthy
@@ -34,7 +36,7 @@ services:
       sh -c "alembic upgrade head &&
              uvicorn app.main:app --host 0.0.0.0 --port 8000"
     ports:
-      - "8000:8000"
+      - "${BACKEND_PORT:-8000}:8000"
 
 volumes:
   modelops_pgdata:

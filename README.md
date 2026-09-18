@@ -77,20 +77,22 @@ ai-modelops/
 Milestone 1은 Management API의 기반(설정/공통 enum·error, DB 모델, Alembic
 초기 migration, `/health`·`/ready`, pytest)을 제공한다.
 
-### 사전 준비
+### 권장: 원클릭 배포
+
+Docker가 설치·기동된 상태에서 repository root에서:
 
 ```bash
-cp .env.example .env   # 필요 시 값 조정 (secret은 commit 금지)
+./scripts/deploy.sh
 ```
 
-### 옵션 A) Docker Compose (권장)
+- root `.env`가 없으면 interactive wizard로 생성한다.
+- 기존 `.env`가 있으면 재사용한다. 재설정: `./scripts/deploy.sh --configure`
+- Compose로 PostgreSQL + backend를 기동하고 `/health`, `/ready`를 확인한다.
+- 종료(볼륨 유지): `./scripts/deploy.sh --down`
 
-```bash
-docker compose -f deploy/compose/docker-compose.yml up --build
-# backend: http://localhost:8000  (postgres: localhost:5432)
-```
+성공 시 Backend는 `http://localhost:<BACKEND_PORT>` (기본 8000)이다.
 
-### 옵션 B) 로컬 PostgreSQL + venv
+### 옵션 B) 로컬 PostgreSQL + venv (Cloud Agent / non-Docker)
 
 ```bash
 # 1) 시스템 패키지 + venv + 의존성 설치 (idempotent)
@@ -118,6 +120,18 @@ export MODELOPS_DATABASE_URL="postgresql+asyncpg://modelops:modelops@localhost:5
 pytest -v            # 단위/health/migration smoke 테스트
 alembic upgrade head # 초기 스키마(문서화된 23개 테이블) 생성
 ```
+
+### Troubleshooting / 수동 Docker Compose
+
+`.env`를 직접 다루는 경우:
+
+```bash
+cp .env.example .env   # 필요 시 값 조정 (secret은 commit 금지)
+docker compose --env-file .env -f deploy/compose/docker-compose.yml up -d --build
+docker compose --env-file .env -f deploy/compose/docker-compose.yml down
+```
+
+참고: Cloud Agent 환경에는 Docker Engine이 없어 Compose 실환경 검증은 로컬 PC에서 수행한다.
 
 Cloud Agent 환경(`.cursor/environment.json`)은 `scripts/cloud-install.sh`(install)와
 `scripts/cloud-start.sh`(start)를 사용하며, `backend` 터미널에서 API를 자동 기동한다.
