@@ -72,6 +72,56 @@ ai-modelops/
 └── tests/
 ```
 
+## Local Development (Milestone 1 — Foundation)
+
+Milestone 1은 Management API의 기반(설정/공통 enum·error, DB 모델, Alembic
+초기 migration, `/health`·`/ready`, pytest)을 제공한다.
+
+### 사전 준비
+
+```bash
+cp .env.example .env   # 필요 시 값 조정 (secret은 commit 금지)
+```
+
+### 옵션 A) Docker Compose (권장)
+
+```bash
+docker compose -f deploy/compose/docker-compose.yml up --build
+# backend: http://localhost:8000  (postgres: localhost:5432)
+```
+
+### 옵션 B) 로컬 PostgreSQL + venv
+
+```bash
+# 1) 시스템 패키지 + venv + 의존성 설치 (idempotent)
+bash scripts/cloud-install.sh
+# 2) PostgreSQL 기동 + role/DB 준비 + migration 적용
+bash scripts/cloud-start.sh
+# 3) API 실행
+cd backend && . ../.venv/bin/activate
+export MODELOPS_DATABASE_URL="postgresql+asyncpg://modelops:modelops@localhost:5432/modelops"
+uvicorn app.main:app --reload
+```
+
+### 확인
+
+```bash
+curl -s http://localhost:8000/health   # {"status":"ok"}
+curl -s http://localhost:8000/ready    # {"status":"ready","checks":{"database":"ok"}}
+```
+
+### 테스트 / Migration
+
+```bash
+cd backend && . ../.venv/bin/activate
+export MODELOPS_DATABASE_URL="postgresql+asyncpg://modelops:modelops@localhost:5432/modelops"
+pytest -v            # 단위/health/migration smoke 테스트
+alembic upgrade head # 초기 스키마(문서화된 23개 테이블) 생성
+```
+
+Cloud Agent 환경(`.cursor/environment.json`)은 `scripts/cloud-install.sh`(install)와
+`scripts/cloud-start.sh`(start)를 사용하며, `backend` 터미널에서 API를 자동 기동한다.
+
 ## Planned Technology Stack
 
 - Frontend: React + TypeScript + Vite
@@ -96,4 +146,5 @@ ai-modelops/
 - [x] API 명세
 - [x] 개발·배포·이관 전략
 - [x] Coding agent / Cursor 작업 지침
-- [ ] 초기 구현
+- [x] 초기 구현 — Milestone 1 (Foundation): Backend bootstrap, 공통 enum/error, DB 모델 + Alembic 초기 migration, `/health`·`/ready`, pytest
+- [ ] Milestone 2 이후 (Node/Resource, Registry/Deployment, Gateway, Switch, Admin UI)
