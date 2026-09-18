@@ -154,6 +154,7 @@ class NodeService:
         client = self._agent_client_factory(str(node.agent_base_url))
         info = await client.fetch_node()
         resources = await client.fetch_resources()
+        ready = await client.fetch_ready()
         sampled_at = _parse_collected_at(
             resources.get("collected_at") if isinstance(resources, dict) else None
         )
@@ -184,7 +185,7 @@ class NodeService:
         if not isinstance(gpu_payloads, list):
             gpu_payloads = []
 
-        # NVML unavailable → empty GPU list is valid (degraded), not fabricated zeros.
+        # Empty GPU list with NVML available is valid (zero devices), not degraded.
         for item in gpu_payloads:
             if not isinstance(item, dict):
                 continue
@@ -220,11 +221,15 @@ class NodeService:
                 )
             )
 
-        node.status = (
-            NodeStatus.ONLINE.value
-            if gpu_payloads or info.get("hostname")
-            else NodeStatus.DEGRADED.value
-        )
+        # Node status follows Agent /ready: both Docker+NVML → ONLINE, else DEGRADED.
+        # Zero GPUs with NVML available remains ONLINE.
+        ready_status = str((ready or {}).get("status") or "").upper()
+        docker_ok = str((ready or {}).get("docker") or "").upper() == "AVAILABLE"
+        nvml_ok = str((ready or {}).get("nvml") or "").upper() == "AVAILABLE"
+        if ready_status == "READY" and docker_ok and nvml_ok:
+            node.status = NodeStatus.ONLINE.value
+        else:
+            node.status = NodeStatus.DEGRADED.value
         await self._session.commit()
         return await self.latest_resources(uuid.UUID(str(node.id)))
 

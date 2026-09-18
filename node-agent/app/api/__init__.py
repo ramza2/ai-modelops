@@ -31,9 +31,9 @@ async def ready_root(
     service: NodeService = Depends(get_node_service),
 ) -> dict[str, object]:
     payload = service.readiness()
-    # Process is ready to serve even when NVML is degraded; Docker unavailable
-    # marks DEGRADED but still returns 200 so orchestrators can inspect reasons.
-    if payload["status"] not in {"READY", "DEGRADED"}:
+    # /ready is 200 only when Docker + NVML are both AVAILABLE.
+    # DEGRADED still returns a body with reasons; query APIs stay up.
+    if payload["status"] != "READY":
         response.status_code = 503
     return payload
 

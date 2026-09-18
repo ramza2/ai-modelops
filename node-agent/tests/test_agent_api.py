@@ -55,11 +55,54 @@ async def test_ready_degraded_when_docker_unavailable() -> None:
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         response = await ac.get("/ready")
-    assert response.status_code == 200
+        # Query APIs remain available even when /ready is DEGRADED.
+        node = await ac.get("/internal/v1/node")
+        resources = await ac.get("/internal/v1/resources")
+    assert response.status_code == 503
     body = response.json()
     assert body["docker"] == "UNAVAILABLE"
     assert body["nvml"] == "UNAVAILABLE"
     assert body["status"] == "DEGRADED"
+    assert body.get("docker_reason")
+    assert body.get("nvml_reason")
+    assert node.status_code == 200
+    assert resources.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_ready_ok_when_docker_and_nvml_available() -> None:
+    app = create_app(
+        service=_service(
+            docker=FakeDockerAdapter(available=True),
+            nvml=FakeNvmlAdapter(available=True, gpus=[]),
+        )
+    )
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        response = await ac.get("/ready")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "READY"
+    assert body["docker"] == "AVAILABLE"
+    assert body["nvml"] == "AVAILABLE"
+
+
+@pytest.mark.asyncio
+async def test_ready_degraded_when_only_nvml_unavailable() -> None:
+    app = create_app(
+        service=_service(
+            docker=FakeDockerAdapter(available=True),
+            nvml=FakeNvmlAdapter(available=False, reason="missing libnvidia"),
+        )
+    )
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        response = await ac.get("/ready")
+    assert response.status_code == 503
+    body = response.json()
+    assert body["status"] == "DEGRADED"
+    assert body["docker"] == "AVAILABLE"
+    assert body["nvml"] == "UNAVAILABLE"
 
 
 @pytest.mark.asyncio
@@ -128,9 +171,10 @@ async def test_nvml_unavailable_returns_empty_gpu_list_not_zeros() -> None:
     )
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
-        ready = (await ac.get("/ready")).json()
+        ready = await ac.get("/ready")
         resources = (await ac.get("/internal/v1/resources")).json()
-    assert ready["nvml"] == "UNAVAILABLE"
+    assert ready.status_code == 503
+    assert ready.json()["nvml"] == "UNAVAILABLE"
     assert resources["gpus"] == []
 
 
@@ -142,9 +186,10 @@ async def test_docker_unavailable_status() -> None:
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         node = (await ac.get("/internal/v1/node")).json()
-        ready = (await ac.get("/ready")).json()
+        ready = await ac.get("/ready")
     assert node["docker_version"] is None
-    assert ready["docker"] == "UNAVAILABLE"
+    assert ready.status_code == 503
+    assert ready.json()["docker"] == "UNAVAILABLE"
 
 
 @pytest.mark.asyncio

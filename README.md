@@ -98,29 +98,50 @@ Docker가 설치·기동된 상태에서 repository root에서:
 로컬에서도 Compose 안에 privileged Docker/NVML 마운트를 억지로 넣지 않고,
 Backend/PostgreSQL은 Compose(또는 venv)로 두고 Node Agent는 host process로 기동한다.
 
-```bash
-# terminal A — Control Plane (Compose or cloud-start + uvicorn)
-./scripts/deploy.sh
-# or: bash scripts/cloud-start.sh && cd backend && uvicorn app.main:app --reload
+Windows + Docker Desktop 로컬 예:
 
-# terminal B — Node Agent on the host
+```text
+Windows Host
+  └─ Node Agent :8100   (Docker/NVML/psutil)
+
+Docker Desktop
+  └─ Backend Container  → http://host.docker.internal:8100
+```
+
+```bash
+# terminal A — Control Plane (Compose)
+./scripts/deploy.sh
+
+# terminal B — Node Agent on the Windows host
+# Bind 0.0.0.0 so the Backend container can reach the host via host.docker.internal.
 cd node-agent
 python -m venv .venv && . .venv/bin/activate
 pip install -r requirements-dev.txt
-export NODE_AGENT_HOST=127.0.0.1 NODE_AGENT_PORT=8100 NODE_AGENT_TOKEN=
-uvicorn app.main:app --host 127.0.0.1 --port 8100
+export NODE_AGENT_HOST=0.0.0.0 NODE_AGENT_PORT=8100 NODE_AGENT_TOKEN=
+uvicorn app.main:app --host 0.0.0.0 --port 8100
 ```
 
-등록 및 자원 sync 예:
+Host에서 Agent 직접 확인:
+
+```bash
+curl -s http://127.0.0.1:8100/health
+curl -s http://127.0.0.1:8100/ready
+curl -s http://127.0.0.1:8100/internal/v1/resources
+```
+
+Compose Backend에서 Node 등록/sync (container → host Agent):
 
 ```bash
 curl -s -X POST http://localhost:8000/api/v1/nodes \
   -H 'Content-Type: application/json' \
-  -d '{"name":"local-dev","agent_base_url":"http://127.0.0.1:8100","environment":"local"}'
+  -d '{"name":"local-dev","agent_base_url":"http://host.docker.internal:8100","environment":"local"}'
 # → node_id
 curl -s -X POST http://localhost:8000/api/v1/nodes/<node_id>/resources/refresh
 curl -s http://localhost:8000/api/v1/nodes/<node_id>/resources/latest
 ```
+
+Backend를 host venv로 직접 실행하는 경우(Agent도 같은 host)에는
+`agent_base_url`에 `http://127.0.0.1:8100`을 사용한다.
 
 `POST .../resources/refresh`는 Milestone 2에서 Agent 상태를 DB snapshot으로
 끌어오기 위한 명시적 sync endpoint이다(문서의 GET latest/history와 충돌하지 않음).

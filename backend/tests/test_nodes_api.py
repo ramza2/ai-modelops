@@ -20,15 +20,29 @@ from app.services.nodes import NodeService
 
 
 class FakeAgentClient:
-    def __init__(self, *, node: dict[str, Any], resources: dict[str, Any]) -> None:
+    def __init__(
+        self,
+        *,
+        node: dict[str, Any],
+        resources: dict[str, Any],
+        ready: dict[str, Any] | None = None,
+    ) -> None:
         self._node = node
         self._resources = resources
+        self._ready = ready or {
+            "status": "READY",
+            "docker": "AVAILABLE",
+            "nvml": "AVAILABLE",
+        }
 
     async def fetch_node(self) -> dict[str, Any]:
         return self._node
 
     async def fetch_resources(self) -> dict[str, Any]:
         return self._resources
+
+    async def fetch_ready(self) -> dict[str, Any]:
+        return self._ready
 
 
 def _database_url() -> str:
@@ -149,6 +163,54 @@ async def test_gpu_uuid_upsert_and_snapshot_persistence(db_session: AsyncSession
     assert uuid.UUID(str(gpu_a2.id)) == gpu_a_id
     assert gpu_a2.device_index == 7
     assert second["host"]["sampled_at"].startswith("2026-09-18T08:05:00")
+
+
+@pytest.mark.asyncio
+async def test_node_status_follows_agent_ready_not_gpu_count(
+    db_session: AsyncSession,
+) -> None:
+    hostname = f"status-host-{uuid.uuid4().hex[:8]}"
+    node = Node(
+        name=f"status-node-{uuid.uuid4().hex[:8]}",
+        hostname=hostname,
+        agent_base_url="http://127.0.0.1:8100",
+        environment="local",
+        status=NodeStatus.UNKNOWN.value,
+        labels_json={},
+    )
+    db_session.add(node)
+    await db_session.flush()
+
+    # NVML available + zero GPUs → ONLINE (not the same as NVML unavailable).
+    fake = FakeAgentClient(
+        node={"hostname": hostname, "cpu_model": "CPU", "ram_total_mb": 1, "disk_total_mb": 1},
+        resources={
+            "collected_at": "2026-09-18T09:00:00Z",
+            "host": {"cpu_utilization_pct": 1.0},
+            "gpus": [],
+        },
+        ready={"status": "READY", "docker": "AVAILABLE", "nvml": "AVAILABLE"},
+    )
+    service = NodeService(db_session, agent_client_factory=lambda _url=None: fake)
+    await service.refresh_resources(uuid.UUID(str(node.id)))
+    await db_session.refresh(node)
+    assert node.status == NodeStatus.ONLINE.value
+
+    # Docker or NVML unavailable → DEGRADED even if host metrics exist.
+    fake._ready = {
+        "status": "DEGRADED",
+        "docker": "AVAILABLE",
+        "nvml": "UNAVAILABLE",
+        "nvml_reason": "missing driver",
+    }
+    fake._resources = {
+        "collected_at": "2026-09-18T09:01:00Z",
+        "host": {"cpu_utilization_pct": 2.0},
+        "gpus": [],
+    }
+    await service.refresh_resources(uuid.UUID(str(node.id)))
+    await db_session.refresh(node)
+    assert node.status == NodeStatus.DEGRADED.value
 
 
 @pytest.mark.asyncio

@@ -77,8 +77,8 @@ class NodeService:
         nvml = self._nvml.status()
         docker_state = "AVAILABLE" if docker.available else "UNAVAILABLE"
         nvml_state = "AVAILABLE" if nvml.available else "UNAVAILABLE"
-        # Ready when the process can answer; degraded when Docker/NVML missing.
-        overall = "READY" if docker.available else "DEGRADED"
+        # Docs: READY only when Docker Engine and NVML are both usable.
+        overall = "READY" if docker.available and nvml.available else "DEGRADED"
         return {
             "status": overall,
             "docker": docker_state,

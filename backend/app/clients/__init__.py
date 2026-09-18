@@ -33,8 +33,14 @@ class NodeAgentClient:
             headers["Authorization"] = f"Bearer {self._token}"
         return headers
 
-    async def get_json(self, path: str) -> dict[str, Any]:
+    async def get_json(
+        self,
+        path: str,
+        *,
+        allow_statuses: set[int] | None = None,
+    ) -> dict[str, Any]:
         url = f"{self._base_url}{path}"
+        allowed = allow_statuses or set()
         try:
             async with httpx.AsyncClient(
                 timeout=self._timeout,
@@ -54,7 +60,7 @@ class NodeAgentClient:
                 code="AGENT_UNAUTHORIZED",
                 details={"status_code": 401},
             )
-        if response.status_code >= 400:
+        if response.status_code >= 400 and response.status_code not in allowed:
             raise DependencyUnavailableError(
                 "Node Agent request failed.",
                 details={"status_code": response.status_code, "body": response.text[:500]},
@@ -69,6 +75,14 @@ class NodeAgentClient:
 
     async def fetch_resources(self) -> dict[str, Any]:
         return await self.get_json("/internal/v1/resources")
+
+    async def fetch_ready(self) -> dict[str, Any]:
+        """Return Agent readiness payload.
+
+        ``/ready`` responds 503 when DEGRADED; that is still a reachable Agent
+        and must not be treated as an unreachable dependency.
+        """
+        return await self.get_json("/internal/v1/ready", allow_statuses={503})
 
 
 def build_node_agent_client(base_url: str | None = None) -> NodeAgentClient:
