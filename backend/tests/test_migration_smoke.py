@@ -105,10 +105,22 @@ def test_upgrade_creates_all_tables_then_downgrade(scratch_db) -> None:
                 )
             )
             tables = {r[0] for r in rows}
+            routing_count = conn.execute(
+                text("SELECT count(*) FROM routing_state")
+            ).scalar_one()
+            row = conn.execute(
+                text("SELECT id, version FROM routing_state WHERE id = 1")
+            ).one_or_none()
         engine.dispose()
 
         missing = EXPECTED_TABLES - tables
         assert not missing, f"missing tables after upgrade: {sorted(missing)}"
+        assert routing_count == 1, (
+            f"routing_state must have exactly 1 row, got {routing_count}"
+        )
+        assert row is not None, "routing_state singleton row missing after upgrade"
+        assert row[0] == 1
+        assert row[1] == 0
 
         command.downgrade(cfg, "base")
     finally:

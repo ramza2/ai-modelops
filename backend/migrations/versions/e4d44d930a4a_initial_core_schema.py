@@ -90,6 +90,13 @@ def upgrade() -> None:
     sa.CheckConstraint('id = 1', name='ck_routing_state_singleton'),
     sa.PrimaryKeyConstraint('id')
     )
+    # Singleton row required so route commits can ``UPDATE ... WHERE id = 1``.
+    op.execute(
+        sa.text(
+            "INSERT INTO routing_state (id, version, updated_at) "
+            "VALUES (1, 0, now())"
+        )
+    )
     op.create_table('gpu_device',
     sa.Column('id', sa.UUID(), server_default=sa.text('gen_random_uuid()'), nullable=False),
     sa.Column('node_id', sa.UUID(), nullable=False),
