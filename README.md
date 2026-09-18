@@ -92,6 +92,39 @@ Docker가 설치·기동된 상태에서 repository root에서:
 
 성공 시 Backend는 `http://localhost:<BACKEND_PORT>` (기본 8000)이다.
 
+### Milestone 2 — Node Agent (host process)
+
+운영 권장 형태는 Node Agent를 **host `systemd` service**로 실행하는 것이다.
+로컬에서도 Compose 안에 privileged Docker/NVML 마운트를 억지로 넣지 않고,
+Backend/PostgreSQL은 Compose(또는 venv)로 두고 Node Agent는 host process로 기동한다.
+
+```bash
+# terminal A — Control Plane (Compose or cloud-start + uvicorn)
+./scripts/deploy.sh
+# or: bash scripts/cloud-start.sh && cd backend && uvicorn app.main:app --reload
+
+# terminal B — Node Agent on the host
+cd node-agent
+python -m venv .venv && . .venv/bin/activate
+pip install -r requirements-dev.txt
+export NODE_AGENT_HOST=127.0.0.1 NODE_AGENT_PORT=8100 NODE_AGENT_TOKEN=
+uvicorn app.main:app --host 127.0.0.1 --port 8100
+```
+
+등록 및 자원 sync 예:
+
+```bash
+curl -s -X POST http://localhost:8000/api/v1/nodes \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"local-dev","agent_base_url":"http://127.0.0.1:8100","environment":"local"}'
+# → node_id
+curl -s -X POST http://localhost:8000/api/v1/nodes/<node_id>/resources/refresh
+curl -s http://localhost:8000/api/v1/nodes/<node_id>/resources/latest
+```
+
+`POST .../resources/refresh`는 Milestone 2에서 Agent 상태를 DB snapshot으로
+끌어오기 위한 명시적 sync endpoint이다(문서의 GET latest/history와 충돌하지 않음).
+
 ### 옵션 B) 로컬 PostgreSQL + venv (Cloud Agent / non-Docker)
 
 ```bash
@@ -162,4 +195,5 @@ Cloud Agent 환경(`.cursor/environment.json`)은 `scripts/cloud-install.sh`(ins
 - [x] Coding agent / Cursor 작업 지침
 - [x] 초기 구현 — Milestone 1 (Foundation): Backend bootstrap, 공통 enum/error, DB 모델 + Alembic 초기 migration, `/health`·`/ready`, pytest
   - 참고: Docker Compose 실환경 검증은 로컬 PC에서 별도 수행 예정 (Cloud Agent에는 Docker Engine 없음)
-- [ ] Milestone 2 이후 (Node/Resource, Registry/Deployment, Gateway, Switch, Admin UI)
+- [x] Milestone 2 (Node/Resource): Node Agent + Host/NVML/Docker adapters, Backend Node/GPU API, resource snapshots
+- [ ] Milestone 3 이후 (Registry/Deployment, Gateway, Switch, Admin UI)
