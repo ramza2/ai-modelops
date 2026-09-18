@@ -92,6 +92,60 @@ Docker가 설치·기동된 상태에서 repository root에서:
 
 성공 시 Backend는 `http://localhost:<BACKEND_PORT>` (기본 8000)이다.
 
+### Milestone 2 — Node Agent (host process)
+
+운영 권장 형태는 Node Agent를 **host `systemd` service**로 실행하는 것이다.
+로컬에서도 Compose 안에 privileged Docker/NVML 마운트를 억지로 넣지 않고,
+Backend/PostgreSQL은 Compose(또는 venv)로 두고 Node Agent는 host process로 기동한다.
+
+Windows + Docker Desktop 로컬 예:
+
+```text
+Windows Host
+  └─ Node Agent :8100   (Docker/NVML/psutil)
+
+Docker Desktop
+  └─ Backend Container  → http://host.docker.internal:8100
+```
+
+```bash
+# terminal A — Control Plane (Compose)
+./scripts/deploy.sh
+
+# terminal B — Node Agent on the Windows host
+# Bind 0.0.0.0 so the Backend container can reach the host via host.docker.internal.
+cd node-agent
+python -m venv .venv && . .venv/bin/activate
+pip install -r requirements-dev.txt
+export NODE_AGENT_HOST=0.0.0.0 NODE_AGENT_PORT=8100 NODE_AGENT_TOKEN=
+uvicorn app.main:app --host 0.0.0.0 --port 8100
+```
+
+Host에서 Agent 직접 확인:
+
+```bash
+curl -s http://127.0.0.1:8100/health
+curl -s http://127.0.0.1:8100/ready
+curl -s http://127.0.0.1:8100/internal/v1/resources
+```
+
+Compose Backend에서 Node 등록/sync (container → host Agent):
+
+```bash
+curl -s -X POST http://localhost:8000/api/v1/nodes \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"local-dev","agent_base_url":"http://host.docker.internal:8100","environment":"local"}'
+# → node_id
+curl -s -X POST http://localhost:8000/api/v1/nodes/<node_id>/resources/refresh
+curl -s http://localhost:8000/api/v1/nodes/<node_id>/resources/latest
+```
+
+Backend를 host venv로 직접 실행하는 경우(Agent도 같은 host)에는
+`agent_base_url`에 `http://127.0.0.1:8100`을 사용한다.
+
+`POST .../resources/refresh`는 Milestone 2에서 Agent 상태를 DB snapshot으로
+끌어오기 위한 명시적 sync endpoint이다(문서의 GET latest/history와 충돌하지 않음).
+
 ### 옵션 B) 로컬 PostgreSQL + venv (Cloud Agent / non-Docker)
 
 ```bash
@@ -162,4 +216,5 @@ Cloud Agent 환경(`.cursor/environment.json`)은 `scripts/cloud-install.sh`(ins
 - [x] Coding agent / Cursor 작업 지침
 - [x] 초기 구현 — Milestone 1 (Foundation): Backend bootstrap, 공통 enum/error, DB 모델 + Alembic 초기 migration, `/health`·`/ready`, pytest
   - 참고: Docker Compose 실환경 검증은 로컬 PC에서 별도 수행 예정 (Cloud Agent에는 Docker Engine 없음)
-- [ ] Milestone 2 이후 (Node/Resource, Registry/Deployment, Gateway, Switch, Admin UI)
+- [x] Milestone 2 (Node/Resource): Node Agent + Host/NVML/Docker adapters, Backend Node/GPU API, resource snapshots
+- [ ] Milestone 3 이후 (Registry/Deployment, Gateway, Switch, Admin UI)
