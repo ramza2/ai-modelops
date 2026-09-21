@@ -46,10 +46,13 @@ class ContainerInfo:
     image: str | None = None
     command: list[str] | None = None
     environment: dict[str, str] = field(default_factory=dict)
+    volumes: list[VolumeMount] = field(default_factory=list)
     gpu_device_indices: list[int] = field(default_factory=list)
     runtime_port: int | None = None
     network_names: list[str] = field(default_factory=list)
     internal_address: str | None = None
+    # Host port bindings (empty for managed runtimes — no publish).
+    published_ports: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -198,10 +201,6 @@ class RealDockerAdapter:
             f"{v.host_path}:{v.container_path}:{'ro' if v.read_only else 'rw'}"
             for v in spec.volumes
         ]
-        ports = None
-        if spec.runtime_port is not None:
-            ports = {f"{spec.runtime_port}/tcp": None}
-
         device_requests = None
         if spec.gpu_device_indices:
             device_requests = [
@@ -213,29 +212,47 @@ class RealDockerAdapter:
             ]
 
         env_list = [f"{k}={v}" for k, v in spec.environment.items()]
+        # Expose runtime_port inside the container network only — never publish
+        # a HostPort. Gateway reaches the container via modelops-model DNS.
+
+        created_id: str | None = None
         try:
-            container = client.containers.create(
+            host_config = client.api.create_host_config(
+                binds=binds or None,
+                device_requests=device_requests,
+                # Intentionally omit port_bindings — no Host port publishing.
+            )
+            raw = client.api.create_container(
                 image=spec.image,
                 name=spec.name,
                 command=list(spec.command),
                 environment=env_list,
-                volumes=binds or None,
-                ports=ports,
                 labels=dict(spec.labels),
+                host_config=host_config,
+                ports=[spec.runtime_port] if spec.runtime_port is not None else None,
                 networking_config=None,
-                device_requests=device_requests,
-                detach=True,
             )
+            created_id = str(raw.get("Id") or "")
+            container = client.containers.get(created_id)
+
             for network in spec.network_names:
                 try:
                     net = client.networks.get(network)
                     net.connect(container)
-                except Exception:  # noqa: BLE001
-                    # Network may not exist in local/dev; leave container created.
-                    pass
+                except Exception as exc:  # noqa: BLE001
+                    self._cleanup_new_container(created_id)
+                    raise DockerUnavailableError(
+                        "Failed to attach container to Docker network.",
+                        details={"network": network},
+                    ) from exc
+
             container.reload()
             return self._to_info(container, create_spec=spec)
+        except DockerUnavailableError:
+            raise
         except Exception as exc:  # noqa: BLE001
+            if created_id:
+                self._cleanup_new_container(created_id)
             if _is_conflict(exc):
                 from app.core.errors import ContainerConflictError
 
@@ -247,6 +264,16 @@ class RealDockerAdapter:
                 "Failed to create Docker container.",
                 details={"reason": f"{type(exc).__name__}: {exc}"},
             ) from exc
+
+    def _cleanup_new_container(self, container_id: str) -> None:
+        """Best-effort remove of a container created in this request only."""
+        if not container_id or self._client is None:
+            return
+        try:
+            container = self._client.containers.get(container_id)
+            container.remove(force=False)
+        except Exception:  # noqa: BLE001
+            return
 
     def start(self, container_id: str) -> ContainerInfo:
         client = self._require_client()
@@ -340,7 +367,10 @@ class RealDockerAdapter:
             except (TypeError, ValueError):
                 pid = None
 
-        restart_count = state.get("RestartCount")
+        # Docker inspect places RestartCount at the top level, not under State.
+        restart_count = attrs.get("RestartCount")
+        if restart_count is None:
+            restart_count = state.get("RestartCount")
         if restart_count is not None:
             try:
                 restart_count = int(restart_count)
@@ -364,13 +394,12 @@ class RealDockerAdapter:
                 key, value = item.split("=", 1)
                 environment[key] = value
 
+        volumes = _extract_volumes(host_config, attrs)
         gpu_indices = _extract_gpu_indices(host_config)
         runtime_port = _extract_runtime_port(config, network_settings)
-        networks = list((network_settings.get("Networks") or {}).keys())
-        internal = None
-        if networks:
-            internal = networks[0]
+        networks = sorted((network_settings.get("Networks") or {}).keys())
         name = str(getattr(container, "name", "") or "").lstrip("/")
+        published = _extract_published_ports(host_config, network_settings)
         image = None
         if create_spec is not None:
             image = create_spec.image
@@ -378,11 +407,15 @@ class RealDockerAdapter:
             runtime_port = create_spec.runtime_port
             command = list(create_spec.command)
             environment = dict(create_spec.environment)
-            networks = list(create_spec.network_names)
-            internal = create_spec.name
+            volumes = list(create_spec.volumes)
+            networks = sorted(create_spec.network_names)
+            # Prefer container DNS name on the model network (not network name).
+            internal = name or None
+            published = {}
         else:
             image_raw = config.get("Image")
             image = str(image_raw) if image_raw else None
+            internal = _extract_internal_address(name, network_settings)
 
         return ContainerInfo(
             id=str(container.id),
@@ -395,11 +428,81 @@ class RealDockerAdapter:
             image=image,
             command=command,
             environment=environment,
+            volumes=volumes,
             gpu_device_indices=gpu_indices,
             runtime_port=runtime_port,
             network_names=networks,
             internal_address=internal,
+            published_ports=published,
         )
+
+
+def _extract_volumes(
+    host_config: dict[str, Any], attrs: dict[str, Any]
+) -> list[VolumeMount]:
+    mounts: list[VolumeMount] = []
+    for bind in host_config.get("Binds") or []:
+        if not isinstance(bind, str):
+            continue
+        parts = bind.split(":")
+        if len(parts) < 2:
+            continue
+        host_path, container_path = parts[0], parts[1]
+        mode = parts[2] if len(parts) > 2 else "rw"
+        mounts.append(
+            VolumeMount(
+                host_path=host_path,
+                container_path=container_path,
+                read_only="ro" in mode.split(","),
+            )
+        )
+    if mounts:
+        return mounts
+    for item in attrs.get("Mounts") or []:
+        if not isinstance(item, dict):
+            continue
+        source = item.get("Source")
+        destination = item.get("Destination")
+        if not source or not destination:
+            continue
+        mounts.append(
+            VolumeMount(
+                host_path=str(source),
+                container_path=str(destination),
+                read_only=bool(item.get("RW") is False or item.get("Mode") == "ro"),
+            )
+        )
+    return mounts
+
+
+def _extract_published_ports(
+    host_config: dict[str, Any], network_settings: dict[str, Any]
+) -> dict[str, Any]:
+    bindings = host_config.get("PortBindings") or {}
+    if bindings:
+        return dict(bindings)
+    ports = network_settings.get("Ports") or {}
+    published: dict[str, Any] = {}
+    for key, value in ports.items():
+        if value:
+            published[str(key)] = value
+    return published
+
+
+def _extract_internal_address(
+    container_name: str, network_settings: dict[str, Any]
+) -> str | None:
+    """Return container IP if known, else container DNS name — never network name."""
+    networks = network_settings.get("Networks") or {}
+    for _net_name, net_info in networks.items():
+        if not isinstance(net_info, dict):
+            continue
+        ip = net_info.get("IPAddress")
+        if ip:
+            return str(ip)
+    if networks and container_name:
+        return container_name
+    return None
 
 
 def _extract_gpu_indices(host_config: dict[str, Any]) -> list[int]:
@@ -426,13 +529,7 @@ def _extract_runtime_port(
                 return int(key.split("/")[0])
             except ValueError:
                 continue
-    ports = network_settings.get("Ports") or {}
-    for key in ports:
-        if isinstance(key, str) and key.endswith("/tcp"):
-            try:
-                return int(key.split("/")[0])
-            except ValueError:
-                continue
+    # Do not infer from published HostPorts — managed runtimes must not publish.
     return None
 
 
@@ -458,13 +555,16 @@ class FakeDockerAdapter:
         version: str | None = "24.0.0",
         containers: list[ContainerInfo] | None = None,
         reason: str | None = None,
+        fail_networks: set[str] | None = None,
     ) -> None:
         self._available = available
         self._version = version
         self._reason = reason
         self._containers: dict[str, ContainerInfo] = {}
+        self.fail_networks: set[str] = set(fail_networks or ())
         self.last_device_requests: list[dict[str, Any]] | None = None
         self.last_create_spec: CreateContainerSpec | None = None
+        self.last_create_published_ports: dict[str, Any] | None = None
         self.last_stop_timeout: int | None = None
         self.last_restart_timeout: int | None = None
         for c in containers or []:
@@ -485,6 +585,8 @@ class FakeDockerAdapter:
             )
 
     def list_containers(self, *, all_containers: bool = False) -> list[ContainerInfo]:
+        # Keep list soft-fail for Milestone 2 resource probes; lifecycle APIs
+        # call status()/ _require_docker() first and return 502 DOCKER_ERROR.
         if not self._available:
             return []
         items = list(self._containers.values())
@@ -516,10 +618,13 @@ class FakeDockerAdapter:
         self._require_available()
         self.last_create_spec = spec
         self.last_device_requests = build_device_requests(spec.gpu_device_indices)
+        # Managed runtimes never publish Host ports.
+        self.last_create_published_ports = {}
         container_id = f"fake-{uuid.uuid4().hex[:12]}"
+        name = spec.name.lstrip("/")
         info = ContainerInfo(
             id=container_id,
-            name=spec.name.lstrip("/"),
+            name=name,
             status="created",
             labels=dict(spec.labels),
             pid=None,
@@ -528,12 +633,23 @@ class FakeDockerAdapter:
             image=spec.image,
             command=list(spec.command),
             environment=dict(spec.environment),
+            volumes=list(spec.volumes),
             gpu_device_indices=list(spec.gpu_device_indices),
             runtime_port=spec.runtime_port,
-            network_names=list(spec.network_names),
-            internal_address=spec.name.lstrip("/"),
+            network_names=sorted(spec.network_names),
+            # DNS name = container name (not Docker network name).
+            internal_address=name or None,
+            published_ports={},
         )
         self._containers[container_id] = info
+
+        for network in spec.network_names:
+            if network in self.fail_networks:
+                del self._containers[container_id]
+                raise DockerUnavailableError(
+                    "Failed to attach container to Docker network.",
+                    details={"network": network},
+                )
         return info
 
     def start(self, container_id: str) -> ContainerInfo:
@@ -544,21 +660,11 @@ class FakeDockerAdapter:
                 "Container not found.",
                 details={"container_id": container_id},
             )
-        updated = ContainerInfo(
-            id=info.id,
-            name=info.name,
+        updated = _copy_info(
+            info,
             status="running",
-            labels=info.labels,
             pid=info.pid if info.pid is not None else 4242,
             started_at=info.started_at or "2026-09-21T00:00:00Z",
-            restart_count=info.restart_count,
-            image=info.image,
-            command=info.command,
-            environment=info.environment,
-            gpu_device_indices=info.gpu_device_indices,
-            runtime_port=info.runtime_port,
-            network_names=info.network_names,
-            internal_address=info.internal_address,
         )
         self._containers[container_id] = updated
         return updated
@@ -572,22 +678,7 @@ class FakeDockerAdapter:
                 "Container not found.",
                 details={"container_id": container_id},
             )
-        updated = ContainerInfo(
-            id=info.id,
-            name=info.name,
-            status="exited",
-            labels=info.labels,
-            pid=None,
-            started_at=info.started_at,
-            restart_count=info.restart_count,
-            image=info.image,
-            command=info.command,
-            environment=info.environment,
-            gpu_device_indices=info.gpu_device_indices,
-            runtime_port=info.runtime_port,
-            network_names=info.network_names,
-            internal_address=info.internal_address,
-        )
+        updated = _copy_info(info, status="exited", pid=None)
         self._containers[container_id] = updated
         return updated
 
@@ -609,3 +700,26 @@ class FakeDockerAdapter:
     def seed(self, info: ContainerInfo) -> None:
         """Test helper to insert an arbitrary container record."""
         self._containers[info.id] = info
+
+
+def _copy_info(info: ContainerInfo, **changes: Any) -> ContainerInfo:
+    data = {
+        "id": info.id,
+        "name": info.name,
+        "status": info.status,
+        "labels": info.labels,
+        "pid": info.pid,
+        "started_at": info.started_at,
+        "restart_count": info.restart_count,
+        "image": info.image,
+        "command": info.command,
+        "environment": info.environment,
+        "volumes": info.volumes,
+        "gpu_device_indices": info.gpu_device_indices,
+        "runtime_port": info.runtime_port,
+        "network_names": info.network_names,
+        "internal_address": info.internal_address,
+        "published_ports": info.published_ports,
+    }
+    data.update(changes)
+    return ContainerInfo(**data)

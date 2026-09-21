@@ -32,6 +32,7 @@ class DeploymentLifecycleService:
         self._docker = docker
 
     def list_deployments(self) -> list[dict[str, Any]]:
+        self._require_docker()
         containers = self._docker.list_containers(all_containers=True)
         managed = [c for c in containers if self._is_managed(c)]
         return [self._serialize(c) for c in managed]
@@ -106,16 +107,21 @@ class DeploymentLifecycleService:
 
         existing = self._docker.find_by_deployment_id(deployment_id)
         if existing is not None:
+            # Refresh inspect metadata when possible for accurate comparison.
+            inspected = self._docker.inspect(existing.id) or existing
             if self._same_create_config(
-                existing,
+                inspected,
                 name=name,
                 image=image,
                 command=argv,
+                environment=env,
+                volumes=mounts,
                 gpu_device_indices=gpus,
                 runtime_port=runtime_port,
+                network_names=networks,
                 labels=required_labels,
             ):
-                return self._serialize(existing)
+                return self._serialize(inspected)
             raise ContainerConflictError(
                 "Managed container already exists for deployment with different config.",
                 details={
@@ -320,8 +326,11 @@ class DeploymentLifecycleService:
         name: str,
         image: str,
         command: list[str],
+        environment: dict[str, str],
+        volumes: list[VolumeMount],
         gpu_device_indices: list[int],
         runtime_port: int | None,
+        network_names: list[str],
         labels: dict[str, str],
     ) -> bool:
         if existing.name.lstrip("/") != name.lstrip("/"):
@@ -334,15 +343,60 @@ class DeploymentLifecycleService:
             return False
         if existing.runtime_port != runtime_port:
             return False
-        for key in (
-            LABEL_MANAGED,
-            LABEL_DEPLOYMENT_ID,
-            LABEL_MODEL_ID,
-            LABEL_NODE_ID,
+        if not DeploymentLifecycleService._env_matches(
+            existing.environment or {}, environment
         ):
-            if existing.labels.get(key) != labels.get(key):
-                return False
+            return False
+        if DeploymentLifecycleService._normalize_volumes(
+            existing.volumes or []
+        ) != DeploymentLifecycleService._normalize_volumes(volumes):
+            return False
+        if sorted(existing.network_names or []) != sorted(network_names):
+            return False
+        if DeploymentLifecycleService._normalize_labels(
+            existing.labels or {}
+        ) != DeploymentLifecycleService._normalize_labels(labels):
+            return False
         return True
+
+    # Docker injects PATH/HOSTNAME/etc.; ignore those when comparing request env.
+    _DOCKER_DEFAULT_ENV_KEYS = frozenset(
+        {
+            "PATH",
+            "HOSTNAME",
+            "HOME",
+            "TERM",
+            "LANG",
+            "LC_ALL",
+            "container",
+        }
+    )
+
+    @classmethod
+    def _env_matches(
+        cls, existing: dict[str, str], requested: dict[str, str]
+    ) -> bool:
+        filtered = {
+            k: v
+            for k, v in existing.items()
+            if k not in cls._DOCKER_DEFAULT_ENV_KEYS
+        }
+        return filtered == dict(requested)
+
+    @staticmethod
+    def _normalize_volumes(volumes: list[VolumeMount]) -> list[tuple[str, str, bool]]:
+        return sorted(
+            (
+                v.host_path,
+                v.container_path,
+                bool(v.read_only),
+            )
+            for v in volumes
+        )
+
+    @staticmethod
+    def _normalize_labels(labels: dict[str, str]) -> list[tuple[str, str]]:
+        return sorted((str(k), str(v)) for k, v in labels.items())
 
     def _action_payload(self, container: ContainerInfo) -> dict[str, Any]:
         deployment_id = container.labels.get(LABEL_DEPLOYMENT_ID)
