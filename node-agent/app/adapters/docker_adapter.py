@@ -348,10 +348,40 @@ class RealDockerAdapter:
                     "Container not found.",
                     details={"container_id": container_id},
                 ) from exc
+            # Windows Docker Desktop named-pipe may time out after restart
+            # already completed. Reconcile actual state before failing.
+            if _is_timeout_error(exc):
+                reconciled = self._reconcile_running_after_timeout(container_id)
+                if reconciled is not None:
+                    return reconciled
             raise DockerUnavailableError(
                 "Failed to restart Docker container.",
                 details={"reason": f"{type(exc).__name__}: {exc}"},
             ) from exc
+
+    def _reconcile_running_after_timeout(
+        self,
+        container_id: str,
+        *,
+        attempts: int = 3,
+        delay_seconds: float = 0.25,
+    ) -> ContainerInfo | None:
+        """Bounded inspect after a Docker SDK timeout.
+
+        Returns container info when status is RUNNING; otherwise None.
+        """
+        import time
+
+        for index in range(max(attempts, 1)):
+            try:
+                info = self.inspect(container_id)
+            except DockerUnavailableError:
+                info = None
+            if info is not None and map_docker_status_to_runtime(info.status) == "RUNNING":
+                return info
+            if index + 1 < attempts:
+                time.sleep(delay_seconds)
+        return None
 
     def remove(self, container_id: str) -> None:
         client = self._require_client()
@@ -587,6 +617,28 @@ def _is_not_found(exc: Exception) -> bool:
     return name in {"NotFound", "ImageNotFound"} or "404" in str(exc)
 
 
+def _is_timeout_error(exc: Exception) -> bool:
+    """Detect Docker SDK / urllib3 / requests read timeouts only."""
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        name = type(current).__name__
+        if name in {
+            "ReadTimeout",
+            "ConnectTimeout",
+            "Timeout",
+            "TimeoutError",
+            "ReadTimeoutError",
+        }:
+            return True
+        message = str(current).lower()
+        if "read timed out" in message or "read timeout" in message:
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
 def _is_conflict(exc: Exception) -> bool:
     name = type(exc).__name__
     return name in {"APIError", "Conflict"} and (
@@ -606,6 +658,9 @@ class FakeDockerAdapter:
         reason: str | None = None,
         fail_networks: set[str] | None = None,
         missing_networks: set[str] | None = None,
+        restart_timeout_error: bool = False,
+        restart_status_after_timeout: str = "running",
+        restart_generic_error: bool = False,
     ) -> None:
         self._available = available
         self._version = version
@@ -613,12 +668,16 @@ class FakeDockerAdapter:
         self._containers: dict[str, ContainerInfo] = {}
         self.fail_networks: set[str] = set(fail_networks or ())
         self.missing_networks: set[str] = set(missing_networks or ())
+        self.restart_timeout_error = restart_timeout_error
+        self.restart_status_after_timeout = restart_status_after_timeout
+        self.restart_generic_error = restart_generic_error
         self.last_device_requests: list[dict[str, Any]] | None = None
         self.last_create_spec: CreateContainerSpec | None = None
         self.last_create_published_ports: dict[str, Any] | None = None
         self.last_initial_network: str | None = None
         self.last_stop_timeout: int | None = None
         self.last_restart_timeout: int | None = None
+        self.restart_reconcile_used = False
         for c in containers or []:
             self._containers[c.id] = c
 
@@ -752,6 +811,52 @@ class FakeDockerAdapter:
     def restart(self, container_id: str, *, timeout_seconds: int) -> ContainerInfo:
         self._require_available()
         self.last_restart_timeout = timeout_seconds
+        info = self._containers.get(container_id)
+        if info is None:
+            raise ContainerNotFoundError(
+                "Container not found.",
+                details={"container_id": container_id},
+            )
+
+        if self.restart_generic_error:
+            raise DockerUnavailableError(
+                "Failed to restart Docker container.",
+                details={"reason": "APIError: simulated docker failure"},
+            )
+
+        if self.restart_timeout_error:
+            # Simulate Docker completing under the timed-out SDK response.
+            post_status = (self.restart_status_after_timeout or "exited").lower()
+            if post_status == "running":
+                self._containers[container_id] = _copy_info(
+                    info,
+                    status="running",
+                    pid=info.pid if info.pid is not None else 4242,
+                    started_at=info.started_at or "2026-09-21T00:00:00Z",
+                )
+            else:
+                self._containers[container_id] = _copy_info(
+                    info,
+                    status=post_status,
+                    pid=None,
+                )
+            self.restart_reconcile_used = True
+            inspected = self.inspect(container_id)
+            if (
+                inspected is not None
+                and map_docker_status_to_runtime(inspected.status) == "RUNNING"
+            ):
+                return inspected
+            raise DockerUnavailableError(
+                "Failed to restart Docker container.",
+                details={
+                    "reason": (
+                        "ReadTimeout: NpipeHTTPConnectionPool "
+                        "Read timed out. (read timeout=7.0)"
+                    )
+                },
+            )
+
         self.stop(container_id, timeout_seconds=timeout_seconds)
         return self.start(container_id)
 
