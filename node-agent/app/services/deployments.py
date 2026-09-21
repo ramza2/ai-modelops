@@ -351,7 +351,9 @@ class DeploymentLifecycleService:
             existing.volumes or []
         ) != DeploymentLifecycleService._normalize_volumes(volumes):
             return False
-        if sorted(existing.network_names or []) != sorted(network_names):
+        if not DeploymentLifecycleService._networks_match(
+            existing.network_names or [], network_names
+        ):
             return False
         if DeploymentLifecycleService._normalize_labels(
             existing.labels or {}
@@ -393,6 +395,22 @@ class DeploymentLifecycleService:
             )
             for v in volumes
         )
+
+    @staticmethod
+    def _networks_match(existing: list[str], requested: list[str]) -> bool:
+        """Compare networks without treating default bridge as a config change.
+
+        - Empty request → default Docker network (bridge-only / empty) is OK.
+        - Custom request → ignore stray ``bridge`` on existing unless requested.
+        """
+        req = sorted(requested)
+        got = list(existing)
+        if req:
+            if "bridge" not in req:
+                got = [n for n in got if n != "bridge"]
+            return sorted(got) == req
+        # No custom networks requested: bridge-only or empty is equivalent.
+        return all(n == "bridge" for n in got)
 
     @staticmethod
     def _normalize_labels(labels: dict[str, str]) -> list[tuple[str, str]]:
