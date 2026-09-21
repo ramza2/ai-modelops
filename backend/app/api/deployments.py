@@ -139,7 +139,7 @@ async def create_deployment(
             "node_id is required for MANAGED deployments.",
             details={"field": "node_id"},
         )
-    if not (body.container_name or body.name):
+    if body.container_name is None or not body.container_name.strip():
         raise ValidationError(
             "container_name is required for MANAGED deployments.",
             details={"field": "container_name"},
@@ -149,7 +149,7 @@ async def create_deployment(
         name=body.name,
         model_version_id=body.model_version_id,
         node_id=body.node_id,
-        container_name=body.container_name,
+        container_name=body.container_name.strip(),
         runtime_port=body.runtime_port,
         upstream_base_url=body.upstream_base_url,
         deployment_config=body.deployment_config,

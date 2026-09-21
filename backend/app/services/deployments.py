@@ -83,7 +83,7 @@ class DeploymentService:
         name: str,
         model_version_id: uuid.UUID,
         node_id: uuid.UUID,
-        container_name: str | None = None,
+        container_name: str,
         runtime_port: int | None = None,
         upstream_base_url: str | None = None,
         deployment_config: dict[str, Any] | None = None,
@@ -102,7 +102,7 @@ class DeploymentService:
         if not name:
             raise ValidationError("name is required.")
 
-        container = (container_name or name).strip()
+        container = container_name.strip()
         if not container:
             raise ValidationError(
                 "container_name is required for MANAGED deployments.",
@@ -117,8 +117,7 @@ class DeploymentService:
 
         upstream = (upstream_base_url or "").strip()
         if not upstream:
-            port = runtime_port if runtime_port is not None else 8000
-            upstream = f"http://{container}:{port}"
+            upstream = self._derived_managed_upstream(container, runtime_port)
 
         deployment = Deployment(
             name=name,
@@ -195,8 +194,24 @@ class DeploymentService:
                 details={"deployment_id": str(deployment_id)},
             )
 
+        explicit_upstream = upstream_base_url is not None
         if runtime_port is not None:
             self._validate_runtime_port(runtime_port)
+            # Keep auto-derived MANAGED upstream in sync when port changes.
+            if (
+                not explicit_upstream
+                and deployment.deployment_type == DeploymentType.MANAGED.value
+                and deployment.container_name
+            ):
+                previous_derived = self._derived_managed_upstream(
+                    str(deployment.container_name),
+                    deployment.runtime_port,
+                )
+                if deployment.upstream_base_url == previous_derived:
+                    deployment.upstream_base_url = self._derived_managed_upstream(
+                        str(deployment.container_name),
+                        runtime_port,
+                    )
             deployment.runtime_port = runtime_port
         if upstream_base_url is not None:
             upstream = upstream_base_url.strip()
@@ -443,6 +458,14 @@ class DeploymentService:
                 "Active deployment with this container_name already exists.",
                 details={"container_name": container_name},
             )
+
+    @staticmethod
+    def _derived_managed_upstream(
+        container_name: str, runtime_port: int | None
+    ) -> str:
+        """Internal URL derived from container_name + runtime_port for MANAGED."""
+        port = runtime_port if runtime_port is not None else 8000
+        return f"http://{container_name}:{port}"
 
     @staticmethod
     def _validate_runtime_port(runtime_port: int | None) -> None:

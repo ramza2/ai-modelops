@@ -184,6 +184,35 @@ async def test_managed_and_imported_create_validation_retire(ctx) -> None:
     )
     assert missing_node.status_code == 422
 
+    # MANAGED missing container_name (must not fall back to name)
+    missing_ctr = await client.post(
+        "/api/v1/deployments",
+        json={
+            "name": f"example-{suffix}",
+            "model_version_id": version_id,
+            "deployment_type": "MANAGED",
+            "node_id": ctx["node_a_id"],
+            "runtime_port": 8000,
+        },
+    )
+    assert missing_ctr.status_code == 422
+    assert missing_ctr.json()["error"]["code"] == "VALIDATION_ERROR"
+
+    # MANAGED empty / whitespace container_name
+    empty_ctr = await client.post(
+        "/api/v1/deployments",
+        json={
+            "name": f"example-empty-{suffix}",
+            "model_version_id": version_id,
+            "deployment_type": "MANAGED",
+            "node_id": ctx["node_a_id"],
+            "container_name": "   ",
+            "runtime_port": 8000,
+        },
+    )
+    assert empty_ctr.status_code == 422
+    assert empty_ctr.json()["error"]["code"] == "VALIDATION_ERROR"
+
     # IMPORTED via dedicated endpoint
     imported = await client.post(
         "/api/v1/deployments/import",
@@ -384,3 +413,47 @@ async def test_gpu_assignment_rules(ctx) -> None:
         },
     )
     assert missing_gpu.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_managed_runtime_port_patch_keeps_derived_upstream(ctx) -> None:
+    client: AsyncClient = ctx["client"]
+    suffix = ctx["suffix"]
+    container = f"ctr-port-sync-{suffix}"
+
+    created = await client.post(
+        "/api/v1/deployments",
+        json={
+            "name": f"port-sync-{suffix}",
+            "model_version_id": ctx["version_id"],
+            "node_id": ctx["node_a_id"],
+            "deployment_type": "MANAGED",
+            "container_name": container,
+            "runtime_port": 8000,
+        },
+    )
+    assert created.status_code == 201, created.text
+    deployment_id = created.json()["id"]
+    assert created.json()["upstream_base_url"] == f"http://{container}:8000"
+
+    patched = await client.patch(
+        f"/api/v1/deployments/{deployment_id}",
+        json={"runtime_port": 9000},
+    )
+    assert patched.status_code == 200, patched.text
+    assert patched.json()["runtime_port"] == 9000
+    assert patched.json()["upstream_base_url"] == f"http://{container}:9000"
+
+    # Explicit custom upstream is not overwritten when only port changes.
+    custom = await client.patch(
+        f"/api/v1/deployments/{deployment_id}",
+        json={"upstream_base_url": "http://custom-upstream:7000"},
+    )
+    assert custom.status_code == 200
+    keep = await client.patch(
+        f"/api/v1/deployments/{deployment_id}",
+        json={"runtime_port": 9100},
+    )
+    assert keep.status_code == 200
+    assert keep.json()["runtime_port"] == 9100
+    assert keep.json()["upstream_base_url"] == "http://custom-upstream:7000"
