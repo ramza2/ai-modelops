@@ -35,6 +35,14 @@ class Settings(BaseSettings):
     # Seconds allowed for the readiness DB probe before reporting NOT ready.
     ready_timeout_seconds: float = 2.0
 
+    # Node Agent (Management API → Agent). Placeholders only — no real hosts/tokens.
+    node_agent_base_url: str = Field(
+        default="http://127.0.0.1:8100",
+    )
+    node_agent_token: str = Field(default="")
+    node_agent_timeout_seconds: float = 5.0
+    default_gpu_safety_margin_mb: int = 1024
+
     @property
     def sync_database_url(self) -> str:
         """Return a synchronous SQLAlchemy URL for Alembic migrations."""

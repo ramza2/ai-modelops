@@ -1,8 +1,4 @@
-"""Domain error types and the common API error envelope.
-
-Domain code raises :class:`AppError` (or a subclass). The API layer converts it
-to the shared error envelope documented in ``docs/api/00-api-conventions.md``.
-"""
+"""Node Agent error codes and envelope (aligned with Management API conventions)."""
 
 from __future__ import annotations
 
@@ -10,21 +6,13 @@ from typing import Any
 
 
 class ErrorCode:
-    """Canonical error codes (see ``docs/api/00-api-conventions.md``)."""
-
     VALIDATION_ERROR = "VALIDATION_ERROR"
-    NOT_FOUND = "NOT_FOUND"
-    CONFLICT = "CONFLICT"
-    INTERNAL_ERROR = "INTERNAL_ERROR"
-    DEPENDENCY_UNAVAILABLE = "DEPENDENCY_UNAVAILABLE"
     AGENT_UNAUTHORIZED = "AGENT_UNAUTHORIZED"
-    NODE_UNAVAILABLE = "NODE_UNAVAILABLE"
-    GPU_UNAVAILABLE = "GPU_UNAVAILABLE"
+    INTERNAL_ERROR = "INTERNAL_ERROR"
+    DOCKER_ERROR = "DOCKER_ERROR"
 
 
 class AppError(Exception):
-    """Base domain error carrying an API error code and HTTP status."""
-
     code: str = ErrorCode.INTERNAL_ERROR
     http_status: int = 500
 
@@ -45,24 +33,9 @@ class AppError(Exception):
         self.details = details or {}
 
 
-class NotFoundError(AppError):
-    code = ErrorCode.NOT_FOUND
-    http_status = 404
-
-
-class ConflictError(AppError):
-    code = ErrorCode.CONFLICT
-    http_status = 409
-
-
-class ValidationError(AppError):
-    code = ErrorCode.VALIDATION_ERROR
-    http_status = 422
-
-
-class DependencyUnavailableError(AppError):
-    code = ErrorCode.DEPENDENCY_UNAVAILABLE
-    http_status = 503
+class UnauthorizedError(AppError):
+    code = ErrorCode.AGENT_UNAUTHORIZED
+    http_status = 401
 
 
 def error_envelope(
@@ -72,7 +45,6 @@ def error_envelope(
     request_id: str | None = None,
     details: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Build the shared error envelope body."""
     return {
         "error": {
             "code": code,

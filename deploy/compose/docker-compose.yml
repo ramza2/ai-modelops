@@ -29,6 +29,12 @@ services:
       MODELOPS_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-modelops}:${POSTGRES_PASSWORD:-modelops}@postgres:5432/${POSTGRES_DB:-modelops}
       MODELOPS_ENVIRONMENT: ${MODELOPS_ENVIRONMENT:-local}
       MODELOPS_DEBUG: ${MODELOPS_DEBUG:-false}
+      # Host Node Agent (Windows Docker Desktop: host.docker.internal).
+      # Do not commit real internal addresses; override via root .env.
+      MODELOPS_NODE_AGENT_BASE_URL: ${MODELOPS_NODE_AGENT_BASE_URL:-http://host.docker.internal:8100}
+      MODELOPS_NODE_AGENT_TOKEN: ${MODELOPS_NODE_AGENT_TOKEN:-}
+      MODELOPS_NODE_AGENT_TIMEOUT_SECONDS: ${MODELOPS_NODE_AGENT_TIMEOUT_SECONDS:-5}
+      MODELOPS_DEFAULT_GPU_SAFETY_MARGIN_MB: ${MODELOPS_DEFAULT_GPU_SAFETY_MARGIN_MB:-1024}
     depends_on:
       postgres:
         condition: service_healthy

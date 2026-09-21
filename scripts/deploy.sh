@@ -294,4 +294,7 @@ ModelOps deployment completed
 Backend: http://localhost:${BACKEND_PORT}
 Health: OK
 Ready: OK
+
+Note: Node Agent runs as a host process (not in Compose) so it can access
+Docker/NVML. See README "Milestone 2 — Node Agent".
 EOF

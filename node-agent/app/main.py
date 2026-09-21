@@ -1,30 +1,41 @@
-"""ModelOps Management API entrypoint.
-
-Milestone 1 (Foundation): app bootstrap, common error envelope, request-id
-propagation, and health/readiness endpoints. Domain routers are added in later
-milestones.
-"""
+"""ModelOps Node Agent FastAPI entrypoint (Milestone 2)."""
 
 from __future__ import annotations
 
 import uuid
 
 from fastapi import FastAPI, Request
-from fastapi.encoders import jsonable_encoder
-from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from app.api.health import router as health_router
-from app.api.nodes import router as nodes_router
+from app.adapters.docker_adapter import RealDockerAdapter
+from app.adapters.host import HostAdapter
+from app.adapters.nvml import RealNvmlAdapter
+from app.api import get_node_service, health_router, internal_router
 from app.core.config import get_settings
 from app.core.errors import AppError, ErrorCode, error_envelope
+from app.services import NodeService
 
 REQUEST_ID_HEADER = "X-Request-ID"
 
 
-def create_app() -> FastAPI:
+def build_default_service() -> NodeService:
+    settings = get_settings()
+    return NodeService(
+        host=HostAdapter(),
+        docker=RealDockerAdapter(timeout_seconds=settings.docker_timeout_seconds),
+        nvml=RealNvmlAdapter(),
+    )
+
+
+def create_app(*, service: NodeService | None = None) -> FastAPI:
     settings = get_settings()
     app = FastAPI(title=settings.app_name)
+    node_service = service or build_default_service()
+
+    def _service_override() -> NodeService:
+        return node_service
+
+    app.dependency_overrides[get_node_service] = _service_override
 
     @app.middleware("http")
     async def request_id_middleware(request: Request, call_next):
@@ -47,23 +58,21 @@ def create_app() -> FastAPI:
             ),
         )
 
-    @app.exception_handler(RequestValidationError)
-    async def validation_error_handler(
-        request: Request, exc: RequestValidationError
-    ) -> JSONResponse:
+    @app.exception_handler(Exception)
+    async def unhandled_error_handler(request: Request, exc: Exception) -> JSONResponse:
         request_id = getattr(request.state, "request_id", None)
         return JSONResponse(
-            status_code=422,
+            status_code=500,
             content=error_envelope(
-                ErrorCode.VALIDATION_ERROR,
-                "Request validation failed.",
+                ErrorCode.INTERNAL_ERROR,
+                "Unexpected Node Agent error.",
                 request_id=request_id,
-                details={"errors": jsonable_encoder(exc.errors())},
+                details={"type": type(exc).__name__},
             ),
         )
 
     app.include_router(health_router)
-    app.include_router(nodes_router)
+    app.include_router(internal_router)
     return app
 
 
