@@ -10,6 +10,9 @@ class ErrorCode:
     AGENT_UNAUTHORIZED = "AGENT_UNAUTHORIZED"
     INTERNAL_ERROR = "INTERNAL_ERROR"
     DOCKER_ERROR = "DOCKER_ERROR"
+    MANAGED_LABEL_REQUIRED = "MANAGED_LABEL_REQUIRED"
+    CONTAINER_NOT_FOUND = "CONTAINER_NOT_FOUND"
+    CONTAINER_CONFLICT = "CONTAINER_CONFLICT"
 
 
 class AppError(Exception):
@@ -36,6 +39,31 @@ class AppError(Exception):
 class UnauthorizedError(AppError):
     code = ErrorCode.AGENT_UNAUTHORIZED
     http_status = 401
+
+
+class ValidationError(AppError):
+    code = ErrorCode.VALIDATION_ERROR
+    http_status = 422
+
+
+class ManagedLabelRequiredError(AppError):
+    code = ErrorCode.MANAGED_LABEL_REQUIRED
+    http_status = 403
+
+
+class ContainerNotFoundError(AppError):
+    code = ErrorCode.CONTAINER_NOT_FOUND
+    http_status = 404
+
+
+class ContainerConflictError(AppError):
+    code = ErrorCode.CONTAINER_CONFLICT
+    http_status = 409
+
+
+class DockerUnavailableError(AppError):
+    code = ErrorCode.DOCKER_ERROR
+    http_status = 502
 
 
 def error_envelope(

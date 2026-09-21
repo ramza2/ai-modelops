@@ -1,0 +1,2 @@
+# Worker package (Milestone 3B-1: runtime adapters only)
+pytest==8.3.4
