@@ -423,8 +423,31 @@ async def test_create_does_not_publish_host_ports(client) -> None:
 
 @pytest.mark.asyncio
 async def test_network_attach_failure_cleans_up_new_container() -> None:
+    # Extra network attach fails after create → cleanup newly created container.
     docker = FakeDockerAdapter(
-        available=True, fail_networks={"missing-model-net"}
+        available=True, fail_networks={"extra-net"}
+    )
+    app, docker = _make_app(docker)
+    transport = ASGITransport(app=app)
+    ids = _ids()
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        created = await ac.post(
+            f"/internal/v1/deployments/{ids['deployment_id']}/create",
+            json=_create_body(
+                ids, network_names=["modelops-model", "extra-net"]
+            ),
+        )
+    assert created.status_code == 502
+    assert created.json()["error"]["code"] == "DOCKER_ERROR"
+    assert created.json()["error"]["details"]["network"] == "extra-net"
+    assert docker.find_by_deployment_id(ids["deployment_id"]) is None
+    assert docker.list_containers(all_containers=True) == []
+
+
+@pytest.mark.asyncio
+async def test_missing_network_fails_before_create() -> None:
+    docker = FakeDockerAdapter(
+        available=True, missing_networks={"missing-model-net"}
     )
     app, docker = _make_app(docker)
     transport = ASGITransport(app=app)
@@ -435,10 +458,137 @@ async def test_network_attach_failure_cleans_up_new_container() -> None:
             json=_create_body(ids, network_names=["missing-model-net"]),
         )
     assert created.status_code == 502
-    assert created.json()["error"]["code"] == "DOCKER_ERROR"
     assert created.json()["error"]["details"]["network"] == "missing-model-net"
-    assert docker.find_by_deployment_id(ids["deployment_id"]) is None
     assert docker.list_containers(all_containers=True) == []
+
+
+@pytest.mark.asyncio
+async def test_custom_network_create_idempotent_ignores_stray_bridge(
+    client,
+) -> None:
+    ac, docker = client
+    ids = _ids()
+    body = _create_body(ids, network_names=["modelops-model"])
+    first = await ac.post(
+        f"/internal/v1/deployments/{ids['deployment_id']}/create", json=body
+    )
+    assert first.status_code == 201
+    assert docker.last_initial_network == "modelops-model"
+    info = docker.find_by_deployment_id(ids["deployment_id"])
+    assert info is not None
+    assert info.network_names == ["modelops-model"]
+    assert "bridge" not in info.network_names
+
+    # Simulate an older inspect that still shows default bridge alongside.
+    docker.seed(
+        ContainerInfo(
+            id=info.id,
+            name=info.name,
+            status=info.status,
+            labels=info.labels,
+            image=info.image,
+            command=info.command,
+            environment=info.environment,
+            volumes=info.volumes,
+            gpu_device_indices=info.gpu_device_indices,
+            runtime_port=info.runtime_port,
+            network_names=["bridge", "modelops-model"],
+            internal_address=info.internal_address,
+            published_ports={},
+            restart_count=info.restart_count,
+        )
+    )
+
+    second = await ac.post(
+        f"/internal/v1/deployments/{ids['deployment_id']}/create", json=body
+    )
+    assert second.status_code == 201
+    assert second.json()["container_id"] == info.id
+
+
+def test_windows_volume_mounts_preferred_and_bind_fallback() -> None:
+    from app.adapters.docker_adapter import (
+        VolumeMount,
+        _extract_volumes,
+        _parse_bind_string,
+    )
+    from app.services.deployments import DeploymentLifecycleService
+
+    # Structured Mounts win (Windows drive letter path).
+    mounts = _extract_volumes(
+        host_config={
+            "Binds": ["D:/models/example:/models/current:ro"],
+        },
+        attrs={
+            "Mounts": [
+                {
+                    "Source": "D:/models/example",
+                    "Destination": "/models/current",
+                    "RW": False,
+                    "Mode": "ro",
+                }
+            ]
+        },
+    )
+    assert mounts == [
+        VolumeMount(
+            host_path="D:/models/example",
+            container_path="/models/current",
+            read_only=True,
+        )
+    ]
+
+    # Bind fallback must not split on drive colon.
+    parsed = _parse_bind_string("D:/models/example:/models/current:ro")
+    assert parsed is not None
+    assert parsed.host_path == "D:/models/example"
+    assert parsed.container_path == "/models/current"
+    assert parsed.read_only is True
+
+    # Idempotency compare treats restored Windows volume as identical.
+    existing = ContainerInfo(
+        id="x",
+        name="ctr",
+        status="created",
+        volumes=mounts,
+    )
+    assert DeploymentLifecycleService._normalize_volumes(existing.volumes) == (
+        DeploymentLifecycleService._normalize_volumes(
+            [
+                VolumeMount(
+                    host_path="D:/models/example",
+                    container_path="/models/current",
+                    read_only=True,
+                )
+            ]
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_windows_style_volume_create_idempotent(client) -> None:
+    ac, _docker = client
+    ids = _ids()
+    body = _create_body(
+        ids,
+        network_names=[],
+        volumes=[
+            {
+                "host_path": "D:/models/example",
+                "container_path": "/models/current",
+                "read_only": True,
+            }
+        ],
+    )
+    first = await ac.post(
+        f"/internal/v1/deployments/{ids['deployment_id']}/create", json=body
+    )
+    assert first.status_code == 201
+    second = await ac.post(
+        f"/internal/v1/deployments/{ids['deployment_id']}/create", json=body
+    )
+    assert second.status_code == 201
+    assert second.json()["container_id"] == first.json()["container_id"]
 
 
 def test_restart_count_reads_top_level_inspect_field() -> None:

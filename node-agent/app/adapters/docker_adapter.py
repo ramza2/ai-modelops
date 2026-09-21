@@ -215,6 +215,28 @@ class RealDockerAdapter:
         # Expose runtime_port inside the container network only — never publish
         # a HostPort. Gateway reaches the container via modelops-model DNS.
 
+        # Validate requested networks exist before creating the container.
+        for network in spec.network_names:
+            try:
+                client.networks.get(network)
+            except Exception as exc:  # noqa: BLE001
+                raise DockerUnavailableError(
+                    "Requested Docker network is not available.",
+                    details={"network": network},
+                ) from exc
+
+        # First requested network is the create-time network so Docker does not
+        # leave the default bridge attached alongside custom networks.
+        networking_config = None
+        initial_network: str | None = None
+        extra_networks: list[str] = []
+        if spec.network_names:
+            initial_network = spec.network_names[0]
+            extra_networks = list(spec.network_names[1:])
+            networking_config = client.api.create_networking_config(
+                {initial_network: client.api.create_endpoint_config()}
+            )
+
         created_id: str | None = None
         try:
             host_config = client.api.create_host_config(
@@ -230,12 +252,12 @@ class RealDockerAdapter:
                 labels=dict(spec.labels),
                 host_config=host_config,
                 ports=[spec.runtime_port] if spec.runtime_port is not None else None,
-                networking_config=None,
+                networking_config=networking_config,
             )
             created_id = str(raw.get("Id") or "")
             container = client.containers.get(created_id)
 
-            for network in spec.network_names:
+            for network in extra_networks:
                 try:
                     net = client.networks.get(network)
                     net.connect(container)
@@ -440,24 +462,8 @@ class RealDockerAdapter:
 def _extract_volumes(
     host_config: dict[str, Any], attrs: dict[str, Any]
 ) -> list[VolumeMount]:
+    """Prefer structured Mounts (Windows-safe); fall back to Binds parsing."""
     mounts: list[VolumeMount] = []
-    for bind in host_config.get("Binds") or []:
-        if not isinstance(bind, str):
-            continue
-        parts = bind.split(":")
-        if len(parts) < 2:
-            continue
-        host_path, container_path = parts[0], parts[1]
-        mode = parts[2] if len(parts) > 2 else "rw"
-        mounts.append(
-            VolumeMount(
-                host_path=host_path,
-                container_path=container_path,
-                read_only="ro" in mode.split(","),
-            )
-        )
-    if mounts:
-        return mounts
     for item in attrs.get("Mounts") or []:
         if not isinstance(item, dict):
             continue
@@ -465,14 +471,57 @@ def _extract_volumes(
         destination = item.get("Destination")
         if not source or not destination:
             continue
+        read_only = bool(item.get("RW") is False)
+        mode = str(item.get("Mode") or "")
+        if "ro" in mode.split(","):
+            read_only = True
         mounts.append(
             VolumeMount(
                 host_path=str(source),
                 container_path=str(destination),
-                read_only=bool(item.get("RW") is False or item.get("Mode") == "ro"),
+                read_only=read_only,
             )
         )
+    if mounts:
+        return mounts
+
+    for bind in host_config.get("Binds") or []:
+        if not isinstance(bind, str):
+            continue
+        parsed = _parse_bind_string(bind)
+        if parsed is not None:
+            mounts.append(parsed)
     return mounts
+
+
+def _parse_bind_string(bind: str) -> VolumeMount | None:
+    """Parse HostConfig.Binds without breaking Windows drive-letter paths.
+
+    Examples:
+    - ``/srv/models:/models/current:ro``
+    - ``D:/models/example:/models/current:ro``
+    """
+    text = bind.strip()
+    if not text:
+        return None
+    read_only = False
+    rest = text
+    if rest.endswith(":ro") or rest.endswith(":rw"):
+        read_only = rest.endswith(":ro")
+        rest = rest[:-3]
+    # Split host vs container at the last ":/" (container paths are absolute).
+    sep = rest.rfind(":/")
+    if sep <= 0:
+        return None
+    host_path = rest[:sep]
+    container_path = rest[sep + 1 :]
+    if not host_path or not container_path.startswith("/"):
+        return None
+    return VolumeMount(
+        host_path=host_path,
+        container_path=container_path,
+        read_only=read_only,
+    )
 
 
 def _extract_published_ports(
@@ -556,15 +605,18 @@ class FakeDockerAdapter:
         containers: list[ContainerInfo] | None = None,
         reason: str | None = None,
         fail_networks: set[str] | None = None,
+        missing_networks: set[str] | None = None,
     ) -> None:
         self._available = available
         self._version = version
         self._reason = reason
         self._containers: dict[str, ContainerInfo] = {}
         self.fail_networks: set[str] = set(fail_networks or ())
+        self.missing_networks: set[str] = set(missing_networks or ())
         self.last_device_requests: list[dict[str, Any]] | None = None
         self.last_create_spec: CreateContainerSpec | None = None
         self.last_create_published_ports: dict[str, Any] | None = None
+        self.last_initial_network: str | None = None
         self.last_stop_timeout: int | None = None
         self.last_restart_timeout: int | None = None
         for c in containers or []:
@@ -620,8 +672,22 @@ class FakeDockerAdapter:
         self.last_device_requests = build_device_requests(spec.gpu_device_indices)
         # Managed runtimes never publish Host ports.
         self.last_create_published_ports = {}
+
+        # Existence check before create (mirrors RealDockerAdapter).
+        for network in spec.network_names:
+            if network in self.missing_networks:
+                raise DockerUnavailableError(
+                    "Requested Docker network is not available.",
+                    details={"network": network},
+                )
+
+        initial_network = spec.network_names[0] if spec.network_names else None
+        extra_networks = list(spec.network_names[1:]) if spec.network_names else []
+        self.last_initial_network = initial_network
+
         container_id = f"fake-{uuid.uuid4().hex[:12]}"
         name = spec.name.lstrip("/")
+        # Custom networks only — never add default "bridge" when requested.
         info = ContainerInfo(
             id=container_id,
             name=name,
@@ -636,14 +702,15 @@ class FakeDockerAdapter:
             volumes=list(spec.volumes),
             gpu_device_indices=list(spec.gpu_device_indices),
             runtime_port=spec.runtime_port,
-            network_names=sorted(spec.network_names),
+            network_names=list(spec.network_names),
             # DNS name = container name (not Docker network name).
             internal_address=name or None,
             published_ports={},
         )
         self._containers[container_id] = info
 
-        for network in spec.network_names:
+        # Extra network attach failures clean up the newly created container.
+        for network in extra_networks:
             if network in self.fail_networks:
                 del self._containers[container_id]
                 raise DockerUnavailableError(
