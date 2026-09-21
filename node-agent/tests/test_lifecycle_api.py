@@ -307,17 +307,21 @@ async def test_deployment_id_mismatch_rejected(client) -> None:
 async def test_inspect_nulls_when_unavailable(client) -> None:
     ac, docker = client
     ids = _ids()
+    body_req = _create_body(ids)
     created = await ac.post(
         f"/internal/v1/deployments/{ids['deployment_id']}/create",
-        json=_create_body(ids),
+        json=body_req,
     )
     assert created.status_code == 201
     body = created.json()
     assert body["pid"] is None
     assert body["started_at"] is None
     assert body["observed_vram_mb"] is None
-    assert body["network"]["internal_address"] is not None
     assert body["network"]["port"] == 8000
+    # internal_address is container DNS name / IP — never the Docker network name.
+    assert body["network"]["internal_address"] == body_req["container_name"]
+    assert body["network"]["internal_address"] != "modelops-model"
+    assert body["restart_count"] == 0
 
 
 def test_build_device_requests_keeps_indices_independent() -> None:
@@ -326,3 +330,153 @@ def test_build_device_requests_keeps_indices_independent() -> None:
     assert reqs[0]["DeviceIDs"] == ["0", "1"]
     # No VRAM pooling fields are invented here.
     assert "vram" not in str(reqs).lower()
+
+
+@pytest.mark.asyncio
+async def test_list_deployments_docker_unavailable_returns_502() -> None:
+    app, _docker = _make_app(FakeDockerAdapter(available=False, reason="no engine"))
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        listed = await ac.get("/internal/v1/deployments")
+    assert listed.status_code == 502
+    assert listed.json()["error"]["code"] == "DOCKER_ERROR"
+
+
+@pytest.mark.asyncio
+async def test_create_config_mismatch_fields_conflict(client) -> None:
+    ac, _docker = client
+    ids = _ids()
+    base = _create_body(
+        ids,
+        environment={"A": "1"},
+        volumes=[
+            {
+                "host_path": "/srv/models/a",
+                "container_path": "/models/current",
+                "read_only": True,
+            }
+        ],
+        network_names=["modelops-model"],
+        labels={"custom": "v1"},
+    )
+    first = await ac.post(
+        f"/internal/v1/deployments/{ids['deployment_id']}/create", json=base
+    )
+    assert first.status_code == 201
+
+    env_conflict = await ac.post(
+        f"/internal/v1/deployments/{ids['deployment_id']}/create",
+        json={**base, "environment": {"A": "2"}},
+    )
+    assert env_conflict.status_code == 409
+
+    vol_conflict = await ac.post(
+        f"/internal/v1/deployments/{ids['deployment_id']}/create",
+        json={
+            **base,
+            "volumes": [
+                {
+                    "host_path": "/srv/models/b",
+                    "container_path": "/models/current",
+                    "read_only": True,
+                }
+            ],
+        },
+    )
+    assert vol_conflict.status_code == 409
+
+    net_conflict = await ac.post(
+        f"/internal/v1/deployments/{ids['deployment_id']}/create",
+        json={**base, "network_names": ["other-net"]},
+    )
+    assert net_conflict.status_code == 409
+
+    label_conflict = await ac.post(
+        f"/internal/v1/deployments/{ids['deployment_id']}/create",
+        json={**base, "labels": {"custom": "v2"}},
+    )
+    assert label_conflict.status_code == 409
+
+    same = await ac.post(
+        f"/internal/v1/deployments/{ids['deployment_id']}/create", json=base
+    )
+    assert same.status_code == 201
+    assert same.json()["container_id"] == first.json()["container_id"]
+
+
+@pytest.mark.asyncio
+async def test_create_does_not_publish_host_ports(client) -> None:
+    ac, docker = client
+    ids = _ids()
+    created = await ac.post(
+        f"/internal/v1/deployments/{ids['deployment_id']}/create",
+        json=_create_body(ids, runtime_port=8000),
+    )
+    assert created.status_code == 201
+    assert created.json()["network"]["port"] == 8000
+    assert docker.last_create_published_ports == {}
+    info = docker.find_by_deployment_id(ids["deployment_id"])
+    assert info is not None
+    assert info.published_ports == {}
+    assert info.runtime_port == 8000
+
+
+@pytest.mark.asyncio
+async def test_network_attach_failure_cleans_up_new_container() -> None:
+    docker = FakeDockerAdapter(
+        available=True, fail_networks={"missing-model-net"}
+    )
+    app, docker = _make_app(docker)
+    transport = ASGITransport(app=app)
+    ids = _ids()
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        created = await ac.post(
+            f"/internal/v1/deployments/{ids['deployment_id']}/create",
+            json=_create_body(ids, network_names=["missing-model-net"]),
+        )
+    assert created.status_code == 502
+    assert created.json()["error"]["code"] == "DOCKER_ERROR"
+    assert created.json()["error"]["details"]["network"] == "missing-model-net"
+    assert docker.find_by_deployment_id(ids["deployment_id"]) is None
+    assert docker.list_containers(all_containers=True) == []
+
+
+def test_restart_count_reads_top_level_inspect_field() -> None:
+    from app.adapters.docker_adapter import RealDockerAdapter
+
+    class _FakeContainer:
+        id = "abc"
+        name = "/ctr"
+        status = "running"
+        labels = {}
+        attrs = {
+            "RestartCount": 7,
+            "State": {"Pid": 1, "StartedAt": "2026-09-21T00:00:00Z"},
+            "Config": {"Image": "img", "Env": [], "Labels": {}},
+            "HostConfig": {},
+            "NetworkSettings": {"Networks": {}},
+        }
+
+    adapter = RealDockerAdapter.__new__(RealDockerAdapter)
+    info = RealDockerAdapter._to_info(adapter, _FakeContainer())
+    assert info.restart_count == 7
+
+
+def test_internal_address_prefers_ip_not_network_name() -> None:
+    from app.adapters.docker_adapter import _extract_internal_address
+
+    addr = _extract_internal_address(
+        "my-container",
+        {
+            "Networks": {
+                "modelops-model": {"IPAddress": "172.28.0.5"},
+            }
+        },
+    )
+    assert addr == "172.28.0.5"
+    dns_only = _extract_internal_address(
+        "my-container",
+        {"Networks": {"modelops-model": {"IPAddress": ""}}},
+    )
+    assert dns_only == "my-container"
+    assert dns_only != "modelops-model"
