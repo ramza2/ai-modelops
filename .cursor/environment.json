@@ -9,5 +9,10 @@
       "command": "cd backend && . ../.venv/bin/activate && export MODELOPS_DATABASE_URL=\"postgresql+asyncpg://modelops:modelops@localhost:5432/modelops\" && uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload"
     }
   ],
-  "ports": [8000]
+  "ports": [
+    {
+      "name": "backend",
+      "port": 8000
+    }
+  ]
 }
