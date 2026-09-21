@@ -630,3 +630,103 @@ def test_internal_address_prefers_ip_not_network_name() -> None:
     )
     assert dns_only == "my-container"
     assert dns_only != "modelops-model"
+
+
+def test_is_timeout_error_detects_read_timeout_only() -> None:
+    from app.adapters.docker_adapter import _is_timeout_error
+
+    class ReadTimeout(Exception):
+        pass
+
+    class APIError(Exception):
+        pass
+
+    assert _is_timeout_error(ReadTimeout("Read timed out. (read timeout=7.0)"))
+    assert _is_timeout_error(
+        Exception("NpipeHTTPConnectionPool Read timed out. (read timeout=7.0)")
+    )
+    assert not _is_timeout_error(APIError("conflict: name already in use"))
+    wrapped = APIError("wrapper")
+    wrapped.__cause__ = ReadTimeout("Read timed out.")
+    assert _is_timeout_error(wrapped)
+
+
+@pytest.mark.asyncio
+async def test_restart_timeout_reconciles_to_running() -> None:
+    docker = FakeDockerAdapter(
+        available=True,
+        restart_timeout_error=True,
+        restart_status_after_timeout="running",
+    )
+    app, docker = _make_app(docker)
+    ids = _ids()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        created = await ac.post(
+            f"/internal/v1/deployments/{ids['deployment_id']}/create",
+            json=_create_body(ids, network_names=[]),
+        )
+        assert created.status_code == 201
+        await ac.post(
+            f"/internal/v1/deployments/{ids['deployment_id']}/start", json={}
+        )
+        restarted = await ac.post(
+            f"/internal/v1/deployments/{ids['deployment_id']}/restart",
+            json={"graceful_timeout_seconds": 5},
+        )
+    assert restarted.status_code == 200
+    assert restarted.json()["runtime_status"] == "RUNNING"
+    assert docker.restart_reconcile_used is True
+
+
+@pytest.mark.asyncio
+async def test_restart_timeout_still_error_when_not_running() -> None:
+    docker = FakeDockerAdapter(
+        available=True,
+        restart_timeout_error=True,
+        restart_status_after_timeout="exited",
+    )
+    app, docker = _make_app(docker)
+    ids = _ids()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        created = await ac.post(
+            f"/internal/v1/deployments/{ids['deployment_id']}/create",
+            json=_create_body(ids, network_names=[]),
+        )
+        assert created.status_code == 201
+        await ac.post(
+            f"/internal/v1/deployments/{ids['deployment_id']}/start", json={}
+        )
+        restarted = await ac.post(
+            f"/internal/v1/deployments/{ids['deployment_id']}/restart",
+            json={"graceful_timeout_seconds": 5},
+        )
+    assert restarted.status_code == 502
+    assert restarted.json()["error"]["code"] == "DOCKER_ERROR"
+    assert "ReadTimeout" in restarted.json()["error"]["details"]["reason"]
+
+
+@pytest.mark.asyncio
+async def test_restart_generic_docker_error_not_reconciled() -> None:
+    docker = FakeDockerAdapter(available=True, restart_generic_error=True)
+    app, docker = _make_app(docker)
+    ids = _ids()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        created = await ac.post(
+            f"/internal/v1/deployments/{ids['deployment_id']}/create",
+            json=_create_body(ids, network_names=[]),
+        )
+        assert created.status_code == 201
+        await ac.post(
+            f"/internal/v1/deployments/{ids['deployment_id']}/start", json={}
+        )
+        restarted = await ac.post(
+            f"/internal/v1/deployments/{ids['deployment_id']}/restart",
+            json={"graceful_timeout_seconds": 5},
+        )
+    assert restarted.status_code == 502
+    assert restarted.json()["error"]["code"] == "DOCKER_ERROR"
+    assert docker.restart_reconcile_used is False
+    assert "APIError" in restarted.json()["error"]["details"]["reason"]
