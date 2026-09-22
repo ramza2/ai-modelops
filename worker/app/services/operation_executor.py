@@ -373,7 +373,8 @@ class OperationExecutor:
                 deployment_id, mutation=mutation, timeout_seconds=30
             )
             self._merge_container_id(deployment, result)
-            deployment.health_status = HealthStatus.STARTING.value
+            # Persist lifecycle truth immediately — health/probe may still fail.
+            self._mark_runtime_started(deployment)
         elif code == STEP_STOP_CONTAINER:
             try:
                 result = await client.stop_deployment(
@@ -382,13 +383,15 @@ class OperationExecutor:
                     graceful_timeout_seconds=graceful,
                 )
                 self._merge_container_id(deployment, result)
+                self._mark_runtime_stopped(deployment)
             except NodeAgentError as exc:
                 # For DELETE ops, missing container is OK on stop.
                 if (
                     operation.operation_type == OperationType.DELETE.value
                     and exc.status_code == 404
                 ):
-                    pass
+                    # Container already gone — still record STOPPED lifecycle.
+                    self._mark_runtime_stopped(deployment)
                 else:
                     raise
         elif code == STEP_RESTART_CONTAINER:
@@ -398,7 +401,7 @@ class OperationExecutor:
                 graceful_timeout_seconds=graceful,
             )
             self._merge_container_id(deployment, result)
-            deployment.health_status = HealthStatus.STARTING.value
+            self._mark_runtime_started(deployment)
         elif code == STEP_REMOVE_CONTAINER:
             try:
                 await client.remove_deployment(deployment_id, mutation=mutation)
@@ -631,12 +634,16 @@ class OperationExecutor:
                     "latency_ms": last.get("latency_ms"),
                 }
             if asyncio.get_event_loop().time() >= deadline:
+                # Boot never became healthy; keep runtime_status separate.
+                deployment.health_status = HealthStatus.UNHEALTHY.value
+                deployment.updated_at = dt.datetime.now(tz=dt.UTC)
+                await session.flush()
                 raise PermanentStepError(
                     "Timed out waiting for deployment health.",
                     code="HEALTH_TIMEOUT",
                     details={
                         "attempts": attempts,
-                        "health_status": status,
+                        "health_status": HealthStatus.UNHEALTHY.value,
                         "http_status": last.get("http_status"),
                     },
                 )
@@ -1016,6 +1023,23 @@ class OperationExecutor:
         if container_id:
             deployment.container_id = str(container_id)
 
+    @staticmethod
+    def _mark_runtime_started(deployment: Deployment) -> None:
+        """Record that the container is running after START/RESTART succeeded."""
+        now = dt.datetime.now(tz=dt.UTC)
+        deployment.runtime_status = RuntimeStatus.RUNNING.value
+        deployment.last_started_at = now
+        deployment.health_status = HealthStatus.STARTING.value
+        deployment.updated_at = now
+
+    @staticmethod
+    def _mark_runtime_stopped(deployment: Deployment) -> None:
+        """Record that the container is stopped after STOP succeeded."""
+        now = dt.datetime.now(tz=dt.UTC)
+        deployment.runtime_status = RuntimeStatus.STOPPED.value
+        deployment.last_stopped_at = now
+        deployment.updated_at = now
+
     async def _apply_success_deployment_state(
         self,
         session: AsyncSession,
@@ -1027,20 +1051,25 @@ class OperationExecutor:
         if op == OperationType.START.value:
             deployment.desired_state = DesiredState.RUNNING.value
             deployment.runtime_status = RuntimeStatus.RUNNING.value
-            deployment.last_started_at = now
+            # Preserve timestamp from STEP_START_CONTAINER when already set.
+            if deployment.last_started_at is None:
+                deployment.last_started_at = now
         elif op == OperationType.STOP.value:
             deployment.desired_state = DesiredState.STOPPED.value
             deployment.runtime_status = RuntimeStatus.STOPPED.value
-            deployment.last_stopped_at = now
+            if deployment.last_stopped_at is None:
+                deployment.last_stopped_at = now
         elif op == OperationType.RESTART.value:
             deployment.desired_state = DesiredState.RUNNING.value
             deployment.runtime_status = RuntimeStatus.RUNNING.value
-            deployment.last_started_at = now
+            if deployment.last_started_at is None:
+                deployment.last_started_at = now
         elif op == OperationType.DELETE.value:
             deployment.desired_state = DesiredState.REMOVED.value
             deployment.runtime_status = RuntimeStatus.STOPPED.value
             deployment.container_id = None
-            deployment.last_stopped_at = now
+            if deployment.last_stopped_at is None:
+                deployment.last_stopped_at = now
         deployment.updated_at = now
         deployment.status_reason = None
         await session.flush()

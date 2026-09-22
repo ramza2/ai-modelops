@@ -1826,3 +1826,199 @@ async def test_probe_passes_served_model_name_from_version(db) -> None:
         op = await session.get(Operation, op_id)
         assert op is not None
         assert op.status == OperationStatus.SUCCEEDED.value
+
+
+@pytest.mark.asyncio
+async def test_start_then_health_timeout_keeps_runtime_running(db) -> None:
+    """START_CONTAINER success must persist RUNNING even if WAIT_HEALTH fails."""
+    fake = FakeNodeAgent()
+    fake.health_fail_times = 1000
+    transport = httpx.MockTransport(fake.handler)
+    session_factory = db
+
+    async with session_factory() as session:
+        seeded = await _seed_deployment(
+            session, runtime_status=RuntimeStatus.CREATED.value
+        )
+        dep_id = seeded["deployment_id"]
+        fake.containers[str(dep_id)] = {
+            "deployment_id": str(dep_id),
+            "container_id": f"ctr-start-health-fail-{seeded['suffix']}",
+            "runtime_status": "STOPPED",
+        }
+        op_id, _ = await _enqueue(
+            session,
+            deployment_id=dep_id,
+            operation_type=OperationType.START.value,
+            steps=[STEP_ENSURE_CONTAINER, STEP_START_CONTAINER, STEP_WAIT_HEALTH],
+            desired_state=DesiredState.RUNNING.value,
+            metadata={"health_timeout_seconds": 0.05},
+        )
+
+    await JobRunner(
+        settings=_m3b3_settings(
+            health_timeout_seconds=0.05, health_poll_interval_seconds=0.01
+        ),
+        session_factory=session_factory,
+        transport=transport,
+    ).poll_once()
+
+    async with session_factory() as session:
+        op = await session.get(Operation, op_id)
+        dep = await session.get(Deployment, dep_id)
+        assert op is not None and dep is not None
+        assert op.status == OperationStatus.FAILED.value
+        assert op.error_code == "HEALTH_TIMEOUT"
+        assert dep.desired_state == DesiredState.RUNNING.value
+        assert dep.runtime_status == RuntimeStatus.RUNNING.value
+        assert dep.container_id is not None
+        assert dep.last_started_at is not None
+        assert dep.health_status == "UNHEALTHY"
+
+
+@pytest.mark.asyncio
+async def test_start_then_probe_failure_keeps_runtime_running(db) -> None:
+    """Health success + probe failure must not roll runtime back from RUNNING."""
+    fake = FakeNodeAgent()
+    fake.probe_mode = "malformed"
+    transport = httpx.MockTransport(fake.handler)
+    session_factory = db
+
+    async with session_factory() as session:
+        seeded = await _seed_deployment(
+            session, runtime_status=RuntimeStatus.CREATED.value
+        )
+        dep_id = seeded["deployment_id"]
+        fake.containers[str(dep_id)] = {
+            "deployment_id": str(dep_id),
+            "container_id": f"ctr-start-probe-fail-{seeded['suffix']}",
+            "runtime_status": "STOPPED",
+        }
+        op_id, _ = await _enqueue(
+            session,
+            deployment_id=dep_id,
+            operation_type=OperationType.START.value,
+            steps=[
+                STEP_ENSURE_CONTAINER,
+                STEP_START_CONTAINER,
+                STEP_WAIT_HEALTH,
+                STEP_PROBE_INFERENCE,
+            ],
+            desired_state=DesiredState.RUNNING.value,
+            max_attempts=1,
+        )
+
+    await JobRunner(
+        settings=_m3b3_settings(worker_max_attempts=1),
+        session_factory=session_factory,
+        transport=transport,
+    ).poll_once()
+
+    async with session_factory() as session:
+        op = await session.get(Operation, op_id)
+        dep = await session.get(Deployment, dep_id)
+        assert op is not None and dep is not None
+        assert op.status == OperationStatus.FAILED.value
+        assert op.error_code == "PROBE_MALFORMED_RESPONSE"
+        assert dep.runtime_status == RuntimeStatus.RUNNING.value
+        assert dep.container_id is not None
+        assert dep.last_started_at is not None
+        assert dep.health_status == "UNHEALTHY"
+        assert dep.desired_state == DesiredState.RUNNING.value
+
+
+@pytest.mark.asyncio
+async def test_restart_then_health_timeout_keeps_runtime_running(db) -> None:
+    """RESTART_CONTAINER success must keep RUNNING after WAIT_HEALTH failure."""
+    fake = FakeNodeAgent()
+    fake.health_fail_times = 1000
+    transport = httpx.MockTransport(fake.handler)
+    session_factory = db
+
+    async with session_factory() as session:
+        seeded = await _seed_deployment(
+            session,
+            runtime_status=RuntimeStatus.RUNNING.value,
+            container_id=f"ctr-restart-health-{uuid.uuid4().hex[:8]}",
+        )
+        dep_id = seeded["deployment_id"]
+        fake.containers[str(dep_id)] = {
+            "deployment_id": str(dep_id),
+            "container_id": seeded["container_id"],
+            "runtime_status": "RUNNING",
+        }
+        op_id, _ = await _enqueue(
+            session,
+            deployment_id=dep_id,
+            operation_type=OperationType.RESTART.value,
+            steps=[STEP_RESTART_CONTAINER, STEP_WAIT_HEALTH],
+            desired_state=DesiredState.RUNNING.value,
+            metadata={"health_timeout_seconds": 0.05},
+        )
+
+    await JobRunner(
+        settings=_m3b3_settings(
+            health_timeout_seconds=0.05, health_poll_interval_seconds=0.01
+        ),
+        session_factory=session_factory,
+        transport=transport,
+    ).poll_once()
+
+    async with session_factory() as session:
+        op = await session.get(Operation, op_id)
+        dep = await session.get(Deployment, dep_id)
+        assert op is not None and dep is not None
+        assert op.status == OperationStatus.FAILED.value
+        assert op.error_code == "HEALTH_TIMEOUT"
+        assert dep.runtime_status == RuntimeStatus.RUNNING.value
+        assert dep.last_started_at is not None
+        assert dep.health_status == "UNHEALTHY"
+        assert dep.desired_state == DesiredState.RUNNING.value
+
+
+@pytest.mark.asyncio
+async def test_start_success_preserves_lifecycle_last_started_at(db) -> None:
+    """Final success must not overwrite last_started_at set at START_CONTAINER."""
+    fake = FakeNodeAgent()
+    transport = httpx.MockTransport(fake.handler)
+    session_factory = db
+
+    async with session_factory() as session:
+        seeded = await _seed_deployment(
+            session, runtime_status=RuntimeStatus.STOPPED.value
+        )
+        dep_id = seeded["deployment_id"]
+        fake.containers[str(dep_id)] = {
+            "deployment_id": str(dep_id),
+            "container_id": f"ctr-ts-preserve-{seeded['suffix']}",
+            "runtime_status": "STOPPED",
+        }
+        op_id, _ = await _enqueue(
+            session,
+            deployment_id=dep_id,
+            operation_type=OperationType.START.value,
+            steps=[
+                STEP_ENSURE_CONTAINER,
+                STEP_START_CONTAINER,
+                STEP_WAIT_HEALTH,
+                STEP_PROBE_INFERENCE,
+            ],
+            desired_state=DesiredState.RUNNING.value,
+        )
+
+    await JobRunner(
+        settings=_m3b3_settings(),
+        session_factory=session_factory,
+        transport=transport,
+    ).poll_once()
+
+    async with session_factory() as session:
+        op = await session.get(Operation, op_id)
+        dep = await session.get(Deployment, dep_id)
+        assert op is not None and dep is not None
+        assert op.status == OperationStatus.SUCCEEDED.value
+        assert dep.runtime_status == RuntimeStatus.RUNNING.value
+        assert dep.last_started_at is not None
+        assert op.finished_at is not None
+        # Lifecycle timestamp must be at/before operation finish, not overwritten later.
+        assert dep.last_started_at <= op.finished_at
