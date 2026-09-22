@@ -5,7 +5,7 @@ from __future__ import annotations
 import datetime as dt
 import uuid
 
-from sqlalchemy import select, text, update
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.enums import JobStatus, OperationStatus, StepStatus
@@ -78,23 +78,6 @@ class OperationJobRepository:
         await self._session.commit()
         await self._session.refresh(job)
         return job
-
-    async def try_advisory_lock(self, deployment_id: uuid.UUID) -> bool:
-        """Session-level advisory lock keyed by deployment_id text hash."""
-        result = await self._session.execute(
-            text("SELECT pg_try_advisory_lock(hashtext(:key))"),
-            {"key": str(deployment_id)},
-        )
-        locked = bool(result.scalar_one())
-        # Do not commit here — lock is held on this connection until unlock.
-        return locked
-
-    async def advisory_unlock(self, deployment_id: uuid.UUID) -> None:
-        await self._session.execute(
-            text("SELECT pg_advisory_unlock(hashtext(:key))"),
-            {"key": str(deployment_id)},
-        )
-        await self._session.commit()
 
     async def requeue_job(
         self,

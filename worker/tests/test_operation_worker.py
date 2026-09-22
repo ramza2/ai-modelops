@@ -13,6 +13,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from app.core.advisory_lock import DeploymentAdvisoryLock
 from app.core.config import Settings
 from app.core.db import Base
 from app.core.enums import (
@@ -798,6 +799,7 @@ async def test_advisory_lock_requeues_without_failing(db) -> None:
     fake = FakeNodeAgent()
     transport = httpx.MockTransport(fake.handler)
     session_factory = db
+    engine = session_factory.kw["bind"]
     settings = Settings(
         worker_id="w-lock",
         worker_lock_requeue_seconds=0.01,
@@ -820,24 +822,21 @@ async def test_advisory_lock_requeues_without_failing(db) -> None:
             desired_state=DesiredState.STOPPED.value,
         )
 
-    # Hold advisory lock on another connection while executor runs.
-    async with session_factory() as lock_session:
-        repo_lock = OperationJobRepository(lock_session)
-        assert await repo_lock.try_advisory_lock(dep_id) is True
-
-        runner = JobRunner(
-            settings=settings, session_factory=session_factory, transport=transport
-        )
-        # Claim first
+    # Hold advisory lock on a dedicated connection while executor runs.
+    holder = DeploymentAdvisoryLock(engine)
+    assert await holder.try_acquire(dep_id) is True
+    try:
         async with session_factory() as session:
             repo = OperationJobRepository(session)
             job = await repo.claim_next_job(worker_id="w-lock")
             assert job is not None
 
+        calls_before = len(fake.calls)
         executor = OperationExecutor(
             session_factory=session_factory,
             settings=settings,
             transport=transport,
+            engine=engine,
         )
         await executor.execute(job_id)
 
@@ -851,5 +850,173 @@ async def test_advisory_lock_requeues_without_failing(db) -> None:
                 OperationStatus.RUNNING.value,
             }
             assert job.last_error and "advisory lock" in job.last_error.lower()
+        # Contending worker must not call Node Agent.
+        assert len(fake.calls) == calls_before
+    finally:
+        await holder.release()
 
-        await repo_lock.advisory_unlock(dep_id)
+
+@pytest.mark.asyncio
+async def test_advisory_lock_survives_orm_commit_during_mutation_pause(db) -> None:
+    """Worker A keeps deployment lock after step DB commit; Worker B requeues."""
+    import asyncio
+
+    fake = FakeNodeAgent()
+    transport = httpx.MockTransport(fake.handler)
+    session_factory = db
+    engine = session_factory.kw["bind"]
+    settings = Settings(
+        worker_id="w-lifetime",
+        worker_lock_requeue_seconds=0.01,
+        worker_poll_seconds=0.01,
+    )
+
+    async with session_factory() as session:
+        seeded = await _seed_deployment(
+            session,
+            runtime_status=RuntimeStatus.RUNNING.value,
+            container_id=f"ctr-life-{uuid.uuid4().hex[:12]}",
+        )
+        dep_id = seeded["deployment_id"]
+        fake.containers[str(dep_id)] = {
+            "deployment_id": str(dep_id),
+            "container_id": seeded["container_id"],
+            "runtime_status": "RUNNING",
+        }
+        op_a, job_a = await _enqueue(
+            session,
+            deployment_id=dep_id,
+            operation_type=OperationType.STOP.value,
+            steps=[STEP_STOP_CONTAINER],
+            desired_state=DesiredState.STOPPED.value,
+        )
+
+    # Second job for same deployment (claim/execute later as Worker B).
+    async with session_factory() as session:
+        # Do not clear queue — add sibling job while keeping job_a queued.
+        now = __import__("datetime").datetime.now(
+            tz=__import__("datetime").timezone.utc
+        )
+        op_b = uuid.uuid4()
+        job_b = uuid.uuid4()
+        session.add(
+            Operation(
+                id=op_b,
+                operation_type=OperationType.RESTART.value,
+                status=OperationStatus.QUEUED.value,
+                target_deployment_id=dep_id,
+                metadata_json={},
+            )
+        )
+        session.add(
+            OperationStep(
+                id=uuid.uuid4(),
+                operation_id=op_b,
+                sequence_no=1,
+                step_code=STEP_RESTART_CONTAINER,
+                status=StepStatus.PENDING.value,
+                attempt_no=1,
+                detail_json={},
+            )
+        )
+        session.add(
+            OperationJob(
+                id=job_b,
+                operation_id=op_b,
+                status=JobStatus.QUEUED.value,
+                priority=100,
+                attempt_count=0,
+                max_attempts=3,
+                available_at=now,
+            )
+        )
+        await session.commit()
+
+    entered = asyncio.Event()
+    gate = asyncio.Event()
+
+    async with session_factory() as session:
+        repo = OperationJobRepository(session)
+        claimed_a = await repo.claim_next_job(worker_id="worker-a")
+        assert claimed_a is not None
+        assert uuid.UUID(str(claimed_a.id)) == job_a
+
+    executor_a = OperationExecutor(
+        session_factory=session_factory,
+        settings=settings,
+        transport=transport,
+        engine=engine,
+        mutation_entered=entered,
+        mutation_gate=gate,
+    )
+    task_a = asyncio.create_task(executor_a.execute(job_a))
+    await asyncio.wait_for(entered.wait(), timeout=5)
+
+    # After begin_step commit, step must be RUNNING while A still holds lock.
+    async with session_factory() as session:
+        steps = (
+            await session.execute(
+                select(OperationStep).where(OperationStep.operation_id == op_a)
+            )
+        ).scalars().all()
+        assert any(s.status == StepStatus.RUNNING.value for s in steps)
+
+    calls_before_b = len(fake.calls)
+    async with session_factory() as session:
+        repo = OperationJobRepository(session)
+        claimed_b = await repo.claim_next_job(worker_id="worker-b")
+        assert claimed_b is not None
+        assert uuid.UUID(str(claimed_b.id)) == job_b
+
+    executor_b = OperationExecutor(
+        session_factory=session_factory,
+        settings=settings,
+        transport=transport,
+        engine=engine,
+    )
+    await executor_b.execute(job_b)
+
+    async with session_factory() as session:
+        job = await session.get(OperationJob, job_b)
+        op = await session.get(Operation, op_b)
+        assert job is not None and op is not None
+        assert job.status == JobStatus.QUEUED.value
+        assert "advisory lock" in (job.last_error or "").lower()
+        assert op.status != OperationStatus.FAILED.value
+    # B must not have issued Node Agent mutations.
+    assert len(fake.calls) == calls_before_b
+
+    gate.set()
+    await asyncio.wait_for(task_a, timeout=5)
+
+    async with session_factory() as session:
+        op = await session.get(Operation, op_a)
+        assert op is not None
+        assert op.status == OperationStatus.SUCCEEDED.value
+
+    # After A releases, B can proceed.
+    async with session_factory() as session:
+        job = await session.get(OperationJob, job_b)
+        assert job is not None
+        job.available_at = __import__("datetime").datetime.now(
+            tz=__import__("datetime").timezone.utc
+        ) - __import__("datetime").timedelta(seconds=1)
+        await session.commit()
+
+    async with session_factory() as session:
+        repo = OperationJobRepository(session)
+        claimed_b2 = await repo.claim_next_job(worker_id="worker-b")
+        assert claimed_b2 is not None
+
+    await executor_b.execute(job_b)
+    async with session_factory() as session:
+        op = await session.get(Operation, op_b)
+        assert op is not None
+        assert op.status == OperationStatus.SUCCEEDED.value
+
+    restart_calls = [
+        c
+        for c in fake.calls
+        if c["method"] == "POST" and c["path"].endswith("/restart")
+    ]
+    assert restart_calls, "Worker B should mutate only after A released the lock"

@@ -10,7 +10,7 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.config import Settings, get_settings
-from app.core.db import get_sessionmaker
+from app.core.db import get_engine, get_sessionmaker
 from app.domain.models import OperationJob
 from app.repositories.operations import OperationJobRepository
 from app.services.operation_executor import OperationExecutor
@@ -26,6 +26,7 @@ class JobRunner:
         session_factory: async_sessionmaker[AsyncSession] | None = None,
         transport: Any | None = None,
         stop_event: asyncio.Event | None = None,
+        engine: Any | None = None,
     ) -> None:
         self._settings = settings or get_settings()
         self._session_factory = session_factory or get_sessionmaker()
@@ -35,6 +36,9 @@ class JobRunner:
             session_factory=self._session_factory,
             settings=self._settings,
             transport=self._transport,
+            engine=engine or (
+                None if session_factory is not None else get_engine()
+            ),
         )
 
     def request_shutdown(self) -> None:

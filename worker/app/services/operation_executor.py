@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import logging
 import uuid
 from typing import Any
 
-from sqlalchemy import select, text
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.clients.node_agent import MutationHeaders, NodeAgentClient, NodeAgentError
+from app.core.advisory_lock import DeploymentAdvisoryLock
 from app.core.config import Settings
 from app.core.enums import DesiredState, JobStatus, OperationType, RuntimeStatus, StepStatus
 from app.domain.models import (
@@ -68,10 +70,25 @@ class OperationExecutor:
         session_factory: async_sessionmaker[AsyncSession],
         settings: Settings,
         transport: Any | None = None,
+        engine: AsyncEngine | None = None,
+        mutation_entered: asyncio.Event | None = None,
+        mutation_gate: asyncio.Event | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._settings = settings
         self._transport = transport
+        self._engine = engine
+        # Test hooks: signal after step DB commit, optionally pause before mutation.
+        self._mutation_entered = mutation_entered
+        self._mutation_gate = mutation_gate
+
+    def _resolve_engine(self) -> AsyncEngine:
+        if self._engine is not None:
+            return self._engine
+        bind = self._session_factory.kw.get("bind")
+        if isinstance(bind, AsyncEngine):
+            return bind
+        raise RuntimeError("AsyncEngine is required for deployment advisory locks.")
 
     async def execute(self, job_id: uuid.UUID) -> None:
         async with self._session_factory() as session:
@@ -91,10 +108,17 @@ class OperationExecutor:
                     message="Operation missing target_deployment_id.",
                 )
                 return
-
             deployment_id = uuid.UUID(str(operation.target_deployment_id))
-            locked = await repo.try_advisory_lock(deployment_id)
-            if not locked:
+            operation_id = uuid.UUID(str(operation.id))
+
+        lock = DeploymentAdvisoryLock(self._resolve_engine())
+        locked = await lock.try_acquire(deployment_id)
+        if not locked:
+            async with self._session_factory() as session:
+                repo = OperationJobRepository(session)
+                job = await session.get(OperationJob, job_id)
+                if job is None:
+                    return
                 # Lock contention must not burn retry attempts.
                 job.attempt_count = max(0, int(job.attempt_count) - 1)
                 await repo.requeue_job(
@@ -102,23 +126,20 @@ class OperationExecutor:
                     delay_seconds=self._settings.worker_lock_requeue_seconds,
                     error="Deployment advisory lock busy; requeued.",
                 )
-                return
+            return
 
-            try:
-                await self._run_operation(session, repo, job, operation, deployment_id)
-            finally:
-                try:
-                    await repo.advisory_unlock(deployment_id)
-                except Exception:  # noqa: BLE001 - unlock best-effort
-                    logger.exception(
-                        "Failed to release advisory lock for deployment %s",
-                        deployment_id,
-                    )
-                    try:
-                        await session.execute(text("SELECT pg_advisory_unlock_all()"))
-                        await session.commit()
-                    except Exception:  # noqa: BLE001
-                        logger.exception("pg_advisory_unlock_all failed")
+        try:
+            async with self._session_factory() as session:
+                repo = OperationJobRepository(session)
+                job = await session.get(OperationJob, job_id)
+                operation = await repo.get_operation(operation_id)
+                if job is None or operation is None:
+                    return
+                await self._run_operation(
+                    session, repo, job, operation, deployment_id
+                )
+        finally:
+            await lock.release()
 
     async def _run_operation(
         self,
@@ -294,6 +315,13 @@ class OperationExecutor:
         # Refresh after begin_step commit.
         step = await session.get(OperationStep, step.id)  # type: ignore[assignment]
         assert step is not None
+
+        # Test hooks: prove advisory lock survives ORM commits before mutation.
+        if self._mutation_entered is not None:
+            self._mutation_entered.set()
+        if self._mutation_gate is not None:
+            await self._mutation_gate.wait()
+
         mutation = MutationHeaders(
             operation_id=str(operation.id),
             step_id=str(step.id),
