@@ -33,10 +33,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     http_client = httpx.AsyncClient()
     app.state.routing_store = store
     app.state.http_client = http_client
-    try:
-        await store.start()
-    except Exception:  # noqa: BLE001 - allow process up; /ready reflects state
-        logger.exception("Initial routing snapshot load failed.")
+    await store.start()
     yield
     await store.stop()
     await http_client.aclose()
@@ -81,8 +78,7 @@ def create_app(
             content=error_envelope(
                 exc.code,
                 exc.message,
-                request_id=request_id,
-                details=exc.details,
+                param=exc.param,
             ),
             headers={REQUEST_ID_HEADER: str(request_id or "")},
         )
@@ -98,7 +94,7 @@ def create_app(
             content=error_envelope(
                 ErrorCode.INTERNAL_ERROR,
                 "Internal gateway error.",
-                request_id=request_id,
+                param=None,
             ),
             headers={REQUEST_ID_HEADER: str(request_id or "")},
         )

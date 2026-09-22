@@ -56,6 +56,7 @@ async def proxy_json_post(
             "Upstream inference timed out.",
             code=ErrorCode.UPSTREAM_TIMEOUT,
             http_status=504,
+            param="model",
             details={"path": path},
         ) from exc
     except httpx.HTTPError as exc:
@@ -64,6 +65,7 @@ async def proxy_json_post(
             "Upstream inference transport error.",
             code=ErrorCode.UPSTREAM_ERROR,
             http_status=502,
+            param="model",
             details={"path": path},
         ) from exc
 

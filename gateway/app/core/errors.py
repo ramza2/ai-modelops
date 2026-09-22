@@ -1,4 +1,4 @@
-"""Gateway error codes and envelope (OpenAI-compatible + ModelOps codes)."""
+"""Gateway error codes and OpenAI-compatible envelope."""
 
 from __future__ import annotations
 
@@ -28,6 +28,7 @@ class GatewayError(Exception):
         *,
         code: str | None = None,
         http_status: int | None = None,
+        param: str | None = None,
         details: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(message)
@@ -36,6 +37,8 @@ class GatewayError(Exception):
             self.code = code
         if http_status is not None:
             self.http_status = http_status
+        self.param = param
+        # details kept for internal logging/tests; not serialized in the body.
         self.details = details or {}
 
 
@@ -43,14 +46,17 @@ def error_envelope(
     code: str,
     message: str,
     *,
-    request_id: str | None = None,
-    details: dict[str, Any] | None = None,
+    param: str | None = None,
 ) -> dict[str, Any]:
+    """Build the Gateway OpenAI-compatible error body.
+
+    Request ID is returned via the ``X-Request-ID`` header, not the body.
+    """
     return {
         "error": {
-            "code": code,
             "message": message,
-            "details": details or {},
-            "request_id": request_id,
+            "type": "modelops_error",
+            "param": param,
+            "code": code,
         }
     }

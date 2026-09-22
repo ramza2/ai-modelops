@@ -342,6 +342,26 @@ async def test_embeddings_proxy(gw) -> None:
     assert gw["recorder"].calls[-1]["body"]["model"] == "emb-rewritten"
 
 
+def _assert_gateway_error(
+    resp: httpx.Response,
+    *,
+    status: int,
+    code: str,
+    param: str | None = "model",
+) -> dict[str, Any]:
+    assert resp.status_code == status, resp.text
+    body = resp.json()
+    assert "error" in body
+    err = body["error"]
+    assert set(err.keys()) == {"message", "type", "param", "code"}
+    assert isinstance(err["message"], str) and err["message"]
+    assert err["type"] == "modelops_error"
+    assert err["param"] == param
+    assert err["code"] == code
+    assert "X-Request-ID" in resp.headers
+    return err
+
+
 @pytest.mark.asyncio
 async def test_routing_error_matrix(gw) -> None:
     ac = gw["client"]
@@ -351,8 +371,9 @@ async def test_routing_error_matrix(gw) -> None:
         "/v1/chat/completions",
         json={"model": "does-not-exist", "messages": []},
     )
-    assert missing.status_code == 404
-    assert missing.json()["error"]["code"] == "MODEL_ALIAS_NOT_FOUND"
+    _assert_gateway_error(
+        missing, status=404, code="MODEL_ALIAS_NOT_FOUND", param="model"
+    )
 
     disabled = await _seed_alias_route(sf, enabled=False)
     await gw["store"].reload(force=True)
@@ -360,8 +381,7 @@ async def test_routing_error_matrix(gw) -> None:
         "/v1/chat/completions",
         json={"model": disabled["alias"], "messages": []},
     )
-    assert r.status_code == 503
-    assert r.json()["error"]["code"] == "MODEL_ALIAS_DISABLED"
+    _assert_gateway_error(r, status=503, code="MODEL_ALIAS_DISABLED")
 
     maint = await _seed_alias_route(sf, traffic_state="MAINTENANCE")
     await gw["store"].reload(force=True)
@@ -369,8 +389,7 @@ async def test_routing_error_matrix(gw) -> None:
         "/v1/chat/completions",
         json={"model": maint["alias"], "messages": []},
     )
-    assert r.status_code == 503
-    assert r.json()["error"]["code"] == "MODEL_MAINTENANCE"
+    _assert_gateway_error(r, status=503, code="MODEL_MAINTENANCE")
 
     chat = await _seed_alias_route(sf, api_type="CHAT")
     await gw["store"].reload(force=True)
@@ -378,8 +397,7 @@ async def test_routing_error_matrix(gw) -> None:
         "/v1/embeddings",
         json={"model": chat["alias"], "input": "x"},
     )
-    assert r.status_code == 400
-    assert r.json()["error"]["code"] == "MODEL_API_TYPE_MISMATCH"
+    _assert_gateway_error(r, status=400, code="MODEL_API_TYPE_MISMATCH")
 
     noroute = await _seed_alias_route(sf, with_route=False)
     await gw["store"].reload(force=True)
@@ -387,8 +405,7 @@ async def test_routing_error_matrix(gw) -> None:
         "/v1/chat/completions",
         json={"model": noroute["alias"], "messages": []},
     )
-    assert r.status_code == 503
-    assert r.json()["error"]["code"] == "MODEL_UNAVAILABLE"
+    _assert_gateway_error(r, status=503, code="MODEL_UNAVAILABLE")
 
     stopped = await _seed_alias_route(sf, runtime_status="STOPPED")
     await gw["store"].reload(force=True)
@@ -396,8 +413,7 @@ async def test_routing_error_matrix(gw) -> None:
         "/v1/chat/completions",
         json={"model": stopped["alias"], "messages": []},
     )
-    assert r.status_code == 503
-    assert r.json()["error"]["code"] == "MODEL_UNAVAILABLE"
+    _assert_gateway_error(r, status=503, code="MODEL_UNAVAILABLE")
 
     unhealthy = await _seed_alias_route(sf, health_status="UNHEALTHY")
     await gw["store"].reload(force=True)
@@ -405,8 +421,7 @@ async def test_routing_error_matrix(gw) -> None:
         "/v1/chat/completions",
         json={"model": unhealthy["alias"], "messages": []},
     )
-    assert r.status_code == 503
-    assert r.json()["error"]["code"] == "MODEL_UNAVAILABLE"
+    _assert_gateway_error(r, status=503, code="MODEL_UNAVAILABLE")
 
 
 @pytest.mark.asyncio
@@ -423,7 +438,9 @@ async def test_stream_true_rejected(gw) -> None:
         },
     )
     assert resp.status_code == 400
-    assert resp.json()["error"]["code"] == "STREAMING_NOT_SUPPORTED"
+    _assert_gateway_error(
+        resp, status=400, code="STREAMING_NOT_SUPPORTED", param="stream"
+    )
 
 
 @pytest.mark.asyncio
@@ -445,16 +462,14 @@ async def test_upstream_passthrough_and_errors(gw) -> None:
         "/v1/chat/completions",
         json={"model": seeded["alias"], "messages": []},
     )
-    assert r.status_code == 504
-    assert r.json()["error"]["code"] == "UPSTREAM_TIMEOUT"
+    _assert_gateway_error(r, status=504, code="UPSTREAM_TIMEOUT")
 
     gw["recorder"].mode = "transport"
     r = await ac.post(
         "/v1/chat/completions",
         json={"model": seeded["alias"], "messages": []},
     )
-    assert r.status_code == 502
-    assert r.json()["error"]["code"] == "UPSTREAM_ERROR"
+    _assert_gateway_error(r, status=502, code="UPSTREAM_ERROR")
 
 
 @pytest.mark.asyncio
@@ -482,15 +497,107 @@ async def test_snapshot_reload_and_lkg(gw) -> None:
     broken = async_sessionmaker(broken_engine, expire_on_commit=False)
     original = store._session_factory
     store._session_factory = broken
-    before = store.snapshot.routing_version
+    before_snap = store.snapshot
+    before = before_snap.routing_version
+    assert before_snap.using_last_known_good is False
     lkg = await store.reload(force=True)
     assert lkg.get("using_last_known_good") is True
     assert store.snapshot is not None
+    assert store.snapshot is not before_snap  # new reference, not in-place mutate
+    assert before_snap.using_last_known_good is False  # old object untouched
     assert store.snapshot.routing_version == before
     assert store.snapshot.using_last_known_good is True
+    assert store.db_connected is False
     store._session_factory = original
     await broken_engine.dispose()
+
+    # Recovery clears LKG flags.
+    recovered = await store.reload(force=True)
+    assert recovered.get("using_last_known_good") is False
+    assert store.db_connected is True
+    assert store.snapshot is not None
+    assert store.snapshot.using_last_known_good is False
 
     manual = await ac.post("/internal/v1/routes/reload")
     assert manual.status_code == 200
     assert "applied_version" in manual.json()
+
+
+@pytest.mark.asyncio
+async def test_initial_load_failure_poller_recovers(gw) -> None:
+    """Startup DB failure keeps process NOT_READY but poller recovers later."""
+    session_factory = gw["session_factory"]
+    broken_engine = create_async_engine(
+        "postgresql+asyncpg://modelops:modelops@127.0.0.1:1/modelops"
+    )
+    broken = async_sessionmaker(broken_engine, expire_on_commit=False)
+    store = RoutingStore(broken, poll_seconds=0.05)
+    await store.start()
+    try:
+        assert store.snapshot is None
+        assert store.ready is False
+        assert store._task is not None and not store._task.done()
+
+        # Heal DB connectivity; poller should load the first snapshot.
+        store._session_factory = session_factory
+        await _seed_alias_route(session_factory)
+        for _ in range(40):
+            if store.ready:
+                break
+            await __import__("asyncio").sleep(0.05)
+        assert store.ready is True
+        assert store.snapshot is not None
+        assert store.db_connected is True
+        assert store.snapshot.using_last_known_good is False
+    finally:
+        await store.stop()
+        await broken_engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_poll_refreshes_runtime_health_without_version_bump(gw) -> None:
+    """Deployment status changes must appear even if routing_state.version is unchanged."""
+    ac = gw["client"]
+    store: RoutingStore = gw["store"]
+    sf = gw["session_factory"]
+    seeded = await _seed_alias_route(sf)
+    await store.reload(force=True)
+    assert store.snapshot is not None
+    entry = store.snapshot.get(seeded["alias"])
+    assert entry is not None
+    assert entry.runtime_status == "RUNNING"
+    assert entry.health_status == "HEALTHY"
+    version_before = store.snapshot.routing_version
+
+    async with sf() as session:
+        await session.execute(
+            text(
+                """
+                UPDATE deployment
+                SET runtime_status = 'STOPPED', health_status = 'UNHEALTHY'
+                WHERE id = :id
+                """
+            ),
+            {"id": seeded["deployment_id"]},
+        )
+        # Intentionally do NOT bump routing_state.version.
+        await session.commit()
+        version_after = (
+            await session.execute(text("SELECT version FROM routing_state WHERE id = 1"))
+        ).scalar_one()
+    assert int(version_after) == version_before
+
+    # Poll/reload without version change must still refresh runtime/health.
+    await store.reload(force=False)
+    assert store.snapshot is not None
+    assert store.snapshot.routing_version == version_before
+    refreshed = store.snapshot.get(seeded["alias"])
+    assert refreshed is not None
+    assert refreshed.runtime_status == "STOPPED"
+    assert refreshed.health_status == "UNHEALTHY"
+
+    r = await ac.post(
+        "/v1/chat/completions",
+        json={"model": seeded["alias"], "messages": [{"role": "user", "content": "x"}]},
+    )
+    _assert_gateway_error(r, status=503, code="MODEL_UNAVAILABLE")

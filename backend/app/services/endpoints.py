@@ -151,7 +151,12 @@ class EndpointService:
         rewrite_model_name: str | None = None,
         reason: str | None = None,
     ) -> dict[str, Any]:
-        alias = await self._require_alias(endpoint_id)
+        alias = await self._repo.lock_alias_for_update(endpoint_id)
+        if alias is None:
+            raise NotFoundError(
+                f"Endpoint '{endpoint_id}' not found.",
+                details={"endpoint_id": str(endpoint_id)},
+            )
         target = await self._repo.get_deployment_with_model(deployment_id)
         if target is None:
             raise NotFoundError(

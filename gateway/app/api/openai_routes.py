@@ -58,7 +58,7 @@ async def chat_completions(request: Request) -> Response:
             "Streaming is not supported in Milestone 4-A.",
             code=ErrorCode.STREAMING_NOT_SUPPORTED,
             http_status=400,
-            details={"field": "stream"},
+            param="stream",
         )
     model = str(body.get("model") or "").strip()
     if not model:
@@ -66,7 +66,7 @@ async def chat_completions(request: Request) -> Response:
             "Request body field 'model' is required.",
             code=ErrorCode.VALIDATION_ERROR,
             http_status=422,
-            details={"field": "model"},
+            param="model",
         )
     entry = resolve_route(
         _store(request).snapshot,
@@ -94,7 +94,7 @@ async def embeddings(request: Request) -> Response:
             "Request body field 'model' is required.",
             code=ErrorCode.VALIDATION_ERROR,
             http_status=422,
-            details={"field": "model"},
+            param="model",
         )
     entry = resolve_route(
         _store(request).snapshot,
@@ -121,11 +121,13 @@ async def _read_json_body(request: Request) -> dict[str, Any]:
             "Request body must be valid JSON.",
             code=ErrorCode.VALIDATION_ERROR,
             http_status=422,
+            param=None,
         ) from exc
     if not isinstance(payload, dict):
         raise GatewayError(
             "Request body must be a JSON object.",
             code=ErrorCode.VALIDATION_ERROR,
             http_status=422,
+            param=None,
         )
     return payload

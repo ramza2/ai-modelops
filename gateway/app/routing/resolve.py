@@ -18,6 +18,7 @@ def resolve_route(
             "Routing snapshot is not ready.",
             code=ErrorCode.MODEL_UNAVAILABLE,
             http_status=503,
+            param="model",
         )
     entry = snapshot.get(alias)
     if entry is None:
@@ -25,6 +26,7 @@ def resolve_route(
             f"Model alias '{alias}' was not found.",
             code=ErrorCode.MODEL_ALIAS_NOT_FOUND,
             http_status=404,
+            param="model",
             details={"alias": alias},
         )
     if not entry.enabled:
@@ -32,6 +34,7 @@ def resolve_route(
             f"Model alias '{alias}' is disabled.",
             code=ErrorCode.MODEL_ALIAS_DISABLED,
             http_status=503,
+            param="model",
             details={"alias": alias},
         )
     if entry.traffic_state in (
@@ -42,6 +45,7 @@ def resolve_route(
             f"Model alias '{alias}' is in {entry.traffic_state}.",
             code=ErrorCode.MODEL_MAINTENANCE,
             http_status=503,
+            param="model",
             details={"alias": alias, "traffic_state": entry.traffic_state},
         )
     if entry.api_type != expected_api_type.value:
@@ -49,6 +53,7 @@ def resolve_route(
             f"Model alias '{alias}' api_type mismatch.",
             code=ErrorCode.MODEL_API_TYPE_MISMATCH,
             http_status=400,
+            param="model",
             details={
                 "alias": alias,
                 "expected": expected_api_type.value,
@@ -64,6 +69,7 @@ def resolve_route(
             f"Model alias '{alias}' has no active route.",
             code=ErrorCode.MODEL_UNAVAILABLE,
             http_status=503,
+            param="model",
             details={"alias": alias},
         )
     if entry.runtime_status != RuntimeStatus.RUNNING.value:
@@ -71,6 +77,7 @@ def resolve_route(
             f"Model alias '{alias}' deployment is not RUNNING.",
             code=ErrorCode.MODEL_UNAVAILABLE,
             http_status=503,
+            param="model",
             details={
                 "alias": alias,
                 "runtime_status": entry.runtime_status,
@@ -81,6 +88,7 @@ def resolve_route(
             f"Model alias '{alias}' deployment is not HEALTHY.",
             code=ErrorCode.MODEL_UNAVAILABLE,
             http_status=503,
+            param="model",
             details={
                 "alias": alias,
                 "health_status": entry.health_status,
@@ -91,6 +99,7 @@ def resolve_route(
             f"Model alias '{alias}' has no rewrite/served model name.",
             code=ErrorCode.MODEL_UNAVAILABLE,
             http_status=503,
+            param="model",
             details={"alias": alias},
         )
     return entry

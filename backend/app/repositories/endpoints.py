@@ -25,6 +25,17 @@ class EndpointRepository:
     async def get_alias(self, endpoint_id: uuid.UUID) -> EndpointAlias | None:
         return await self._session.get(EndpointAlias, endpoint_id)
 
+    async def lock_alias_for_update(
+        self, endpoint_id: uuid.UUID
+    ) -> EndpointAlias | None:
+        """Serialize concurrent route mutations for one alias."""
+        stmt = (
+            select(EndpointAlias)
+            .where(EndpointAlias.id == endpoint_id)
+            .with_for_update()
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
     async def get_alias_by_name(self, alias: str) -> EndpointAlias | None:
         stmt = select(EndpointAlias).where(EndpointAlias.alias == alias)
         return (await self._session.execute(stmt)).scalar_one_or_none()
@@ -128,15 +139,26 @@ class EndpointRepository:
         return route
 
     async def bump_routing_version(self, *, now: dt.datetime) -> int:
-        state = await self._session.get(RoutingState, 1)
-        if state is None:
-            state = RoutingState(id=1, version=0, updated_at=now)
-            self._session.add(state)
+        """Atomically increment routing_state.version (singleton id=1)."""
+        stmt = (
+            update(RoutingState)
+            .where(RoutingState.id == 1)
+            .values(
+                version=RoutingState.version + 1,
+                updated_at=now,
+            )
+            .returning(RoutingState.version)
+        )
+        result = await self._session.execute(stmt)
+        version = result.scalar_one_or_none()
+        if version is None:
+            # Migration guarantees the singleton row; recreate only if wiped.
+            self._session.add(
+                RoutingState(id=1, version=1, updated_at=now)
+            )
             await self._session.flush()
-        state.version = int(state.version) + 1
-        state.updated_at = now
-        await self._session.flush()
-        return int(state.version)
+            return 1
+        return int(version)
 
     async def get_routing_version(self) -> int:
         state = await self._session.get(RoutingState, 1)

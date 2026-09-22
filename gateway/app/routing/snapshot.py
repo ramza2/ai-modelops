@@ -44,7 +44,7 @@ class RouteEntry:
         return self.served_model_name
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class RoutingSnapshot:
     routing_version: int
     loaded_at: dt.datetime

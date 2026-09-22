@@ -43,6 +43,7 @@ async def route_runtime(alias: str, request: Request) -> dict[str, Any]:
             "Routing snapshot is not ready.",
             code=ErrorCode.MODEL_UNAVAILABLE,
             http_status=503,
+            param="model",
         )
     entry = snap.get(alias)
     if entry is None:
@@ -50,6 +51,7 @@ async def route_runtime(alias: str, request: Request) -> dict[str, Any]:
             f"Model alias '{alias}' was not found.",
             code=ErrorCode.MODEL_ALIAS_NOT_FOUND,
             http_status=404,
+            param="model",
             details={"alias": alias},
         )
     return {

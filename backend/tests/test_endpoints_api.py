@@ -330,3 +330,44 @@ async def test_disable_endpoint_bumps_routing_version(client) -> None:
             await session.execute(text("SELECT version FROM routing_state WHERE id = 1"))
         ).scalar_one()
     assert after == before + 1
+
+
+@pytest.mark.asyncio
+async def test_concurrent_routing_version_bumps_are_atomic(client) -> None:
+    """Two concurrent bumps must not land on the same version (lost update)."""
+    import asyncio
+    import datetime as dt
+
+    from app.repositories.endpoints import EndpointRepository
+
+    _, session_factory = client
+    async with session_factory() as session:
+        before = int(
+            (
+                await session.execute(
+                    text("SELECT version FROM routing_state WHERE id = 1")
+                )
+            ).scalar_one()
+        )
+
+    async def _bump_once() -> int:
+        async with session_factory() as session:
+            repo = EndpointRepository(session)
+            version = await repo.bump_routing_version(
+                now=dt.datetime.now(tz=dt.UTC)
+            )
+            await session.commit()
+            return int(version)
+
+    versions = await asyncio.gather(*[_bump_once() for _ in range(8)])
+    assert len(set(versions)) == 8
+    assert max(versions) == before + 8
+    async with session_factory() as session:
+        after = int(
+            (
+                await session.execute(
+                    text("SELECT version FROM routing_state WHERE id = 1")
+                )
+            ).scalar_one()
+        )
+    assert after == before + 8
