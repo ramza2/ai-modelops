@@ -24,6 +24,10 @@ class NodeService:
         self._docker = docker
         self._nvml = nvml
 
+    @property
+    def docker(self) -> DockerAdapter:
+        return self._docker
+
     def node_payload(self) -> dict[str, Any]:
         info = self._host.get_info()
         docker = self._docker.status()

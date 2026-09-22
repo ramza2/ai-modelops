@@ -1,7 +1,8 @@
 """ModelOps Management API entrypoint.
 
-Milestone 1–3A: app bootstrap, common error envelope, request-id propagation,
-health/readiness, Node/GPU, and Model Registry / Deployment metadata APIs.
+Milestone 1–3B-2: app bootstrap, common error envelope, request-id propagation,
+health/readiness, Node/GPU, Model Registry / Deployment metadata, and
+lifecycle Operation enqueue APIs.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from app.api.deployments import router as deployments_router
 from app.api.health import router as health_router
 from app.api.models import router as models_router
 from app.api.nodes import router as nodes_router
+from app.api.operations import router as operations_router
 from app.core.config import get_settings
 from app.core.errors import AppError, ErrorCode, error_envelope
 
@@ -67,6 +69,7 @@ def create_app() -> FastAPI:
     app.include_router(nodes_router)
     app.include_router(models_router)
     app.include_router(deployments_router)
+    app.include_router(operations_router)
     return app
 
 

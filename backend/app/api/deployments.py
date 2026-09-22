@@ -1,17 +1,19 @@
-"""Management API Deployment routes (Milestone 3A metadata only)."""
+"""Management API Deployment routes (metadata + lifecycle enqueue)."""
 
 from __future__ import annotations
 
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, Header, Query, Response, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_session
+from app.core.enums import OperationType
 from app.core.errors import ValidationError
 from app.services.deployments import DeploymentService
+from app.services.operations import OperationService
 
 router = APIRouter(prefix="/api/v1", tags=["deployments"])
 
@@ -57,10 +59,26 @@ class ReplaceGPUAssignmentsRequest(BaseModel):
     gpu_assignments: list[GPUAssignmentRequest]
 
 
+class LifecycleStopRequest(BaseModel):
+    reason: str | None = None
+    graceful_timeout_seconds: int | None = Field(default=None, ge=0, le=600)
+
+
+class LifecycleRestartRequest(BaseModel):
+    reason: str | None = None
+    graceful_timeout_seconds: int | None = Field(default=None, ge=0, le=600)
+
+
 def get_deployment_service(
     session: AsyncSession = Depends(get_session),
 ) -> DeploymentService:
     return DeploymentService(session)
+
+
+def get_operation_service(
+    session: AsyncSession = Depends(get_session),
+) -> OperationService:
+    return OperationService(session)
 
 
 def _assignment_dicts(
@@ -209,3 +227,88 @@ async def replace_gpu_assignments(
         deployment_id,
         _assignment_dicts(body.gpu_assignments),
     )
+
+
+@router.post(
+    "/deployments/{deployment_id}/start",
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def start_deployment(
+    deployment_id: uuid.UUID,
+    response: Response,
+    service: OperationService = Depends(get_operation_service),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+) -> dict:
+    payload = await service.enqueue_lifecycle(
+        deployment_id=deployment_id,
+        operation_type=OperationType.START.value,
+        idempotency_key=idempotency_key,
+    )
+    response.status_code = status.HTTP_202_ACCEPTED
+    return payload
+
+
+@router.post(
+    "/deployments/{deployment_id}/stop",
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def stop_deployment(
+    deployment_id: uuid.UUID,
+    response: Response,
+    body: LifecycleStopRequest | None = None,
+    service: OperationService = Depends(get_operation_service),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+) -> dict:
+    payload_body = body or LifecycleStopRequest()
+    payload = await service.enqueue_lifecycle(
+        deployment_id=deployment_id,
+        operation_type=OperationType.STOP.value,
+        reason=payload_body.reason,
+        graceful_timeout_seconds=payload_body.graceful_timeout_seconds,
+        idempotency_key=idempotency_key,
+    )
+    response.status_code = status.HTTP_202_ACCEPTED
+    return payload
+
+
+@router.post(
+    "/deployments/{deployment_id}/restart",
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def restart_deployment(
+    deployment_id: uuid.UUID,
+    response: Response,
+    body: LifecycleRestartRequest | None = None,
+    service: OperationService = Depends(get_operation_service),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+) -> dict:
+    payload_body = body or LifecycleRestartRequest()
+    payload = await service.enqueue_lifecycle(
+        deployment_id=deployment_id,
+        operation_type=OperationType.RESTART.value,
+        reason=payload_body.reason,
+        graceful_timeout_seconds=payload_body.graceful_timeout_seconds,
+        idempotency_key=idempotency_key,
+    )
+    response.status_code = status.HTTP_202_ACCEPTED
+    return payload
+
+
+@router.post(
+    "/deployments/{deployment_id}/remove",
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def remove_deployment(
+    deployment_id: uuid.UUID,
+    response: Response,
+    service: OperationService = Depends(get_operation_service),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+) -> dict:
+    """Enqueue container remove (OperationType.DELETE). Does not retire metadata."""
+    payload = await service.enqueue_lifecycle(
+        deployment_id=deployment_id,
+        operation_type=OperationType.DELETE.value,
+        idempotency_key=idempotency_key,
+    )
+    response.status_code = status.HTTP_202_ACCEPTED
+    return payload

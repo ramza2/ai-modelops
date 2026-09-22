@@ -1,0 +1,523 @@
+"""Execute a claimed lifecycle Operation against the Node Agent."""
+
+from __future__ import annotations
+
+import asyncio
+import datetime as dt
+import logging
+import uuid
+from typing import Any
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+
+from app.clients.node_agent import MutationHeaders, NodeAgentClient, NodeAgentError
+from app.core.advisory_lock import DeploymentAdvisoryLock
+from app.core.config import Settings
+from app.core.enums import DesiredState, JobStatus, OperationType, RuntimeStatus, StepStatus
+from app.domain.models import (
+    Deployment,
+    DeploymentGPUAssignment,
+    GPUDevice,
+    ModelVersion,
+    Node,
+    Operation,
+    OperationJob,
+    OperationStep,
+)
+from app.repositories.operations import OperationJobRepository
+from app.runtime_adapters import (
+    GenericOpenAIAdapter,
+    RuntimeAdapterError,
+    RuntimeBuildInput,
+    VLLMAdapter,
+)
+
+logger = logging.getLogger(__name__)
+
+STEP_ENSURE_CONTAINER = "ENSURE_CONTAINER"
+STEP_START_CONTAINER = "START_CONTAINER"
+STEP_STOP_CONTAINER = "STOP_CONTAINER"
+STEP_RESTART_CONTAINER = "RESTART_CONTAINER"
+STEP_REMOVE_CONTAINER = "REMOVE_CONTAINER"
+
+_ADAPTERS = {
+    "VLLM": VLLMAdapter(),
+    "GENERIC_OPENAI": GenericOpenAIAdapter(),
+}
+
+
+class RetryableStepError(Exception):
+    def __init__(self, message: str, *, code: str, details: dict[str, Any] | None = None):
+        super().__init__(message)
+        self.message = message
+        self.code = code
+        self.details = details or {}
+
+
+class PermanentStepError(Exception):
+    def __init__(self, message: str, *, code: str, details: dict[str, Any] | None = None):
+        super().__init__(message)
+        self.message = message
+        self.code = code
+        self.details = details or {}
+
+
+class OperationExecutor:
+    def __init__(
+        self,
+        *,
+        session_factory: async_sessionmaker[AsyncSession],
+        settings: Settings,
+        transport: Any | None = None,
+        engine: AsyncEngine | None = None,
+        mutation_entered: asyncio.Event | None = None,
+        mutation_gate: asyncio.Event | None = None,
+    ) -> None:
+        self._session_factory = session_factory
+        self._settings = settings
+        self._transport = transport
+        self._engine = engine
+        # Test hooks: signal after step DB commit, optionally pause before mutation.
+        self._mutation_entered = mutation_entered
+        self._mutation_gate = mutation_gate
+
+    def _resolve_engine(self) -> AsyncEngine:
+        if self._engine is not None:
+            return self._engine
+        bind = self._session_factory.kw.get("bind")
+        if isinstance(bind, AsyncEngine):
+            return bind
+        raise RuntimeError("AsyncEngine is required for deployment advisory locks.")
+
+    async def execute(self, job_id: uuid.UUID) -> None:
+        async with self._session_factory() as session:
+            repo = OperationJobRepository(session)
+            job = await session.get(OperationJob, job_id)
+            if job is None:
+                return
+            operation = await repo.get_operation(uuid.UUID(str(job.operation_id)))
+            if operation is None:
+                await repo.mark_job_failed(job_id, error="Operation row missing.")
+                return
+            if operation.target_deployment_id is None:
+                await repo.mark_job_failed(job_id, error="Operation missing target deployment.")
+                await repo.mark_operation_failed(
+                    uuid.UUID(str(operation.id)),
+                    code="INVALID_OPERATION",
+                    message="Operation missing target_deployment_id.",
+                )
+                return
+            deployment_id = uuid.UUID(str(operation.target_deployment_id))
+            operation_id = uuid.UUID(str(operation.id))
+
+        lock = DeploymentAdvisoryLock(self._resolve_engine())
+        locked = await lock.try_acquire(deployment_id)
+        if not locked:
+            async with self._session_factory() as session:
+                repo = OperationJobRepository(session)
+                job = await session.get(OperationJob, job_id)
+                if job is None:
+                    return
+                # Lock contention must not burn retry attempts.
+                job.attempt_count = max(0, int(job.attempt_count) - 1)
+                await repo.requeue_job(
+                    job,
+                    delay_seconds=self._settings.worker_lock_requeue_seconds,
+                    error="Deployment advisory lock busy; requeued.",
+                )
+            return
+
+        try:
+            async with self._session_factory() as session:
+                repo = OperationJobRepository(session)
+                job = await session.get(OperationJob, job_id)
+                operation = await repo.get_operation(operation_id)
+                if job is None or operation is None:
+                    return
+                await self._run_operation(
+                    session, repo, job, operation, deployment_id
+                )
+        finally:
+            await lock.release()
+
+    async def _run_operation(
+        self,
+        session: AsyncSession,
+        repo: OperationJobRepository,
+        job: OperationJob,
+        operation: Operation,
+        deployment_id: uuid.UUID,
+    ) -> None:
+        deployment = await session.get(Deployment, deployment_id)
+        if deployment is None:
+            await self._fail_all(
+                repo,
+                job,
+                operation,
+                code="DEPLOYMENT_NOT_FOUND",
+                message="Target deployment not found.",
+            )
+            return
+
+        node = await session.get(Node, deployment.node_id) if deployment.node_id else None
+        if node is None or not node.agent_base_url:
+            await self._fail_all(
+                repo,
+                job,
+                operation,
+                code="NODE_AGENT_URL_MISSING",
+                message="Deployment node is missing agent_base_url.",
+            )
+            return
+
+        client = NodeAgentClient(
+            base_url=str(node.agent_base_url),
+            token=self._settings.node_agent_token,
+            timeout_seconds=self._settings.node_agent_timeout_seconds,
+            transport=self._transport,
+        )
+
+        steps = await repo.list_steps(uuid.UUID(str(operation.id)))
+        pending = [
+            s
+            for s in steps
+            if s.status in (StepStatus.PENDING.value, StepStatus.RUNNING.value)
+        ]
+        # Resume: treat leftover RUNNING (crash mid-step) as retriable current step.
+        for step in pending:
+            try:
+                await self._execute_step(
+                    session, repo, client, operation, deployment, step
+                )
+            except RetryableStepError as exc:
+                await self._handle_retryable(
+                    repo, job, operation, step, exc
+                )
+                return
+            except PermanentStepError as exc:
+                await repo.fail_step(
+                    uuid.UUID(str(step.id)),
+                    code=exc.code,
+                    message=exc.message,
+                    detail=exc.details,
+                )
+                await self._fail_all(
+                    repo,
+                    job,
+                    operation,
+                    code=exc.code,
+                    message=exc.message,
+                )
+                return
+            except NodeAgentError as exc:
+                if exc.retryable:
+                    await self._handle_retryable(
+                        repo,
+                        job,
+                        operation,
+                        step,
+                        RetryableStepError(
+                            exc.message, code=exc.code, details=exc.details
+                        ),
+                    )
+                    return
+                await repo.fail_step(
+                    uuid.UUID(str(step.id)),
+                    code=exc.code,
+                    message=exc.message,
+                    detail=exc.details,
+                )
+                await self._fail_all(
+                    repo,
+                    job,
+                    operation,
+                    code=exc.code,
+                    message=exc.message,
+                )
+                return
+
+        await self._apply_success_deployment_state(
+            session, operation, deployment
+        )
+        await session.commit()
+        await repo.mark_operation_succeeded(uuid.UUID(str(operation.id)))
+        await repo.mark_job_done(uuid.UUID(str(job.id)))
+
+    async def _handle_retryable(
+        self,
+        repo: OperationJobRepository,
+        job: OperationJob,
+        operation: Operation,
+        step: OperationStep,
+        exc: RetryableStepError,
+    ) -> None:
+        max_attempts = int(job.max_attempts)
+        if int(job.attempt_count) >= max_attempts:
+            await repo.fail_step(
+                uuid.UUID(str(step.id)),
+                code=exc.code,
+                message=exc.message,
+                detail=exc.details,
+            )
+            await self._fail_all(
+                repo,
+                job,
+                operation,
+                code=exc.code,
+                message=f"{exc.message} (retry exhausted)",
+            )
+            return
+
+        # Keep operation RUNNING; requeue job with bounded backoff.
+        delay = float(2 ** max(0, int(job.attempt_count) - 1))
+        delay = min(delay, 4.0)
+        await repo.bump_step_attempt(uuid.UUID(str(step.id)))
+        # Reload job into a fresh identity for requeue.
+        async with self._session_factory() as session:
+            fresh_repo = OperationJobRepository(session)
+            fresh_job = await session.get(OperationJob, job.id)
+            if fresh_job is None:
+                return
+            # Ensure status is RUNNING→QUEUED via requeue helper.
+            if fresh_job.status != JobStatus.RUNNING.value:
+                fresh_job.status = JobStatus.RUNNING.value
+            await fresh_repo.requeue_job(
+                fresh_job,
+                delay_seconds=delay,
+                error=f"{exc.code}: {exc.message}",
+            )
+
+    async def _fail_all(
+        self,
+        repo: OperationJobRepository,
+        job: OperationJob,
+        operation: Operation,
+        *,
+        code: str,
+        message: str,
+    ) -> None:
+        await repo.mark_operation_failed(
+            uuid.UUID(str(operation.id)), code=code, message=message
+        )
+        await repo.mark_job_failed(uuid.UUID(str(job.id)), error=f"{code}: {message}")
+
+    async def _execute_step(
+        self,
+        session: AsyncSession,
+        repo: OperationJobRepository,
+        client: NodeAgentClient,
+        operation: Operation,
+        deployment: Deployment,
+        step: OperationStep,
+    ) -> None:
+        request_id = await repo.begin_step(step)
+        # Refresh after begin_step commit.
+        step = await session.get(OperationStep, step.id)  # type: ignore[assignment]
+        assert step is not None
+
+        # Test hooks: prove advisory lock survives ORM commits before mutation.
+        if self._mutation_entered is not None:
+            self._mutation_entered.set()
+        if self._mutation_gate is not None:
+            await self._mutation_gate.wait()
+
+        mutation = MutationHeaders(
+            operation_id=str(operation.id),
+            step_id=str(step.id),
+            request_id=request_id,
+        )
+        deployment_id = str(deployment.id)
+        graceful = int(
+            (operation.metadata_json or {}).get("graceful_timeout_seconds") or 30
+        )
+
+        code = step.step_code
+        if code == STEP_ENSURE_CONTAINER:
+            await self._ensure_container(
+                session, client, deployment, mutation
+            )
+        elif code == STEP_START_CONTAINER:
+            result = await client.start_deployment(
+                deployment_id, mutation=mutation, timeout_seconds=30
+            )
+            self._merge_container_id(deployment, result)
+        elif code == STEP_STOP_CONTAINER:
+            try:
+                result = await client.stop_deployment(
+                    deployment_id,
+                    mutation=mutation,
+                    graceful_timeout_seconds=graceful,
+                )
+                self._merge_container_id(deployment, result)
+            except NodeAgentError as exc:
+                # For DELETE ops, missing container is OK on stop.
+                if (
+                    operation.operation_type == OperationType.DELETE.value
+                    and exc.status_code == 404
+                ):
+                    pass
+                else:
+                    raise
+        elif code == STEP_RESTART_CONTAINER:
+            result = await client.restart_deployment(
+                deployment_id,
+                mutation=mutation,
+                graceful_timeout_seconds=graceful,
+            )
+            self._merge_container_id(deployment, result)
+        elif code == STEP_REMOVE_CONTAINER:
+            try:
+                await client.remove_deployment(deployment_id, mutation=mutation)
+            except NodeAgentError as exc:
+                if exc.status_code == 404:
+                    pass
+                else:
+                    raise
+            deployment.container_id = None
+        else:
+            raise PermanentStepError(
+                f"Unknown step_code: {code}",
+                code="UNKNOWN_STEP",
+            )
+
+        await session.commit()
+        await repo.succeed_step(uuid.UUID(str(step.id)))
+
+    async def _ensure_container(
+        self,
+        session: AsyncSession,
+        client: NodeAgentClient,
+        deployment: Deployment,
+        mutation: MutationHeaders,
+    ) -> None:
+        existing = await client.get_deployment(str(deployment.id), mutation=mutation)
+        if existing is not None:
+            self._merge_container_id(deployment, existing)
+            return
+
+        create_payload = await self._build_create_payload(session, deployment)
+        result = await client.create_deployment(
+            str(deployment.id), create_payload, mutation=mutation
+        )
+        self._merge_container_id(deployment, result)
+
+    async def _build_create_payload(
+        self, session: AsyncSession, deployment: Deployment
+    ) -> dict[str, Any]:
+        version = await session.get(ModelVersion, deployment.model_version_id)
+        if version is None:
+            raise PermanentStepError(
+                "Model version not found for deployment.",
+                code="MODEL_VERSION_NOT_FOUND",
+            )
+
+        adapter = _ADAPTERS.get(version.runtime_type)
+        if adapter is None:
+            raise PermanentStepError(
+                f"Unsupported runtime_type: {version.runtime_type}",
+                code="UNSUPPORTED_RUNTIME",
+                details={"runtime_type": version.runtime_type},
+            )
+
+        cfg = dict(deployment.deployment_config_json or {})
+        model_path = cfg.get("model_path") or cfg.get("host_model_path")
+        runtime_port = deployment.runtime_port or int(cfg.get("runtime_port") or 8000)
+        network_names = cfg.get("network_names") or ["modelops-model"]
+        if not isinstance(network_names, list):
+            raise PermanentStepError(
+                "deployment_config.network_names must be a list.",
+                code="INVALID_DEPLOYMENT_CONFIG",
+            )
+
+        gpu_indices = await self._gpu_indices(session, uuid.UUID(str(deployment.id)))
+        try:
+            spec = adapter.build_create_spec(
+                RuntimeBuildInput(
+                    runtime_image=version.runtime_image,
+                    served_model_name=version.served_model_name,
+                    model_path=str(model_path) if model_path else None,
+                    runtime_port=runtime_port,
+                    gpu_device_indices=gpu_indices,
+                    network_names=[str(n) for n in network_names],
+                    dtype=version.dtype,
+                    quantization=version.quantization,
+                    max_model_len=version.default_max_model_len,
+                    tensor_parallel_size=cfg.get("tensor_parallel_size"),
+                    runtime_config=dict(version.runtime_config_json or {}),
+                    deployment_config=cfg,
+                    health_path=str(cfg.get("health_path") or "/health"),
+                )
+            )
+        except RuntimeAdapterError as exc:
+            raise PermanentStepError(
+                str(exc),
+                code="CREATE_SPEC_UNAVAILABLE",
+                details={"reason": str(exc)},
+            ) from exc
+
+        payload = spec.to_create_payload()
+        payload["container_name"] = deployment.container_name
+        payload["model_id"] = str(version.model_id)
+        payload["node_id"] = str(deployment.node_id)
+        payload["labels"] = {
+            "ai.modelops.managed": "true",
+            "ai.modelops.deployment_id": str(deployment.id),
+            "ai.modelops.model_id": str(version.model_id),
+            "ai.modelops.node_id": str(deployment.node_id),
+        }
+        return payload
+
+    async def _gpu_indices(
+        self, session: AsyncSession, deployment_id: uuid.UUID
+    ) -> list[int]:
+        stmt = (
+            select(GPUDevice.device_index)
+            .join(
+                DeploymentGPUAssignment,
+                DeploymentGPUAssignment.gpu_device_id == GPUDevice.id,
+            )
+            .where(DeploymentGPUAssignment.deployment_id == deployment_id)
+            .order_by(DeploymentGPUAssignment.device_order.asc())
+        )
+        rows = (await session.execute(stmt)).scalars().all()
+        return [int(i) for i in rows]
+
+    @staticmethod
+    def _merge_container_id(
+        deployment: Deployment, payload: dict[str, Any] | None
+    ) -> None:
+        if not payload:
+            return
+        container_id = payload.get("container_id")
+        if container_id:
+            deployment.container_id = str(container_id)
+
+    async def _apply_success_deployment_state(
+        self,
+        session: AsyncSession,
+        operation: Operation,
+        deployment: Deployment,
+    ) -> None:
+        now = dt.datetime.now(tz=dt.UTC)
+        op = operation.operation_type
+        if op == OperationType.START.value:
+            deployment.desired_state = DesiredState.RUNNING.value
+            deployment.runtime_status = RuntimeStatus.RUNNING.value
+            deployment.last_started_at = now
+        elif op == OperationType.STOP.value:
+            deployment.desired_state = DesiredState.STOPPED.value
+            deployment.runtime_status = RuntimeStatus.STOPPED.value
+            deployment.last_stopped_at = now
+        elif op == OperationType.RESTART.value:
+            deployment.desired_state = DesiredState.RUNNING.value
+            deployment.runtime_status = RuntimeStatus.RUNNING.value
+            deployment.last_started_at = now
+        elif op == OperationType.DELETE.value:
+            deployment.desired_state = DesiredState.REMOVED.value
+            deployment.runtime_status = RuntimeStatus.STOPPED.value
+            deployment.container_id = None
+            deployment.last_stopped_at = now
+        deployment.updated_at = now
+        deployment.status_reason = None
+        await session.flush()
