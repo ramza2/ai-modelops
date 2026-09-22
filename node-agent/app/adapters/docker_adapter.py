@@ -311,6 +311,12 @@ class RealDockerAdapter:
                     "Container not found.",
                     details={"container_id": container_id},
                 ) from exc
+            # Windows Docker Desktop named-pipe may time out after start
+            # already completed. Reconcile actual state before failing.
+            if _is_timeout_error(exc):
+                reconciled = self._reconcile_running_after_timeout(container_id)
+                if reconciled is not None:
+                    return reconciled
             raise DockerUnavailableError(
                 "Failed to start Docker container.",
                 details={"reason": f"{type(exc).__name__}: {exc}"},
@@ -366,7 +372,7 @@ class RealDockerAdapter:
         attempts: int = 3,
         delay_seconds: float = 0.25,
     ) -> ContainerInfo | None:
-        """Bounded inspect after a Docker SDK timeout.
+        """Bounded inspect after a Docker SDK timeout on start/restart.
 
         Returns container info when status is RUNNING; otherwise None.
         """
@@ -661,6 +667,9 @@ class FakeDockerAdapter:
         restart_timeout_error: bool = False,
         restart_status_after_timeout: str = "running",
         restart_generic_error: bool = False,
+        start_timeout_error: bool = False,
+        start_status_after_timeout: str = "running",
+        start_generic_error: bool = False,
     ) -> None:
         self._available = available
         self._version = version
@@ -671,6 +680,9 @@ class FakeDockerAdapter:
         self.restart_timeout_error = restart_timeout_error
         self.restart_status_after_timeout = restart_status_after_timeout
         self.restart_generic_error = restart_generic_error
+        self.start_timeout_error = start_timeout_error
+        self.start_status_after_timeout = start_status_after_timeout
+        self.start_generic_error = start_generic_error
         self.last_device_requests: list[dict[str, Any]] | None = None
         self.last_create_spec: CreateContainerSpec | None = None
         self.last_create_published_ports: dict[str, Any] | None = None
@@ -678,6 +690,7 @@ class FakeDockerAdapter:
         self.last_stop_timeout: int | None = None
         self.last_restart_timeout: int | None = None
         self.restart_reconcile_used = False
+        self.start_reconcile_used = False
         for c in containers or []:
             self._containers[c.id] = c
 
@@ -786,6 +799,48 @@ class FakeDockerAdapter:
                 "Container not found.",
                 details={"container_id": container_id},
             )
+
+        if self.start_generic_error:
+            raise DockerUnavailableError(
+                "Failed to start Docker container.",
+                details={"reason": "APIError: simulated docker failure"},
+            )
+
+        if self.start_timeout_error:
+            # Simulate Docker completing under the timed-out SDK response.
+            post_status = (self.start_status_after_timeout or "exited").lower()
+            if post_status == "running":
+                self._containers[container_id] = _copy_info(
+                    info,
+                    status="running",
+                    pid=info.pid if info.pid is not None else 4242,
+                    started_at=info.started_at or "2026-09-21T00:00:00Z",
+                )
+            else:
+                self._containers[container_id] = _copy_info(
+                    info,
+                    status=post_status,
+                    pid=None,
+                )
+            self.start_reconcile_used = True
+            inspected = self.inspect(container_id)
+            if (
+                inspected is not None
+                and map_docker_status_to_runtime(inspected.status) == "RUNNING"
+            ):
+                return inspected
+            raise DockerUnavailableError(
+                "Failed to start Docker container.",
+                details={
+                    "reason": (
+                        "ReadTimeout: NpipeHTTPConnectionPool "
+                        "Read timed out. (read timeout=2.0)"
+                    )
+                },
+            )
+
+        if info.status == "running":
+            return info
         updated = _copy_info(
             info,
             status="running",

@@ -7,6 +7,10 @@ from typing import Any
 
 import httpx
 
+# Extra seconds beyond graceful_timeout so STOP/RESTART HTTP clients do not
+# race the Node Agent's own graceful stop budget.
+_GRACEFUL_HTTP_SAFETY_SECONDS = 10.0
+
 
 class NodeAgentError(Exception):
     """Mapped Node Agent HTTP/domain failure."""
@@ -65,6 +69,13 @@ class NodeAgentClient:
         headers["X-Request-ID"] = mutation.request_id
         return headers
 
+    def lifecycle_http_timeout(self, graceful_timeout_seconds: int) -> float:
+        """HTTP timeout budget for STOP/RESTART (graceful + safety margin)."""
+        return max(
+            float(self._timeout),
+            float(graceful_timeout_seconds) + _GRACEFUL_HTTP_SAFETY_SECONDS,
+        )
+
     async def _request(
         self,
         method: str,
@@ -74,11 +85,13 @@ class NodeAgentClient:
         json_body: dict[str, Any] | None = None,
         expect_json: bool = True,
         allow_empty: bool = False,
+        timeout_seconds: float | None = None,
     ) -> dict[str, Any] | None:
         url = f"{self._base_url}{path}"
+        timeout = self._timeout if timeout_seconds is None else float(timeout_seconds)
         try:
             async with httpx.AsyncClient(
-                timeout=self._timeout,
+                timeout=timeout,
                 transport=self._transport,
             ) as client:
                 response = await client.request(
@@ -211,6 +224,7 @@ class NodeAgentClient:
             f"/internal/v1/deployments/{deployment_id}/stop",
             headers=self._mutation_headers(mutation),
             json_body={"graceful_timeout_seconds": graceful_timeout_seconds},
+            timeout_seconds=self.lifecycle_http_timeout(graceful_timeout_seconds),
         )
         assert result is not None
         return result
@@ -227,6 +241,7 @@ class NodeAgentClient:
             f"/internal/v1/deployments/{deployment_id}/restart",
             headers=self._mutation_headers(mutation),
             json_body={"graceful_timeout_seconds": graceful_timeout_seconds},
+            timeout_seconds=self.lifecycle_http_timeout(graceful_timeout_seconds),
         )
         assert result is not None
         return result

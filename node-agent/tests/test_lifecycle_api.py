@@ -730,3 +730,72 @@ async def test_restart_generic_docker_error_not_reconciled() -> None:
     assert restarted.json()["error"]["code"] == "DOCKER_ERROR"
     assert docker.restart_reconcile_used is False
     assert "APIError" in restarted.json()["error"]["details"]["reason"]
+
+
+@pytest.mark.asyncio
+async def test_start_timeout_reconciles_to_running() -> None:
+    docker = FakeDockerAdapter(
+        available=True,
+        start_timeout_error=True,
+        start_status_after_timeout="running",
+    )
+    app, docker = _make_app(docker)
+    ids = _ids()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        created = await ac.post(
+            f"/internal/v1/deployments/{ids['deployment_id']}/create",
+            json=_create_body(ids, network_names=[]),
+        )
+        assert created.status_code == 201
+        started = await ac.post(
+            f"/internal/v1/deployments/{ids['deployment_id']}/start", json={}
+        )
+    assert started.status_code == 200
+    assert started.json()["runtime_status"] == "RUNNING"
+    assert docker.start_reconcile_used is True
+
+
+@pytest.mark.asyncio
+async def test_start_timeout_still_error_when_not_running() -> None:
+    docker = FakeDockerAdapter(
+        available=True,
+        start_timeout_error=True,
+        start_status_after_timeout="exited",
+    )
+    app, docker = _make_app(docker)
+    ids = _ids()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        created = await ac.post(
+            f"/internal/v1/deployments/{ids['deployment_id']}/create",
+            json=_create_body(ids, network_names=[]),
+        )
+        assert created.status_code == 201
+        started = await ac.post(
+            f"/internal/v1/deployments/{ids['deployment_id']}/start", json={}
+        )
+    assert started.status_code == 502
+    assert started.json()["error"]["code"] == "DOCKER_ERROR"
+    assert "ReadTimeout" in started.json()["error"]["details"]["reason"]
+
+
+@pytest.mark.asyncio
+async def test_start_generic_docker_error_not_reconciled() -> None:
+    docker = FakeDockerAdapter(available=True, start_generic_error=True)
+    app, docker = _make_app(docker)
+    ids = _ids()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        created = await ac.post(
+            f"/internal/v1/deployments/{ids['deployment_id']}/create",
+            json=_create_body(ids, network_names=[]),
+        )
+        assert created.status_code == 201
+        started = await ac.post(
+            f"/internal/v1/deployments/{ids['deployment_id']}/start", json={}
+        )
+    assert started.status_code == 502
+    assert started.json()["error"]["code"] == "DOCKER_ERROR"
+    assert docker.start_reconcile_used is False
+    assert "APIError" in started.json()["error"]["details"]["reason"]
