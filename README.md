@@ -217,4 +217,9 @@ Cloud Agent 환경(`.cursor/environment.json`)은 `scripts/cloud-install.sh`(ins
 - [x] 초기 구현 — Milestone 1 (Foundation): Backend bootstrap, 공통 enum/error, DB 모델 + Alembic 초기 migration, `/health`·`/ready`, pytest
   - 참고: Docker Compose 실환경 검증은 로컬 PC에서 별도 수행 예정 (Cloud Agent에는 Docker Engine 없음)
 - [x] Milestone 2 (Node/Resource): Node Agent + Host/NVML/Docker adapters, Backend Node/GPU API, resource snapshots
-- [ ] Milestone 3 이후 (Registry/Deployment, Gateway, Switch, Admin UI)
+- [x] Milestone 3A (Registry/Deployment metadata): Model / ModelVersion / Artifact / Deployment CRUD
+- [x] Milestone 3B-1 (Node Agent lifecycle): managed container create/start/stop/restart/remove + Runtime Adapters
+- [x] Milestone 3B-2 (Operation Worker): Operation/Job/Step queue, advisory lock, START/STOP/RESTART/DELETE
+- [x] Milestone 3B-3 (Prepare / Health / Probe / VRAM wait): artifact prepare + `node_model_cache`, health/probe records, `WAIT_VRAM_RELEASE`
+- [ ] Milestone 4+ (Gateway / Alias routing / Cold Switch orchestration / Admin UI) — out of scope for 3B-3
+

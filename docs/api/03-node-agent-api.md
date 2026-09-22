@@ -241,6 +241,17 @@ Agent가 인식하는 Managed Deployment 목록.
 
 MVP 1차 구현에서는 Node Agent 호출 timeout 안에 처리 가능한 prepare verification을 우선하고, 대용량 download는 Orchestrator Operation Step에서 별도 timeout 정책을 둔다.
 
+### Milestone 3B-3 prepare 계약 (현재 구현)
+
+- Worker `PREPARE_ARTIFACTS` step이 Node Agent `POST .../prepare`를 호출한다.
+- Runtime image 존재 확인(및 credential-free pull)과 **로컬** artifact path 검증만 수행한다.
+- `file://` / `local://` / absolute local path만 허용한다. Hugging Face 등 credential이 필요한 remote download는 **구현하지 않는다** (public repo 안전 규칙).
+- 성공/실패에 따라 Control Plane `node_model_cache` 상태를 `PREPARING` → `READY` | `FAILED`로 갱신한다.
+- 동일 artifact에 대한 재 prepare는 idempotent하다 (`READY` 재검증 + `last_verified_at` 갱신).
+
+Gateway Alias routing, Cold Switch orchestration, Admin UI는 본 milestone 범위 밖이다.
+
+
 응답 예:
 
 ```json
@@ -397,6 +408,12 @@ Restart 완료는 Container RUNNING까지이며 Model Health까지 의미하지 
 
 Agent가 Deployment 설정에 정의된 health endpoint를 호출한다.
 
+Worker `WAIT_HEALTH` step이 이 API를 polling하고, Control Plane `deployment.health_status` /
+`last_health_at` 및 `health_check`(type=`HTTP`) 행을 갱신한다.
+
+**HTTP 2xx만으로 inference readiness를 단정하지 않는다.** 기동 완료 판정은 이어지는
+`POST .../probe` (`PROBE_INFERENCE`)에서 수행한다.
+
 응답:
 
 ```json
@@ -441,6 +458,12 @@ Endpoint Switch 직전 실제 최소 추론 가능 여부를 확인한다.
 Probe Prompt/Input은 Runtime Adapter에 정의된 최소 고정 payload를 사용한다.
 
 운영 사용자 데이터는 사용하지 않는다.
+
+Milestone 3B-3: Worker는 probe 결과의 성공/실패 코드·latency만 `health_check`(type=`INFERENCE`)에
+기록한다. prompt/response 원문은 로그·DB에 저장하지 않는다. 구분 코드 예:
+
+- `RUNTIME_NOT_READY` / `PROBE_TIMEOUT` / `PROBE_TRANSPORT_ERROR` (재시도 가능)
+- `PROBE_HTTP_ERROR` / `PROBE_MALFORMED_RESPONSE` (영구 실패)
 
 응답:
 
@@ -494,6 +517,11 @@ Timeout:
 ```
 
 Orchestrator가 직접 `/resources`를 polling하는 방식도 가능하지만, Host-local 판단을 Agent에 캡슐화하기 위해 이 API를 제공할 수 있다.
+
+Milestone 3B-3: Worker step `WAIT_VRAM_RELEASE`가 이 API를 호출한다. GPU는 **장치별로 독립 평가**하며
+free VRAM을 합산(pool)하지 않는다. Timeout은 `409 VRAM_NOT_RELEASED`로 명시 반환되며 무한 polling하지 않는다.
+Cold Switch 전체 orchestration은 이후 milestone이다.
+
 
 ---
 

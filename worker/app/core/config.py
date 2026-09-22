@@ -22,6 +22,12 @@ class Settings(BaseSettings):
     )
     node_agent_token: str = ""
     node_agent_timeout_seconds: float = 30.0
+    node_agent_prepare_timeout_seconds: float = 120.0
+    health_timeout_seconds: float = 120.0
+    health_poll_interval_seconds: float = 1.0
+    probe_timeout_seconds: float = 60.0
+    vram_release_timeout_seconds: float = 60.0
+    vram_release_poll_interval_ms: int = 200
     worker_poll_seconds: float = 1.0
     worker_max_attempts: int = 3
     worker_stale_seconds: int = 60

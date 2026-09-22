@@ -30,6 +30,7 @@ class _CapturingClient(NodeAgentClient):
         *,
         headers: dict[str, str],
         json_body: dict | None = None,
+        params: dict[str, str] | None = None,
         expect_json: bool = True,
         allow_empty: bool = False,
         timeout_seconds: float | None = None,

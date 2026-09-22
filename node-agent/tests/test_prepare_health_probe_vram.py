@@ -1,0 +1,389 @@
+"""Milestone 3B-3 Node Agent prepare / health / probe / VRAM wait tests."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import tempfile
+import uuid
+from pathlib import Path
+
+import httpx
+import pytest
+from httpx import ASGITransport, AsyncClient
+
+from app.adapters.docker_adapter import FakeDockerAdapter
+from app.adapters.host import HostAdapter
+from app.adapters.nvml import FakeNvmlAdapter, GpuDeviceSnapshot
+from app.core.labels import (
+    LABEL_DEPLOYMENT_ID,
+    LABEL_MANAGED,
+    LABEL_MODEL_ID,
+    LABEL_NODE_ID,
+)
+from app.main import create_app
+from app.services import NodeService
+from app.services.deployments import DeploymentLifecycleService
+
+
+@pytest.fixture
+def anyio_backend() -> str:
+    return "asyncio"
+
+
+def _gpu(index: int, free: int, total: int = 16000) -> GpuDeviceSnapshot:
+    return GpuDeviceSnapshot(
+        gpu_uuid=f"GPU-{index}",
+        device_index=index,
+        model_name=f"Fake-{index}",
+        vram_total_mb=total,
+        vram_used_mb=total - free,
+        vram_free_mb=free,
+        gpu_utilization_pct=0.0,
+        memory_utilization_pct=0.0,
+        temperature_c=40.0,
+        power_w=50.0,
+    )
+
+
+def _make_app(
+    *,
+    docker: FakeDockerAdapter | None = None,
+    nvml: FakeNvmlAdapter | None = None,
+    http_transport: httpx.BaseTransport | None = None,
+):
+    docker = docker or FakeDockerAdapter(available=True)
+    nvml = nvml or FakeNvmlAdapter(available=True, gpus=[_gpu(0, 8000), _gpu(1, 8000)])
+    node = NodeService(host=HostAdapter(), docker=docker, nvml=nvml)
+    lifecycle = DeploymentLifecycleService(docker, http_transport=http_transport)
+    return create_app(service=node, deployment_service=lifecycle), docker, nvml
+
+
+def _ids() -> dict[str, str]:
+    return {
+        "deployment_id": str(uuid.uuid4()),
+        "model_id": str(uuid.uuid4()),
+        "node_id": str(uuid.uuid4()),
+    }
+
+
+def _create_body(ids: dict[str, str], **overrides):
+    body = {
+        "container_name": f"modelops-{ids['deployment_id'][:8]}",
+        "model_id": ids["model_id"],
+        "node_id": ids["node_id"],
+        "runtime_image": "example/runtime:tag",
+        "command": ["python", "-m", "http.server", "8000"],
+        "environment": {},
+        "volumes": [],
+        "gpu_device_indices": [0],
+        "runtime_port": 8000,
+        "network_names": [],
+        "labels": {},
+    }
+    body.update(overrides)
+    return body
+
+
+@pytest.mark.asyncio
+async def test_prepare_idempotent_when_image_and_path_ready(tmp_path: Path) -> None:
+    docker = FakeDockerAdapter(available=True)
+    docker.known_images.add("example/runtime:tag")
+    artifact_dir = tmp_path / "model"
+    artifact_dir.mkdir()
+    (artifact_dir / "weights.bin").write_bytes(b"abc")
+    app, *_ = _make_app(docker=docker)
+    ids = _ids()
+    transport = ASGITransport(app=app)
+    body = {
+        "runtime_image": "example/runtime:tag",
+        "artifacts": [
+            {
+                "artifact_id": str(uuid.uuid4()),
+                "source_uri": f"file://{artifact_dir}",
+                "target_path": str(artifact_dir),
+            }
+        ],
+    }
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        first = await ac.post(
+            f"/internal/v1/deployments/{ids['deployment_id']}/prepare", json=body
+        )
+        second = await ac.post(
+            f"/internal/v1/deployments/{ids['deployment_id']}/prepare", json=body
+        )
+    assert first.status_code == 200, first.text
+    assert first.json()["status"] == "READY"
+    assert first.json()["image_ready"] is True
+    assert first.json()["artifacts_ready"] is True
+    assert second.status_code == 200
+    assert second.json()["status"] == "READY"
+
+
+@pytest.mark.asyncio
+async def test_prepare_image_not_ready() -> None:
+    docker = FakeDockerAdapter(available=True)
+    app, *_ = _make_app(docker=docker)
+    ids = _ids()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        resp = await ac.post(
+            f"/internal/v1/deployments/{ids['deployment_id']}/prepare",
+            json={"runtime_image": "missing/image:tag", "artifacts": []},
+        )
+    assert resp.status_code == 409
+    assert resp.json()["error"]["code"] == "IMAGE_NOT_READY"
+
+
+@pytest.mark.asyncio
+async def test_prepare_rejects_remote_download_uri(tmp_path: Path) -> None:
+    docker = FakeDockerAdapter(available=True)
+    docker.known_images.add("example/runtime:tag")
+    app, *_ = _make_app(docker=docker)
+    ids = _ids()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        resp = await ac.post(
+            f"/internal/v1/deployments/{ids['deployment_id']}/prepare",
+            json={
+                "runtime_image": "example/runtime:tag",
+                "artifacts": [
+                    {
+                        "artifact_id": str(uuid.uuid4()),
+                        "source_uri": "hf://org/model",
+                        "target_path": str(tmp_path / "missing"),
+                    }
+                ],
+            },
+        )
+    assert resp.status_code == 409
+    assert resp.json()["error"]["code"] == "ARTIFACT_NOT_READY"
+
+
+@pytest.mark.asyncio
+async def test_prepare_checksum_mismatch(tmp_path: Path) -> None:
+    docker = FakeDockerAdapter(available=True)
+    docker.known_images.add("example/runtime:tag")
+    model_file = tmp_path / "weights.bin"
+    model_file.write_bytes(b"hello")
+    app, *_ = _make_app(docker=docker)
+    ids = _ids()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        resp = await ac.post(
+            f"/internal/v1/deployments/{ids['deployment_id']}/prepare",
+            json={
+                "runtime_image": "example/runtime:tag",
+                "artifacts": [
+                    {
+                        "artifact_id": str(uuid.uuid4()),
+                        "source_uri": f"file://{model_file}",
+                        "target_path": str(model_file),
+                        "checksum": "deadbeef",
+                    }
+                ],
+            },
+        )
+    assert resp.status_code == 409
+    assert resp.json()["error"]["code"] == "ARTIFACT_NOT_READY"
+
+
+@pytest.mark.asyncio
+async def test_health_success_and_failure() -> None:
+    ids = _ids()
+
+    def healthy_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"status": "ok"})
+        return httpx.Response(404)
+
+    app, docker, _ = _make_app(http_transport=httpx.MockTransport(healthy_handler))
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        created = await ac.post(
+            f"/internal/v1/deployments/{ids['deployment_id']}/create",
+            json=_create_body(ids),
+        )
+        assert created.status_code == 201
+        await ac.post(f"/internal/v1/deployments/{ids['deployment_id']}/start", json={})
+        ok = await ac.get(f"/internal/v1/deployments/{ids['deployment_id']}/health")
+    assert ok.status_code == 200
+    assert ok.json()["health_status"] == "HEALTHY"
+    assert ok.json()["http_status"] == 200
+
+    def bad_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, json={"status": "down"})
+
+    app2, _, _ = _make_app(http_transport=httpx.MockTransport(bad_handler))
+    # Reuse same docker by seeding from first docker state is complex; recreate.
+    docker2 = FakeDockerAdapter(available=True)
+    docker2.known_images.add("example/runtime:tag")
+    app2, docker2, _ = _make_app(
+        docker=docker2, http_transport=httpx.MockTransport(bad_handler)
+    )
+    ids2 = _ids()
+    transport2 = ASGITransport(app=app2)
+    async with AsyncClient(transport=transport2, base_url="http://test") as ac:
+        await ac.post(
+            f"/internal/v1/deployments/{ids2['deployment_id']}/create",
+            json=_create_body(ids2),
+        )
+        await ac.post(
+            f"/internal/v1/deployments/{ids2['deployment_id']}/start", json={}
+        )
+        bad = await ac.get(
+            f"/internal/v1/deployments/{ids2['deployment_id']}/health"
+        )
+    assert bad.status_code == 200
+    assert bad.json()["health_status"] == "UNHEALTHY"
+
+
+@pytest.mark.asyncio
+async def test_probe_success_http_error_and_malformed() -> None:
+    ids = _ids()
+
+    def ok_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/chat/completions"):
+            return httpx.Response(
+                200, json={"id": "x", "choices": [{"message": {"content": "ok"}}]}
+            )
+        return httpx.Response(404)
+
+    app, docker, _ = _make_app(http_transport=httpx.MockTransport(ok_handler))
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        await ac.post(
+            f"/internal/v1/deployments/{ids['deployment_id']}/create",
+            json=_create_body(ids),
+        )
+        await ac.post(f"/internal/v1/deployments/{ids['deployment_id']}/start", json={})
+        ok = await ac.post(
+            f"/internal/v1/deployments/{ids['deployment_id']}/probe",
+            json={"probe_type": "CHAT"},
+        )
+    assert ok.status_code == 200
+    assert ok.json()["success"] is True
+    assert ok.json()["error_code"] is None
+
+    def http_fail(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, json={"error": "boom"})
+
+    docker2 = FakeDockerAdapter(available=True)
+    docker2.known_images.add("example/runtime:tag")
+    app2, _, _ = _make_app(
+        docker=docker2, http_transport=httpx.MockTransport(http_fail)
+    )
+    ids2 = _ids()
+    async with AsyncClient(
+        transport=ASGITransport(app=app2), base_url="http://test"
+    ) as ac:
+        await ac.post(
+            f"/internal/v1/deployments/{ids2['deployment_id']}/create",
+            json=_create_body(ids2),
+        )
+        await ac.post(
+            f"/internal/v1/deployments/{ids2['deployment_id']}/start", json={}
+        )
+        fail = await ac.post(
+            f"/internal/v1/deployments/{ids2['deployment_id']}/probe",
+            json={"probe_type": "CHAT"},
+        )
+    assert fail.json()["success"] is False
+    assert fail.json()["error_code"] == "PROBE_HTTP_ERROR"
+
+    def malformed(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"id": "x"})  # missing choices
+
+    docker3 = FakeDockerAdapter(available=True)
+    docker3.known_images.add("example/runtime:tag")
+    app3, _, _ = _make_app(
+        docker=docker3, http_transport=httpx.MockTransport(malformed)
+    )
+    ids3 = _ids()
+    async with AsyncClient(
+        transport=ASGITransport(app=app3), base_url="http://test"
+    ) as ac:
+        await ac.post(
+            f"/internal/v1/deployments/{ids3['deployment_id']}/create",
+            json=_create_body(ids3),
+        )
+        await ac.post(
+            f"/internal/v1/deployments/{ids3['deployment_id']}/start", json={}
+        )
+        bad = await ac.post(
+            f"/internal/v1/deployments/{ids3['deployment_id']}/probe",
+            json={"probe_type": "CHAT"},
+        )
+    assert bad.json()["success"] is False
+    assert bad.json()["error_code"] == "PROBE_MALFORMED_RESPONSE"
+
+
+@pytest.mark.asyncio
+async def test_wait_vram_immediate_poll_and_timeout() -> None:
+    nvml = FakeNvmlAdapter(
+        available=True, gpus=[_gpu(0, free=9000), _gpu(1, free=1000)]
+    )
+    app, _, nvml = _make_app(nvml=nvml)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        # GPU0 already free enough — immediate success (independent of GPU1).
+        ok = await ac.post(
+            "/internal/v1/resources/wait-vram-release",
+            json={
+                "gpu_device_indices": [0],
+                "minimum_free_vram_mb": 8000,
+                "timeout_seconds": 1,
+                "poll_interval_ms": 50,
+            },
+        )
+        assert ok.status_code == 200, ok.text
+        assert ok.json()["released"] is True
+        assert ok.json()["gpus"][0]["device_index"] == 0
+
+        # Timeout while GPU1 still low.
+        timed = await ac.post(
+            "/internal/v1/resources/wait-vram-release",
+            json={
+                "gpu_device_indices": [1],
+                "minimum_free_vram_mb": 8000,
+                "timeout_seconds": 0.2,
+                "poll_interval_ms": 50,
+            },
+        )
+        assert timed.status_code == 409
+        assert timed.json()["error"]["code"] == "VRAM_NOT_RELEASED"
+
+    # Polling success: free rises after first observation.
+    nvml2 = FakeNvmlAdapter(available=True, gpus=[_gpu(0, free=100)])
+    app2, _, nvml2 = _make_app(nvml=nvml2)
+    transport2 = ASGITransport(app=app2)
+
+    async def _raise_then_ok():
+        # mutate mid-wait from another task... simpler: call service directly
+        pass
+
+    from app.services import NodeService
+
+    service = NodeService(
+        host=HostAdapter(),
+        docker=FakeDockerAdapter(available=True),
+        nvml=nvml2,
+    )
+
+    import threading
+
+    def _bump():
+        import time as _t
+
+        _t.sleep(0.1)
+        nvml2.set_gpu_free_vram(0, 9000)
+
+    threading.Thread(target=_bump, daemon=True).start()
+    result = service.wait_vram_release(
+        gpu_device_indices=[0],
+        minimum_free_vram_mb=8000,
+        timeout_seconds=2.0,
+        poll_interval_ms=50,
+    )
+    assert result["released"] is True
+    assert result["gpus"][0]["free_vram_mb"] >= 8000

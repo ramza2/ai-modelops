@@ -62,6 +62,38 @@ class RestartRequest(BaseModel):
     graceful_timeout_seconds: int = Field(default=30, ge=0, le=600)
 
 
+class PrepareArtifactRequest(BaseModel):
+    artifact_id: uuid.UUID | None = None
+    source_uri: str | None = None
+    revision: str | None = None
+    checksum: str | None = None
+    target_path: str = Field(min_length=1)
+
+
+class PrepareRequest(BaseModel):
+    runtime_image: str = Field(min_length=1)
+    runtime_image_digest: str | None = None
+    artifacts: list[PrepareArtifactRequest] = Field(default_factory=list)
+
+
+class HealthQuery(BaseModel):
+    health_path: str = "/health"
+    timeout_seconds: float = Field(default=5.0, gt=0, le=120)
+
+
+class ProbeRequest(BaseModel):
+    probe_type: str = "CHAT"
+    timeout_seconds: float = Field(default=60.0, gt=0, le=600)
+    health_path: str = "/health"
+
+
+class WaitVramReleaseRequest(BaseModel):
+    gpu_device_indices: list[int] = Field(min_length=1)
+    minimum_free_vram_mb: int = Field(ge=0)
+    timeout_seconds: float = Field(default=60.0, ge=0, le=600)
+    poll_interval_ms: int = Field(default=1000, ge=50, le=10_000)
+
+
 @health_router.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "UP"}
@@ -103,6 +135,23 @@ async def resources(service: NodeService = Depends(get_node_service)) -> dict[st
     return service.resources_payload()
 
 
+@internal_router.post("/resources/wait-vram-release")
+async def wait_vram_release(
+    body: WaitVramReleaseRequest,
+    service: NodeService = Depends(get_node_service),
+    x_operation_id: str | None = Header(default=None, alias="X-Operation-ID"),
+    x_step_id: str | None = Header(default=None, alias="X-Step-ID"),
+    x_request_id: str | None = Header(default=None, alias="X-Request-ID"),
+) -> dict[str, Any]:
+    _ = (x_operation_id, x_step_id, x_request_id)
+    return service.wait_vram_release(
+        gpu_device_indices=list(body.gpu_device_indices),
+        minimum_free_vram_mb=body.minimum_free_vram_mb,
+        timeout_seconds=body.timeout_seconds,
+        poll_interval_ms=body.poll_interval_ms,
+    )
+
+
 @internal_router.get("/deployments")
 async def list_deployments(
     service: DeploymentLifecycleService = Depends(get_deployment_service),
@@ -117,6 +166,61 @@ async def get_deployment(
     service: DeploymentLifecycleService = Depends(get_deployment_service),
 ) -> dict[str, Any]:
     return service.get_deployment(str(deployment_id))
+
+
+@internal_router.post("/deployments/{deployment_id}/prepare")
+async def prepare_deployment(
+    deployment_id: uuid.UUID,
+    body: PrepareRequest,
+    service: DeploymentLifecycleService = Depends(get_deployment_service),
+    x_operation_id: str | None = Header(default=None, alias="X-Operation-ID"),
+    x_step_id: str | None = Header(default=None, alias="X-Step-ID"),
+    x_request_id: str | None = Header(default=None, alias="X-Request-ID"),
+) -> dict[str, Any]:
+    _ = (x_operation_id, x_step_id, x_request_id)
+    return service.prepare(
+        str(deployment_id),
+        runtime_image=body.runtime_image,
+        runtime_image_digest=body.runtime_image_digest,
+        artifacts=[a.model_dump(mode="json") for a in body.artifacts],
+    )
+
+
+@internal_router.get("/deployments/{deployment_id}/health")
+async def deployment_health(
+    deployment_id: uuid.UUID,
+    health_path: str = "/health",
+    timeout_seconds: float = 5.0,
+    service: DeploymentLifecycleService = Depends(get_deployment_service),
+    x_operation_id: str | None = Header(default=None, alias="X-Operation-ID"),
+    x_step_id: str | None = Header(default=None, alias="X-Step-ID"),
+    x_request_id: str | None = Header(default=None, alias="X-Request-ID"),
+) -> dict[str, Any]:
+    _ = (x_operation_id, x_step_id, x_request_id)
+    return service.check_health(
+        str(deployment_id),
+        health_path=health_path,
+        timeout_seconds=timeout_seconds,
+    )
+
+
+@internal_router.post("/deployments/{deployment_id}/probe")
+async def deployment_probe(
+    deployment_id: uuid.UUID,
+    body: ProbeRequest | None = None,
+    service: DeploymentLifecycleService = Depends(get_deployment_service),
+    x_operation_id: str | None = Header(default=None, alias="X-Operation-ID"),
+    x_step_id: str | None = Header(default=None, alias="X-Step-ID"),
+    x_request_id: str | None = Header(default=None, alias="X-Request-ID"),
+) -> dict[str, Any]:
+    _ = (x_operation_id, x_step_id, x_request_id)
+    payload = body or ProbeRequest()
+    return service.probe_inference(
+        str(deployment_id),
+        probe_type=payload.probe_type,
+        timeout_seconds=payload.timeout_seconds,
+        health_path=payload.health_path,
+    )
 
 
 @internal_router.post(

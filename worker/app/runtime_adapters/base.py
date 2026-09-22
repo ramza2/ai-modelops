@@ -82,6 +82,12 @@ class RuntimeAdapter(Protocol):
 
     def build_create_spec(self, inp: RuntimeBuildInput) -> RuntimeCreateSpec: ...
 
+    def resolve_probe_type(
+        self, *, model_type: str | None, deployment_config: dict[str, Any]
+    ) -> str: ...
+
+    def resolve_health_path(self, deployment_config: dict[str, Any]) -> str: ...
+
 
 def _require_non_empty(value: str | None, field_name: str) -> str:
     text = (value or "").strip()
@@ -94,7 +100,7 @@ def _require_model_path(inp: RuntimeBuildInput) -> str:
     path = (inp.model_path or "").strip()
     if not path:
         raise RuntimeAdapterError(
-            "model_path is required (artifact prepare is Milestone 3B-3)."
+            "model_path is required for managed create (prepare local path first)."
         )
     return path
 
@@ -111,3 +117,27 @@ def _merged_int(
         return int(raw)
     except (TypeError, ValueError) as exc:
         raise RuntimeAdapterError(f"{key} must be an integer.") from exc
+
+
+def resolve_probe_type_from_model(
+    *, model_type: str | None, deployment_config: dict[str, Any]
+) -> str:
+    """Choose OpenAI-compatible probe endpoint from model/runtime metadata."""
+    configured = deployment_config.get("probe_type")
+    if configured:
+        text = str(configured).strip().upper()
+        if text not in {"CHAT", "EMBEDDING"}:
+            raise RuntimeAdapterError(
+                "deployment_config.probe_type must be CHAT or EMBEDDING."
+            )
+        return text
+    if (model_type or "").upper() == "EMBEDDING":
+        return "EMBEDDING"
+    return "CHAT"
+
+
+def resolve_health_path(deployment_config: dict[str, Any]) -> str:
+    path = str(deployment_config.get("health_path") or "/health").strip() or "/health"
+    if not path.startswith("/"):
+        path = "/" + path
+    return path

@@ -83,6 +83,15 @@ class DockerAdapter(Protocol):
 
     def remove(self, container_id: str) -> None: ...
 
+    def has_image(self, image: str) -> bool: ...
+
+    def ensure_image(self, image: str) -> bool:
+        """Ensure image is present locally. May pull without credentials.
+
+        Returns True when the image is available after the call.
+        """
+        ...
+
 
 def map_docker_status_to_runtime(status: str) -> str:
     normalized = (status or "").strip().lower()
@@ -405,6 +414,32 @@ class RealDockerAdapter:
                 details={"reason": f"{type(exc).__name__}: {exc}"},
             ) from exc
 
+    def has_image(self, image: str) -> bool:
+        client = self._require_client()
+        try:
+            client.images.get(image)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            if _is_not_found(exc):
+                return False
+            raise DockerUnavailableError(
+                "Failed to inspect Docker image.",
+                details={"reason": f"{type(exc).__name__}: {exc}", "image": image},
+            ) from exc
+
+    def ensure_image(self, image: str) -> bool:
+        """Ensure image exists locally. Pulls without registry credentials."""
+        if self.has_image(image):
+            return True
+        client = self._require_client()
+        try:
+            client.images.pull(image)
+        except Exception as exc:  # noqa: BLE001
+            # Private registries without credentials fail here — caller maps to
+            # IMAGE_NOT_READY rather than treating as Docker unavailable.
+            return False
+        return self.has_image(image)
+
     def _to_info(
         self, container: Any, *, create_spec: CreateContainerSpec | None = None
     ) -> ContainerInfo:
@@ -691,8 +726,12 @@ class FakeDockerAdapter:
         self.last_restart_timeout: int | None = None
         self.restart_reconcile_used = False
         self.start_reconcile_used = False
+        self.known_images: set[str] = set()
+        self.pull_attempts: list[str] = []
         for c in containers or []:
             self._containers[c.id] = c
+            if c.image:
+                self.known_images.add(c.image)
 
     def status(self) -> DockerStatus:
         if not self._available:
@@ -759,6 +798,7 @@ class FakeDockerAdapter:
 
         container_id = f"fake-{uuid.uuid4().hex[:12]}"
         name = spec.name.lstrip("/")
+        self.known_images.add(spec.image)
         # Custom networks only — never add default "bridge" when requested.
         info = ContainerInfo(
             id=container_id,
@@ -924,9 +964,23 @@ class FakeDockerAdapter:
             )
         del self._containers[container_id]
 
+    def has_image(self, image: str) -> bool:
+        self._require_available()
+        return image in self.known_images
+
+    def ensure_image(self, image: str) -> bool:
+        self._require_available()
+        self.pull_attempts.append(image)
+        if image in self.known_images:
+            return True
+        # Fake default: pull is a no-op success only when image was seeded.
+        return False
+
     def seed(self, info: ContainerInfo) -> None:
         """Test helper to insert an arbitrary container record."""
         self._containers[info.id] = info
+        if info.image:
+            self.known_images.add(info.image)
 
 
 def _copy_info(info: ContainerInfo, **changes: Any) -> ContainerInfo:

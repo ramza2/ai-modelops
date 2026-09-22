@@ -13,6 +13,9 @@ class ErrorCode:
     MANAGED_LABEL_REQUIRED = "MANAGED_LABEL_REQUIRED"
     CONTAINER_NOT_FOUND = "CONTAINER_NOT_FOUND"
     CONTAINER_CONFLICT = "CONTAINER_CONFLICT"
+    IMAGE_NOT_READY = "IMAGE_NOT_READY"
+    ARTIFACT_NOT_READY = "ARTIFACT_NOT_READY"
+    VRAM_NOT_RELEASED = "VRAM_NOT_RELEASED"
 
 
 class AppError(Exception):
@@ -58,6 +61,21 @@ class ContainerNotFoundError(AppError):
 
 class ContainerConflictError(AppError):
     code = ErrorCode.CONTAINER_CONFLICT
+    http_status = 409
+
+
+class ImageNotReadyError(AppError):
+    code = ErrorCode.IMAGE_NOT_READY
+    http_status = 409
+
+
+class ArtifactNotReadyError(AppError):
+    code = ErrorCode.ARTIFACT_NOT_READY
+    http_status = 409
+
+
+class VramNotReleasedError(AppError):
+    code = ErrorCode.VRAM_NOT_RELEASED
     http_status = 409
 
 

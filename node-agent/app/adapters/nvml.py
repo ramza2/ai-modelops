@@ -207,3 +207,30 @@ class FakeNvmlAdapter:
         if not self._available:
             return []
         return list(self._gpus)
+
+    def set_gpu_free_vram(self, device_index: int, free_vram_mb: int) -> None:
+        """Test helper: update free/used VRAM for one device independently."""
+        updated: list[GpuDeviceSnapshot] = []
+        for g in self._gpus:
+            if g.device_index == device_index:
+                total = g.vram_total_mb or free_vram_mb
+                used = max(0, total - free_vram_mb)
+                updated.append(
+                    GpuDeviceSnapshot(
+                        gpu_uuid=g.gpu_uuid,
+                        device_index=g.device_index,
+                        model_name=g.model_name,
+                        vram_total_mb=total,
+                        vram_used_mb=used,
+                        vram_free_mb=free_vram_mb,
+                        gpu_utilization_pct=g.gpu_utilization_pct,
+                        memory_utilization_pct=g.memory_utilization_pct,
+                        temperature_c=g.temperature_c,
+                        power_w=g.power_w,
+                        compute_capability=g.compute_capability,
+                        processes=list(g.processes),
+                    )
+                )
+            else:
+                updated.append(g)
+        self._gpus = updated

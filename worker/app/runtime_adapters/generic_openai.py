@@ -9,6 +9,8 @@ from app.runtime_adapters.base import (
     VolumeSpec,
     _require_model_path,
     _require_non_empty,
+    resolve_health_path,
+    resolve_probe_type_from_model,
 )
 
 
@@ -16,6 +18,16 @@ class GenericOpenAIAdapter:
     """Covers GENERIC_OPENAI and Embedding runtimes that speak OpenAI APIs."""
 
     runtime_type = "GENERIC_OPENAI"
+
+    def resolve_probe_type(
+        self, *, model_type: str | None, deployment_config: dict
+    ) -> str:
+        return resolve_probe_type_from_model(
+            model_type=model_type, deployment_config=deployment_config
+        )
+
+    def resolve_health_path(self, deployment_config: dict) -> str:
+        return resolve_health_path(deployment_config)
 
     def build_create_spec(self, inp: RuntimeBuildInput) -> RuntimeCreateSpec:
         image = _require_non_empty(inp.runtime_image, "runtime_image")

@@ -100,3 +100,27 @@ def test_generic_openai_custom_entrypoint_list() -> None:
         )
     )
     assert spec.command == ["python", "serve.py", "--port", "9000"]
+
+
+def test_probe_type_chat_vs_embedding() -> None:
+    vllm = VLLMAdapter()
+    generic = GenericOpenAIAdapter()
+    assert vllm.resolve_probe_type(model_type="LLM", deployment_config={}) == "CHAT"
+    assert (
+        generic.resolve_probe_type(model_type="EMBEDDING", deployment_config={})
+        == "EMBEDDING"
+    )
+    assert (
+        generic.resolve_probe_type(
+            model_type="LLM", deployment_config={"probe_type": "EMBEDDING"}
+        )
+        == "EMBEDDING"
+    )
+    assert generic.resolve_health_path({"health_path": "ready"}) == "/ready"
+
+
+def test_probe_type_rejects_invalid_override() -> None:
+    with pytest.raises(RuntimeAdapterError):
+        GenericOpenAIAdapter().resolve_probe_type(
+            model_type="LLM", deployment_config={"probe_type": "OTHER"}
+        )

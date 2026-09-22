@@ -150,8 +150,15 @@ async def test_start_stop_restart_remove_enqueue_202(ctx) -> None:
     assert body["operation_type"] == OperationType.START.value
     assert body["status"] == OperationStatus.QUEUED.value
     assert body["target_deployment_id"] == managed_id
-    assert body["current_step"] == "ENSURE_CONTAINER"
-    assert len(body["steps"]) == 2
+    assert body["current_step"] == "PREPARE_ARTIFACTS"
+    assert [s["step_code"] for s in body["steps"]] == [
+        "PREPARE_ARTIFACTS",
+        "ENSURE_CONTAINER",
+        "START_CONTAINER",
+        "WAIT_HEALTH",
+        "PROBE_INFERENCE",
+    ]
+    assert len(body["steps"]) == 5
 
     # desired_state updated immediately; runtime_status must stay observed.
     dep = await client.get(f"/api/v1/deployments/{managed_id}")
@@ -208,7 +215,11 @@ async def test_start_stop_restart_remove_enqueue_202(ctx) -> None:
     restart = await client.post(f"/api/v1/deployments/{managed_id}/restart")
     assert restart.status_code == 202
     assert restart.json()["operation_type"] == OperationType.RESTART.value
-    assert restart.json()["steps"][0]["step_code"] == "RESTART_CONTAINER"
+    assert [s["step_code"] for s in restart.json()["steps"]] == [
+        "RESTART_CONTAINER",
+        "WAIT_HEALTH",
+        "PROBE_INFERENCE",
+    ]
     op = await session.get(Operation, uuid.UUID(restart.json()["id"]))
     assert op is not None
     op.status = OperationStatus.SUCCEEDED.value
