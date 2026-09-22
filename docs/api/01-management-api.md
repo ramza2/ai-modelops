@@ -190,13 +190,15 @@ revision/runtime/quantization 변경이 필요하면 새 Model Version을 생성
 
 ```json
 {
-  "artifact_type": "MODEL_FILES",
+  "artifact_type": "MODEL",
   "source_uri": "hf://org/model",
   "revision": "revision-placeholder",
   "checksum": null,
   "size_bytes": 123456789
 }
 ```
+
+`artifact_type` 허용값: `MODEL` | `TOKENIZER` | `PROCESSOR` | `OTHER`
 
 ### GET /nodes/{node_id}/model-cache
 

@@ -115,13 +115,23 @@ Agent: health, ready, node, resources, deployment inspect
 Gateway: models, chat/completions, embeddings
 ```
 
-### Phase 2 — Lifecycle
+### Phase 2 — Lifecycle (Milestone 3B)
 
 ```text
-Deployment create/start/stop/restart
-Artifact prepare
-Health / Probe
-Operation / Step
+Deployment create/start/stop/restart          ✅ 3B-1/3B-2
+Artifact prepare + node_model_cache           ✅ 3B-3
+Health / Probe + health_check records         ✅ 3B-3
+WAIT_VRAM_RELEASE (reusable step)             ✅ 3B-3
+Operation / Step queue + Worker               ✅ 3B-2/3B-3
+```
+
+아직 범위 밖:
+
+```text
+Gateway / Endpoint Alias routing
+Cold Switch / Hot Switch orchestration
+Rollback state machine
+Admin UI
 ```
 
 ### Phase 3 — Switch

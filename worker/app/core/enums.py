@@ -51,3 +51,28 @@ class StepStatus(StrEnum):
     SUCCEEDED = "SUCCEEDED"
     FAILED = "FAILED"
     SKIPPED = "SKIPPED"
+
+
+class CacheStatus(StrEnum):
+    MISSING = "MISSING"
+    PREPARING = "PREPARING"
+    READY = "READY"
+    FAILED = "FAILED"
+
+
+class HealthStatus(StrEnum):
+    UNKNOWN = "UNKNOWN"
+    STARTING = "STARTING"
+    HEALTHY = "HEALTHY"
+    DEGRADED = "DEGRADED"
+    UNHEALTHY = "UNHEALTHY"
+
+
+class HealthCheckType(StrEnum):
+    HTTP = "HTTP"
+    INFERENCE = "INFERENCE"
+
+
+class HealthCheckResult(StrEnum):
+    SUCCESS = "SUCCESS"
+    FAILURE = "FAILURE"

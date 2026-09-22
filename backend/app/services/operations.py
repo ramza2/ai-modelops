@@ -26,17 +26,31 @@ from app.domain.models import Deployment, Operation, OperationJob, OperationStep
 from app.repositories.deployments import DeploymentRepository
 from app.repositories.operations import OperationRepository
 
-# Step codes for Milestone 3B-2 single-deployment lifecycle.
+# Step codes for Milestone 3B-2/3B-3 single-deployment lifecycle.
+STEP_PREPARE_ARTIFACTS = "PREPARE_ARTIFACTS"
 STEP_ENSURE_CONTAINER = "ENSURE_CONTAINER"
 STEP_START_CONTAINER = "START_CONTAINER"
 STEP_STOP_CONTAINER = "STOP_CONTAINER"
 STEP_RESTART_CONTAINER = "RESTART_CONTAINER"
 STEP_REMOVE_CONTAINER = "REMOVE_CONTAINER"
+STEP_WAIT_HEALTH = "WAIT_HEALTH"
+STEP_PROBE_INFERENCE = "PROBE_INFERENCE"
+# WAIT_VRAM_RELEASE is composed by Cold Switch (Milestone 5), not default STOP.
 
 _LIFECYCLE_STEPS: dict[str, list[str]] = {
-    OperationType.START.value: [STEP_ENSURE_CONTAINER, STEP_START_CONTAINER],
+    OperationType.START.value: [
+        STEP_PREPARE_ARTIFACTS,
+        STEP_ENSURE_CONTAINER,
+        STEP_START_CONTAINER,
+        STEP_WAIT_HEALTH,
+        STEP_PROBE_INFERENCE,
+    ],
     OperationType.STOP.value: [STEP_STOP_CONTAINER],
-    OperationType.RESTART.value: [STEP_RESTART_CONTAINER],
+    OperationType.RESTART.value: [
+        STEP_RESTART_CONTAINER,
+        STEP_WAIT_HEALTH,
+        STEP_PROBE_INFERENCE,
+    ],
     OperationType.DELETE.value: [STEP_STOP_CONTAINER, STEP_REMOVE_CONTAINER],
 }
 

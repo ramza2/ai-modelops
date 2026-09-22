@@ -6,6 +6,7 @@ Docker SDK directly. Use :class:`FakeDockerAdapter` in Cloud Agent tests.
 
 from __future__ import annotations
 
+import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -82,6 +83,17 @@ class DockerAdapter(Protocol):
     def restart(self, container_id: str, *, timeout_seconds: int) -> ContainerInfo: ...
 
     def remove(self, container_id: str) -> None: ...
+
+    def has_image(self, image: str) -> bool: ...
+
+    def ensure_image(self, image: str, *, pull_timeout_seconds: float = 300.0) -> bool:
+        """Ensure image is present locally. May pull without credentials.
+
+        ``pull_timeout_seconds`` applies only to the pull path — not to ordinary
+        lifecycle Docker SDK calls. Returns True when the image is available.
+        May raise DockerUnavailableError for transient timeout/network failures.
+        """
+        ...
 
 
 def map_docker_status_to_runtime(status: str) -> str:
@@ -405,6 +417,72 @@ class RealDockerAdapter:
                 details={"reason": f"{type(exc).__name__}: {exc}"},
             ) from exc
 
+    def has_image(self, image: str) -> bool:
+        client = self._require_client()
+        try:
+            client.images.get(image)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            if _is_not_found(exc):
+                return False
+            raise DockerUnavailableError(
+                "Failed to inspect Docker image.",
+                details={"reason": f"{type(exc).__name__}: {exc}", "image": image},
+            ) from exc
+
+    def ensure_image(self, image: str, *, pull_timeout_seconds: float = 300.0) -> bool:
+        """Ensure image exists locally using a dedicated pull timeout budget.
+
+        The short lifecycle Docker client timeout is intentionally not used for
+        image pulls — first-time pulls can take minutes.
+        """
+        if self.has_image(image):
+            return True
+        # Dedicated client so pull does not inherit the short lifecycle timeout.
+        pull_client: Any | None = None
+        try:
+            import docker  # type: ignore[import-untyped]
+
+            pull_client = docker.from_env(timeout=float(pull_timeout_seconds))
+            pull_client.images.pull(image)
+        except Exception as exc:  # noqa: BLE001
+            # Timeout: reconcile presence before deciding failure (pull may have
+            # completed server-side while the HTTP client timed out).
+            if _is_timeout_error(exc):
+                if self.has_image(image):
+                    return True
+                raise DockerUnavailableError(
+                    "Docker image pull timed out.",
+                    details={
+                        "reason": f"{type(exc).__name__}: {exc}",
+                        "image": image,
+                        "pull_timeout_seconds": float(pull_timeout_seconds),
+                    },
+                ) from exc
+            if _is_not_found(exc):
+                return False
+            # Other failures: reconcile then classify transient vs permanent.
+            if self.has_image(image):
+                return True
+            if _is_transient_docker_error(exc):
+                raise DockerUnavailableError(
+                    "Docker image pull failed transiently.",
+                    details={
+                        "reason": f"{type(exc).__name__}: {exc}",
+                        "image": image,
+                    },
+                ) from exc
+            return False
+        finally:
+            if pull_client is not None:
+                close = getattr(pull_client, "close", None)
+                if callable(close):
+                    try:
+                        close()
+                    except Exception:  # noqa: BLE001 - best-effort cleanup
+                        pass
+        return self.has_image(image)
+
     def _to_info(
         self, container: Any, *, create_spec: CreateContainerSpec | None = None
     ) -> ContainerInfo:
@@ -645,6 +723,43 @@ def _is_timeout_error(exc: Exception) -> bool:
     return False
 
 
+def _is_transient_docker_error(exc: Exception) -> bool:
+    """Network / daemon / connection failures that should be retried."""
+    if _is_timeout_error(exc):
+        return True
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        name = type(current).__name__
+        if name in {
+            "APIConnectionError",
+            "DockerException",
+            "ConnectionError",
+            "ConnectionResetError",
+            "ProtocolError",
+        }:
+            return True
+        message = str(current).lower()
+        if any(
+            token in message
+            for token in (
+                "connection refused",
+                "connection reset",
+                "temporarily unavailable",
+                "network is unreachable",
+                "name or service not known",
+                "server error",
+                "502",
+                "503",
+                "504",
+            )
+        ):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
 def _is_conflict(exc: Exception) -> bool:
     name = type(exc).__name__
     return name in {"APIError", "Conflict"} and (
@@ -670,6 +785,10 @@ class FakeDockerAdapter:
         start_timeout_error: bool = False,
         start_status_after_timeout: str = "running",
         start_generic_error: bool = False,
+        pull_succeeds: bool = False,
+        pull_timeout_error: bool = False,
+        pull_present_after_timeout: bool = False,
+        pull_block_seconds: float = 0.0,
     ) -> None:
         self._available = available
         self._version = version
@@ -683,16 +802,25 @@ class FakeDockerAdapter:
         self.start_timeout_error = start_timeout_error
         self.start_status_after_timeout = start_status_after_timeout
         self.start_generic_error = start_generic_error
+        self.pull_succeeds = pull_succeeds
+        self.pull_timeout_error = pull_timeout_error
+        self.pull_present_after_timeout = pull_present_after_timeout
+        self.pull_block_seconds = float(pull_block_seconds)
         self.last_device_requests: list[dict[str, Any]] | None = None
         self.last_create_spec: CreateContainerSpec | None = None
         self.last_create_published_ports: dict[str, Any] | None = None
         self.last_initial_network: str | None = None
         self.last_stop_timeout: int | None = None
         self.last_restart_timeout: int | None = None
+        self.last_pull_timeout_seconds: float | None = None
         self.restart_reconcile_used = False
         self.start_reconcile_used = False
+        self.known_images: set[str] = set()
+        self.pull_attempts: list[str] = []
         for c in containers or []:
             self._containers[c.id] = c
+            if c.image:
+                self.known_images.add(c.image)
 
     def status(self) -> DockerStatus:
         if not self._available:
@@ -759,6 +887,7 @@ class FakeDockerAdapter:
 
         container_id = f"fake-{uuid.uuid4().hex[:12]}"
         name = spec.name.lstrip("/")
+        self.known_images.add(spec.image)
         # Custom networks only — never add default "bridge" when requested.
         info = ContainerInfo(
             id=container_id,
@@ -924,9 +1053,44 @@ class FakeDockerAdapter:
             )
         del self._containers[container_id]
 
+    def has_image(self, image: str) -> bool:
+        self._require_available()
+        return image in self.known_images
+
+    def ensure_image(self, image: str, *, pull_timeout_seconds: float = 300.0) -> bool:
+        self._require_available()
+        self.pull_attempts.append(image)
+        self.last_pull_timeout_seconds = float(pull_timeout_seconds)
+        if self.pull_block_seconds > 0:
+            time.sleep(self.pull_block_seconds)
+        if image in self.known_images:
+            return True
+        if self.pull_timeout_error:
+            if self.pull_present_after_timeout:
+                self.known_images.add(image)
+                return True
+            raise DockerUnavailableError(
+                "Docker image pull timed out.",
+                details={
+                    "reason": (
+                        "ReadTimeout: NpipeHTTPConnectionPool "
+                        "Read timed out. (read timeout="
+                        f"{float(pull_timeout_seconds)})"
+                    ),
+                    "image": image,
+                    "pull_timeout_seconds": float(pull_timeout_seconds),
+                },
+            )
+        if self.pull_succeeds:
+            self.known_images.add(image)
+            return True
+        return False
+
     def seed(self, info: ContainerInfo) -> None:
         """Test helper to insert an arbitrary container record."""
         self._containers[info.id] = info
+        if info.image:
+            self.known_images.add(info.image)
 
 
 def _copy_info(info: ContainerInfo, **changes: Any) -> ContainerInfo:

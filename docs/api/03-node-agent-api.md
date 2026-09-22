@@ -217,6 +217,7 @@ Agent가 인식하는 Managed Deployment 목록.
 {
   "runtime_image": "example/runtime:tag",
   "runtime_image_digest": null,
+  "pull_timeout_seconds": 300,
   "artifacts": [
     {
       "artifact_id": "uuid",
@@ -240,6 +241,26 @@ Agent가 인식하는 Managed Deployment 목록.
 응답은 동기적으로 오래 기다리지 않도록 구현 방식에 따라 Worker가 polling 가능한 Agent Job으로 확장할 수 있다.
 
 MVP 1차 구현에서는 Node Agent 호출 timeout 안에 처리 가능한 prepare verification을 우선하고, 대용량 download는 Orchestrator Operation Step에서 별도 timeout 정책을 둔다.
+
+### Milestone 3B-3 prepare 계약 (현재 구현)
+
+- Worker `PREPARE_ARTIFACTS` step이 Node Agent `POST .../prepare`를 호출한다.
+- Runtime image 존재 확인(및 credential-free pull)과 **로컬** artifact path 검증만 수행한다.
+- Image pull은 lifecycle Docker SDK timeout(기본 2s)과 분리된 **전용 pull timeout**(기본 300s)을 사용한다.
+  pull timeout 시 이미지 존재 여부를 reconcile한 뒤, 여전히 없으면 `DOCKER_ERROR`(재시도 가능)로 반환한다.
+- Worker는 prepare 요청에 `pull_timeout_seconds`를 명시하고, Worker HTTP timeout은
+  `max(lifecycle_default, pull_timeout_seconds + safety_margin)`으로 계산한다
+  (기본: pull 300s + safety 30s = HTTP 330s). START/STOP/RESTART HTTP budget은 변경하지 않는다.
+- prepare / health / probe route는 sync endpoint로 두어 FastAPI threadpool에서 blocking I/O를 실행한다
+  (`WAIT_VRAM_RELEASE`만 async + `asyncio.sleep` 유지).
+- `file://` / `local://` / absolute local path만 허용한다. Hugging Face 등 credential이 필요한 remote download는 **구현하지 않는다** (public repo 안전 규칙).
+- 단일 파일 checksum은 SHA-256 streaming으로 검증한다. **디렉터리 checksum은 아직 지원하지 않는다**
+  (path+size 메타데이터 해시를 content checksum으로 취급하지 않음). 디렉터리에 checksum이 있으면 `ARTIFACT_NOT_READY`.
+- 성공/실패에 따라 Control Plane `node_model_cache` 상태를 `PREPARING` → `READY` | `FAILED`로 갱신한다.
+- 동일 artifact에 대한 재 prepare는 idempotent하다 (`READY` 재검증 + `last_verified_at` 갱신).
+
+Gateway Alias routing, Cold Switch orchestration, Admin UI는 본 milestone 범위 밖이다.
+
 
 응답 예:
 
@@ -397,6 +418,12 @@ Restart 완료는 Container RUNNING까지이며 Model Health까지 의미하지 
 
 Agent가 Deployment 설정에 정의된 health endpoint를 호출한다.
 
+Worker `WAIT_HEALTH` step이 이 API를 polling하고, Control Plane `deployment.health_status` /
+`last_health_at` 및 `health_check`(type=`HTTP`) 행을 갱신한다.
+
+**HTTP 2xx만으로 inference readiness를 단정하지 않는다.** 기동 완료 판정은 이어지는
+`POST .../probe` (`PROBE_INFERENCE`)에서 수행한다.
+
 응답:
 
 ```json
@@ -429,18 +456,28 @@ UNHEALTHY
 
 Endpoint Switch 직전 실제 최소 추론 가능 여부를 확인한다.
 
+Probe Prompt/Input은 Runtime Adapter에 정의된 최소 고정 payload를 사용한다.
+
+운영 사용자 데이터는 사용하지 않는다.
+
+요청의 `served_model_name`은 Control Plane `ModelVersion.served_model_name`을 그대로 전달한다.
+하드코딩된 `modelops-probe` 같은 가짜 이름을 쓰지 않는다.
+
 요청 예:
 
 ```json
 {
+  "served_model_name": "example-served-model",
   "probe_type": "CHAT",
   "timeout_seconds": 60
 }
 ```
 
-Probe Prompt/Input은 Runtime Adapter에 정의된 최소 고정 payload를 사용한다.
+Milestone 3B-3: Worker는 probe 결과의 성공/실패 코드·latency만 `health_check`(type=`INFERENCE`)에
+기록한다. prompt/response 원문은 로그·DB에 저장하지 않는다. 구분 코드 예:
 
-운영 사용자 데이터는 사용하지 않는다.
+- `RUNTIME_NOT_READY` / `PROBE_TIMEOUT` / `PROBE_TRANSPORT_ERROR` (재시도 가능)
+- `PROBE_HTTP_ERROR` / `PROBE_MALFORMED_RESPONSE` (영구 실패)
 
 응답:
 
@@ -494,6 +531,11 @@ Timeout:
 ```
 
 Orchestrator가 직접 `/resources`를 polling하는 방식도 가능하지만, Host-local 판단을 Agent에 캡슐화하기 위해 이 API를 제공할 수 있다.
+
+Milestone 3B-3: Worker step `WAIT_VRAM_RELEASE`가 이 API를 호출한다. GPU는 **장치별로 독립 평가**하며
+free VRAM을 합산(pool)하지 않는다. Timeout은 `409 VRAM_NOT_RELEASED`로 명시 반환되며 무한 polling하지 않는다.
+Cold Switch 전체 orchestration은 이후 milestone이다.
+
 
 ---
 

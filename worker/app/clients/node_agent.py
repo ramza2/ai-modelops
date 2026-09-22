@@ -10,6 +10,9 @@ import httpx
 # Extra seconds beyond graceful_timeout so STOP/RESTART HTTP clients do not
 # race the Node Agent's own graceful stop budget.
 _GRACEFUL_HTTP_SAFETY_SECONDS = 10.0
+# Extra seconds beyond the Agent image-pull budget so Worker HTTP does not
+# abort while Node Agent is still pulling within its allowed window.
+_PREPARE_HTTP_SAFETY_SECONDS = 30.0
 
 
 class NodeAgentError(Exception):
@@ -76,6 +79,24 @@ class NodeAgentClient:
             float(graceful_timeout_seconds) + _GRACEFUL_HTTP_SAFETY_SECONDS,
         )
 
+    def prepare_http_timeout(
+        self,
+        pull_timeout_seconds: float,
+        *,
+        safety_seconds: float | None = None,
+    ) -> float:
+        """HTTP timeout for prepare = max(lifecycle default, pull + safety).
+
+        The Worker must wait longer than the Node Agent image-pull budget so a
+        successful pull within the Agent window is not aborted mid-flight.
+        """
+        margin = (
+            float(safety_seconds)
+            if safety_seconds is not None
+            else _PREPARE_HTTP_SAFETY_SECONDS
+        )
+        return max(float(self._timeout), float(pull_timeout_seconds) + margin)
+
     async def _request(
         self,
         method: str,
@@ -83,6 +104,7 @@ class NodeAgentClient:
         *,
         headers: dict[str, str],
         json_body: dict[str, Any] | None = None,
+        params: dict[str, str] | None = None,
         expect_json: bool = True,
         allow_empty: bool = False,
         timeout_seconds: float | None = None,
@@ -95,7 +117,11 @@ class NodeAgentClient:
                 transport=self._transport,
             ) as client:
                 response = await client.request(
-                    method, url, headers=headers, json=json_body
+                    method,
+                    url,
+                    headers=headers,
+                    json=json_body,
+                    params=params,
                 )
         except httpx.TimeoutException as exc:
             raise NodeAgentError(
@@ -259,3 +285,102 @@ class NodeAgentClient:
             expect_json=False,
             allow_empty=False,
         )
+
+    async def prepare_deployment(
+        self,
+        deployment_id: str,
+        payload: dict[str, Any],
+        *,
+        mutation: MutationHeaders,
+        pull_timeout_seconds: float,
+        safety_seconds: float | None = None,
+        timeout_seconds: float | None = None,
+    ) -> dict[str, Any]:
+        body = dict(payload)
+        body["pull_timeout_seconds"] = float(pull_timeout_seconds)
+        http_timeout = (
+            float(timeout_seconds)
+            if timeout_seconds is not None
+            else self.prepare_http_timeout(
+                pull_timeout_seconds, safety_seconds=safety_seconds
+            )
+        )
+        result = await self._request(
+            "POST",
+            f"/internal/v1/deployments/{deployment_id}/prepare",
+            headers=self._mutation_headers(mutation),
+            json_body=body,
+            timeout_seconds=http_timeout,
+        )
+        assert result is not None
+        return result
+
+    async def check_health(
+        self,
+        deployment_id: str,
+        *,
+        mutation: MutationHeaders,
+        health_path: str = "/health",
+        timeout_seconds: float = 5.0,
+    ) -> dict[str, Any]:
+        result = await self._request(
+            "GET",
+            f"/internal/v1/deployments/{deployment_id}/health",
+            headers=self._mutation_headers(mutation),
+            params={
+                "health_path": health_path,
+                "timeout_seconds": str(timeout_seconds),
+            },
+            timeout_seconds=max(self._timeout, timeout_seconds + 5.0),
+        )
+        assert result is not None
+        return result
+
+    async def probe_inference(
+        self,
+        deployment_id: str,
+        *,
+        mutation: MutationHeaders,
+        served_model_name: str,
+        probe_type: str = "CHAT",
+        timeout_seconds: float = 60.0,
+        health_path: str = "/health",
+    ) -> dict[str, Any]:
+        result = await self._request(
+            "POST",
+            f"/internal/v1/deployments/{deployment_id}/probe",
+            headers=self._mutation_headers(mutation),
+            json_body={
+                "served_model_name": served_model_name,
+                "probe_type": probe_type,
+                "timeout_seconds": timeout_seconds,
+                "health_path": health_path,
+            },
+            timeout_seconds=max(self._timeout, timeout_seconds + 10.0),
+        )
+        assert result is not None
+        return result
+
+    async def wait_vram_release(
+        self,
+        *,
+        mutation: MutationHeaders,
+        gpu_device_indices: list[int],
+        minimum_free_vram_mb: int,
+        timeout_seconds: float = 60.0,
+        poll_interval_ms: int = 1000,
+    ) -> dict[str, Any]:
+        result = await self._request(
+            "POST",
+            "/internal/v1/resources/wait-vram-release",
+            headers=self._mutation_headers(mutation),
+            json_body={
+                "gpu_device_indices": list(gpu_device_indices),
+                "minimum_free_vram_mb": int(minimum_free_vram_mb),
+                "timeout_seconds": float(timeout_seconds),
+                "poll_interval_ms": int(poll_interval_ms),
+            },
+            timeout_seconds=max(self._timeout, float(timeout_seconds) + 15.0),
+        )
+        assert result is not None
+        return result

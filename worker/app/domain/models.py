@@ -41,6 +41,7 @@ class Model(Base):
     __tablename__ = "model"
 
     id: Mapped[str] = _uuid_pk()
+    model_type: Mapped[str] = mapped_column(String(32), nullable=False)
 
 
 class ModelVersion(Base):
@@ -56,6 +57,43 @@ class ModelVersion(Base):
     default_max_model_len: Mapped[int | None] = mapped_column(Integer)
     runtime_config_json: Mapped[dict] = mapped_column(
         JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+
+
+class ModelArtifact(Base):
+    __tablename__ = "model_artifact"
+
+    id: Mapped[str] = _uuid_pk()
+    model_version_id: Mapped[str] = mapped_column(UUID(as_uuid=True), nullable=False)
+    artifact_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    source_uri: Mapped[str] = mapped_column(Text, nullable=False)
+    revision: Mapped[str | None] = mapped_column(String(255))
+    checksum: Mapped[str | None] = mapped_column(String(255))
+    size_bytes: Mapped[int | None] = mapped_column(BigInteger)
+
+
+class NodeModelCache(Base):
+    __tablename__ = "node_model_cache"
+
+    id: Mapped[str] = _uuid_pk()
+    node_id: Mapped[str] = mapped_column(UUID(as_uuid=True), nullable=False)
+    model_artifact_id: Mapped[str] = mapped_column(UUID(as_uuid=True), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    local_path: Mapped[str | None] = mapped_column(Text)
+    verified_checksum: Mapped[str | None] = mapped_column(String(255))
+    prepared_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    last_verified_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    error_message: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=NOW
+    )
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=NOW,
+        onupdate=func.now(),
     )
 
 
@@ -78,6 +116,7 @@ class Deployment(Base):
     )
     last_started_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     last_stopped_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    last_health_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     status_reason: Mapped[str | None] = mapped_column(Text)
     updated_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True),
@@ -88,12 +127,27 @@ class Deployment(Base):
     retired_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class HealthCheck(Base):
+    __tablename__ = "health_check"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    deployment_id: Mapped[str] = mapped_column(UUID(as_uuid=True), nullable=False)
+    check_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    result: Mapped[str] = mapped_column(String(32), nullable=False)
+    latency_ms: Mapped[int | None] = mapped_column(Integer)
+    http_status: Mapped[int | None] = mapped_column(Integer)
+    error_code: Mapped[str | None] = mapped_column(String(100))
+    error_message: Mapped[str | None] = mapped_column(Text)
+    checked_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=NOW
+    )
+
+
 class DeploymentGPUAssignment(Base):
     __tablename__ = "deployment_gpu_assignment"
 
-    id: Mapped[str] = _uuid_pk()
-    deployment_id: Mapped[str] = mapped_column(UUID(as_uuid=True), nullable=False)
-    gpu_device_id: Mapped[str] = mapped_column(UUID(as_uuid=True), nullable=False)
+    deployment_id: Mapped[str] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    gpu_device_id: Mapped[str] = mapped_column(UUID(as_uuid=True), primary_key=True)
     device_order: Mapped[int] = mapped_column(Integer, nullable=False)
 
 

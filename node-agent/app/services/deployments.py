@@ -1,8 +1,14 @@
-"""Managed deployment container lifecycle service (Milestone 3B-1)."""
+"""Managed deployment container lifecycle service (Milestone 3B-1 / 3B-3)."""
 
 from __future__ import annotations
 
+import hashlib
+import time
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
+
+import httpx
 
 from app.adapters.docker_adapter import (
     ContainerInfo,
@@ -12,12 +18,15 @@ from app.adapters.docker_adapter import (
     map_docker_status_to_runtime,
 )
 from app.core.errors import (
+    ArtifactNotReadyError,
     ContainerConflictError,
     ContainerNotFoundError,
     DockerUnavailableError,
+    ImageNotReadyError,
     ManagedLabelRequiredError,
     ValidationError,
 )
+from app.core.config import get_settings
 from app.core.labels import (
     LABEL_DEPLOYMENT_ID,
     LABEL_MANAGED,
@@ -26,10 +35,41 @@ from app.core.labels import (
     MANAGED_LABEL_VALUE,
 )
 
+# Synthetic probe payloads — no user/private data.
+# ``model`` is filled at probe time from ModelVersion.served_model_name.
+_CHAT_PROBE_BODY = {
+    "messages": [{"role": "user", "content": "ping"}],
+    "max_tokens": 1,
+    "temperature": 0,
+}
+_EMBEDDING_PROBE_BODY = {
+    "input": "ping",
+}
+
+_SHA256_CHUNK_SIZE = 1024 * 1024
+
+
+def _sha256_file_streaming(path: Path) -> str:
+    """Stream file contents into SHA-256 (bounded memory for large artifacts)."""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(_SHA256_CHUNK_SIZE)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
 
 class DeploymentLifecycleService:
-    def __init__(self, docker: DockerAdapter) -> None:
+    def __init__(
+        self,
+        docker: DockerAdapter,
+        *,
+        http_transport: httpx.BaseTransport | None = None,
+    ) -> None:
         self._docker = docker
+        self._http_transport = http_transport
 
     def list_deployments(self) -> list[dict[str, Any]]:
         self._require_docker()
@@ -209,7 +249,320 @@ class DeploymentLifecycleService:
             )
         self._docker.remove(container.id)
 
+    def prepare(
+        self,
+        deployment_id: str,
+        *,
+        runtime_image: str,
+        runtime_image_digest: str | None = None,
+        artifacts: list[dict[str, Any]] | None = None,
+        pull_timeout_seconds: float | None = None,
+    ) -> dict[str, Any]:
+        """Verify runtime image + local artifact paths (no credentialed download)."""
+        _ = deployment_id  # reserved for future agent-job correlation
+        self._require_docker()
+        image = (runtime_image or "").strip()
+        if not image:
+            raise ValidationError(
+                "runtime_image is required.",
+                details={"field": "runtime_image"},
+            )
+        _ = runtime_image_digest  # digest recorded by Worker; Agent verifies presence
+
+        pull_budget = (
+            float(pull_timeout_seconds)
+            if pull_timeout_seconds is not None
+            else float(get_settings().docker_image_pull_timeout_seconds)
+        )
+        # May raise DockerUnavailableError (retryable) on pull timeout/network.
+        image_ready = self._docker.ensure_image(
+            image, pull_timeout_seconds=pull_budget
+        )
+        if not image_ready:
+            raise ImageNotReadyError(
+                "Runtime image is not available on this node.",
+                details={"runtime_image": image},
+            )
+
+        artifact_results: list[dict[str, Any]] = []
+        for raw in artifacts or []:
+            artifact_results.append(self._verify_artifact(raw))
+
+        artifacts_ready = all(item.get("ready") for item in artifact_results) if artifact_results else True
+        if not artifacts_ready:
+            failed = [a for a in artifact_results if not a.get("ready")]
+            raise ArtifactNotReadyError(
+                "One or more artifacts are not ready on this node.",
+                details={"artifacts": failed},
+            )
+
+        return {
+            "status": "READY",
+            "image_ready": True,
+            "artifacts_ready": True,
+            "artifacts": artifact_results,
+        }
+
+    def check_health(
+        self,
+        deployment_id: str,
+        *,
+        health_path: str = "/health",
+        timeout_seconds: float = 5.0,
+    ) -> dict[str, Any]:
+        self._require_docker()
+        container = self._require_managed_container(deployment_id)
+        runtime_status = map_docker_status_to_runtime(container.status)
+        checked_at = datetime.now(tz=UTC).isoformat().replace("+00:00", "Z")
+        if runtime_status != "RUNNING":
+            return {
+                "deployment_id": deployment_id,
+                "runtime_status": runtime_status,
+                "health_status": "STARTING" if runtime_status == "CREATED" else "UNHEALTHY",
+                "http_status": None,
+                "latency_ms": None,
+                "checked_at": checked_at,
+                "message": "Container is not RUNNING.",
+            }
+
+        url = self._upstream_url(container, health_path)
+        started = time.perf_counter()
+        try:
+            with httpx.Client(
+                timeout=timeout_seconds, transport=self._http_transport
+            ) as client:
+                response = client.get(url)
+            latency_ms = int((time.perf_counter() - started) * 1000)
+            healthy = 200 <= response.status_code < 300
+            return {
+                "deployment_id": deployment_id,
+                "runtime_status": runtime_status,
+                "health_status": "HEALTHY" if healthy else "UNHEALTHY",
+                "http_status": response.status_code,
+                "latency_ms": latency_ms,
+                "checked_at": checked_at,
+                "message": None if healthy else "Health endpoint returned non-2xx.",
+            }
+        except httpx.TimeoutException:
+            return {
+                "deployment_id": deployment_id,
+                "runtime_status": runtime_status,
+                "health_status": "UNHEALTHY",
+                "http_status": None,
+                "latency_ms": int((time.perf_counter() - started) * 1000),
+                "checked_at": checked_at,
+                "message": "Health request timed out.",
+            }
+        except httpx.HTTPError as exc:
+            return {
+                "deployment_id": deployment_id,
+                "runtime_status": runtime_status,
+                "health_status": "UNHEALTHY",
+                "http_status": None,
+                "latency_ms": int((time.perf_counter() - started) * 1000),
+                "checked_at": checked_at,
+                "message": f"Health transport error: {type(exc).__name__}",
+            }
+
+    def probe_inference(
+        self,
+        deployment_id: str,
+        *,
+        served_model_name: str,
+        probe_type: str = "CHAT",
+        timeout_seconds: float = 60.0,
+        health_path: str = "/health",
+    ) -> dict[str, Any]:
+        """Minimal OpenAI-compatible inference readiness probe (no private data logged)."""
+        _ = health_path
+        served = (served_model_name or "").strip()
+        if not served:
+            raise ValidationError(
+                "served_model_name is required.",
+                details={"field": "served_model_name"},
+            )
+        self._require_docker()
+        container = self._require_managed_container(deployment_id)
+        runtime_status = map_docker_status_to_runtime(container.status)
+        checked_at = datetime.now(tz=UTC).isoformat().replace("+00:00", "Z")
+        if runtime_status != "RUNNING":
+            return {
+                "success": False,
+                "latency_ms": None,
+                "checked_at": checked_at,
+                "error_code": "RUNTIME_NOT_READY",
+                "error_message": "Container is not RUNNING.",
+            }
+
+        probe = (probe_type or "CHAT").upper()
+        if probe == "CHAT":
+            path = "/v1/chat/completions"
+            body = {"model": served, **_CHAT_PROBE_BODY}
+        elif probe == "EMBEDDING":
+            path = "/v1/embeddings"
+            body = {"model": served, **_EMBEDDING_PROBE_BODY}
+        else:
+            raise ValidationError(
+                "Unsupported probe_type.",
+                details={"probe_type": probe_type, "allowed": ["CHAT", "EMBEDDING"]},
+            )
+
+        url = self._upstream_url(container, path)
+        started = time.perf_counter()
+        try:
+            with httpx.Client(
+                timeout=timeout_seconds, transport=self._http_transport
+            ) as client:
+                response = client.post(url, json=body)
+            latency_ms = int((time.perf_counter() - started) * 1000)
+        except httpx.TimeoutException:
+            return {
+                "success": False,
+                "latency_ms": int((time.perf_counter() - started) * 1000),
+                "checked_at": checked_at,
+                "error_code": "PROBE_TIMEOUT",
+                "error_message": "Inference probe timed out.",
+            }
+        except httpx.HTTPError:
+            return {
+                "success": False,
+                "latency_ms": int((time.perf_counter() - started) * 1000),
+                "checked_at": checked_at,
+                "error_code": "PROBE_TRANSPORT_ERROR",
+                "error_message": "Inference probe transport failed.",
+            }
+
+        if response.status_code >= 400:
+            return {
+                "success": False,
+                "latency_ms": latency_ms,
+                "checked_at": checked_at,
+                "error_code": "PROBE_HTTP_ERROR",
+                "error_message": f"Probe HTTP {response.status_code}.",
+            }
+
+        try:
+            payload = response.json()
+        except ValueError:
+            return {
+                "success": False,
+                "latency_ms": latency_ms,
+                "checked_at": checked_at,
+                "error_code": "PROBE_MALFORMED_RESPONSE",
+                "error_message": "Probe response was not valid JSON.",
+            }
+
+        if not isinstance(payload, dict):
+            return {
+                "success": False,
+                "latency_ms": latency_ms,
+                "checked_at": checked_at,
+                "error_code": "PROBE_MALFORMED_RESPONSE",
+                "error_message": "Probe response JSON was not an object.",
+            }
+
+        if probe == "CHAT" and "choices" not in payload:
+            return {
+                "success": False,
+                "latency_ms": latency_ms,
+                "checked_at": checked_at,
+                "error_code": "PROBE_MALFORMED_RESPONSE",
+                "error_message": "Chat probe response missing choices.",
+            }
+        if probe == "EMBEDDING" and "data" not in payload:
+            return {
+                "success": False,
+                "latency_ms": latency_ms,
+                "checked_at": checked_at,
+                "error_code": "PROBE_MALFORMED_RESPONSE",
+                "error_message": "Embedding probe response missing data.",
+            }
+
+        return {
+            "success": True,
+            "latency_ms": latency_ms,
+            "checked_at": checked_at,
+            "error_code": None,
+            "error_message": None,
+        }
+
     # ---------------------------------------------------------------- helpers
+
+    def _verify_artifact(self, raw: dict[str, Any]) -> dict[str, Any]:
+        artifact_id = str(raw.get("artifact_id") or "")
+        target_path = str(raw.get("target_path") or "").strip()
+        checksum = raw.get("checksum")
+        result: dict[str, Any] = {
+            "artifact_id": artifact_id or None,
+            "target_path": target_path or None,
+            "ready": False,
+            "verified_checksum": None,
+            "error": None,
+        }
+        if not target_path:
+            result["error"] = "target_path is required."
+            return result
+        # Reject URI schemes that would require credentialed remote download.
+        source_uri = str(raw.get("source_uri") or "")
+        if "://" in source_uri and not source_uri.startswith(
+            ("file://", "local://")
+        ):
+            result["error"] = (
+                "Remote artifact download is not supported without a safe "
+                "credential-free contract; provide a local file:// path or "
+                "pre-placed target_path."
+            )
+            return result
+
+        path = Path(target_path)
+        if source_uri.startswith("file://"):
+            source_path = Path(source_uri[7:])
+            if not source_path.exists():
+                result["error"] = "source_uri file path does not exist."
+                return result
+            # Prefer explicit target_path; if missing, source itself may serve.
+            if not path.exists():
+                path = source_path
+                result["target_path"] = str(path)
+
+        if not path.exists():
+            result["error"] = "target_path does not exist on this node."
+            return result
+
+        if checksum:
+            expected = str(checksum).strip().lower()
+            if expected.startswith("sha256:"):
+                expected = expected[7:]
+            if path.is_dir():
+                # Do not treat path+size metadata as a content checksum.
+                result["error"] = (
+                    "Checksum verification for directories is not supported "
+                    "until a manifest/content checksum contract is defined. "
+                    "Omit checksum or point target_path at a single file."
+                )
+                return result
+            if not path.is_file():
+                result["error"] = "target_path must be a regular file for checksum."
+                return result
+            digest = _sha256_file_streaming(path)
+            if digest != expected:
+                result["error"] = "checksum mismatch."
+                return result
+            result["verified_checksum"] = digest
+        result["ready"] = True
+        return result
+
+    def _upstream_url(self, container: ContainerInfo, path: str) -> str:
+        address = container.internal_address or container.name
+        if not address:
+            raise ValidationError(
+                "Managed container has no reachable internal address.",
+                details={"container_id": container.id},
+            )
+        port = container.runtime_port or 8000
+        if not path.startswith("/"):
+            path = "/" + path
+        return f"http://{address}:{port}{path}"
 
     def _require_docker(self) -> None:
         status = self._docker.status()

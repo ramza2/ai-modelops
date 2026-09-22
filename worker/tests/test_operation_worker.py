@@ -29,10 +29,14 @@ from app.repositories.operations import OperationJobRepository
 from app.services.job_runner import JobRunner
 from app.services.operation_executor import (
     STEP_ENSURE_CONTAINER,
+    STEP_PREPARE_ARTIFACTS,
+    STEP_PROBE_INFERENCE,
     STEP_REMOVE_CONTAINER,
     STEP_RESTART_CONTAINER,
     STEP_START_CONTAINER,
     STEP_STOP_CONTAINER,
+    STEP_WAIT_HEALTH,
+    STEP_WAIT_VRAM_RELEASE,
     OperationExecutor,
 )
 
@@ -52,6 +56,13 @@ class FakeNodeAgent:
         self.calls: list[dict[str, Any]] = []
         self.fail_next: dict[str, list[httpx.Response | Exception]] = {}
         self.restart_fail_times = 0
+        self.prepare_fail_image = False
+        self.prepare_fail_artifacts = False
+        self.health_fail_times = 0
+        self.health_calls = 0
+        self.probe_mode = "success"  # success|malformed|transport|http
+        self.vram_mode = "immediate"  # immediate|poll_then_ok|timeout
+        self.vram_calls = 0
 
     def _record(self, method: str, path: str, headers: httpx.Headers, body: Any) -> None:
         self.calls.append(
@@ -189,6 +200,212 @@ class FakeNodeAgent:
                 )
             del self.containers[deployment_id]
             return httpx.Response(204)
+
+        if method == "POST" and action == "prepare":
+            artifacts = (body or {}).get("artifacts") or []
+            art_results = []
+            for art in artifacts:
+                ready = True
+                error = None
+                if self.prepare_fail_artifacts:
+                    ready = False
+                    error = "artifact missing"
+                art_results.append(
+                    {
+                        "artifact_id": art.get("artifact_id"),
+                        "target_path": art.get("target_path"),
+                        "ready": ready,
+                        "verified_checksum": "abc123" if ready else None,
+                        "error": error,
+                    }
+                )
+            if self.prepare_fail_image:
+                return httpx.Response(
+                    409,
+                    json={
+                        "error": {
+                            "code": "IMAGE_NOT_READY",
+                            "message": "image missing",
+                        }
+                    },
+                )
+            if self.prepare_fail_artifacts:
+                return httpx.Response(
+                    409,
+                    json={
+                        "error": {
+                            "code": "ARTIFACT_NOT_READY",
+                            "message": "artifact missing",
+                            "details": {"artifacts": art_results},
+                        }
+                    },
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "status": "READY",
+                    "image_ready": True,
+                    "artifacts_ready": True,
+                    "artifacts": art_results,
+                },
+            )
+
+        if method == "GET" and action == "health":
+            ctr = self.containers.get(deployment_id)
+            if ctr is None:
+                return httpx.Response(
+                    404,
+                    json={
+                        "error": {
+                            "code": "CONTAINER_NOT_FOUND",
+                            "message": "missing",
+                        }
+                    },
+                )
+            self.health_calls += 1
+            if self.health_fail_times > 0:
+                self.health_fail_times -= 1
+                return httpx.Response(
+                    200,
+                    json={
+                        "deployment_id": deployment_id,
+                        "runtime_status": ctr.get("runtime_status"),
+                        "health_status": "STARTING",
+                        "http_status": None,
+                        "latency_ms": 5,
+                        "checked_at": "2026-01-01T00:00:00Z",
+                        "message": "still starting",
+                    },
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "deployment_id": deployment_id,
+                    "runtime_status": ctr.get("runtime_status", "RUNNING"),
+                    "health_status": "HEALTHY",
+                    "http_status": 200,
+                    "latency_ms": 12,
+                    "checked_at": "2026-01-01T00:00:00Z",
+                    "message": None,
+                },
+            )
+
+        if method == "POST" and action == "probe":
+            ctr = self.containers.get(deployment_id)
+            if ctr is None:
+                return httpx.Response(
+                    404,
+                    json={
+                        "error": {
+                            "code": "CONTAINER_NOT_FOUND",
+                            "message": "missing",
+                        }
+                    },
+                )
+            if self.probe_mode == "success":
+                return httpx.Response(
+                    200,
+                    json={
+                        "success": True,
+                        "latency_ms": 40,
+                        "checked_at": "2026-01-01T00:00:00Z",
+                        "error_code": None,
+                        "error_message": None,
+                    },
+                )
+            if self.probe_mode == "malformed":
+                return httpx.Response(
+                    200,
+                    json={
+                        "success": False,
+                        "latency_ms": 10,
+                        "checked_at": "2026-01-01T00:00:00Z",
+                        "error_code": "PROBE_MALFORMED_RESPONSE",
+                        "error_message": "Chat probe response missing choices.",
+                    },
+                )
+            if self.probe_mode == "transport":
+                return httpx.Response(
+                    200,
+                    json={
+                        "success": False,
+                        "latency_ms": 3,
+                        "checked_at": "2026-01-01T00:00:00Z",
+                        "error_code": "PROBE_TRANSPORT_ERROR",
+                        "error_message": "Inference probe transport failed.",
+                    },
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "success": False,
+                    "latency_ms": 8,
+                    "checked_at": "2026-01-01T00:00:00Z",
+                    "error_code": "PROBE_HTTP_ERROR",
+                    "error_message": "Probe HTTP 503.",
+                },
+            )
+
+        # /internal/v1/resources/wait-vram-release
+        if (
+            method == "POST"
+            and len(parts) >= 4
+            and parts[2] == "resources"
+            and parts[3] == "wait-vram-release"
+        ):
+            self.vram_calls += 1
+            if self.vram_mode == "timeout":
+                return httpx.Response(
+                    409,
+                    json={
+                        "error": {
+                            "code": "VRAM_NOT_RELEASED",
+                            "message": "Timed out waiting for GPU VRAM release.",
+                            "details": {
+                                "gpus": [
+                                    {
+                                        "device_index": 0,
+                                        "free_vram_mb": 100,
+                                        "required_free_vram_mb": (
+                                            body or {}
+                                        ).get("minimum_free_vram_mb"),
+                                    }
+                                ],
+                                "elapsed_ms": 50,
+                            },
+                        }
+                    },
+                )
+            if self.vram_mode == "poll_then_ok":
+                if self.vram_calls == 1:
+                    return httpx.Response(
+                        409,
+                        json={
+                            "error": {
+                                "code": "VRAM_NOT_RELEASED",
+                                "message": "still held",
+                                "details": {"gpus": [], "elapsed_ms": 1},
+                            }
+                        },
+                    )
+            indices = (body or {}).get("gpu_device_indices") or [0]
+            return httpx.Response(
+                200,
+                json={
+                    "released": True,
+                    "gpus": [
+                        {
+                            "device_index": idx,
+                            "free_vram_mb": 12000,
+                            "required_free_vram_mb": (body or {}).get(
+                                "minimum_free_vram_mb"
+                            ),
+                        }
+                        for idx in indices
+                    ],
+                    "elapsed_ms": 5 if self.vram_mode == "immediate" else 25,
+                },
+            )
 
         return httpx.Response(
             404, json={"error": {"code": "NOT_FOUND", "message": path}}
@@ -352,6 +569,7 @@ async def _enqueue(
     steps: list[str],
     desired_state: str,
     max_attempts: int = 3,
+    metadata: dict[str, Any] | None = None,
 ) -> tuple[uuid.UUID, uuid.UUID]:
     now = dt.datetime.now(tz=dt.UTC)
     op_id = uuid.uuid4()
@@ -371,7 +589,7 @@ async def _enqueue(
             operation_type=operation_type,
             status=OperationStatus.QUEUED.value,
             target_deployment_id=deployment_id,
-            metadata_json={},
+            metadata_json=metadata or {},
         )
     )
     for seq, code in enumerate(steps, start=1):
@@ -1020,3 +1238,787 @@ async def test_advisory_lock_survives_orm_commit_during_mutation_pause(db) -> No
         if c["method"] == "POST" and c["path"].endswith("/restart")
     ]
     assert restart_calls, "Worker B should mutate only after A released the lock"
+
+
+
+async def _seed_artifact(
+    session: AsyncSession,
+    *,
+    version_id: uuid.UUID,
+    source_uri: str = "file:///tmp/models/placeholder",
+    checksum: str | None = "sha256:abc123",
+) -> uuid.UUID:
+    artifact_id = uuid.uuid4()
+    await session.execute(
+        __import__("sqlalchemy").text(
+            """
+            INSERT INTO model_artifact (
+              id, model_version_id, artifact_type, source_uri, checksum
+            ) VALUES (
+              :id, :version_id, 'MODEL', :uri, :checksum
+            )
+            """
+        ),
+        {
+            "id": str(artifact_id),
+            "version_id": str(version_id),
+            "uri": source_uri,
+            "checksum": checksum,
+        },
+    )
+    await session.commit()
+    return artifact_id
+
+
+async def _seed_gpu_assignment(
+    session: AsyncSession,
+    *,
+    node_id: uuid.UUID,
+    deployment_id: uuid.UUID,
+    device_index: int = 0,
+    vram_total_mb: int = 16000,
+) -> uuid.UUID:
+    gpu_id = uuid.uuid4()
+    await session.execute(
+        __import__("sqlalchemy").text(
+            """
+            INSERT INTO gpu_device (
+              id, node_id, gpu_uuid, device_index, model_name,
+              vram_total_mb, safety_margin_mb, status
+            ) VALUES (
+              :id, :node_id, :gpu_uuid, :idx, 'Fake GPU',
+              :vram, 1024, 'AVAILABLE'
+            )
+            """
+        ),
+        {
+            "id": str(gpu_id),
+            "node_id": str(node_id),
+            "gpu_uuid": f"GPU-{uuid.uuid4().hex[:12]}",
+            "idx": device_index,
+            "vram": vram_total_mb,
+        },
+    )
+    await session.execute(
+        __import__("sqlalchemy").text(
+            """
+            INSERT INTO deployment_gpu_assignment (
+              deployment_id, gpu_device_id, device_order
+            ) VALUES (
+              :dep, :gpu, 0
+            )
+            """
+        ),
+        {
+            "dep": str(deployment_id),
+            "gpu": str(gpu_id),
+        },
+    )
+    await session.commit()
+    return gpu_id
+
+
+def _m3b3_settings(**overrides: Any) -> Settings:
+    base: dict[str, Any] = dict(
+        worker_id="test-worker",
+        worker_poll_seconds=0.01,
+        worker_max_attempts=3,
+        worker_stale_seconds=60,
+        node_agent_token="",
+        health_timeout_seconds=2.0,
+        health_poll_interval_seconds=0.01,
+        probe_timeout_seconds=5.0,
+        vram_release_timeout_seconds=1.0,
+        vram_release_poll_interval_ms=50,
+    )
+    base.update(overrides)
+    return Settings(**base)
+
+
+@pytest.mark.asyncio
+async def test_prepare_idempotent_and_cache_ready(db) -> None:
+    fake = FakeNodeAgent()
+    transport = httpx.MockTransport(fake.handler)
+    session_factory = db
+    settings = _m3b3_settings()
+
+    async with session_factory() as session:
+        seeded = await _seed_deployment(session)
+        artifact_id = await _seed_artifact(
+            session, version_id=seeded["version_id"]
+        )
+        steps = [
+            STEP_PREPARE_ARTIFACTS,
+            STEP_ENSURE_CONTAINER,
+            STEP_START_CONTAINER,
+            STEP_WAIT_HEALTH,
+            STEP_PROBE_INFERENCE,
+        ]
+        op_id, _ = await _enqueue(
+            session,
+            deployment_id=seeded["deployment_id"],
+            operation_type=OperationType.START.value,
+            steps=steps,
+            desired_state=DesiredState.RUNNING.value,
+        )
+
+    runner = JobRunner(
+        settings=settings, session_factory=session_factory, transport=transport
+    )
+    assert await runner.poll_once() is True
+
+    async with session_factory() as session:
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        assert op.status == OperationStatus.SUCCEEDED.value
+        row = (
+            await session.execute(
+                __import__("sqlalchemy").text(
+                    """
+                    SELECT status, local_path, verified_checksum, prepared_at,
+                           last_verified_at, error_message
+                    FROM node_model_cache
+                    WHERE model_artifact_id = :aid
+                    """
+                ),
+                {"aid": str(artifact_id)},
+            )
+        ).one()
+        assert row.status == "READY"
+        assert row.local_path == "/tmp/models/placeholder"
+        assert row.verified_checksum == "abc123"
+        assert row.prepared_at is not None
+        assert row.last_verified_at is not None
+        assert row.error_message is None
+        first_verified = row.last_verified_at
+
+        op2, _ = await _enqueue(
+            session,
+            deployment_id=seeded["deployment_id"],
+            operation_type=OperationType.START.value,
+            steps=[STEP_PREPARE_ARTIFACTS],
+            desired_state=DesiredState.RUNNING.value,
+        )
+
+    assert await runner.poll_once() is True
+
+    async with session_factory() as session:
+        op = await session.get(Operation, op2)
+        assert op is not None
+        assert op.status == OperationStatus.SUCCEEDED.value
+        row = (
+            await session.execute(
+                __import__("sqlalchemy").text(
+                    """
+                    SELECT status, last_verified_at FROM node_model_cache
+                    WHERE model_artifact_id = :aid
+                    """
+                ),
+                {"aid": str(artifact_id)},
+            )
+        ).one()
+        assert row.status == "READY"
+        assert row.last_verified_at >= first_verified
+        prepare_calls = [
+            c for c in fake.calls if c["path"].endswith("/prepare")
+        ]
+        assert len(prepare_calls) == 2
+        assert all(c["headers"]["X-Operation-ID"] for c in prepare_calls)
+
+
+@pytest.mark.asyncio
+async def test_prepare_artifact_failure_marks_cache_failed(db) -> None:
+    fake = FakeNodeAgent()
+    fake.prepare_fail_artifacts = True
+    transport = httpx.MockTransport(fake.handler)
+    session_factory = db
+
+    async with session_factory() as session:
+        seeded = await _seed_deployment(session)
+        artifact_id = await _seed_artifact(
+            session, version_id=seeded["version_id"]
+        )
+        op_id, _ = await _enqueue(
+            session,
+            deployment_id=seeded["deployment_id"],
+            operation_type=OperationType.START.value,
+            steps=[STEP_PREPARE_ARTIFACTS],
+            desired_state=DesiredState.RUNNING.value,
+        )
+
+    await JobRunner(
+        settings=_m3b3_settings(),
+        session_factory=session_factory,
+        transport=transport,
+    ).poll_once()
+
+    async with session_factory() as session:
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        assert op.status == OperationStatus.FAILED.value
+        assert op.error_code == "ARTIFACT_NOT_READY"
+        row = (
+            await session.execute(
+                __import__("sqlalchemy").text(
+                    "SELECT status, error_message FROM node_model_cache "
+                    "WHERE model_artifact_id = :aid"
+                ),
+                {"aid": str(artifact_id)},
+            )
+        ).one()
+        assert row.status == "FAILED"
+        assert row.error_message
+
+
+@pytest.mark.asyncio
+async def test_wait_health_success_and_records(db) -> None:
+    fake = FakeNodeAgent()
+    fake.health_fail_times = 2
+    transport = httpx.MockTransport(fake.handler)
+    session_factory = db
+
+    async with session_factory() as session:
+        seeded = await _seed_deployment(
+            session,
+            runtime_status=RuntimeStatus.RUNNING.value,
+            container_id=f"ctr-health-{uuid.uuid4().hex[:8]}",
+        )
+        fake.containers[str(seeded["deployment_id"])] = {
+            "deployment_id": str(seeded["deployment_id"]),
+            "container_id": seeded["container_id"],
+            "runtime_status": "RUNNING",
+        }
+        op_id, _ = await _enqueue(
+            session,
+            deployment_id=seeded["deployment_id"],
+            operation_type=OperationType.START.value,
+            steps=[STEP_WAIT_HEALTH],
+            desired_state=DesiredState.RUNNING.value,
+        )
+
+    assert (
+        await JobRunner(
+            settings=_m3b3_settings(health_timeout_seconds=5.0),
+            session_factory=session_factory,
+            transport=transport,
+        ).poll_once()
+        is True
+    )
+
+    async with session_factory() as session:
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        assert op.status == OperationStatus.SUCCEEDED.value
+        dep = await session.get(Deployment, seeded["deployment_id"])
+        assert dep is not None
+        assert dep.health_status == "HEALTHY"
+        assert dep.last_health_at is not None
+        checks = (
+            await session.execute(
+                __import__("sqlalchemy").text(
+                    """
+                    SELECT check_type, result FROM health_check
+                    WHERE deployment_id = :id ORDER BY id
+                    """
+                ),
+                {"id": str(seeded["deployment_id"])},
+            )
+        ).all()
+        assert len(checks) >= 3
+        assert checks[-1].check_type == "HTTP"
+        assert checks[-1].result == "SUCCESS"
+        assert any(c.result == "FAILURE" for c in checks[:-1])
+        assert fake.health_calls >= 3
+
+
+@pytest.mark.asyncio
+async def test_wait_health_timeout(db) -> None:
+    fake = FakeNodeAgent()
+    fake.health_fail_times = 1000
+    transport = httpx.MockTransport(fake.handler)
+    session_factory = db
+
+    async with session_factory() as session:
+        seeded = await _seed_deployment(
+            session,
+            runtime_status=RuntimeStatus.RUNNING.value,
+            container_id=f"ctr-health-to-{uuid.uuid4().hex[:8]}",
+        )
+        fake.containers[str(seeded["deployment_id"])] = {
+            "deployment_id": str(seeded["deployment_id"]),
+            "container_id": seeded["container_id"],
+            "runtime_status": "RUNNING",
+        }
+        op_id, _ = await _enqueue(
+            session,
+            deployment_id=seeded["deployment_id"],
+            operation_type=OperationType.START.value,
+            steps=[STEP_WAIT_HEALTH],
+            desired_state=DesiredState.RUNNING.value,
+            metadata={"health_timeout_seconds": 0.05},
+        )
+
+    await JobRunner(
+        settings=_m3b3_settings(
+            health_timeout_seconds=0.05, health_poll_interval_seconds=0.01
+        ),
+        session_factory=session_factory,
+        transport=transport,
+    ).poll_once()
+
+    async with session_factory() as session:
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        assert op.status == OperationStatus.FAILED.value
+        assert op.error_code == "HEALTH_TIMEOUT"
+
+
+@pytest.mark.asyncio
+async def test_probe_success_and_malformed(db) -> None:
+    fake = FakeNodeAgent()
+    transport = httpx.MockTransport(fake.handler)
+    session_factory = db
+
+    async with session_factory() as session:
+        seeded = await _seed_deployment(
+            session,
+            runtime_status=RuntimeStatus.RUNNING.value,
+            container_id=f"ctr-probe-{uuid.uuid4().hex[:8]}",
+        )
+        fake.containers[str(seeded["deployment_id"])] = {
+            "deployment_id": str(seeded["deployment_id"]),
+            "container_id": seeded["container_id"],
+            "runtime_status": "RUNNING",
+        }
+        op_ok, _ = await _enqueue(
+            session,
+            deployment_id=seeded["deployment_id"],
+            operation_type=OperationType.START.value,
+            steps=[STEP_PROBE_INFERENCE],
+            desired_state=DesiredState.RUNNING.value,
+        )
+
+    await JobRunner(
+        settings=_m3b3_settings(),
+        session_factory=session_factory,
+        transport=transport,
+    ).poll_once()
+
+    async with session_factory() as session:
+        op = await session.get(Operation, op_ok)
+        assert op is not None
+        assert op.status == OperationStatus.SUCCEEDED.value
+        check = (
+            await session.execute(
+                __import__("sqlalchemy").text(
+                    """
+                    SELECT check_type, result, error_code, error_message
+                    FROM health_check
+                    WHERE deployment_id = :id AND check_type = 'INFERENCE'
+                    ORDER BY id DESC LIMIT 1
+                    """
+                ),
+                {"id": str(seeded["deployment_id"])},
+            )
+        ).one()
+        assert check.result == "SUCCESS"
+        assert check.error_code is None
+        assert check.error_message is None
+
+        fake.probe_mode = "malformed"
+        op_bad, _ = await _enqueue(
+            session,
+            deployment_id=seeded["deployment_id"],
+            operation_type=OperationType.START.value,
+            steps=[STEP_PROBE_INFERENCE],
+            desired_state=DesiredState.RUNNING.value,
+            max_attempts=1,
+        )
+
+    await JobRunner(
+        settings=_m3b3_settings(worker_max_attempts=1),
+        session_factory=session_factory,
+        transport=transport,
+    ).poll_once()
+
+    async with session_factory() as session:
+        op = await session.get(Operation, op_bad)
+        assert op is not None
+        assert op.status == OperationStatus.FAILED.value
+        assert op.error_code == "PROBE_MALFORMED_RESPONSE"
+
+
+@pytest.mark.asyncio
+async def test_probe_transport_retry_classification(db) -> None:
+    fake = FakeNodeAgent()
+    fake.probe_mode = "transport"
+    transport = httpx.MockTransport(fake.handler)
+    session_factory = db
+
+    async with session_factory() as session:
+        seeded = await _seed_deployment(
+            session,
+            runtime_status=RuntimeStatus.RUNNING.value,
+            container_id=f"ctr-probe-r-{uuid.uuid4().hex[:8]}",
+        )
+        fake.containers[str(seeded["deployment_id"])] = {
+            "deployment_id": str(seeded["deployment_id"]),
+            "container_id": seeded["container_id"],
+            "runtime_status": "RUNNING",
+        }
+        op_id, job_id = await _enqueue(
+            session,
+            deployment_id=seeded["deployment_id"],
+            operation_type=OperationType.START.value,
+            steps=[STEP_PROBE_INFERENCE],
+            desired_state=DesiredState.RUNNING.value,
+            max_attempts=2,
+        )
+
+    runner = JobRunner(
+        settings=_m3b3_settings(worker_max_attempts=2),
+        session_factory=session_factory,
+        transport=transport,
+    )
+    await runner.poll_once()
+
+    async with session_factory() as session:
+        job = await session.get(OperationJob, job_id)
+        op = await session.get(Operation, op_id)
+        assert job is not None and op is not None
+        # First attempt claims once → attempt_count=1; retryable → requeue.
+        assert job.status == JobStatus.QUEUED.value
+        assert op.status == OperationStatus.RUNNING.value
+
+        job.available_at = dt.datetime.now(tz=dt.UTC) - dt.timedelta(seconds=1)
+        await session.commit()
+
+    await runner.poll_once()
+    async with session_factory() as session:
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        assert op.status == OperationStatus.FAILED.value
+        assert op.error_code == "PROBE_TRANSPORT_ERROR"
+
+
+@pytest.mark.asyncio
+async def test_wait_vram_immediate_success_and_timeout(db) -> None:
+    fake = FakeNodeAgent()
+    transport = httpx.MockTransport(fake.handler)
+    session_factory = db
+
+    async with session_factory() as session:
+        seeded = await _seed_deployment(session)
+        await _seed_gpu_assignment(
+            session,
+            node_id=seeded["node_id"],
+            deployment_id=seeded["deployment_id"],
+        )
+        op_ok, _ = await _enqueue(
+            session,
+            deployment_id=seeded["deployment_id"],
+            operation_type=OperationType.STOP.value,
+            steps=[STEP_WAIT_VRAM_RELEASE],
+            desired_state=DesiredState.STOPPED.value,
+            metadata={"minimum_free_vram_mb": 8000},
+        )
+
+    runner = JobRunner(
+        settings=_m3b3_settings(),
+        session_factory=session_factory,
+        transport=transport,
+    )
+    assert await runner.poll_once() is True
+
+    async with session_factory() as session:
+        op = await session.get(Operation, op_ok)
+        assert op is not None
+        assert op.status == OperationStatus.SUCCEEDED.value
+        step = (
+            await session.execute(
+                select(OperationStep).where(OperationStep.operation_id == op_ok)
+            )
+        ).scalar_one()
+        assert step.detail_json.get("released") is True
+        assert fake.vram_calls == 1
+
+        fake.vram_mode = "timeout"
+        op_bad, _ = await _enqueue(
+            session,
+            deployment_id=seeded["deployment_id"],
+            operation_type=OperationType.STOP.value,
+            steps=[STEP_WAIT_VRAM_RELEASE],
+            desired_state=DesiredState.STOPPED.value,
+            metadata={"minimum_free_vram_mb": 8000},
+            max_attempts=1,
+        )
+
+    await JobRunner(
+        settings=_m3b3_settings(worker_max_attempts=1),
+        session_factory=session_factory,
+        transport=transport,
+    ).poll_once()
+
+    async with session_factory() as session:
+        op = await session.get(Operation, op_bad)
+        assert op is not None
+        assert op.status == OperationStatus.FAILED.value
+        assert op.error_code == "VRAM_NOT_RELEASED"
+
+
+@pytest.mark.asyncio
+async def test_probe_passes_served_model_name_from_version(db) -> None:
+    fake = FakeNodeAgent()
+    transport = httpx.MockTransport(fake.handler)
+    session_factory = db
+
+    async with session_factory() as session:
+        seeded = await _seed_deployment(
+            session,
+            runtime_status=RuntimeStatus.RUNNING.value,
+            container_id=f"ctr-probe-name-{uuid.uuid4().hex[:8]}",
+        )
+        # Override served_model_name to a distinctive value.
+        await session.execute(
+            __import__("sqlalchemy").text(
+                """
+                UPDATE model_version
+                SET served_model_name = :name
+                WHERE id = :id
+                """
+            ),
+            {"name": "actual-vllm-served-name", "id": str(seeded["version_id"])},
+        )
+        fake.containers[str(seeded["deployment_id"])] = {
+            "deployment_id": str(seeded["deployment_id"]),
+            "container_id": seeded["container_id"],
+            "runtime_status": "RUNNING",
+        }
+        op_id, _ = await _enqueue(
+            session,
+            deployment_id=seeded["deployment_id"],
+            operation_type=OperationType.START.value,
+            steps=[STEP_PROBE_INFERENCE],
+            desired_state=DesiredState.RUNNING.value,
+        )
+
+    assert (
+        await JobRunner(
+            settings=_m3b3_settings(),
+            session_factory=session_factory,
+            transport=transport,
+        ).poll_once()
+        is True
+    )
+
+    probe_calls = [
+        c
+        for c in fake.calls
+        if c["method"] == "POST" and str(c["path"]).endswith("/probe")
+    ]
+    assert len(probe_calls) == 1
+    body = probe_calls[0]["body"]
+    assert body["served_model_name"] == "actual-vllm-served-name"
+    assert body["served_model_name"] != "modelops-probe"
+    assert "modelops-probe" not in json.dumps(body)
+
+    async with session_factory() as session:
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        assert op.status == OperationStatus.SUCCEEDED.value
+
+
+@pytest.mark.asyncio
+async def test_start_then_health_timeout_keeps_runtime_running(db) -> None:
+    """START_CONTAINER success must persist RUNNING even if WAIT_HEALTH fails."""
+    fake = FakeNodeAgent()
+    fake.health_fail_times = 1000
+    transport = httpx.MockTransport(fake.handler)
+    session_factory = db
+
+    async with session_factory() as session:
+        seeded = await _seed_deployment(
+            session, runtime_status=RuntimeStatus.CREATED.value
+        )
+        dep_id = seeded["deployment_id"]
+        fake.containers[str(dep_id)] = {
+            "deployment_id": str(dep_id),
+            "container_id": f"ctr-start-health-fail-{seeded['suffix']}",
+            "runtime_status": "STOPPED",
+        }
+        op_id, _ = await _enqueue(
+            session,
+            deployment_id=dep_id,
+            operation_type=OperationType.START.value,
+            steps=[STEP_ENSURE_CONTAINER, STEP_START_CONTAINER, STEP_WAIT_HEALTH],
+            desired_state=DesiredState.RUNNING.value,
+            metadata={"health_timeout_seconds": 0.05},
+        )
+
+    await JobRunner(
+        settings=_m3b3_settings(
+            health_timeout_seconds=0.05, health_poll_interval_seconds=0.01
+        ),
+        session_factory=session_factory,
+        transport=transport,
+    ).poll_once()
+
+    async with session_factory() as session:
+        op = await session.get(Operation, op_id)
+        dep = await session.get(Deployment, dep_id)
+        assert op is not None and dep is not None
+        assert op.status == OperationStatus.FAILED.value
+        assert op.error_code == "HEALTH_TIMEOUT"
+        assert dep.desired_state == DesiredState.RUNNING.value
+        assert dep.runtime_status == RuntimeStatus.RUNNING.value
+        assert dep.container_id is not None
+        assert dep.last_started_at is not None
+        assert dep.health_status == "UNHEALTHY"
+
+
+@pytest.mark.asyncio
+async def test_start_then_probe_failure_keeps_runtime_running(db) -> None:
+    """Health success + probe failure must not roll runtime back from RUNNING."""
+    fake = FakeNodeAgent()
+    fake.probe_mode = "malformed"
+    transport = httpx.MockTransport(fake.handler)
+    session_factory = db
+
+    async with session_factory() as session:
+        seeded = await _seed_deployment(
+            session, runtime_status=RuntimeStatus.CREATED.value
+        )
+        dep_id = seeded["deployment_id"]
+        fake.containers[str(dep_id)] = {
+            "deployment_id": str(dep_id),
+            "container_id": f"ctr-start-probe-fail-{seeded['suffix']}",
+            "runtime_status": "STOPPED",
+        }
+        op_id, _ = await _enqueue(
+            session,
+            deployment_id=dep_id,
+            operation_type=OperationType.START.value,
+            steps=[
+                STEP_ENSURE_CONTAINER,
+                STEP_START_CONTAINER,
+                STEP_WAIT_HEALTH,
+                STEP_PROBE_INFERENCE,
+            ],
+            desired_state=DesiredState.RUNNING.value,
+            max_attempts=1,
+        )
+
+    await JobRunner(
+        settings=_m3b3_settings(worker_max_attempts=1),
+        session_factory=session_factory,
+        transport=transport,
+    ).poll_once()
+
+    async with session_factory() as session:
+        op = await session.get(Operation, op_id)
+        dep = await session.get(Deployment, dep_id)
+        assert op is not None and dep is not None
+        assert op.status == OperationStatus.FAILED.value
+        assert op.error_code == "PROBE_MALFORMED_RESPONSE"
+        assert dep.runtime_status == RuntimeStatus.RUNNING.value
+        assert dep.container_id is not None
+        assert dep.last_started_at is not None
+        assert dep.health_status == "UNHEALTHY"
+        assert dep.desired_state == DesiredState.RUNNING.value
+
+
+@pytest.mark.asyncio
+async def test_restart_then_health_timeout_keeps_runtime_running(db) -> None:
+    """RESTART_CONTAINER success must keep RUNNING after WAIT_HEALTH failure."""
+    fake = FakeNodeAgent()
+    fake.health_fail_times = 1000
+    transport = httpx.MockTransport(fake.handler)
+    session_factory = db
+
+    async with session_factory() as session:
+        seeded = await _seed_deployment(
+            session,
+            runtime_status=RuntimeStatus.RUNNING.value,
+            container_id=f"ctr-restart-health-{uuid.uuid4().hex[:8]}",
+        )
+        dep_id = seeded["deployment_id"]
+        fake.containers[str(dep_id)] = {
+            "deployment_id": str(dep_id),
+            "container_id": seeded["container_id"],
+            "runtime_status": "RUNNING",
+        }
+        op_id, _ = await _enqueue(
+            session,
+            deployment_id=dep_id,
+            operation_type=OperationType.RESTART.value,
+            steps=[STEP_RESTART_CONTAINER, STEP_WAIT_HEALTH],
+            desired_state=DesiredState.RUNNING.value,
+            metadata={"health_timeout_seconds": 0.05},
+        )
+
+    await JobRunner(
+        settings=_m3b3_settings(
+            health_timeout_seconds=0.05, health_poll_interval_seconds=0.01
+        ),
+        session_factory=session_factory,
+        transport=transport,
+    ).poll_once()
+
+    async with session_factory() as session:
+        op = await session.get(Operation, op_id)
+        dep = await session.get(Deployment, dep_id)
+        assert op is not None and dep is not None
+        assert op.status == OperationStatus.FAILED.value
+        assert op.error_code == "HEALTH_TIMEOUT"
+        assert dep.runtime_status == RuntimeStatus.RUNNING.value
+        assert dep.last_started_at is not None
+        assert dep.health_status == "UNHEALTHY"
+        assert dep.desired_state == DesiredState.RUNNING.value
+
+
+@pytest.mark.asyncio
+async def test_start_success_preserves_lifecycle_last_started_at(db) -> None:
+    """Final success must not overwrite last_started_at set at START_CONTAINER."""
+    fake = FakeNodeAgent()
+    transport = httpx.MockTransport(fake.handler)
+    session_factory = db
+
+    async with session_factory() as session:
+        seeded = await _seed_deployment(
+            session, runtime_status=RuntimeStatus.STOPPED.value
+        )
+        dep_id = seeded["deployment_id"]
+        fake.containers[str(dep_id)] = {
+            "deployment_id": str(dep_id),
+            "container_id": f"ctr-ts-preserve-{seeded['suffix']}",
+            "runtime_status": "STOPPED",
+        }
+        op_id, _ = await _enqueue(
+            session,
+            deployment_id=dep_id,
+            operation_type=OperationType.START.value,
+            steps=[
+                STEP_ENSURE_CONTAINER,
+                STEP_START_CONTAINER,
+                STEP_WAIT_HEALTH,
+                STEP_PROBE_INFERENCE,
+            ],
+            desired_state=DesiredState.RUNNING.value,
+        )
+
+    await JobRunner(
+        settings=_m3b3_settings(),
+        session_factory=session_factory,
+        transport=transport,
+    ).poll_once()
+
+    async with session_factory() as session:
+        op = await session.get(Operation, op_id)
+        dep = await session.get(Deployment, dep_id)
+        assert op is not None and dep is not None
+        assert op.status == OperationStatus.SUCCEEDED.value
+        assert dep.runtime_status == RuntimeStatus.RUNNING.value
+        assert dep.last_started_at is not None
+        assert op.finished_at is not None
+        # Lifecycle timestamp must be at/before operation finish, not overwritten later.
+        assert dep.last_started_at <= op.finished_at

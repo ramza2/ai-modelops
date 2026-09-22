@@ -17,6 +17,19 @@ from app.services.operation_executor import OperationExecutor
 
 logger = logging.getLogger(__name__)
 
+# Floor so tiny stale windows still get a positive heartbeat cadence.
+_MIN_HEARTBEAT_SECONDS = 0.05
+
+
+def heartbeat_interval_seconds(stale_seconds: float | int) -> float:
+    """Derive lease heartbeat period from the stale-recovery window.
+
+    Heartbeats must be substantially shorter than ``stale_seconds`` so another
+    Worker's ``recover_stale_jobs`` does not requeue a healthy long-running job.
+    """
+    stale = max(float(stale_seconds), 1.0)
+    return max(_MIN_HEARTBEAT_SECONDS, min(30.0, stale / 3.0))
+
 
 class JobRunner:
     def __init__(
@@ -46,10 +59,11 @@ class JobRunner:
 
     async def run_forever(self) -> None:
         logger.info(
-            "Worker %s starting (poll=%ss stale=%ss max_attempts=%s)",
+            "Worker %s starting (poll=%ss stale=%ss heartbeat=%ss max_attempts=%s)",
             self._settings.worker_id,
             self._settings.worker_poll_seconds,
             self._settings.worker_stale_seconds,
+            heartbeat_interval_seconds(self._settings.worker_stale_seconds),
             self._settings.worker_max_attempts,
         )
         while not self._stop_event.is_set():
@@ -80,6 +94,10 @@ class JobRunner:
             job_id = uuid.UUID(str(job.id))
 
         logger.info("Claimed job %s", job_id)
+        heartbeat = asyncio.create_task(
+            self._heartbeat_loop(job_id),
+            name=f"job-lease-heartbeat-{job_id}",
+        )
         try:
             await self._executor.execute(job_id)
         except Exception:  # noqa: BLE001 - keep loop alive
@@ -96,4 +114,54 @@ class JobRunner:
                         code="WORKER_INTERNAL_ERROR",
                         message="Unhandled worker exception during execution.",
                     )
+        finally:
+            await self._stop_heartbeat(heartbeat)
         return True
+
+    async def _heartbeat_loop(self, job_id: uuid.UUID) -> None:
+        interval = heartbeat_interval_seconds(self._settings.worker_stale_seconds)
+        worker_id = self._settings.worker_id
+        while True:
+            try:
+                await asyncio.sleep(interval)
+            except asyncio.CancelledError:
+                raise
+            try:
+                async with self._session_factory() as session:
+                    repo = OperationJobRepository(session)
+                    refreshed = await repo.heartbeat_job_lease(
+                        job_id, worker_id=worker_id
+                    )
+                if not refreshed:
+                    logger.info(
+                        "Stopping lease heartbeat for job %s "
+                        "(no longer RUNNING for worker %s).",
+                        job_id,
+                        worker_id,
+                    )
+                    return
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - never fail the Operation path
+                logger.exception(
+                    "Lease heartbeat failed for job %s (worker=%s); will retry.",
+                    job_id,
+                    worker_id,
+                )
+
+    @staticmethod
+    async def _stop_heartbeat(task: asyncio.Task[None]) -> None:
+        if task.done():
+            # Drain exception so it is not reported as "Task exception was never retrieved".
+            try:
+                task.result()
+            except Exception:  # noqa: BLE001
+                logger.exception("Lease heartbeat task ended with an error.")
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception:  # noqa: BLE001
+            logger.exception("Lease heartbeat task ended with an error during cancel.")

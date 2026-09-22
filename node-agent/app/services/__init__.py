@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import time
 from dataclasses import asdict
 from datetime import UTC, datetime
 from typing import Any
@@ -10,6 +12,7 @@ from app.adapters.docker_adapter import DockerAdapter
 from app.adapters.host import HostAdapter
 from app.adapters.nvml import NvmlAdapter
 from app.core.config import get_settings
+from app.core.errors import ValidationError, VramNotReleasedError
 
 
 class NodeService:
@@ -27,6 +30,10 @@ class NodeService:
     @property
     def docker(self) -> DockerAdapter:
         return self._docker
+
+    @property
+    def nvml(self) -> NvmlAdapter:
+        return self._nvml
 
     def node_payload(self) -> dict[str, Any]:
         info = self._host.get_info()
@@ -75,6 +82,72 @@ class NodeService:
                 for g in gpus
             ],
         }
+
+    async def wait_vram_release(
+        self,
+        *,
+        gpu_device_indices: list[int],
+        minimum_free_vram_mb: int,
+        timeout_seconds: float = 60.0,
+        poll_interval_ms: int = 1000,
+    ) -> dict[str, Any]:
+        """Poll per-GPU free VRAM until each requested device meets threshold.
+
+        GPUs are evaluated independently — free VRAM is never pooled across devices.
+        Uses ``asyncio.sleep`` so the FastAPI event loop stays responsive.
+        """
+        if not gpu_device_indices:
+            raise ValidationError(
+                "gpu_device_indices must not be empty.",
+                details={"field": "gpu_device_indices"},
+            )
+        if minimum_free_vram_mb < 0:
+            raise ValidationError(
+                "minimum_free_vram_mb must be >= 0.",
+                details={"field": "minimum_free_vram_mb"},
+            )
+        timeout_seconds = max(0.0, float(timeout_seconds))
+        poll_seconds = max(0.05, float(poll_interval_ms) / 1000.0)
+        started = time.perf_counter()
+        deadline = started + timeout_seconds
+        last_gpus: list[dict[str, Any]] = []
+
+        while True:
+            snapshots = {g.device_index: g for g in self._nvml.list_gpus()}
+            last_gpus = []
+            all_ok = True
+            for index in gpu_device_indices:
+                snap = snapshots.get(index)
+                free_mb = snap.vram_free_mb if snap is not None else None
+                last_gpus.append(
+                    {
+                        "device_index": index,
+                        "free_vram_mb": free_mb,
+                        "required_free_vram_mb": minimum_free_vram_mb,
+                    }
+                )
+                if free_mb is None or free_mb < minimum_free_vram_mb:
+                    all_ok = False
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            if all_ok:
+                return {
+                    "released": True,
+                    "gpus": last_gpus,
+                    "elapsed_ms": elapsed_ms,
+                }
+            if time.perf_counter() >= deadline:
+                raise VramNotReleasedError(
+                    "Timed out waiting for GPU VRAM release.",
+                    details={
+                        "gpus": last_gpus,
+                        "elapsed_ms": elapsed_ms,
+                        "minimum_free_vram_mb": minimum_free_vram_mb,
+                    },
+                )
+            remaining = deadline - time.perf_counter()
+            if remaining <= 0:
+                continue
+            await asyncio.sleep(min(poll_seconds, remaining))
 
     def readiness(self) -> dict[str, Any]:
         docker = self._docker.status()
