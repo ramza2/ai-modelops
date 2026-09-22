@@ -199,6 +199,7 @@ revision/runtime/quantization 변경이 필요하면 새 Model Version을 생성
 ```
 
 `artifact_type` 허용값: `MODEL` | `TOKENIZER` | `PROCESSOR` | `OTHER`
+
 ### GET /nodes/{node_id}/model-cache
 
 Node별 준비 상태 조회.
