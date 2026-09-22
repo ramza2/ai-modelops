@@ -1,2 +1,4 @@
-# Worker package (Milestone 3B-1: runtime adapters only)
+# Worker development and test dependencies
+-r requirements.txt
 pytest==8.3.4
+pytest-asyncio==0.25.0

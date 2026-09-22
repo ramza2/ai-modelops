@@ -1,0 +1,855 @@
+"""Milestone 3B-2 Worker claim / executor tests with Fake Node Agent."""
+
+from __future__ import annotations
+
+import datetime as dt
+import json
+import os
+import uuid
+from typing import Any
+
+import httpx
+import pytest
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+from app.core.config import Settings
+from app.core.db import Base
+from app.core.enums import (
+    DesiredState,
+    JobStatus,
+    OperationStatus,
+    OperationType,
+    RuntimeStatus,
+    StepStatus,
+)
+from app.domain.models import Deployment, Node, Operation, OperationJob, OperationStep
+from app.repositories.operations import OperationJobRepository
+from app.services.job_runner import JobRunner
+from app.services.operation_executor import (
+    STEP_ENSURE_CONTAINER,
+    STEP_REMOVE_CONTAINER,
+    STEP_RESTART_CONTAINER,
+    STEP_START_CONTAINER,
+    STEP_STOP_CONTAINER,
+    OperationExecutor,
+)
+
+
+def _database_url() -> str:
+    return os.environ.get(
+        "MODELOPS_DATABASE_URL",
+        "postgresql+asyncpg://modelops:modelops@localhost:5432/modelops",
+    )
+
+
+class FakeNodeAgent:
+    """In-memory Node Agent behavior for Worker tests."""
+
+    def __init__(self) -> None:
+        self.containers: dict[str, dict[str, Any]] = {}
+        self.calls: list[dict[str, Any]] = []
+        self.fail_next: dict[str, list[httpx.Response | Exception]] = {}
+        self.restart_fail_times = 0
+
+    def _record(self, method: str, path: str, headers: httpx.Headers, body: Any) -> None:
+        self.calls.append(
+            {
+                "method": method,
+                "path": path,
+                "headers": {
+                    "X-Operation-ID": headers.get("X-Operation-ID"),
+                    "X-Step-ID": headers.get("X-Step-ID"),
+                    "X-Request-ID": headers.get("X-Request-ID"),
+                },
+                "body": body,
+            }
+        )
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        method = request.method.upper()
+        path = request.url.path
+        body = None
+        if request.content:
+            try:
+                body = json.loads(request.content.decode())
+            except json.JSONDecodeError:
+                body = None
+        self._record(method, path, request.headers, body)
+
+        key = f"{method} {path}"
+        queued = self.fail_next.get(key) or self.fail_next.get(method)
+        if queued:
+            item = queued.pop(0)
+            if isinstance(item, Exception):
+                raise item
+            return item
+
+        parts = path.strip("/").split("/")
+        # /internal/v1/deployments/{id}[...]
+        if len(parts) < 4 or parts[0] != "internal":
+            return httpx.Response(404, json={"error": {"code": "NOT_FOUND", "message": "no"}})
+
+        deployment_id = parts[3]
+        action = parts[4] if len(parts) > 4 else None
+
+        if method == "GET" and action is None:
+            ctr = self.containers.get(deployment_id)
+            if ctr is None:
+                return httpx.Response(
+                    404,
+                    json={
+                        "error": {
+                            "code": "CONTAINER_NOT_FOUND",
+                            "message": "not found",
+                        }
+                    },
+                )
+            return httpx.Response(200, json=ctr)
+
+        if method == "POST" and action == "create":
+            if deployment_id in self.containers:
+                return httpx.Response(200, json=self.containers[deployment_id])
+            ctr = {
+                "deployment_id": deployment_id,
+                "container_id": f"ctr-{uuid.uuid4().hex[:12]}",
+                "container_name": (body or {}).get("container_name"),
+                "runtime_status": "CREATED",
+            }
+            self.containers[deployment_id] = ctr
+            return httpx.Response(201, json=ctr)
+
+        if method == "POST" and action == "start":
+            ctr = self.containers.get(deployment_id)
+            if ctr is None:
+                return httpx.Response(
+                    404,
+                    json={
+                        "error": {
+                            "code": "CONTAINER_NOT_FOUND",
+                            "message": "missing",
+                        }
+                    },
+                )
+            ctr["runtime_status"] = "RUNNING"
+            return httpx.Response(200, json=ctr)
+
+        if method == "POST" and action == "stop":
+            ctr = self.containers.get(deployment_id)
+            if ctr is None:
+                return httpx.Response(
+                    404,
+                    json={
+                        "error": {
+                            "code": "CONTAINER_NOT_FOUND",
+                            "message": "missing",
+                        }
+                    },
+                )
+            ctr["runtime_status"] = "STOPPED"
+            return httpx.Response(200, json=ctr)
+
+        if method == "POST" and action == "restart":
+            ctr = self.containers.get(deployment_id)
+            if ctr is None:
+                return httpx.Response(
+                    404,
+                    json={
+                        "error": {
+                            "code": "CONTAINER_NOT_FOUND",
+                            "message": "missing",
+                        }
+                    },
+                )
+            ctr["runtime_status"] = "RUNNING"
+            return httpx.Response(200, json=ctr)
+
+        if method == "DELETE" and action is None:
+            ctr = self.containers.get(deployment_id)
+            if ctr is None:
+                return httpx.Response(
+                    404,
+                    json={
+                        "error": {
+                            "code": "CONTAINER_NOT_FOUND",
+                            "message": "missing",
+                        }
+                    },
+                )
+            if ctr.get("runtime_status") == "RUNNING":
+                return httpx.Response(
+                    409,
+                    json={
+                        "error": {
+                            "code": "CONTAINER_CONFLICT",
+                            "message": "running",
+                        }
+                    },
+                )
+            del self.containers[deployment_id]
+            return httpx.Response(204)
+
+        return httpx.Response(
+            404, json={"error": {"code": "NOT_FOUND", "message": path}}
+        )
+
+
+@pytest.fixture
+def anyio_backend() -> str:
+    return "asyncio"
+
+
+@pytest.fixture
+async def db():
+    engine = create_async_engine(_database_url(), future=True)
+    session_factory = async_sessionmaker(
+        engine, expire_on_commit=False, autoflush=False
+    )
+    # Ensure worker Base metadata is aware (tables already exist via Alembic).
+    _ = Base.metadata
+    yield session_factory
+    await engine.dispose()
+
+
+async def _clear_queue(session: AsyncSession) -> None:
+    """Prevent leftover QUEUED/RUNNING jobs from other tests interfering."""
+    await session.execute(
+        __import__("sqlalchemy").text(
+            """
+            UPDATE operation_job
+            SET status = 'DONE',
+                locked_by = NULL,
+                locked_at = NULL,
+                available_at = now() + interval '1 day',
+                updated_at = now()
+            WHERE status IN ('QUEUED', 'RUNNING')
+            """
+        )
+    )
+    await session.execute(
+        __import__("sqlalchemy").text(
+            """
+            UPDATE operation
+            SET status = 'CANCELLED',
+                finished_at = COALESCE(finished_at, now())
+            WHERE status IN ('QUEUED', 'RUNNING', 'ROLLING_BACK')
+            """
+        )
+    )
+    await session.commit()
+
+
+async def _seed_deployment(
+    session: AsyncSession,
+    *,
+    with_model_path: bool = True,
+    runtime_status: str = RuntimeStatus.CREATED.value,
+    container_id: str | None = None,
+) -> dict[str, Any]:
+    await _clear_queue(session)
+    suffix = uuid.uuid4().hex[:8]
+    node = Node(id=uuid.uuid4(), agent_base_url="http://node-agent.test")
+    # Node table requires more columns — insert via raw SQL-compatible full row.
+    await session.execute(
+        __import__("sqlalchemy").text(
+            """
+            INSERT INTO node (
+              id, name, hostname, agent_base_url, environment, status, labels_json
+            ) VALUES (
+              :id, :name, :hostname, :url, 'local', 'ONLINE', '{}'::jsonb
+            )
+            """
+        ),
+        {
+            "id": str(node.id),
+            "name": f"w-node-{suffix}",
+            "hostname": f"w-host-{suffix}",
+            "url": "http://node-agent.test",
+        },
+    )
+    model_id = uuid.uuid4()
+    await session.execute(
+        __import__("sqlalchemy").text(
+            """
+            INSERT INTO model (id, slug, name, model_type, source_type)
+            VALUES (:id, :slug, :name, 'LLM', 'LOCAL')
+            """
+        ),
+        {
+            "id": str(model_id),
+            "slug": f"w-model-{suffix}",
+            "name": f"W Model {suffix}",
+        },
+    )
+    version_id = uuid.uuid4()
+    await session.execute(
+        __import__("sqlalchemy").text(
+            """
+            INSERT INTO model_version (
+              id, model_id, version_label, runtime_type, runtime_image,
+              served_model_name, runtime_config_json
+            ) VALUES (
+              :id, :model_id, 'v1', 'GENERIC_OPENAI', 'busybox:1.36',
+              'served', '{}'::jsonb
+            )
+            """
+        ),
+        {"id": str(version_id), "model_id": str(model_id)},
+    )
+    deployment_id = uuid.uuid4()
+    cfg: dict[str, Any] = {
+        "entrypoint": ["sleep", "3600"],
+        "network_names": ["bridge"],
+    }
+    if with_model_path:
+        cfg["model_path"] = "/tmp/models/placeholder"
+    await session.execute(
+        __import__("sqlalchemy").text(
+            """
+            INSERT INTO deployment (
+              id, name, model_version_id, node_id, deployment_type,
+              desired_state, runtime_status, health_status,
+              container_id, container_name, upstream_base_url, runtime_port,
+              deployment_config_json
+            ) VALUES (
+              :id, :name, :version_id, :node_id, 'MANAGED',
+              'STOPPED', :runtime_status, 'UNKNOWN',
+              :container_id, :container_name, :upstream, 8080,
+              CAST(:cfg AS jsonb)
+            )
+            """
+        ),
+        {
+            "id": str(deployment_id),
+            "name": f"w-dep-{suffix}",
+            "version_id": str(version_id),
+            "node_id": str(node.id),
+            "runtime_status": runtime_status,
+            "container_id": container_id,
+            "container_name": f"w-ctr-{suffix}",
+            "upstream": f"http://w-ctr-{suffix}:8080",
+            "cfg": json.dumps(cfg),
+        },
+    )
+    await session.commit()
+    return {
+        "deployment_id": deployment_id,
+        "node_id": node.id,
+        "model_id": model_id,
+        "version_id": version_id,
+        "suffix": suffix,
+        "container_name": f"w-ctr-{suffix}",
+        "container_id": container_id,
+    }
+
+
+async def _enqueue(
+    session: AsyncSession,
+    *,
+    deployment_id: uuid.UUID,
+    operation_type: str,
+    steps: list[str],
+    desired_state: str,
+    max_attempts: int = 3,
+) -> tuple[uuid.UUID, uuid.UUID]:
+    now = dt.datetime.now(tz=dt.UTC)
+    op_id = uuid.uuid4()
+    job_id = uuid.uuid4()
+    await session.execute(
+        __import__("sqlalchemy").text(
+            """
+            UPDATE deployment SET desired_state = :desired, updated_at = now()
+            WHERE id = :id
+            """
+        ),
+        {"desired": desired_state, "id": str(deployment_id)},
+    )
+    session.add(
+        Operation(
+            id=op_id,
+            operation_type=operation_type,
+            status=OperationStatus.QUEUED.value,
+            target_deployment_id=deployment_id,
+            metadata_json={},
+        )
+    )
+    for seq, code in enumerate(steps, start=1):
+        session.add(
+            OperationStep(
+                id=uuid.uuid4(),
+                operation_id=op_id,
+                sequence_no=seq,
+                step_code=code,
+                status=StepStatus.PENDING.value,
+                attempt_no=1,
+                detail_json={},
+            )
+        )
+    session.add(
+        OperationJob(
+            id=job_id,
+            operation_id=op_id,
+            status=JobStatus.QUEUED.value,
+            priority=100,
+            attempt_count=0,
+            max_attempts=max_attempts,
+            available_at=now,
+        )
+    )
+    await session.commit()
+    return op_id, job_id
+
+
+@pytest.mark.asyncio
+async def test_claim_skip_locked_and_future_available(db) -> None:
+    session_factory = db
+    async with session_factory() as session:
+        seeded = await _seed_deployment(session)
+        op_id, job_id = await _enqueue(
+            session,
+            deployment_id=seeded["deployment_id"],
+            operation_type=OperationType.STOP.value,
+            steps=[STEP_STOP_CONTAINER],
+            desired_state=DesiredState.STOPPED.value,
+        )
+        future = await _enqueue(
+            session,
+            deployment_id=seeded["deployment_id"],
+            operation_type=OperationType.START.value,
+            steps=[STEP_ENSURE_CONTAINER, STEP_START_CONTAINER],
+            desired_state=DesiredState.RUNNING.value,
+        )
+        # Make second job unavailable + force first active conflict isn't needed —
+        # mark first succeeded conceptually by making second available_at far future
+        # and ensure claim ignores it. Also set first job's sibling:
+        job2 = await session.get(OperationJob, future[1])
+        assert job2 is not None
+        job2.available_at = dt.datetime.now(tz=dt.UTC) + dt.timedelta(hours=1)
+        # Cancel first operation uniqueness: only one job claimable — delete first op's
+        # conflict by completing first job claim path separately.
+        # Actually both target same deployment — for claim test only job availability matters.
+        # Mark first operation as different deployment to avoid confusion — skip.
+        # Instead mark job1 as the only available by setting job2 future (done).
+        # But we have two jobs both QUEUED — first has available_at now.
+        await session.commit()
+
+    async with session_factory() as s1, session_factory() as s2:
+        r1 = OperationJobRepository(s1)
+        r2 = OperationJobRepository(s2)
+        j1 = await r1.claim_next_job(worker_id="w1")
+        j2 = await r2.claim_next_job(worker_id="w2")
+        assert j1 is not None
+        assert uuid.UUID(str(j1.id)) == job_id
+        # Second claim must not take the future job.
+        assert j2 is None
+
+    # Stale recovery
+    async with session_factory() as session:
+        job = await session.get(OperationJob, job_id)
+        assert job is not None
+        job.status = JobStatus.RUNNING.value
+        job.locked_by = "dead-worker"
+        job.locked_at = dt.datetime.now(tz=dt.UTC) - dt.timedelta(seconds=120)
+        await session.commit()
+
+    async with session_factory() as session:
+        repo = OperationJobRepository(session)
+        recovered = await repo.recover_stale_jobs(stale_seconds=60)
+        assert recovered >= 1
+        job = await session.get(OperationJob, job_id)
+        assert job is not None
+        assert job.status == JobStatus.QUEUED.value
+
+
+@pytest.mark.asyncio
+async def test_start_existing_stopped_and_idempotent_running(db) -> None:
+    fake = FakeNodeAgent()
+    transport = httpx.MockTransport(fake.handler)
+    session_factory = db
+    settings = Settings(
+        worker_id="test-worker",
+        worker_poll_seconds=0.01,
+        worker_max_attempts=3,
+        worker_stale_seconds=60,
+        node_agent_token="",
+    )
+
+    async with session_factory() as session:
+        seeded = await _seed_deployment(
+            session, runtime_status=RuntimeStatus.STOPPED.value
+        )
+        dep_id = seeded["deployment_id"]
+        fake.containers[str(dep_id)] = {
+            "deployment_id": str(dep_id),
+            "container_id": f"ctr-existing-{seeded['suffix']}",
+            "runtime_status": "STOPPED",
+        }
+        op_id, _ = await _enqueue(
+            session,
+            deployment_id=dep_id,
+            operation_type=OperationType.START.value,
+            steps=[STEP_ENSURE_CONTAINER, STEP_START_CONTAINER],
+            desired_state=DesiredState.RUNNING.value,
+        )
+
+    runner = JobRunner(
+        settings=settings, session_factory=session_factory, transport=transport
+    )
+    assert await runner.poll_once() is True
+
+    async with session_factory() as session:
+        op = await session.get(Operation, op_id)
+        dep = await session.get(Deployment, dep_id)
+        assert op is not None and dep is not None
+        assert op.status == OperationStatus.SUCCEEDED.value
+        assert dep.runtime_status == RuntimeStatus.RUNNING.value
+        assert dep.desired_state == DesiredState.RUNNING.value
+        assert dep.container_id == f"ctr-existing-{seeded['suffix']}"
+        assert dep.last_started_at is not None
+
+    # Idempotent start when already RUNNING
+    async with session_factory() as session:
+        fake.containers[str(dep_id)]["runtime_status"] = "RUNNING"
+        op2, _ = await _enqueue(
+            session,
+            deployment_id=dep_id,
+            operation_type=OperationType.START.value,
+            steps=[STEP_ENSURE_CONTAINER, STEP_START_CONTAINER],
+            desired_state=DesiredState.RUNNING.value,
+        )
+    assert await runner.poll_once() is True
+    async with session_factory() as session:
+        op = await session.get(Operation, op2)
+        assert op is not None
+        assert op.status == OperationStatus.SUCCEEDED.value
+
+    # Headers present on mutation calls
+    mut = [c for c in fake.calls if c["method"] in {"POST", "DELETE"}]
+    assert mut
+    for c in mut:
+        assert c["headers"]["X-Operation-ID"]
+        assert c["headers"]["X-Step-ID"]
+        assert c["headers"]["X-Request-ID"]
+
+
+@pytest.mark.asyncio
+async def test_start_create_when_missing_and_fail_without_model_path(db) -> None:
+    fake = FakeNodeAgent()
+    transport = httpx.MockTransport(fake.handler)
+    session_factory = db
+    settings = Settings(worker_id="w-create", worker_poll_seconds=0.01)
+
+    async with session_factory() as session:
+        seeded = await _seed_deployment(session, with_model_path=True)
+        dep_id = seeded["deployment_id"]
+        op_id, _ = await _enqueue(
+            session,
+            deployment_id=dep_id,
+            operation_type=OperationType.START.value,
+            steps=[STEP_ENSURE_CONTAINER, STEP_START_CONTAINER],
+            desired_state=DesiredState.RUNNING.value,
+        )
+    runner = JobRunner(
+        settings=settings, session_factory=session_factory, transport=transport
+    )
+    assert await runner.poll_once() is True
+    async with session_factory() as session:
+        op = await session.get(Operation, op_id)
+        dep = await session.get(Deployment, dep_id)
+        assert op is not None and dep is not None
+        assert op.status == OperationStatus.SUCCEEDED.value
+        assert str(dep_id) in fake.containers
+        assert dep.runtime_status == RuntimeStatus.RUNNING.value
+
+    # Missing model_path → FAILED, runtime stays non-RUNNING
+    async with session_factory() as session:
+        seeded2 = await _seed_deployment(session, with_model_path=False)
+        dep2 = seeded2["deployment_id"]
+        op2, _ = await _enqueue(
+            session,
+            deployment_id=dep2,
+            operation_type=OperationType.START.value,
+            steps=[STEP_ENSURE_CONTAINER, STEP_START_CONTAINER],
+            desired_state=DesiredState.RUNNING.value,
+        )
+    assert await runner.poll_once() is True
+    async with session_factory() as session:
+        op = await session.get(Operation, op2)
+        dep = await session.get(Deployment, dep2)
+        steps = (
+            await session.execute(
+                select(OperationStep).where(OperationStep.operation_id == op2)
+            )
+        ).scalars().all()
+        assert op is not None and dep is not None
+        assert op.status == OperationStatus.FAILED.value
+        assert op.error_code == "CREATE_SPEC_UNAVAILABLE"
+        assert dep.runtime_status != RuntimeStatus.RUNNING.value
+        assert any(s.status == StepStatus.FAILED.value for s in steps)
+
+
+@pytest.mark.asyncio
+async def test_stop_restart_remove_and_retry(db) -> None:
+    fake = FakeNodeAgent()
+    transport = httpx.MockTransport(fake.handler)
+    session_factory = db
+    settings = Settings(
+        worker_id="w-lifecycle",
+        worker_poll_seconds=0.01,
+        worker_max_attempts=3,
+    )
+    runner = JobRunner(
+        settings=settings, session_factory=session_factory, transport=transport
+    )
+
+    async with session_factory() as session:
+        seeded = await _seed_deployment(
+            session,
+            runtime_status=RuntimeStatus.RUNNING.value,
+            container_id=f"ctr-{uuid.uuid4().hex[:12]}",
+        )
+        dep_id = seeded["deployment_id"]
+        ctr_id = seeded["container_id"] or f"ctr-{seeded['suffix']}"
+        fake.containers[str(dep_id)] = {
+            "deployment_id": str(dep_id),
+            "container_id": ctr_id,
+            "runtime_status": "RUNNING",
+        }
+        op_stop, _ = await _enqueue(
+            session,
+            deployment_id=dep_id,
+            operation_type=OperationType.STOP.value,
+            steps=[STEP_STOP_CONTAINER],
+            desired_state=DesiredState.STOPPED.value,
+        )
+    assert await runner.poll_once() is True
+    async with session_factory() as session:
+        op = await session.get(Operation, op_stop)
+        dep = await session.get(Deployment, dep_id)
+        assert op is not None and dep is not None
+        assert op.status == OperationStatus.SUCCEEDED.value
+        assert dep.runtime_status == RuntimeStatus.STOPPED.value
+        assert dep.last_stopped_at is not None
+
+    # already STOPPED stop
+    async with session_factory() as session:
+        op_stop2, _ = await _enqueue(
+            session,
+            deployment_id=dep_id,
+            operation_type=OperationType.STOP.value,
+            steps=[STEP_STOP_CONTAINER],
+            desired_state=DesiredState.STOPPED.value,
+        )
+    assert await runner.poll_once() is True
+    async with session_factory() as session:
+        assert (await session.get(Operation, op_stop2)).status == OperationStatus.SUCCEEDED.value
+
+    # restart with temporary 502 then success
+    async with session_factory() as session:
+        fake.containers[str(dep_id)]["runtime_status"] = "STOPPED"
+        path = f"/internal/v1/deployments/{dep_id}/restart"
+        fake.fail_next[f"POST {path}"] = [
+            httpx.Response(
+                502,
+                json={"error": {"code": "BAD_GATEWAY", "message": "temp"}},
+            )
+        ]
+        op_restart, job_restart = await _enqueue(
+            session,
+            deployment_id=dep_id,
+            operation_type=OperationType.RESTART.value,
+            steps=[STEP_RESTART_CONTAINER],
+            desired_state=DesiredState.RUNNING.value,
+            max_attempts=3,
+        )
+    assert await runner.poll_once() is True
+    async with session_factory() as session:
+        job = await session.get(OperationJob, job_restart)
+        op = await session.get(Operation, op_restart)
+        assert job is not None and op is not None
+        assert job.status == JobStatus.QUEUED.value
+        assert op.status == OperationStatus.RUNNING.value
+        # Make immediately available for next poll
+        job.available_at = dt.datetime.now(tz=dt.UTC) - dt.timedelta(seconds=1)
+        await session.commit()
+    assert await runner.poll_once() is True
+    async with session_factory() as session:
+        op = await session.get(Operation, op_restart)
+        dep = await session.get(Deployment, dep_id)
+        assert op is not None and dep is not None
+        assert op.status == OperationStatus.SUCCEEDED.value
+        assert dep.runtime_status == RuntimeStatus.RUNNING.value
+
+    # restart exhaustion
+    async with session_factory() as session:
+        path = f"/internal/v1/deployments/{dep_id}/restart"
+        fake.fail_next[f"POST {path}"] = [
+            httpx.Response(502, json={"error": {"code": "BAD_GATEWAY", "message": "x"}}),
+            httpx.Response(502, json={"error": {"code": "BAD_GATEWAY", "message": "x"}}),
+            httpx.Response(502, json={"error": {"code": "BAD_GATEWAY", "message": "x"}}),
+        ]
+        op_fail, job_fail = await _enqueue(
+            session,
+            deployment_id=dep_id,
+            operation_type=OperationType.RESTART.value,
+            steps=[STEP_RESTART_CONTAINER],
+            desired_state=DesiredState.RUNNING.value,
+            max_attempts=2,
+        )
+    # attempt 1 fails → requeue; attempt 2 fails → FAILED
+    assert await runner.poll_once() is True
+    async with session_factory() as session:
+        job = await session.get(OperationJob, job_fail)
+        assert job is not None
+        job.available_at = dt.datetime.now(tz=dt.UTC) - dt.timedelta(seconds=1)
+        await session.commit()
+    assert await runner.poll_once() is True
+    async with session_factory() as session:
+        op = await session.get(Operation, op_fail)
+        job = await session.get(OperationJob, job_fail)
+        assert op is not None and job is not None
+        assert op.status == OperationStatus.FAILED.value
+        assert job.status == JobStatus.FAILED.value
+
+    # remove: stop then remove (container currently RUNNING from last success)
+    async with session_factory() as session:
+        # Force running for remove path that stops first
+        fake.containers[str(dep_id)] = {
+            "deployment_id": str(dep_id),
+            "container_id": ctr_id,
+            "runtime_status": "RUNNING",
+        }
+        await session.execute(
+            __import__("sqlalchemy").text(
+                "UPDATE deployment SET runtime_status='RUNNING' WHERE id=:id"
+            ),
+            {"id": str(dep_id)},
+        )
+        await session.commit()
+        op_rm, _ = await _enqueue(
+            session,
+            deployment_id=dep_id,
+            operation_type=OperationType.DELETE.value,
+            steps=[STEP_STOP_CONTAINER, STEP_REMOVE_CONTAINER],
+            desired_state=DesiredState.REMOVED.value,
+        )
+    assert await runner.poll_once() is True
+    async with session_factory() as session:
+        op = await session.get(Operation, op_rm)
+        dep = await session.get(Deployment, dep_id)
+        assert op is not None and dep is not None
+        assert op.status == OperationStatus.SUCCEEDED.value
+        assert dep.desired_state == DesiredState.REMOVED.value
+        assert dep.runtime_status == RuntimeStatus.STOPPED.value
+        assert dep.container_id is None
+        assert str(dep_id) not in fake.containers
+
+
+@pytest.mark.asyncio
+async def test_422_is_immediate_failure_not_retry(db) -> None:
+    fake = FakeNodeAgent()
+    transport = httpx.MockTransport(fake.handler)
+    session_factory = db
+    settings = Settings(worker_id="w-422", worker_max_attempts=3)
+    runner = JobRunner(
+        settings=settings, session_factory=session_factory, transport=transport
+    )
+
+    async with session_factory() as session:
+        seeded = await _seed_deployment(session)
+        dep_id = seeded["deployment_id"]
+        fake.containers[str(dep_id)] = {
+            "deployment_id": str(dep_id),
+            "container_id": f"ctr-422-{seeded['suffix']}",
+            "runtime_status": "STOPPED",
+        }
+        path = f"/internal/v1/deployments/{dep_id}/start"
+        fake.fail_next[f"POST {path}"] = [
+            httpx.Response(
+                422,
+                json={
+                    "error": {
+                        "code": "VALIDATION_ERROR",
+                        "message": "bad",
+                    }
+                },
+            )
+        ]
+        op_id, job_id = await _enqueue(
+            session,
+            deployment_id=dep_id,
+            operation_type=OperationType.START.value,
+            steps=[STEP_ENSURE_CONTAINER, STEP_START_CONTAINER],
+            desired_state=DesiredState.RUNNING.value,
+        )
+    assert await runner.poll_once() is True
+    async with session_factory() as session:
+        op = await session.get(Operation, op_id)
+        job = await session.get(OperationJob, job_id)
+        assert op is not None and job is not None
+        assert op.status == OperationStatus.FAILED.value
+        assert job.status == JobStatus.FAILED.value
+        # Should not have been requeued
+        assert job.attempt_count == 1
+
+
+@pytest.mark.asyncio
+async def test_advisory_lock_requeues_without_failing(db) -> None:
+    fake = FakeNodeAgent()
+    transport = httpx.MockTransport(fake.handler)
+    session_factory = db
+    settings = Settings(
+        worker_id="w-lock",
+        worker_lock_requeue_seconds=0.01,
+        worker_poll_seconds=0.01,
+    )
+
+    async with session_factory() as session:
+        seeded = await _seed_deployment(session)
+        dep_id = seeded["deployment_id"]
+        fake.containers[str(dep_id)] = {
+            "deployment_id": str(dep_id),
+            "container_id": f"ctr-lock-{seeded['suffix']}",
+            "runtime_status": "STOPPED",
+        }
+        op_id, job_id = await _enqueue(
+            session,
+            deployment_id=dep_id,
+            operation_type=OperationType.STOP.value,
+            steps=[STEP_STOP_CONTAINER],
+            desired_state=DesiredState.STOPPED.value,
+        )
+
+    # Hold advisory lock on another connection while executor runs.
+    async with session_factory() as lock_session:
+        repo_lock = OperationJobRepository(lock_session)
+        assert await repo_lock.try_advisory_lock(dep_id) is True
+
+        runner = JobRunner(
+            settings=settings, session_factory=session_factory, transport=transport
+        )
+        # Claim first
+        async with session_factory() as session:
+            repo = OperationJobRepository(session)
+            job = await repo.claim_next_job(worker_id="w-lock")
+            assert job is not None
+
+        executor = OperationExecutor(
+            session_factory=session_factory,
+            settings=settings,
+            transport=transport,
+        )
+        await executor.execute(job_id)
+
+        async with session_factory() as session:
+            job = await session.get(OperationJob, job_id)
+            op = await session.get(Operation, op_id)
+            assert job is not None and op is not None
+            assert job.status == JobStatus.QUEUED.value
+            assert op.status in {
+                OperationStatus.QUEUED.value,
+                OperationStatus.RUNNING.value,
+            }
+            assert job.last_error and "advisory lock" in job.last_error.lower()
+
+        await repo_lock.advisory_unlock(dep_id)

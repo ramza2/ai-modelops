@@ -1,1 +1,1 @@
-"""Worker package root (Milestone 3B-1: runtime adapters only)."""
+"""Worker package root (Milestone 3B-2: Operation job orchestration)."""

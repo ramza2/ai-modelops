@@ -1,0 +1,6 @@
+# Worker runtime dependencies (Milestone 3B-2)
+SQLAlchemy[asyncio]==2.0.36
+asyncpg==0.30.0
+httpx==0.28.1
+pydantic==2.10.4
+pydantic-settings==2.7.1
