@@ -653,10 +653,13 @@ class OperationExecutor:
         timeout = float(
             meta.get("probe_timeout_seconds") or self._settings.probe_timeout_seconds
         )
-        probe_type, health_path = await self._probe_settings(session, deployment)
+        probe_type, health_path, served_model_name = await self._probe_settings(
+            session, deployment
+        )
         result = await client.probe_inference(
             str(deployment.id),
             mutation=mutation,
+            served_model_name=served_model_name,
             probe_type=probe_type,
             timeout_seconds=timeout,
             health_path=health_path,
@@ -872,7 +875,7 @@ class OperationExecutor:
 
     async def _probe_settings(
         self, session: AsyncSession, deployment: Deployment
-    ) -> tuple[str, str]:
+    ) -> tuple[str, str, str]:
         version = await session.get(ModelVersion, deployment.model_version_id)
         if version is None:
             raise PermanentStepError(
@@ -885,6 +888,12 @@ class OperationExecutor:
                 f"Unsupported runtime_type: {version.runtime_type}",
                 code="UNSUPPORTED_RUNTIME",
             )
+        served = (version.served_model_name or "").strip()
+        if not served:
+            raise PermanentStepError(
+                "Model version is missing served_model_name.",
+                code="SERVED_MODEL_NAME_REQUIRED",
+            )
         model = await session.get(Model, version.model_id)
         cfg = dict(deployment.deployment_config_json or {})
         try:
@@ -895,12 +904,12 @@ class OperationExecutor:
             health_path = adapter.resolve_health_path(cfg)
         except RuntimeAdapterError as exc:
             raise PermanentStepError(str(exc), code="INVALID_PROBE_CONFIG") from exc
-        return probe_type, health_path
+        return probe_type, health_path, served
 
     async def _health_path(
         self, session: AsyncSession, deployment: Deployment
     ) -> str:
-        _, health_path = await self._probe_settings(session, deployment)
+        _, health_path, _ = await self._probe_settings(session, deployment)
         return health_path
 
     async def _gpu_indices(

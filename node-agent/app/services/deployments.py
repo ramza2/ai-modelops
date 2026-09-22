@@ -26,6 +26,7 @@ from app.core.errors import (
     ManagedLabelRequiredError,
     ValidationError,
 )
+from app.core.config import get_settings
 from app.core.labels import (
     LABEL_DEPLOYMENT_ID,
     LABEL_MANAGED,
@@ -35,16 +36,29 @@ from app.core.labels import (
 )
 
 # Synthetic probe payloads — no user/private data.
+# ``model`` is filled at probe time from ModelVersion.served_model_name.
 _CHAT_PROBE_BODY = {
-    "model": "modelops-probe",
     "messages": [{"role": "user", "content": "ping"}],
     "max_tokens": 1,
     "temperature": 0,
 }
 _EMBEDDING_PROBE_BODY = {
-    "model": "modelops-probe",
     "input": "ping",
 }
+
+_SHA256_CHUNK_SIZE = 1024 * 1024
+
+
+def _sha256_file_streaming(path: Path) -> str:
+    """Stream file contents into SHA-256 (bounded memory for large artifacts)."""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(_SHA256_CHUNK_SIZE)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 class DeploymentLifecycleService:
@@ -242,6 +256,7 @@ class DeploymentLifecycleService:
         runtime_image: str,
         runtime_image_digest: str | None = None,
         artifacts: list[dict[str, Any]] | None = None,
+        pull_timeout_seconds: float | None = None,
     ) -> dict[str, Any]:
         """Verify runtime image + local artifact paths (no credentialed download)."""
         _ = deployment_id  # reserved for future agent-job correlation
@@ -254,7 +269,15 @@ class DeploymentLifecycleService:
             )
         _ = runtime_image_digest  # digest recorded by Worker; Agent verifies presence
 
-        image_ready = self._docker.ensure_image(image)
+        pull_budget = (
+            float(pull_timeout_seconds)
+            if pull_timeout_seconds is not None
+            else float(get_settings().docker_image_pull_timeout_seconds)
+        )
+        # May raise DockerUnavailableError (retryable) on pull timeout/network.
+        image_ready = self._docker.ensure_image(
+            image, pull_timeout_seconds=pull_budget
+        )
         if not image_ready:
             raise ImageNotReadyError(
                 "Runtime image is not available on this node.",
@@ -345,12 +368,19 @@ class DeploymentLifecycleService:
         self,
         deployment_id: str,
         *,
+        served_model_name: str,
         probe_type: str = "CHAT",
         timeout_seconds: float = 60.0,
         health_path: str = "/health",
     ) -> dict[str, Any]:
         """Minimal OpenAI-compatible inference readiness probe (no private data logged)."""
         _ = health_path
+        served = (served_model_name or "").strip()
+        if not served:
+            raise ValidationError(
+                "served_model_name is required.",
+                details={"field": "served_model_name"},
+            )
         self._require_docker()
         container = self._require_managed_container(deployment_id)
         runtime_status = map_docker_status_to_runtime(container.status)
@@ -367,10 +397,10 @@ class DeploymentLifecycleService:
         probe = (probe_type or "CHAT").upper()
         if probe == "CHAT":
             path = "/v1/chat/completions"
-            body = dict(_CHAT_PROBE_BODY)
+            body = {"model": served, **_CHAT_PROBE_BODY}
         elif probe == "EMBEDDING":
             path = "/v1/embeddings"
-            body = dict(_EMBEDDING_PROBE_BODY)
+            body = {"model": served, **_EMBEDDING_PROBE_BODY}
         else:
             raise ValidationError(
                 "Unsupported probe_type.",
@@ -503,20 +533,18 @@ class DeploymentLifecycleService:
             expected = str(checksum).strip().lower()
             if expected.startswith("sha256:"):
                 expected = expected[7:]
-            if path.is_file():
-                digest = hashlib.sha256(path.read_bytes()).hexdigest()
-            else:
-                # Directory: hash sorted relative file paths + sizes (bounded).
-                parts: list[bytes] = []
-                files = sorted(p for p in path.rglob("*") if p.is_file())
-                if len(files) > 10_000:
-                    result["error"] = "target_path has too many files to verify."
-                    return result
-                for file_path in files:
-                    rel = str(file_path.relative_to(path)).encode()
-                    size = str(file_path.stat().st_size).encode()
-                    parts.append(rel + b":" + size)
-                digest = hashlib.sha256(b"\n".join(parts)).hexdigest()
+            if path.is_dir():
+                # Do not treat path+size metadata as a content checksum.
+                result["error"] = (
+                    "Checksum verification for directories is not supported "
+                    "until a manifest/content checksum contract is defined. "
+                    "Omit checksum or point target_path at a single file."
+                )
+                return result
+            if not path.is_file():
+                result["error"] = "target_path must be a regular file for checksum."
+                return result
+            digest = _sha256_file_streaming(path)
             if digest != expected:
                 result["error"] = "checksum mismatch."
                 return result

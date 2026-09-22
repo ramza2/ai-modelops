@@ -245,7 +245,11 @@ MVP 1차 구현에서는 Node Agent 호출 timeout 안에 처리 가능한 prepa
 
 - Worker `PREPARE_ARTIFACTS` step이 Node Agent `POST .../prepare`를 호출한다.
 - Runtime image 존재 확인(및 credential-free pull)과 **로컬** artifact path 검증만 수행한다.
+- Image pull은 lifecycle Docker SDK timeout(기본 2s)과 분리된 **전용 pull timeout**(기본 300s)을 사용한다.
+  pull timeout 시 이미지 존재 여부를 reconcile한 뒤, 여전히 없으면 `DOCKER_ERROR`(재시도 가능)로 반환한다.
 - `file://` / `local://` / absolute local path만 허용한다. Hugging Face 등 credential이 필요한 remote download는 **구현하지 않는다** (public repo 안전 규칙).
+- 단일 파일 checksum은 SHA-256 streaming으로 검증한다. **디렉터리 checksum은 아직 지원하지 않는다**
+  (path+size 메타데이터 해시를 content checksum으로 취급하지 않음). 디렉터리에 checksum이 있으면 `ARTIFACT_NOT_READY`.
 - 성공/실패에 따라 Control Plane `node_model_cache` 상태를 `PREPARING` → `READY` | `FAILED`로 갱신한다.
 - 동일 artifact에 대한 재 prepare는 idempotent하다 (`READY` 재검증 + `last_verified_at` 갱신).
 
@@ -446,18 +450,22 @@ UNHEALTHY
 
 Endpoint Switch 직전 실제 최소 추론 가능 여부를 확인한다.
 
+Probe Prompt/Input은 Runtime Adapter에 정의된 최소 고정 payload를 사용한다.
+
+운영 사용자 데이터는 사용하지 않는다.
+
+요청의 `served_model_name`은 Control Plane `ModelVersion.served_model_name`을 그대로 전달한다.
+하드코딩된 `modelops-probe` 같은 가짜 이름을 쓰지 않는다.
+
 요청 예:
 
 ```json
 {
+  "served_model_name": "example-served-model",
   "probe_type": "CHAT",
   "timeout_seconds": 60
 }
 ```
-
-Probe Prompt/Input은 Runtime Adapter에 정의된 최소 고정 payload를 사용한다.
-
-운영 사용자 데이터는 사용하지 않는다.
 
 Milestone 3B-3: Worker는 probe 결과의 성공/실패 코드·latency만 `health_check`(type=`INFERENCE`)에
 기록한다. prompt/response 원문은 로그·DB에 저장하지 않는다. 구분 코드 예:

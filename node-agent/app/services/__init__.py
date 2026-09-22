@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from dataclasses import asdict
 from datetime import UTC, datetime
@@ -82,7 +83,7 @@ class NodeService:
             ],
         }
 
-    def wait_vram_release(
+    async def wait_vram_release(
         self,
         *,
         gpu_device_indices: list[int],
@@ -93,6 +94,7 @@ class NodeService:
         """Poll per-GPU free VRAM until each requested device meets threshold.
 
         GPUs are evaluated independently — free VRAM is never pooled across devices.
+        Uses ``asyncio.sleep`` so the FastAPI event loop stays responsive.
         """
         if not gpu_device_indices:
             raise ValidationError(
@@ -145,7 +147,7 @@ class NodeService:
             remaining = deadline - time.perf_counter()
             if remaining <= 0:
                 continue
-            time.sleep(min(poll_seconds, remaining))
+            await asyncio.sleep(min(poll_seconds, remaining))
 
     def readiness(self) -> dict[str, Any]:
         docker = self._docker.status()

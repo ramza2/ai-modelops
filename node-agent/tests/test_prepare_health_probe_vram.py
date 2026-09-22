@@ -259,7 +259,7 @@ async def test_probe_success_http_error_and_malformed() -> None:
         await ac.post(f"/internal/v1/deployments/{ids['deployment_id']}/start", json={})
         ok = await ac.post(
             f"/internal/v1/deployments/{ids['deployment_id']}/probe",
-            json={"probe_type": "CHAT"},
+            json={"probe_type": "CHAT", "served_model_name": "served-chat"},
         )
     assert ok.status_code == 200
     assert ok.json()["success"] is True
@@ -286,7 +286,7 @@ async def test_probe_success_http_error_and_malformed() -> None:
         )
         fail = await ac.post(
             f"/internal/v1/deployments/{ids2['deployment_id']}/probe",
-            json={"probe_type": "CHAT"},
+            json={"probe_type": "CHAT", "served_model_name": "served-chat"},
         )
     assert fail.json()["success"] is False
     assert fail.json()["error_code"] == "PROBE_HTTP_ERROR"
@@ -312,7 +312,7 @@ async def test_probe_success_http_error_and_malformed() -> None:
         )
         bad = await ac.post(
             f"/internal/v1/deployments/{ids3['deployment_id']}/probe",
-            json={"probe_type": "CHAT"},
+            json={"probe_type": "CHAT", "served_model_name": "served-chat"},
         )
     assert bad.json()["success"] is False
     assert bad.json()["error_code"] == "PROBE_MALFORMED_RESPONSE"
@@ -379,7 +379,7 @@ async def test_wait_vram_immediate_poll_and_timeout() -> None:
         nvml2.set_gpu_free_vram(0, 9000)
 
     threading.Thread(target=_bump, daemon=True).start()
-    result = service.wait_vram_release(
+    result = await service.wait_vram_release(
         gpu_device_indices=[0],
         minimum_free_vram_mb=8000,
         timeout_seconds=2.0,
@@ -387,3 +387,233 @@ async def test_wait_vram_immediate_poll_and_timeout() -> None:
     )
     assert result["released"] is True
     assert result["gpus"][0]["free_vram_mb"] >= 8000
+
+
+@pytest.mark.asyncio
+async def test_probe_uses_served_model_name_not_hardcoded() -> None:
+    ids = _ids()
+    captured: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/chat/completions"):
+            body = json.loads(request.content.decode())
+            captured.append(body)
+            return httpx.Response(
+                200, json={"id": "x", "choices": [{"message": {"content": "ok"}}]}
+            )
+        if request.url.path.endswith("/embeddings"):
+            body = json.loads(request.content.decode())
+            captured.append(body)
+            return httpx.Response(
+                200, json={"data": [{"embedding": [0.1], "index": 0}]}
+            )
+        return httpx.Response(404)
+
+    app, docker, _ = _make_app(http_transport=httpx.MockTransport(handler))
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        await ac.post(
+            f"/internal/v1/deployments/{ids['deployment_id']}/create",
+            json=_create_body(ids),
+        )
+        await ac.post(f"/internal/v1/deployments/{ids['deployment_id']}/start", json={})
+        chat = await ac.post(
+            f"/internal/v1/deployments/{ids['deployment_id']}/probe",
+            json={
+                "probe_type": "CHAT",
+                "served_model_name": "real-served-vllm-name",
+            },
+        )
+        emb = await ac.post(
+            f"/internal/v1/deployments/{ids['deployment_id']}/probe",
+            json={
+                "probe_type": "EMBEDDING",
+                "served_model_name": "real-served-embed-name",
+            },
+        )
+    assert chat.status_code == 200 and chat.json()["success"] is True
+    assert emb.status_code == 200 and emb.json()["success"] is True
+    assert len(captured) == 2
+    assert captured[0]["model"] == "real-served-vllm-name"
+    assert captured[1]["model"] == "real-served-embed-name"
+    assert captured[0]["model"] != "modelops-probe"
+    assert captured[1]["model"] != "modelops-probe"
+    assert "modelops-probe" not in json.dumps(captured)
+
+
+@pytest.mark.asyncio
+async def test_probe_requires_served_model_name() -> None:
+    ids = _ids()
+    app, docker, _ = _make_app()
+    docker.known_images.add("example/runtime:tag")
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        await ac.post(
+            f"/internal/v1/deployments/{ids['deployment_id']}/create",
+            json=_create_body(ids),
+        )
+        await ac.post(f"/internal/v1/deployments/{ids['deployment_id']}/start", json={})
+        missing = await ac.post(
+            f"/internal/v1/deployments/{ids['deployment_id']}/probe",
+            json={"probe_type": "CHAT"},
+        )
+    assert missing.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_ensure_image_cached_uncached_timeout_reconcile() -> None:
+    # Cached: immediate, no pull required beyond presence check.
+    cached = FakeDockerAdapter(available=True)
+    cached.known_images.add("example/runtime:cached")
+    assert cached.ensure_image("example/runtime:cached", pull_timeout_seconds=300) is True
+    assert cached.pull_attempts == ["example/runtime:cached"]
+    assert cached.last_pull_timeout_seconds == 300.0
+
+    # Uncached successful pull.
+    puller = FakeDockerAdapter(available=True, pull_succeeds=True)
+    assert puller.ensure_image("example/runtime:fresh", pull_timeout_seconds=120) is True
+    assert "example/runtime:fresh" in puller.known_images
+    assert puller.last_pull_timeout_seconds == 120.0
+
+    # Timeout but image present after reconcile → success.
+    reconcile = FakeDockerAdapter(
+        available=True,
+        pull_timeout_error=True,
+        pull_present_after_timeout=True,
+    )
+    assert (
+        reconcile.ensure_image("example/runtime:late", pull_timeout_seconds=60) is True
+    )
+    assert "example/runtime:late" in reconcile.known_images
+
+    # Timeout and still absent → DockerUnavailableError (retryable path).
+    from app.core.errors import DockerUnavailableError
+
+    absent = FakeDockerAdapter(
+        available=True,
+        pull_timeout_error=True,
+        pull_present_after_timeout=False,
+    )
+    with pytest.raises(DockerUnavailableError) as excinfo:
+        absent.ensure_image("example/runtime:missing", pull_timeout_seconds=45)
+    assert excinfo.value.code == "DOCKER_ERROR"
+    assert excinfo.value.details["pull_timeout_seconds"] == 45.0
+
+    # Permanent absence without timeout → False → IMAGE_NOT_READY at prepare layer.
+    missing = FakeDockerAdapter(available=True)
+    assert missing.ensure_image("no/such:tag", pull_timeout_seconds=30) is False
+
+
+@pytest.mark.asyncio
+async def test_prepare_pull_timeout_returns_docker_unavailable() -> None:
+    docker = FakeDockerAdapter(
+        available=True,
+        pull_timeout_error=True,
+        pull_present_after_timeout=False,
+    )
+    app, *_ = _make_app(docker=docker)
+    ids = _ids()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        resp = await ac.post(
+            f"/internal/v1/deployments/{ids['deployment_id']}/prepare",
+            json={"runtime_image": "example/runtime:slow", "artifacts": []},
+        )
+    assert resp.status_code == 502
+    assert resp.json()["error"]["code"] == "DOCKER_ERROR"
+
+
+@pytest.mark.asyncio
+async def test_directory_checksum_rejected_not_metadata_hash(tmp_path: Path) -> None:
+    docker = FakeDockerAdapter(available=True)
+    docker.known_images.add("example/runtime:tag")
+    artifact_dir = tmp_path / "model"
+    artifact_dir.mkdir()
+    (artifact_dir / "weights.bin").write_bytes(b"abc")
+    app, *_ = _make_app(docker=docker)
+    ids = _ids()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        resp = await ac.post(
+            f"/internal/v1/deployments/{ids['deployment_id']}/prepare",
+            json={
+                "runtime_image": "example/runtime:tag",
+                "artifacts": [
+                    {
+                        "artifact_id": str(uuid.uuid4()),
+                        "source_uri": f"file://{artifact_dir}",
+                        "target_path": str(artifact_dir),
+                        "checksum": "sha256:deadbeef",
+                    }
+                ],
+            },
+        )
+    assert resp.status_code == 409
+    assert resp.json()["error"]["code"] == "ARTIFACT_NOT_READY"
+    detail = json.dumps(resp.json())
+    assert "manifest" in detail.lower() or "directories" in detail.lower() or "directory" in detail.lower()
+
+
+@pytest.mark.asyncio
+async def test_file_checksum_streaming_success(tmp_path: Path) -> None:
+    docker = FakeDockerAdapter(available=True)
+    docker.known_images.add("example/runtime:tag")
+    model_file = tmp_path / "weights.bin"
+    model_file.write_bytes(b"hello-content")
+    digest = hashlib.sha256(b"hello-content").hexdigest()
+    app, *_ = _make_app(docker=docker)
+    ids = _ids()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        resp = await ac.post(
+            f"/internal/v1/deployments/{ids['deployment_id']}/prepare",
+            json={
+                "runtime_image": "example/runtime:tag",
+                "artifacts": [
+                    {
+                        "artifact_id": str(uuid.uuid4()),
+                        "source_uri": f"file://{model_file}",
+                        "target_path": str(model_file),
+                        "checksum": f"sha256:{digest}",
+                    }
+                ],
+            },
+        )
+    assert resp.status_code == 200
+    assert resp.json()["artifacts"][0]["verified_checksum"] == digest
+
+
+@pytest.mark.asyncio
+async def test_wait_vram_does_not_block_other_requests() -> None:
+    """While VRAM wait polls with asyncio.sleep, /health must still respond."""
+    nvml = FakeNvmlAdapter(available=True, gpus=[_gpu(0, free=100)])
+    app, *_ = _make_app(nvml=nvml)
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        import asyncio
+
+        wait_task = asyncio.create_task(
+            ac.post(
+                "/internal/v1/resources/wait-vram-release",
+                json={
+                    "gpu_device_indices": [0],
+                    "minimum_free_vram_mb": 8000,
+                    "timeout_seconds": 1.0,
+                    "poll_interval_ms": 100,
+                },
+            )
+        )
+        # Give the wait request a moment to enter polling.
+        await asyncio.sleep(0.05)
+        health_started = __import__("time").perf_counter()
+        health = await ac.get("/health")
+        health_elapsed = __import__("time").perf_counter() - health_started
+        wait_resp = await wait_task
+
+    assert health.status_code == 200
+    assert health.json()["status"] == "UP"
+    # If the event loop were blocked by time.sleep, health would stall ~1s.
+    assert health_elapsed < 0.5
+    assert wait_resp.status_code == 409
+    assert wait_resp.json()["error"]["code"] == "VRAM_NOT_RELEASED"

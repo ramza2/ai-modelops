@@ -311,6 +311,7 @@ class NodeAgentClient:
         deployment_id: str,
         *,
         mutation: MutationHeaders,
+        served_model_name: str,
         probe_type: str = "CHAT",
         timeout_seconds: float = 60.0,
         health_path: str = "/health",
@@ -320,6 +321,7 @@ class NodeAgentClient:
             f"/internal/v1/deployments/{deployment_id}/probe",
             headers=self._mutation_headers(mutation),
             json_body={
+                "served_model_name": served_model_name,
                 "probe_type": probe_type,
                 "timeout_seconds": timeout_seconds,
                 "health_path": health_path,

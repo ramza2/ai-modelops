@@ -27,6 +27,8 @@ class Settings(BaseSettings):
     token: str = ""
     agent_version: str = "0.2.0"
     docker_timeout_seconds: float = 2.0
+    # Dedicated budget for credential-free image pull during prepare.
+    docker_image_pull_timeout_seconds: float = 300.0
     # Root filesystem path used for disk metrics (Linux/macOS/Windows via psutil).
     disk_path: str = Field(default="/")
 

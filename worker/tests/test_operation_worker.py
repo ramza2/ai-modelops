@@ -1764,3 +1764,65 @@ async def test_wait_vram_immediate_success_and_timeout(db) -> None:
         assert op is not None
         assert op.status == OperationStatus.FAILED.value
         assert op.error_code == "VRAM_NOT_RELEASED"
+
+
+@pytest.mark.asyncio
+async def test_probe_passes_served_model_name_from_version(db) -> None:
+    fake = FakeNodeAgent()
+    transport = httpx.MockTransport(fake.handler)
+    session_factory = db
+
+    async with session_factory() as session:
+        seeded = await _seed_deployment(
+            session,
+            runtime_status=RuntimeStatus.RUNNING.value,
+            container_id=f"ctr-probe-name-{uuid.uuid4().hex[:8]}",
+        )
+        # Override served_model_name to a distinctive value.
+        await session.execute(
+            __import__("sqlalchemy").text(
+                """
+                UPDATE model_version
+                SET served_model_name = :name
+                WHERE id = :id
+                """
+            ),
+            {"name": "actual-vllm-served-name", "id": str(seeded["version_id"])},
+        )
+        fake.containers[str(seeded["deployment_id"])] = {
+            "deployment_id": str(seeded["deployment_id"]),
+            "container_id": seeded["container_id"],
+            "runtime_status": "RUNNING",
+        }
+        op_id, _ = await _enqueue(
+            session,
+            deployment_id=seeded["deployment_id"],
+            operation_type=OperationType.START.value,
+            steps=[STEP_PROBE_INFERENCE],
+            desired_state=DesiredState.RUNNING.value,
+        )
+
+    assert (
+        await JobRunner(
+            settings=_m3b3_settings(),
+            session_factory=session_factory,
+            transport=transport,
+        ).poll_once()
+        is True
+    )
+
+    probe_calls = [
+        c
+        for c in fake.calls
+        if c["method"] == "POST" and str(c["path"]).endswith("/probe")
+    ]
+    assert len(probe_calls) == 1
+    body = probe_calls[0]["body"]
+    assert body["served_model_name"] == "actual-vllm-served-name"
+    assert body["served_model_name"] != "modelops-probe"
+    assert "modelops-probe" not in json.dumps(body)
+
+    async with session_factory() as session:
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        assert op.status == OperationStatus.SUCCEEDED.value

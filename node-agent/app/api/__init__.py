@@ -82,6 +82,7 @@ class HealthQuery(BaseModel):
 
 
 class ProbeRequest(BaseModel):
+    served_model_name: str = Field(min_length=1)
     probe_type: str = "CHAT"
     timeout_seconds: float = Field(default=60.0, gt=0, le=600)
     health_path: str = "/health"
@@ -144,7 +145,7 @@ async def wait_vram_release(
     x_request_id: str | None = Header(default=None, alias="X-Request-ID"),
 ) -> dict[str, Any]:
     _ = (x_operation_id, x_step_id, x_request_id)
-    return service.wait_vram_release(
+    return await service.wait_vram_release(
         gpu_device_indices=list(body.gpu_device_indices),
         minimum_free_vram_mb=body.minimum_free_vram_mb,
         timeout_seconds=body.timeout_seconds,
@@ -207,19 +208,19 @@ async def deployment_health(
 @internal_router.post("/deployments/{deployment_id}/probe")
 async def deployment_probe(
     deployment_id: uuid.UUID,
-    body: ProbeRequest | None = None,
+    body: ProbeRequest,
     service: DeploymentLifecycleService = Depends(get_deployment_service),
     x_operation_id: str | None = Header(default=None, alias="X-Operation-ID"),
     x_step_id: str | None = Header(default=None, alias="X-Step-ID"),
     x_request_id: str | None = Header(default=None, alias="X-Request-ID"),
 ) -> dict[str, Any]:
     _ = (x_operation_id, x_step_id, x_request_id)
-    payload = body or ProbeRequest()
     return service.probe_inference(
         str(deployment_id),
-        probe_type=payload.probe_type,
-        timeout_seconds=payload.timeout_seconds,
-        health_path=payload.health_path,
+        served_model_name=body.served_model_name,
+        probe_type=body.probe_type,
+        timeout_seconds=body.timeout_seconds,
+        health_path=body.health_path,
     )
 
 
