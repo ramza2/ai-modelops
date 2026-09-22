@@ -40,6 +40,31 @@ class OperationJobRepository:
         await self._session.commit()
         return int(result.rowcount or 0)
 
+    async def heartbeat_job_lease(
+        self,
+        job_id: uuid.UUID,
+        *,
+        worker_id: str,
+    ) -> bool:
+        """Refresh ``locked_at`` for a RUNNING job owned by this worker.
+
+        Returns True when a row was updated. Never touches DONE/FAILED jobs or
+        leases owned by another worker.
+        """
+        now = dt.datetime.now(tz=dt.UTC)
+        stmt = (
+            update(OperationJob)
+            .where(
+                OperationJob.id == job_id,
+                OperationJob.status == JobStatus.RUNNING.value,
+                OperationJob.locked_by == worker_id,
+            )
+            .values(locked_at=now, updated_at=now)
+        )
+        result = await self._session.execute(stmt)
+        await self._session.commit()
+        return int(result.rowcount or 0) > 0
+
     async def claim_next_job(self, *, worker_id: str) -> OperationJob | None:
         """Claim one available job using FOR UPDATE SKIP LOCKED.
 
