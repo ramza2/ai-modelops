@@ -112,3 +112,47 @@ async def test_http_timeout_still_maps_to_retryable_node_agent_timeout() -> None
     err = exc_info.value
     assert err.code == "NODE_AGENT_TIMEOUT"
     assert err.retryable is True
+
+
+def test_prepare_http_timeout_exceeds_pull_budget_by_safety() -> None:
+    client = NodeAgentClient(base_url="http://x", timeout_seconds=30.0)
+    # Default Agent pull budget (300) + safety (30) = 330 > lifecycle default.
+    assert client.prepare_http_timeout(300.0) == 330.0
+    assert client.prepare_http_timeout(300.0) > 300.0
+
+
+def test_prepare_http_timeout_custom_pull_keeps_safety_margin() -> None:
+    client = NodeAgentClient(base_url="http://x", timeout_seconds=30.0)
+    assert client.prepare_http_timeout(120.0) == 150.0
+    assert client.prepare_http_timeout(120.0, safety_seconds=45.0) == 165.0
+    # Short pull still floors at lifecycle default timeout.
+    assert client.prepare_http_timeout(5.0) == 35.0
+    assert client.prepare_http_timeout(5.0) == max(30.0, 5.0 + 30.0)
+
+
+@pytest.mark.asyncio
+async def test_prepare_passes_pull_timeout_and_uses_derived_http_budget() -> None:
+    client = _CapturingClient(base_url="http://node-agent.test", timeout_seconds=30.0)
+    await client.prepare_deployment(
+        "dep-1",
+        {"runtime_image": "example/runtime:tag", "artifacts": []},
+        mutation=_mutation(),
+        pull_timeout_seconds=300.0,
+        safety_seconds=30.0,
+    )
+    assert client.captured_timeouts == [330.0]
+    assert client.captured_paths[0].endswith("/prepare")
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_timeouts_unchanged_by_prepare_budget() -> None:
+    client = _CapturingClient(base_url="http://node-agent.test", timeout_seconds=30.0)
+    await client.start_deployment("dep-1", mutation=_mutation())
+    await client.stop_deployment(
+        "dep-1", mutation=_mutation(), graceful_timeout_seconds=30
+    )
+    await client.restart_deployment(
+        "dep-1", mutation=_mutation(), graceful_timeout_seconds=30
+    )
+    # start uses default (None); stop/restart use graceful+10.
+    assert client.captured_timeouts == [None, 40.0, 40.0]

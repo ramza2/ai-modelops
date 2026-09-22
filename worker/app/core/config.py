@@ -22,7 +22,10 @@ class Settings(BaseSettings):
     )
     node_agent_token: str = ""
     node_agent_timeout_seconds: float = 30.0
-    node_agent_prepare_timeout_seconds: float = 120.0
+    # Must match Node Agent docker_image_pull_timeout_seconds default (300s).
+    # Worker prepare HTTP timeout = max(lifecycle default, pull + safety).
+    node_agent_image_pull_timeout_seconds: float = 300.0
+    prepare_http_safety_seconds: float = 30.0
     health_timeout_seconds: float = 120.0
     health_poll_interval_seconds: float = 1.0
     probe_timeout_seconds: float = 60.0

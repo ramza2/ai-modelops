@@ -518,6 +518,7 @@ class OperationExecutor:
             )
 
         try:
+            pull_budget = float(self._settings.node_agent_image_pull_timeout_seconds)
             result = await client.prepare_deployment(
                 str(deployment.id),
                 {
@@ -526,7 +527,8 @@ class OperationExecutor:
                     "artifacts": prepare_artifacts,
                 },
                 mutation=mutation,
-                timeout_seconds=self._settings.node_agent_prepare_timeout_seconds,
+                pull_timeout_seconds=pull_budget,
+                safety_seconds=self._settings.prepare_http_safety_seconds,
             )
         except NodeAgentError as exc:
             await self._mark_caches_failed(

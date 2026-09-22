@@ -217,6 +217,7 @@ Agent가 인식하는 Managed Deployment 목록.
 {
   "runtime_image": "example/runtime:tag",
   "runtime_image_digest": null,
+  "pull_timeout_seconds": 300,
   "artifacts": [
     {
       "artifact_id": "uuid",
@@ -247,6 +248,11 @@ MVP 1차 구현에서는 Node Agent 호출 timeout 안에 처리 가능한 prepa
 - Runtime image 존재 확인(및 credential-free pull)과 **로컬** artifact path 검증만 수행한다.
 - Image pull은 lifecycle Docker SDK timeout(기본 2s)과 분리된 **전용 pull timeout**(기본 300s)을 사용한다.
   pull timeout 시 이미지 존재 여부를 reconcile한 뒤, 여전히 없으면 `DOCKER_ERROR`(재시도 가능)로 반환한다.
+- Worker는 prepare 요청에 `pull_timeout_seconds`를 명시하고, Worker HTTP timeout은
+  `max(lifecycle_default, pull_timeout_seconds + safety_margin)`으로 계산한다
+  (기본: pull 300s + safety 30s = HTTP 330s). START/STOP/RESTART HTTP budget은 변경하지 않는다.
+- prepare / health / probe route는 sync endpoint로 두어 FastAPI threadpool에서 blocking I/O를 실행한다
+  (`WAIT_VRAM_RELEASE`만 async + `asyncio.sleep` 유지).
 - `file://` / `local://` / absolute local path만 허용한다. Hugging Face 등 credential이 필요한 remote download는 **구현하지 않는다** (public repo 안전 규칙).
 - 단일 파일 checksum은 SHA-256 streaming으로 검증한다. **디렉터리 checksum은 아직 지원하지 않는다**
   (path+size 메타데이터 해시를 content checksum으로 취급하지 않음). 디렉터리에 checksum이 있으면 `ARTIFACT_NOT_READY`.

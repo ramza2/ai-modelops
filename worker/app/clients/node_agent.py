@@ -10,6 +10,9 @@ import httpx
 # Extra seconds beyond graceful_timeout so STOP/RESTART HTTP clients do not
 # race the Node Agent's own graceful stop budget.
 _GRACEFUL_HTTP_SAFETY_SECONDS = 10.0
+# Extra seconds beyond the Agent image-pull budget so Worker HTTP does not
+# abort while Node Agent is still pulling within its allowed window.
+_PREPARE_HTTP_SAFETY_SECONDS = 30.0
 
 
 class NodeAgentError(Exception):
@@ -75,6 +78,24 @@ class NodeAgentClient:
             float(self._timeout),
             float(graceful_timeout_seconds) + _GRACEFUL_HTTP_SAFETY_SECONDS,
         )
+
+    def prepare_http_timeout(
+        self,
+        pull_timeout_seconds: float,
+        *,
+        safety_seconds: float | None = None,
+    ) -> float:
+        """HTTP timeout for prepare = max(lifecycle default, pull + safety).
+
+        The Worker must wait longer than the Node Agent image-pull budget so a
+        successful pull within the Agent window is not aborted mid-flight.
+        """
+        margin = (
+            float(safety_seconds)
+            if safety_seconds is not None
+            else _PREPARE_HTTP_SAFETY_SECONDS
+        )
+        return max(float(self._timeout), float(pull_timeout_seconds) + margin)
 
     async def _request(
         self,
@@ -271,16 +292,25 @@ class NodeAgentClient:
         payload: dict[str, Any],
         *,
         mutation: MutationHeaders,
+        pull_timeout_seconds: float,
+        safety_seconds: float | None = None,
         timeout_seconds: float | None = None,
     ) -> dict[str, Any]:
+        body = dict(payload)
+        body["pull_timeout_seconds"] = float(pull_timeout_seconds)
+        http_timeout = (
+            float(timeout_seconds)
+            if timeout_seconds is not None
+            else self.prepare_http_timeout(
+                pull_timeout_seconds, safety_seconds=safety_seconds
+            )
+        )
         result = await self._request(
             "POST",
             f"/internal/v1/deployments/{deployment_id}/prepare",
             headers=self._mutation_headers(mutation),
-            json_body=payload,
-            timeout_seconds=timeout_seconds
-            if timeout_seconds is not None
-            else max(self._timeout, 120.0),
+            json_body=body,
+            timeout_seconds=http_timeout,
         )
         assert result is not None
         return result

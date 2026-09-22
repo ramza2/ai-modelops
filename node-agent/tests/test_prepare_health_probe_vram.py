@@ -617,3 +617,109 @@ async def test_wait_vram_does_not_block_other_requests() -> None:
     assert health_elapsed < 0.5
     assert wait_resp.status_code == 409
     assert wait_resp.json()["error"]["code"] == "VRAM_NOT_RELEASED"
+
+
+@pytest.mark.asyncio
+async def test_slow_prepare_does_not_block_health() -> None:
+    docker = FakeDockerAdapter(
+        available=True,
+        pull_succeeds=True,
+        pull_block_seconds=0.8,
+    )
+    app, *_ = _make_app(docker=docker)
+    ids = _ids()
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        import asyncio
+        import time as _t
+
+        prepare_task = asyncio.create_task(
+            ac.post(
+                f"/internal/v1/deployments/{ids['deployment_id']}/prepare",
+                json={
+                    "runtime_image": "example/runtime:slow-pull",
+                    "pull_timeout_seconds": 60,
+                    "artifacts": [],
+                },
+            )
+        )
+        await asyncio.sleep(0.05)
+        started = _t.perf_counter()
+        health = await ac.get("/health")
+        elapsed = _t.perf_counter() - started
+        prepare_resp = await prepare_task
+
+    assert health.status_code == 200
+    assert health.json()["status"] == "UP"
+    assert elapsed < 0.5
+    assert prepare_resp.status_code == 200
+    assert docker.last_pull_timeout_seconds == 60.0
+
+
+@pytest.mark.asyncio
+async def test_slow_probe_does_not_block_health() -> None:
+    ids = _ids()
+
+    def slow_probe(request: httpx.Request) -> httpx.Response:
+        import time as _t
+
+        if request.url.path.endswith("/chat/completions"):
+            _t.sleep(0.8)
+            return httpx.Response(
+                200, json={"id": "x", "choices": [{"message": {"content": "ok"}}]}
+            )
+        return httpx.Response(404)
+
+    app, docker, _ = _make_app(http_transport=httpx.MockTransport(slow_probe))
+    docker.known_images.add("example/runtime:tag")
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        import asyncio
+        import time as _t
+
+        await ac.post(
+            f"/internal/v1/deployments/{ids['deployment_id']}/create",
+            json=_create_body(ids),
+        )
+        await ac.post(f"/internal/v1/deployments/{ids['deployment_id']}/start", json={})
+        probe_task = asyncio.create_task(
+            ac.post(
+                f"/internal/v1/deployments/{ids['deployment_id']}/probe",
+                json={
+                    "probe_type": "CHAT",
+                    "served_model_name": "served-name",
+                    "timeout_seconds": 5,
+                },
+            )
+        )
+        await asyncio.sleep(0.05)
+        started = _t.perf_counter()
+        health = await ac.get("/health")
+        elapsed = _t.perf_counter() - started
+        probe_resp = await probe_task
+
+    assert health.status_code == 200
+    assert elapsed < 0.5
+    assert probe_resp.status_code == 200
+    assert probe_resp.json()["success"] is True
+
+
+@pytest.mark.asyncio
+async def test_prepare_honors_explicit_pull_timeout_seconds() -> None:
+    docker = FakeDockerAdapter(available=True, pull_succeeds=True)
+    app, *_ = _make_app(docker=docker)
+    ids = _ids()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        resp = await ac.post(
+            f"/internal/v1/deployments/{ids['deployment_id']}/prepare",
+            json={
+                "runtime_image": "example/runtime:custom",
+                "pull_timeout_seconds": 180,
+                "artifacts": [],
+            },
+        )
+    assert resp.status_code == 200
+    assert docker.last_pull_timeout_seconds == 180.0

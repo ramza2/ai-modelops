@@ -74,6 +74,8 @@ class PrepareRequest(BaseModel):
     runtime_image: str = Field(min_length=1)
     runtime_image_digest: str | None = None
     artifacts: list[PrepareArtifactRequest] = Field(default_factory=list)
+    # Explicit pull budget shared with Worker HTTP timeout contract.
+    pull_timeout_seconds: float | None = Field(default=None, gt=0, le=3600)
 
 
 class HealthQuery(BaseModel):
@@ -170,7 +172,7 @@ async def get_deployment(
 
 
 @internal_router.post("/deployments/{deployment_id}/prepare")
-async def prepare_deployment(
+def prepare_deployment(
     deployment_id: uuid.UUID,
     body: PrepareRequest,
     service: DeploymentLifecycleService = Depends(get_deployment_service),
@@ -178,17 +180,19 @@ async def prepare_deployment(
     x_step_id: str | None = Header(default=None, alias="X-Step-ID"),
     x_request_id: str | None = Header(default=None, alias="X-Request-ID"),
 ) -> dict[str, Any]:
+    """Sync route: Docker pull / file I/O run in FastAPI's threadpool."""
     _ = (x_operation_id, x_step_id, x_request_id)
     return service.prepare(
         str(deployment_id),
         runtime_image=body.runtime_image,
         runtime_image_digest=body.runtime_image_digest,
         artifacts=[a.model_dump(mode="json") for a in body.artifacts],
+        pull_timeout_seconds=body.pull_timeout_seconds,
     )
 
 
 @internal_router.get("/deployments/{deployment_id}/health")
-async def deployment_health(
+def deployment_health(
     deployment_id: uuid.UUID,
     health_path: str = "/health",
     timeout_seconds: float = 5.0,
@@ -197,6 +201,7 @@ async def deployment_health(
     x_step_id: str | None = Header(default=None, alias="X-Step-ID"),
     x_request_id: str | None = Header(default=None, alias="X-Request-ID"),
 ) -> dict[str, Any]:
+    """Sync route: blocking upstream health HTTP runs in threadpool."""
     _ = (x_operation_id, x_step_id, x_request_id)
     return service.check_health(
         str(deployment_id),
@@ -206,7 +211,7 @@ async def deployment_health(
 
 
 @internal_router.post("/deployments/{deployment_id}/probe")
-async def deployment_probe(
+def deployment_probe(
     deployment_id: uuid.UUID,
     body: ProbeRequest,
     service: DeploymentLifecycleService = Depends(get_deployment_service),
@@ -214,6 +219,7 @@ async def deployment_probe(
     x_step_id: str | None = Header(default=None, alias="X-Step-ID"),
     x_request_id: str | None = Header(default=None, alias="X-Request-ID"),
 ) -> dict[str, Any]:
+    """Sync route: blocking upstream probe HTTP runs in threadpool."""
     _ = (x_operation_id, x_step_id, x_request_id)
     return service.probe_inference(
         str(deployment_id),

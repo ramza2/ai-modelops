@@ -6,6 +6,7 @@ Docker SDK directly. Use :class:`FakeDockerAdapter` in Cloud Agent tests.
 
 from __future__ import annotations
 
+import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -438,6 +439,7 @@ class RealDockerAdapter:
         if self.has_image(image):
             return True
         # Dedicated client so pull does not inherit the short lifecycle timeout.
+        pull_client: Any | None = None
         try:
             import docker  # type: ignore[import-untyped]
 
@@ -471,6 +473,14 @@ class RealDockerAdapter:
                     },
                 ) from exc
             return False
+        finally:
+            if pull_client is not None:
+                close = getattr(pull_client, "close", None)
+                if callable(close):
+                    try:
+                        close()
+                    except Exception:  # noqa: BLE001 - best-effort cleanup
+                        pass
         return self.has_image(image)
 
     def _to_info(
@@ -778,6 +788,7 @@ class FakeDockerAdapter:
         pull_succeeds: bool = False,
         pull_timeout_error: bool = False,
         pull_present_after_timeout: bool = False,
+        pull_block_seconds: float = 0.0,
     ) -> None:
         self._available = available
         self._version = version
@@ -794,6 +805,7 @@ class FakeDockerAdapter:
         self.pull_succeeds = pull_succeeds
         self.pull_timeout_error = pull_timeout_error
         self.pull_present_after_timeout = pull_present_after_timeout
+        self.pull_block_seconds = float(pull_block_seconds)
         self.last_device_requests: list[dict[str, Any]] | None = None
         self.last_create_spec: CreateContainerSpec | None = None
         self.last_create_published_ports: dict[str, Any] | None = None
@@ -1049,6 +1061,8 @@ class FakeDockerAdapter:
         self._require_available()
         self.pull_attempts.append(image)
         self.last_pull_timeout_seconds = float(pull_timeout_seconds)
+        if self.pull_block_seconds > 0:
+            time.sleep(self.pull_block_seconds)
         if image in self.known_images:
             return True
         if self.pull_timeout_error:
