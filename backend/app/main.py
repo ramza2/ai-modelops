@@ -15,6 +15,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from app.api.deployments import router as deployments_router
+from app.api.endpoints import router as endpoints_router
 from app.api.health import router as health_router
 from app.api.models import router as models_router
 from app.api.nodes import router as nodes_router
@@ -70,6 +71,7 @@ def create_app() -> FastAPI:
     app.include_router(models_router)
     app.include_router(deployments_router)
     app.include_router(operations_router)
+    app.include_router(endpoints_router)
     return app
 
 
