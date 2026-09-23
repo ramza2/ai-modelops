@@ -127,7 +127,12 @@ Gateway 자체 오류일 때만 ModelOps error code를 OpenAI-Compatible error b
 
 ### Streaming
 
-요청:
+Milestone **4-A**에서는 `stream=true`를 지원하지 않는다.
+요청 시 `400 STREAMING_NOT_SUPPORTED`를 반환한다.
+
+Streaming/SSE proxy는 Milestone 4-B에서 구현한다.
+
+요청 예 (4-B):
 
 ```json
 {
@@ -137,9 +142,9 @@ Gateway 자체 오류일 때만 ModelOps error code를 OpenAI-Compatible error b
 }
 ```
 
-Gateway는 upstream SSE를 buffer 전체 수집하지 않고 chunk 단위로 전달한다.
+4-B에서 Gateway는 upstream SSE를 buffer 전체 수집하지 않고 chunk 단위로 전달한다.
 
-필수 원칙:
+필수 원칙 (4-B):
 
 - Client disconnect 감지
 - Upstream connection 정리
@@ -241,13 +246,17 @@ Gateway 메모리 Route Snapshot 예:
 
 매 요청마다 PostgreSQL을 조회하지 않는다.
 
-Route Snapshot 갱신:
+Route Snapshot 갱신 (Milestone 4-A):
 
 ```text
-PostgreSQL LISTEN / NOTIFY
+startup load
         +
-주기적 routing_state.version 확인
+주기적 routing_state.version polling
+        +
+POST /internal/v1/routes/reload
 ```
+
+PostgreSQL `LISTEN / NOTIFY`는 Milestone 4-B에서 추가한다.
 
 DB 일시 장애 시 Last Known Good Snapshot을 계속 사용한다.
 

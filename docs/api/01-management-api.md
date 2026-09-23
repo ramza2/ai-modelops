@@ -435,7 +435,10 @@ q
 
 일반 메타데이터와 `is_enabled` 변경.
 
-`traffic_state`는 Cold Switch Worker가 제어하므로 일반 UI PATCH에서는 직접 수정하지 않는 것을 권장한다.
+`traffic_state`는 Cold Switch Worker가 제어한다. 일반 PATCH에서 `traffic_state`를
+보내면 `422 VALIDATION_ERROR`로 거부한다.
+
+`is_enabled` 변경 시 `routing_state.version`을 증가시킨다.
 
 ### GET /endpoints/{endpoint_id}/routes
 
@@ -455,7 +458,12 @@ Route 이력 조회.
 }
 ```
 
-Target은 `RUNNING + HEALTHY`여야 한다.
+Target은 `RUNNING + HEALTHY`이고 `retired_at IS NULL`여야 한다.
+
+CHAT Alias는 LLM/VLM Deployment만, EMBEDDING Alias는 EMBEDDING Deployment만 허용한다.
+
+Route 교체와 `routing_state.version` 증가는 같은 DB transaction에서 수행한다.
+기존 ACTIVE Route는 INACTIVE로 내리고 신규 ACTIVE Route를 생성한다.
 
 ---
 
