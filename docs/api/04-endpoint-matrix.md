@@ -65,7 +65,7 @@ Base: `/v1`
 | Method | Path | 목적 |
 |---|---|---|
 | GET | `/v1/models` | 사용 가능한 논리 모델 Alias 목록 |
-| POST | `/v1/chat/completions` | LLM/VLM Chat Completion (4-A: non-streaming) |
+| POST | `/v1/chat/completions` | LLM/VLM Chat Completion (streaming + non-streaming) |
 | POST | `/v1/embeddings` | Embedding |
 | GET | `/health` | Gateway liveness |
 | GET | `/ready` | Gateway readiness |
@@ -75,10 +75,10 @@ Gateway Internal:
 | Method | Path | 목적 |
 |---|---|---|
 | GET | `/internal/v1/runtime` | 전체 Gateway Runtime 상태 |
-| GET | `/internal/v1/routes/{alias}/runtime` | Alias별 Route/Traffic 상태 |
+| GET | `/internal/v1/routes/{alias}/runtime` | Alias별 Route/Traffic/Inflight/Drain 상태 |
 | POST | `/internal/v1/routes/reload` | Routing Snapshot 재로드 |
 
-Milestone 4-A 제외: Streaming/SSE, LISTEN/NOTIFY, inflight drain, Invocation Log.
+Milestone 4-B 포함: Streaming/SSE, LISTEN/NOTIFY, inflight drain, Invocation Log (best-effort).
 
 ---
 

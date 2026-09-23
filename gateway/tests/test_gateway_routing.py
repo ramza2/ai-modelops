@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import uuid
@@ -16,6 +17,8 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from app.core.db import Base
 from app.main import create_app
 from app.routing.store import RoutingStore
+from app.runtime.inflight import InflightTracker
+from app.runtime.invocation_log import InvocationLogWriter
 
 
 def _database_url() -> str:
@@ -192,6 +195,8 @@ class UpstreamRecorder:
         self.calls: list[dict[str, Any]] = []
         self.mode: str = "ok"
         self.delay_raise: Exception | None = None
+        self.hold_gate: asyncio.Event | None = None
+        self.entered_gate: asyncio.Event | None = None
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content.decode() or "{}")
@@ -214,6 +219,25 @@ class UpstreamRecorder:
                 400,
                 json={"error": {"message": "bad request from upstream"}},
                 headers={"content-type": "application/json"},
+            )
+        if self.mode == "sse":
+            payload = (
+                b'data: {"id":"chatcmpl-stream","choices":[{"delta":{"content":"hi"}}]}\n\n'
+                b"data: [DONE]\n\n"
+            )
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content=payload,
+            )
+        if self.mode == "sse_hold":
+            # Synchronous hold via busy-wait is avoided; MockTransport is sync.
+            # Tests that need hold use a custom ASGI upstream instead.
+            payload = b"data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n\n"
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content=payload,
             )
         if request.url.path.endswith("/embeddings"):
             return httpx.Response(
@@ -253,7 +277,14 @@ async def gw():
     http_client = httpx.AsyncClient(transport=transport)
     store = RoutingStore(session_factory, poll_seconds=60.0)
     await store.reload(force=True)
-    app = create_app(routing_store=store, http_client=http_client)
+    inflight = InflightTracker()
+    invocation_logs = InvocationLogWriter(session_factory)
+    app = create_app(
+        routing_store=store,
+        http_client=http_client,
+        inflight=inflight,
+        invocation_logs=invocation_logs,
+    )
     asgi = ASGITransport(app=app)
     async with AsyncClient(transport=asgi, base_url="http://gw.test") as ac:
         yield {
@@ -262,7 +293,10 @@ async def gw():
             "session_factory": session_factory,
             "recorder": recorder,
             "app": app,
+            "inflight": inflight,
+            "invocation_logs": invocation_logs,
         }
+    await invocation_logs.drain(timeout_seconds=2.0)
     await http_client.aclose()
     await engine.dispose()
 
@@ -391,6 +425,14 @@ async def test_routing_error_matrix(gw) -> None:
     )
     _assert_gateway_error(r, status=503, code="MODEL_MAINTENANCE")
 
+    draining = await _seed_alias_route(sf, traffic_state="DRAINING")
+    await gw["store"].reload(force=True)
+    r = await ac.post(
+        "/v1/chat/completions",
+        json={"model": draining["alias"], "messages": []},
+    )
+    _assert_gateway_error(r, status=503, code="ENDPOINT_DRAINING")
+
     chat = await _seed_alias_route(sf, api_type="CHAT")
     await gw["store"].reload(force=True)
     r = await ac.post(
@@ -425,10 +467,12 @@ async def test_routing_error_matrix(gw) -> None:
 
 
 @pytest.mark.asyncio
-async def test_stream_true_rejected(gw) -> None:
+async def test_stream_true_sse_passthrough_and_inflight(gw) -> None:
     ac = gw["client"]
     seeded = await _seed_alias_route(gw["session_factory"])
     await gw["store"].reload(force=True)
+    gw["recorder"].mode = "sse"
+
     resp = await ac.post(
         "/v1/chat/completions",
         json={
@@ -437,10 +481,141 @@ async def test_stream_true_rejected(gw) -> None:
             "stream": True,
         },
     )
-    assert resp.status_code == 400
-    _assert_gateway_error(
-        resp, status=400, code="STREAMING_NOT_SUPPORTED", param="stream"
+    assert resp.status_code == 200
+    assert "text/event-stream" in resp.headers.get("content-type", "")
+    body = resp.content
+    assert b"data:" in body
+    assert b"[DONE]" in body
+    assert gw["recorder"].calls[-1]["body"]["model"] == "rewritten-model"
+    assert gw["recorder"].calls[-1]["body"]["stream"] is True
+    # Stream finished → inflight cleared.
+    assert gw["inflight"].get(seeded["alias"]) == 0
+
+    runtime = await ac.get(f"/internal/v1/routes/{seeded['alias']}/runtime")
+    assert runtime.status_code == 200
+    assert runtime.json()["inflight_requests"] == 0
+
+
+@pytest.mark.asyncio
+async def test_nonstream_inflight_cleared_and_invocation_logged(gw) -> None:
+    ac = gw["client"]
+    seeded = await _seed_alias_route(gw["session_factory"])
+    await gw["store"].reload(force=True)
+    request_id = str(uuid.uuid4())
+    resp = await ac.post(
+        "/v1/chat/completions",
+        headers={"X-Request-ID": request_id, "X-AI-Client": "test-client"},
+        json={
+            "model": seeded["alias"],
+            "messages": [{"role": "user", "content": "secret-prompt-should-not-log"}],
+        },
     )
+    assert resp.status_code == 200
+    assert gw["inflight"].get(seeded["alias"]) == 0
+    await gw["invocation_logs"].drain(timeout_seconds=2.0)
+
+    async with gw["session_factory"]() as session:
+        row = (
+            await session.execute(
+                text(
+                    """
+                    SELECT request_id::text, api_path, http_status, is_streaming,
+                           error_code, raw_client_key, latency_ms
+                    FROM invocation_log
+                    WHERE request_id = CAST(:rid AS uuid)
+                    """
+                ),
+                {"rid": request_id},
+            )
+        ).one_or_none()
+    assert row is not None
+    assert row.api_path == "/v1/chat/completions"
+    assert row.http_status == 200
+    assert row.is_streaming is False
+    assert row.error_code is None
+    assert row.raw_client_key == "test-client"
+    assert row.latency_ms >= 0
+    # Ensure no prompt/response body columns exist / were written via metadata only.
+    async with gw["session_factory"]() as session:
+        cols = (
+            await session.execute(
+                text(
+                    """
+                    SELECT column_name FROM information_schema.columns
+                    WHERE table_name = 'invocation_log'
+                    """
+                )
+            )
+        ).scalars().all()
+    assert "prompt" not in cols
+    assert "response" not in cols
+    assert "messages" not in cols
+
+
+@pytest.mark.asyncio
+async def test_invocation_log_db_failure_does_not_break_inference(gw) -> None:
+    ac = gw["client"]
+    seeded = await _seed_alias_route(gw["session_factory"])
+    await gw["store"].reload(force=True)
+    # Break writer session factory after request path still uses working http client.
+    broken_engine = create_async_engine(
+        "postgresql+asyncpg://modelops:modelops@127.0.0.1:1/modelops"
+    )
+    gw["invocation_logs"]._session_factory = async_sessionmaker(
+        broken_engine, expire_on_commit=False
+    )
+    resp = await ac.post(
+        "/v1/chat/completions",
+        json={
+            "model": seeded["alias"],
+            "messages": [{"role": "user", "content": "hi"}],
+        },
+    )
+    assert resp.status_code == 200
+    await gw["invocation_logs"].drain(timeout_seconds=1.0)
+    await broken_engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_draining_blocks_new_and_reports_drain_complete(gw) -> None:
+    ac = gw["client"]
+    sf = gw["session_factory"]
+    seeded = await _seed_alias_route(sf, traffic_state="SERVING")
+    await gw["store"].reload(force=True)
+
+    ok = await ac.post(
+        "/v1/chat/completions",
+        json={
+            "model": seeded["alias"],
+            "messages": [{"role": "user", "content": "hi"}],
+        },
+    )
+    assert ok.status_code == 200
+
+    async with sf() as session:
+        await session.execute(
+            text(
+                "UPDATE endpoint_alias SET traffic_state = 'DRAINING' WHERE id = :id"
+            ),
+            {"id": seeded["endpoint_id"]},
+        )
+        await session.commit()
+    await gw["store"].reload(force=True)
+
+    blocked = await ac.post(
+        "/v1/chat/completions",
+        json={
+            "model": seeded["alias"],
+            "messages": [{"role": "user", "content": "hi"}],
+        },
+    )
+    _assert_gateway_error(blocked, status=503, code="ENDPOINT_DRAINING")
+
+    runtime = await ac.get(f"/internal/v1/routes/{seeded['alias']}/runtime")
+    body = runtime.json()
+    assert body["traffic_state"] == "DRAINING"
+    assert body["inflight_requests"] == 0
+    assert body["drain_complete"] is True
 
 
 @pytest.mark.asyncio
