@@ -46,9 +46,11 @@ def _request_id(request: Request) -> str:
     return str(getattr(request.state, "request_id", "") or "")
 
 
-def _client_key(request: Request) -> str | None:
+def _client_key(request: Request) -> str:
     value = request.headers.get("X-AI-Client")
-    return value.strip() if value else None
+    if value and value.strip():
+        return value.strip()
+    return "unknown"
 
 
 @router.get("/v1/models")
@@ -84,10 +86,8 @@ async def chat_completions(request: Request) -> Response:
             http_status=422,
             param="model",
         )
-    entry = resolve_route(
-        _store(request).snapshot,
-        alias=model,
-        expected_api_type=ApiType.CHAT,
+    entry = await _admit_and_resolve(
+        request, alias=model, expected_api_type=ApiType.CHAT
     )
     upstream_body = dict(body)
     upstream_body["model"] = entry.upstream_model_name
@@ -99,6 +99,7 @@ async def chat_completions(request: Request) -> Response:
         api_path="/v1/chat/completions",
         body=upstream_body,
         is_streaming=False,
+        already_admitted=True,
     )
 
 
@@ -113,10 +114,8 @@ async def embeddings(request: Request) -> Response:
             http_status=422,
             param="model",
         )
-    entry = resolve_route(
-        _store(request).snapshot,
-        alias=model,
-        expected_api_type=ApiType.EMBEDDING,
+    entry = await _admit_and_resolve(
+        request, alias=model, expected_api_type=ApiType.EMBEDDING
     )
     upstream_body = dict(body)
     upstream_body["model"] = entry.upstream_model_name
@@ -126,7 +125,34 @@ async def embeddings(request: Request) -> Response:
         api_path="/v1/embeddings",
         body=upstream_body,
         is_streaming=False,
+        already_admitted=True,
     )
+
+
+async def _admit_and_resolve(
+    request: Request,
+    *,
+    alias: str,
+    expected_api_type: ApiType,
+) -> RouteEntry:
+    """Admit inflight *before* snapshot resolve to close the drain race.
+
+    Order:
+    1. increment inflight for the requested alias
+    2. resolve against the current snapshot
+    3. on any reject path, decrement immediately
+    """
+    inflight = _inflight(request)
+    await inflight.increment(alias)
+    try:
+        return resolve_route(
+            _store(request).snapshot,
+            alias=alias,
+            expected_api_type=expected_api_type,
+        )
+    except Exception:
+        await inflight.decrement(alias)
+        raise
 
 
 async def _proxy_nonstream(
@@ -136,11 +162,13 @@ async def _proxy_nonstream(
     api_path: str,
     body: dict[str, Any],
     is_streaming: bool,
+    already_admitted: bool = False,
 ) -> Response:
     started = dt.datetime.now(tz=dt.UTC)
     request_id = _request_id(request)
     inflight = _inflight(request)
-    await inflight.increment(entry.alias)
+    if not already_admitted:
+        await inflight.increment(entry.alias)
     http_status = 500
     error_code: str | None = None
     response_bytes: int | None = None
@@ -186,10 +214,10 @@ async def _proxy_streaming_chat(
     entry: RouteEntry,
     body: dict[str, Any],
 ) -> Response:
+    """Stream chat completions. Inflight was already admitted before resolve."""
     started = dt.datetime.now(tz=dt.UTC)
     request_id = _request_id(request)
     inflight = _inflight(request)
-    await inflight.increment(entry.alias)
     completed = False
 
     async def _on_complete(

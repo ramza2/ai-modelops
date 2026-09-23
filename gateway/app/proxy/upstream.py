@@ -85,8 +85,9 @@ async def proxy_sse_post(
 ) -> Response:
     """POST JSON and stream SSE bytes through without buffering the full body.
 
-    ``on_complete(http_status, response_bytes, error_code)`` runs when the stream
-    finishes (success, client cancel, or upstream error mid-stream).
+    Mid-stream upstream failures are re-raised so the connection closes
+    abnormally (not a clean EOF after HTTP 200). Cleanup (upstream close +
+    ``on_complete``) is shielded so ASGI cancellation still decrements inflight.
     """
     base = upstream_base_url.rstrip("/")
     url = f"{base}{path}"
@@ -136,26 +137,44 @@ async def proxy_sse_post(
     async def _aiter() -> AsyncIterator[bytes]:
         response_bytes = 0
         error_code: str | None = None
+        pending_exc: BaseException | None = None
         try:
             async for chunk in upstream.aiter_bytes():
                 response_bytes += len(chunk)
                 yield chunk
-        except httpx.TimeoutException:
+        except httpx.TimeoutException as exc:
             error_code = ErrorCode.UPSTREAM_TIMEOUT
+            pending_exc = exc
             logger.warning("Upstream SSE timed out path=%s", path)
-        except httpx.HTTPError:
+        except httpx.HTTPError as exc:
             error_code = ErrorCode.UPSTREAM_ERROR
+            pending_exc = exc
             logger.warning("Upstream SSE transport error path=%s", path)
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as exc:
             error_code = "CLIENT_DISCONNECT"
-            raise
+            pending_exc = exc
         finally:
-            await upstream.aclose()
-            if on_complete is not None:
+            async def _cleanup() -> None:
                 try:
-                    await on_complete(status_code, response_bytes, error_code)
+                    await upstream.aclose()
                 except Exception:  # noqa: BLE001
-                    logger.exception("Streaming on_complete hook failed.")
+                    logger.exception("Upstream SSE close failed path=%s", path)
+                if on_complete is not None:
+                    try:
+                        await on_complete(status_code, response_bytes, error_code)
+                    except Exception:  # noqa: BLE001
+                        logger.exception("Streaming on_complete hook failed.")
+
+            # Ensure cleanup runs even when the ASGI task is being cancelled.
+            # Swallow CancelledError from awaiting the shield so we can re-raise
+            # the original pending_exc below (shield still completes cleanup).
+            try:
+                await asyncio.shield(_cleanup())
+            except asyncio.CancelledError:
+                pass
+
+        if pending_exc is not None:
+            raise pending_exc
 
     return StreamingResponse(
         _aiter(),

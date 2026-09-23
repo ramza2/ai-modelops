@@ -612,7 +612,7 @@ UNIQUE(client_key)
 | Column | Type | Null |
 |---|---|---:|
 | id | BIGINT | N |
-| request_id | UUID | N |
+| request_id | VARCHAR(255) | N |
 | requested_at | TIMESTAMPTZ | N |
 | client_app_id | UUID | Y |
 | raw_client_key | VARCHAR(255) | Y |
@@ -630,6 +630,8 @@ UNIQUE(client_key)
 | response_bytes | BIGINT | Y |
 | is_streaming | BOOLEAN | N |
 | error_code | VARCHAR(100) | Y |
+
+`request_id` stores the Gateway `X-Request-ID` exactly (opaque string, not rewritten to UUID).
 
 ### Indexes
 

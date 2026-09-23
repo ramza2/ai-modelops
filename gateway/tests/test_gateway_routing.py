@@ -519,16 +519,17 @@ async def test_nonstream_inflight_cleared_and_invocation_logged(gw) -> None:
             await session.execute(
                 text(
                     """
-                    SELECT request_id::text, api_path, http_status, is_streaming,
+                    SELECT request_id, api_path, http_status, is_streaming,
                            error_code, raw_client_key, latency_ms
                     FROM invocation_log
-                    WHERE request_id = CAST(:rid AS uuid)
+                    WHERE request_id = :rid
                     """
                 ),
                 {"rid": request_id},
             )
         ).one_or_none()
     assert row is not None
+    assert row.request_id == request_id
     assert row.api_path == "/v1/chat/completions"
     assert row.http_status == 200
     assert row.is_streaming is False

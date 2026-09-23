@@ -786,7 +786,7 @@ class InvocationLog(Base):
     id: Mapped[int] = mapped_column(
         BigInteger, primary_key=True, autoincrement=True
     )
-    request_id: Mapped[str] = mapped_column(UUID(as_uuid=True), nullable=False)
+    request_id: Mapped[str] = mapped_column(String(255), nullable=False)
     requested_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=NOW
     )

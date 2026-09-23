@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import logging
-import uuid
 from dataclasses import dataclass
 from typing import Any
 
@@ -66,11 +65,8 @@ class InvocationLogWriter:
 
     async def _write(self, record: InvocationRecord) -> None:
         assert self._session_factory is not None
-        try:
-            request_uuid = uuid.UUID(str(record.request_id))
-        except ValueError:
-            # Non-UUID request ids are still accepted by generating a stable UUID5.
-            request_uuid = uuid.uuid5(uuid.NAMESPACE_URL, str(record.request_id))
+        # Persist the exact client-visible request id (no UUID5 rewrite).
+        request_id = str(record.request_id)
         try:
             async with self._session_factory() as session:
                 await session.execute(
@@ -82,7 +78,7 @@ class InvocationLogWriter:
                           api_path, http_status, latency_ms,
                           request_bytes, response_bytes, is_streaming, error_code
                         ) VALUES (
-                          CAST(:request_id AS uuid), :requested_at, :raw_client_key,
+                          :request_id, :requested_at, :raw_client_key,
                           CAST(:endpoint_alias_id AS uuid),
                           CAST(:deployment_id AS uuid),
                           CAST(:model_version_id AS uuid),
@@ -93,9 +89,9 @@ class InvocationLogWriter:
                         """
                     ),
                     {
-                        "request_id": str(request_uuid),
+                        "request_id": request_id,
                         "requested_at": record.requested_at,
-                        "raw_client_key": record.raw_client_key,
+                        "raw_client_key": record.raw_client_key or "unknown",
                         "endpoint_alias_id": record.endpoint_alias_id,
                         "deployment_id": record.deployment_id,
                         "model_version_id": record.model_version_id,
@@ -143,7 +139,7 @@ def build_invocation_record(
         latency_ms=latency_ms,
         is_streaming=is_streaming,
         error_code=error_code,
-        raw_client_key=raw_client_key,
+        raw_client_key=raw_client_key or "unknown",
         request_bytes=request_bytes,
         response_bytes=response_bytes,
     )
