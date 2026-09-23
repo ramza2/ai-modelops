@@ -620,7 +620,7 @@ async def test_opaque_request_id_matches_invocation_log_and_unknown_client() -> 
         inflight=inflight,
         invocation_logs=invocation_logs,
     )
-    opaque_id = "m4a-e2e-001"
+    opaque_id = f"m4a-e2e-{uuid.uuid4().hex[:8]}"
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://gw.test"
     ) as ac:
@@ -693,7 +693,7 @@ async def test_reused_request_id_stores_two_invocation_rows() -> None:
         inflight=InflightTracker(),
         invocation_logs=invocation_logs,
     )
-    reused_id = "m4b-reused-request-id"
+    reused_id = f"m4b-reused-{uuid.uuid4().hex[:8]}"
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://gw.test"
     ) as ac:
