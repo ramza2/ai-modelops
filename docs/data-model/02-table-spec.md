@@ -632,11 +632,12 @@ UNIQUE(client_key)
 | error_code | VARCHAR(100) | Y |
 
 `request_id` stores the Gateway `X-Request-ID` exactly (opaque string, not rewritten to UUID).
+Client-visible request ids are not globally unique; the BIGINT `id` primary key identifies each row.
 
 ### Indexes
 
 ```text
-UNIQUE(request_id)
+INDEX(request_id)
 INDEX(requested_at DESC)
 INDEX(endpoint_alias_id, requested_at DESC)
 INDEX(deployment_id, requested_at DESC)

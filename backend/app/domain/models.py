@@ -816,7 +816,7 @@ class InvocationLog(Base):
     error_code: Mapped[str | None] = mapped_column(String(100))
 
     __table_args__ = (
-        UniqueConstraint("request_id", name="uq_invocation_log_request_id"),
+        Index("ix_invocation_log_request_id", "request_id"),
         Index("ix_invocation_log_requested_at", text("requested_at DESC")),
         Index(
             "ix_invocation_log_alias",

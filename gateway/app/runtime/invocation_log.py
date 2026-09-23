@@ -85,7 +85,6 @@ class InvocationLogWriter:
                           :api_path, :http_status, :latency_ms,
                           :request_bytes, :response_bytes, :is_streaming, :error_code
                         )
-                        ON CONFLICT (request_id) DO NOTHING
                         """
                     ),
                     {

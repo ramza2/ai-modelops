@@ -656,3 +656,79 @@ async def test_opaque_request_id_matches_invocation_log_and_unknown_client() -> 
     await http_client.aclose()
     await engine.dispose()
 
+
+@pytest.mark.asyncio
+async def test_reused_request_id_stores_two_invocation_rows() -> None:
+    """Same client-visible X-Request-ID must not drop a second invocation."""
+    engine = create_async_engine(_database_url(), future=True)
+    session_factory = async_sessionmaker(
+        engine, expire_on_commit=False, autoflush=False
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-reuse",
+                "object": "chat.completion",
+                "model": "rewritten-model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop",
+                    }
+                ],
+            },
+        )
+
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    store = RoutingStore(session_factory, poll_seconds=60.0)
+    seeded = await _seed_alias_route(session_factory)
+    await store.reload(force=True)
+    invocation_logs = InvocationLogWriter(session_factory)
+    app = create_app(
+        routing_store=store,
+        http_client=http_client,
+        inflight=InflightTracker(),
+        invocation_logs=invocation_logs,
+    )
+    reused_id = "m4b-reused-request-id"
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://gw.test"
+    ) as ac:
+        for _ in range(2):
+            resp = await ac.post(
+                "/v1/chat/completions",
+                headers={"X-Request-ID": reused_id},
+                json={
+                    "model": seeded["alias"],
+                    "messages": [{"role": "user", "content": "hi"}],
+                },
+            )
+            assert resp.status_code == 200
+            assert resp.headers.get("x-request-id") == reused_id
+        await invocation_logs.drain(timeout_seconds=2.0)
+
+    async with session_factory() as session:
+        rows = (
+            await session.execute(
+                text(
+                    """
+                    SELECT id, request_id
+                    FROM invocation_log
+                    WHERE request_id = :rid
+                    ORDER BY id
+                    """
+                ),
+                {"rid": reused_id},
+            )
+        ).all()
+    assert len(rows) == 2
+    assert rows[0].request_id == reused_id
+    assert rows[1].request_id == reused_id
+    assert rows[0].id != rows[1].id
+
+    await http_client.aclose()
+    await engine.dispose()
+
