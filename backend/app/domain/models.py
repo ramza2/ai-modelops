@@ -786,7 +786,7 @@ class InvocationLog(Base):
     id: Mapped[int] = mapped_column(
         BigInteger, primary_key=True, autoincrement=True
     )
-    request_id: Mapped[str] = mapped_column(UUID(as_uuid=True), nullable=False)
+    request_id: Mapped[str] = mapped_column(String(255), nullable=False)
     requested_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=NOW
     )
@@ -816,7 +816,7 @@ class InvocationLog(Base):
     error_code: Mapped[str | None] = mapped_column(String(100))
 
     __table_args__ = (
-        UniqueConstraint("request_id", name="uq_invocation_log_request_id"),
+        Index("ix_invocation_log_request_id", "request_id"),
         Index("ix_invocation_log_requested_at", text("requested_at DESC")),
         Index(
             "ix_invocation_log_alias",

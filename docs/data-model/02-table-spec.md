@@ -612,7 +612,7 @@ UNIQUE(client_key)
 | Column | Type | Null |
 |---|---|---:|
 | id | BIGINT | N |
-| request_id | UUID | N |
+| request_id | VARCHAR(255) | N |
 | requested_at | TIMESTAMPTZ | N |
 | client_app_id | UUID | Y |
 | raw_client_key | VARCHAR(255) | Y |
@@ -631,10 +631,13 @@ UNIQUE(client_key)
 | is_streaming | BOOLEAN | N |
 | error_code | VARCHAR(100) | Y |
 
+`request_id` stores the Gateway `X-Request-ID` exactly (opaque string, not rewritten to UUID).
+Client-visible request ids are not globally unique; the BIGINT `id` primary key identifies each row.
+
 ### Indexes
 
 ```text
-UNIQUE(request_id)
+INDEX(request_id)
 INDEX(requested_at DESC)
 INDEX(endpoint_alias_id, requested_at DESC)
 INDEX(deployment_id, requested_at DESC)

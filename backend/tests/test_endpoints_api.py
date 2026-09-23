@@ -371,3 +371,53 @@ async def test_concurrent_routing_version_bumps_are_atomic(client) -> None:
             ).scalar_one()
         )
     assert after == before + 8
+
+
+@pytest.mark.asyncio
+async def test_bump_routing_version_emits_pg_notify(client) -> None:
+    """EndpointRepository.bump_routing_version delivers NOTIFY on commit."""
+    import asyncio
+    import datetime as dt
+    import os
+
+    import asyncpg
+
+    from app.repositories.endpoints import EndpointRepository
+
+    _, session_factory = client
+    dsn = os.environ.get(
+        "MODELOPS_DATABASE_URL",
+        "postgresql+asyncpg://modelops:modelops@localhost:5432/modelops",
+    ).replace("postgresql+asyncpg://", "postgresql://")
+
+    notified: asyncio.Queue[str | None] = asyncio.Queue()
+
+    def _on_notify(
+        _connection: asyncpg.Connection,
+        _pid: int,
+        channel: str,
+        payload: str,
+    ) -> None:
+        if channel == "modelops_routing_changed":
+            notified.put_nowait(payload)
+
+    conn = await asyncpg.connect(dsn)
+    try:
+        await conn.add_listener("modelops_routing_changed", _on_notify)
+        # Drain any stale notifications from prior tests.
+        await asyncio.sleep(0.05)
+        while not notified.empty():
+            notified.get_nowait()
+
+        async with session_factory() as session:
+            repo = EndpointRepository(session)
+            version = await repo.bump_routing_version(
+                now=dt.datetime.now(tz=dt.UTC)
+            )
+            await session.commit()
+
+        payload = await asyncio.wait_for(notified.get(), timeout=3.0)
+        assert payload == str(version)
+    finally:
+        await conn.remove_listener("modelops_routing_changed", _on_notify)
+        await conn.close()

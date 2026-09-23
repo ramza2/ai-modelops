@@ -1,4 +1,4 @@
-"""ModelOps AI Gateway entrypoint (Milestone 4-A)."""
+"""ModelOps AI Gateway entrypoint (Milestone 4-A / 4-B)."""
 
 from __future__ import annotations
 
@@ -17,7 +17,10 @@ from app.api.openai_routes import router as openai_router
 from app.core.config import get_settings
 from app.core.db import dispose_engine, get_sessionmaker
 from app.core.errors import ErrorCode, GatewayError, error_envelope
+from app.routing.notify import RoutingNotifierListener
 from app.routing.store import RoutingStore
+from app.runtime.inflight import InflightTracker
+from app.runtime.invocation_log import InvocationLogWriter
 
 logger = logging.getLogger(__name__)
 REQUEST_ID_HEADER = "X-Request-ID"
@@ -30,12 +33,29 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     store = RoutingStore(
         session_factory, poll_seconds=settings.routing_poll_seconds
     )
+    inflight = InflightTracker()
+    invocation_logs = InvocationLogWriter(session_factory)
     http_client = httpx.AsyncClient()
+
+    async def _on_notify() -> None:
+        await store.reload(force=True)
+
+    listener = RoutingNotifierListener(
+        database_url=settings.database_url,
+        on_notify=_on_notify,
+        reconnect_seconds=settings.routing_listen_reconnect_seconds,
+    )
     app.state.routing_store = store
     app.state.http_client = http_client
+    app.state.inflight = inflight
+    app.state.invocation_logs = invocation_logs
+    app.state.routing_listener = listener
     await store.start()
+    await listener.start()
     yield
+    await listener.stop()
     await store.stop()
+    await invocation_logs.drain()
     await http_client.aclose()
     await dispose_engine()
 
@@ -44,6 +64,9 @@ def create_app(
     *,
     routing_store: RoutingStore | None = None,
     http_client: httpx.AsyncClient | None = None,
+    inflight: InflightTracker | None = None,
+    invocation_logs: InvocationLogWriter | None = None,
+    routing_listener: RoutingNotifierListener | None = None,
 ) -> FastAPI:
     """Create the Gateway app.
 
@@ -59,6 +82,9 @@ def create_app(
     if use_injected:
         app.state.routing_store = routing_store
         app.state.http_client = http_client
+        app.state.inflight = inflight or InflightTracker()
+        app.state.invocation_logs = invocation_logs or InvocationLogWriter(None)
+        app.state.routing_listener = routing_listener
 
     @app.middleware("http")
     async def request_id_middleware(request: Request, call_next):
