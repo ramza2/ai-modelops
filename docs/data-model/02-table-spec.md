@@ -439,7 +439,7 @@ INDEX(operation_id, sequence_no)
 | Column | Type | Null | 비고 |
 |---|---|---:|---|
 | id | UUID | N | PK |
-| operation_id | UUID | N | FK operation |
+| operation_id | UUID | Y | FK operation; NULL for standalone preview preflights |
 | node_id | UUID | N | FK node |
 | target_model_version_id | UUID | N | FK model_version |
 | source_deployment_id | UUID | Y | FK deployment |
@@ -461,6 +461,10 @@ INDEX(target_model_version_id, checked_at DESC)
 ```
 
 하나의 Operation에서 재평가가 발생할 수 있으므로 `operation_id`는 UNIQUE가 아니다.
+
+`POST /api/v1/preflights` preview는 Operation 생성 전에 호출되므로 `operation_id`가 NULL일 수 있다.
+Worker가 실제 Cold Switch를 실행하기 직전에 수행하는 revalidation 기록만 `operation_id`를 채운다.
+Preview 결과만으로 Switch를 승인하지 않는다.
 
 ---
 

@@ -573,7 +573,7 @@ Operation의 세부 실행 이력.
 주요 속성:
 
 - `id`
-- `operation_id`
+- `operation_id` (nullable for standalone preview; Worker revalidation sets it)
 - `node_id`
 - `target_model_version_id`
 - `source_deployment_id`
