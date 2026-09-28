@@ -796,6 +796,8 @@ async def _isolate_and_claim_job(
 ) -> None:
     """Clear other queued jobs so claim_next_job returns this test's job."""
     async with session_factory() as session:
+        # Retire every other non-terminal job so shared-DB leftovers cannot
+        # win claim_next_job under FOR UPDATE SKIP LOCKED ordering.
         await session.execute(
             __import__("sqlalchemy").text(
                 """
@@ -805,8 +807,8 @@ async def _isolate_and_claim_job(
                     locked_at = NULL,
                     available_at = now() + interval '1 day',
                     updated_at = now()
-                WHERE status IN ('QUEUED', 'RUNNING')
-                  AND id <> :id
+                WHERE id <> :id
+                  AND status NOT IN ('DONE', 'FAILED')
                 """
             ),
             {"id": str(job_id)},
@@ -815,9 +817,12 @@ async def _isolate_and_claim_job(
             __import__("sqlalchemy").text(
                 """
                 UPDATE operation_job
-                SET available_at = now() - interval '1 second',
+                SET status = 'QUEUED',
+                    locked_by = NULL,
+                    locked_at = NULL,
+                    available_at = now() - interval '1 second',
                     updated_at = now()
-                WHERE id = :id AND status = 'QUEUED'
+                WHERE id = :id
                 """
             ),
             {"id": str(job_id)},
