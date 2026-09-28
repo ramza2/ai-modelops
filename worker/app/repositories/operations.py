@@ -162,6 +162,15 @@ class OperationJobRepository:
         operation = await self._session.get(Operation, operation_id)
         if operation is None:
             return
+        # Never overwrite a finished terminal status.
+        if operation.status in {
+            OperationStatus.SUCCEEDED.value,
+            OperationStatus.ROLLED_BACK.value,
+            OperationStatus.FAILED.value,
+            OperationStatus.MANUAL_INTERVENTION_REQUIRED.value,
+            OperationStatus.CANCELLED.value,
+        }:
+            return
         operation.status = OperationStatus.SUCCEEDED.value
         operation.finished_at = now
         operation.error_code = None
@@ -244,6 +253,12 @@ class OperationJobRepository:
         operation = await self._session.get(Operation, operation_id)
         if operation is None:
             return
+        if operation.status in {
+            OperationStatus.ROLLED_BACK.value,
+            OperationStatus.MANUAL_INTERVENTION_REQUIRED.value,
+            OperationStatus.SUCCEEDED.value,
+        }:
+            return
         operation.status = OperationStatus.ROLLED_BACK.value
         operation.finished_at = now
         # Preserve original forward failure code/message when already set.
@@ -264,11 +279,203 @@ class OperationJobRepository:
         operation = await self._session.get(Operation, operation_id)
         if operation is None:
             return
+        if operation.status == OperationStatus.MANUAL_INTERVENTION_REQUIRED.value:
+            # Keep first MIR diagnosis; still allow finished_at if missing.
+            if operation.finished_at is None:
+                operation.finished_at = now
+                await self._session.commit()
+            return
+        if operation.status == OperationStatus.SUCCEEDED.value:
+            return
         operation.status = OperationStatus.MANUAL_INTERVENTION_REQUIRED.value
         operation.finished_at = now
         operation.error_code = code
         operation.error_message = message
         await self._session.commit()
+
+    async def finalize_operation_rolled_back(
+        self,
+        *,
+        operation_id: uuid.UUID,
+        job_id: uuid.UUID,
+        code: str | None = None,
+        message: str | None = None,
+    ) -> None:
+        """Set Operation ROLLED_BACK + Job DONE in one commit."""
+        now = dt.datetime.now(tz=dt.UTC)
+        operation = await self._session.get(Operation, operation_id)
+        job = await self._session.get(OperationJob, job_id)
+        if operation is None:
+            return
+        if operation.status not in {
+            OperationStatus.ROLLED_BACK.value,
+            OperationStatus.MANUAL_INTERVENTION_REQUIRED.value,
+            OperationStatus.SUCCEEDED.value,
+        }:
+            operation.status = OperationStatus.ROLLED_BACK.value
+            operation.finished_at = now
+            if code is not None:
+                operation.error_code = code
+            if message is not None:
+                operation.error_message = message
+        if job is not None and job.status != JobStatus.DONE.value:
+            job.status = JobStatus.DONE.value
+            job.locked_by = None
+            job.locked_at = None
+            job.last_error = None
+            job.updated_at = now
+        await self._session.commit()
+
+    async def finalize_operation_manual_intervention(
+        self,
+        *,
+        operation_id: uuid.UUID,
+        job_id: uuid.UUID,
+        code: str,
+        message: str,
+    ) -> None:
+        """Set Operation MIR + Job FAILED in one commit."""
+        now = dt.datetime.now(tz=dt.UTC)
+        operation = await self._session.get(Operation, operation_id)
+        job = await self._session.get(OperationJob, job_id)
+        if operation is None:
+            return
+        if operation.status not in {
+            OperationStatus.MANUAL_INTERVENTION_REQUIRED.value,
+            OperationStatus.SUCCEEDED.value,
+        }:
+            operation.status = OperationStatus.MANUAL_INTERVENTION_REQUIRED.value
+            operation.finished_at = now
+            operation.error_code = code
+            operation.error_message = message
+        elif (
+            operation.status == OperationStatus.MANUAL_INTERVENTION_REQUIRED.value
+            and operation.finished_at is None
+        ):
+            operation.finished_at = now
+        if job is not None and job.status not in {
+            JobStatus.FAILED.value,
+            JobStatus.DONE.value,
+        }:
+            job.status = JobStatus.FAILED.value
+            job.locked_by = None
+            job.locked_at = None
+            job.last_error = f"{code}: {message}"
+            job.updated_at = now
+        await self._session.commit()
+
+    async def finalize_operation_succeeded(
+        self,
+        *,
+        operation_id: uuid.UUID,
+        job_id: uuid.UUID,
+    ) -> None:
+        """Set Operation SUCCEEDED + Job DONE in one commit."""
+        now = dt.datetime.now(tz=dt.UTC)
+        operation = await self._session.get(Operation, operation_id)
+        job = await self._session.get(OperationJob, job_id)
+        if operation is None:
+            return
+        if operation.status not in {
+            OperationStatus.SUCCEEDED.value,
+            OperationStatus.ROLLED_BACK.value,
+            OperationStatus.FAILED.value,
+            OperationStatus.MANUAL_INTERVENTION_REQUIRED.value,
+            OperationStatus.CANCELLED.value,
+        }:
+            operation.status = OperationStatus.SUCCEEDED.value
+            operation.finished_at = now
+            operation.error_code = None
+            operation.error_message = None
+        if job is not None and job.status != JobStatus.DONE.value:
+            job.status = JobStatus.DONE.value
+            job.locked_by = None
+            job.locked_at = None
+            job.last_error = None
+            job.updated_at = now
+        await self._session.commit()
+
+    async def finalize_operation_failed(
+        self,
+        *,
+        operation_id: uuid.UUID,
+        job_id: uuid.UUID,
+        code: str,
+        message: str,
+    ) -> None:
+        """Set Operation FAILED (or MIR backstop) + Job FAILED in one commit."""
+        now = dt.datetime.now(tz=dt.UTC)
+        operation = await self._session.get(Operation, operation_id)
+        job = await self._session.get(OperationJob, job_id)
+        if operation is None:
+            return
+        if operation.status != OperationStatus.MANUAL_INTERVENTION_REQUIRED.value:
+            meta = operation.metadata_json or {}
+            if (
+                operation.operation_type == OperationType.SWITCH.value
+                and bool(meta.get("destructive_boundary_entered"))
+            ):
+                operation.status = (
+                    OperationStatus.MANUAL_INTERVENTION_REQUIRED.value
+                )
+            elif operation.status not in {
+                OperationStatus.FAILED.value,
+                OperationStatus.SUCCEEDED.value,
+                OperationStatus.ROLLED_BACK.value,
+                OperationStatus.CANCELLED.value,
+            }:
+                operation.status = OperationStatus.FAILED.value
+            operation.finished_at = now
+            operation.error_code = code
+            operation.error_message = message
+        if job is not None and job.status not in {
+            JobStatus.FAILED.value,
+            JobStatus.DONE.value,
+        }:
+            job.status = JobStatus.FAILED.value
+            job.locked_by = None
+            job.locked_at = None
+            job.last_error = f"{code}: {message}"
+            job.updated_at = now
+        await self._session.commit()
+
+    async def reconcile_terminal_operation_job(
+        self,
+        *,
+        operation: Operation,
+        job: OperationJob,
+    ) -> bool:
+        """If Operation is already terminal, only reconcile Job and return True.
+
+        Never rewrites terminal Operation status/error fields. Returns False when
+        the Operation is still non-terminal and normal execution should continue.
+        """
+        status = str(operation.status)
+        if status in {
+            OperationStatus.SUCCEEDED.value,
+            OperationStatus.ROLLED_BACK.value,
+        }:
+            if job.status != JobStatus.DONE.value:
+                await self.mark_job_done(uuid.UUID(str(job.id)))
+            return True
+        if status in {
+            OperationStatus.FAILED.value,
+            OperationStatus.MANUAL_INTERVENTION_REQUIRED.value,
+            OperationStatus.CANCELLED.value,
+        }:
+            if job.status not in {
+                JobStatus.FAILED.value,
+                JobStatus.DONE.value,
+            }:
+                await self.mark_job_failed(
+                    uuid.UUID(str(job.id)),
+                    error=(
+                        f"{operation.error_code or status}: "
+                        f"{operation.error_message or 'Operation already terminal.'}"
+                    ),
+                )
+            return True
+        return False
 
     async def begin_step(self, step: OperationStep) -> str:
         """Mark step RUNNING and ensure a stable request_id in detail_json."""

@@ -383,6 +383,12 @@ class ColdSwitchExecutor(ColdSwitchRollbackMixin):
             if job is None or operation is None:
                 return
 
+            # Crash-window guard: terminal Operation never re-executes side effects.
+            if await repo.reconcile_terminal_operation_job(
+                operation=operation, job=job
+            ):
+                return
+
             source = await session.get(Deployment, source_id)
             target = await session.get(Deployment, target_id)
             alias = await session.get(EndpointAlias, endpoint_id)
@@ -430,7 +436,7 @@ class ColdSwitchExecutor(ColdSwitchRollbackMixin):
 
             # Resume durable rollback if Worker restarted mid-rollback.
             if operation.status == OperationStatus.ROLLING_BACK.value:
-                await self._run_pending_rollback_steps(
+                await self._resume_rolling_back(
                     session,
                     repo,
                     client,
@@ -640,8 +646,10 @@ class ColdSwitchExecutor(ColdSwitchRollbackMixin):
             try:
                 await self._finalize_desired_states(session, source, target)
                 await session.commit()
-                await repo.mark_operation_succeeded(operation_id)
-                await repo.mark_job_done(uuid.UUID(str(job.id)))
+                await repo.finalize_operation_succeeded(
+                    operation_id=operation_id,
+                    job_id=uuid.UUID(str(job.id)),
+                )
             except Exception:  # noqa: BLE001
                 logger.exception(
                     "Unexpected Cold Switch error during FINALIZE commit "
@@ -704,7 +712,9 @@ class ColdSwitchExecutor(ColdSwitchRollbackMixin):
             )
             return
 
-        if self._should_enter_automatic_rollback(operation, step):
+        if self._should_enter_automatic_rollback(
+            operation, step, code=code
+        ):
             await self._enter_and_run_rollback(
                 session,
                 repo,
@@ -809,11 +819,11 @@ class ColdSwitchExecutor(ColdSwitchRollbackMixin):
                     gateway=gateway,
                     wait=False,
                 )
-            await repo.mark_operation_manual_intervention(
-                uuid.UUID(str(operation.id)), code=code, message=message
-            )
-            await repo.mark_job_failed(
-                uuid.UUID(str(job.id)), error=f"{code}: {message}"
+            await repo.finalize_operation_manual_intervention(
+                operation_id=uuid.UUID(str(operation.id)),
+                job_id=uuid.UUID(str(job.id)),
+                code=code,
+                message=message,
             )
             return
 
@@ -839,11 +849,11 @@ class ColdSwitchExecutor(ColdSwitchRollbackMixin):
                     wait=True,
                 )
 
-        await repo.mark_operation_failed(
-            uuid.UUID(str(operation.id)), code=code, message=message
-        )
-        await repo.mark_job_failed(
-            uuid.UUID(str(job.id)), error=f"{code}: {message}"
+        await repo.finalize_operation_failed(
+            operation_id=uuid.UUID(str(operation.id)),
+            job_id=uuid.UUID(str(job.id)),
+            code=code,
+            message=message,
         )
 
     async def _best_effort_set_traffic(

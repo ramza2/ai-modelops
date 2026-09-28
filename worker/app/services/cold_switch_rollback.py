@@ -423,8 +423,65 @@ class ColdSwitchRollbackMixin:
                 return
 
         # Preserve forward failure code/message on ROLLED_BACK.
-        await repo.mark_operation_rolled_back(uuid.UUID(str(operation.id)))
-        await repo.mark_job_done(uuid.UUID(str(job.id)))
+        await repo.finalize_operation_rolled_back(
+            operation_id=uuid.UUID(str(operation.id)),
+            job_id=uuid.UUID(str(job.id)),
+        )
+
+    async def _resume_rolling_back(
+        self,
+        session: AsyncSession,
+        repo: OperationJobRepository,
+        client: NodeAgentClient,
+        gateway: GatewayClient,
+        operation: Operation,
+        job: OperationJob,
+        alias: EndpointAlias,
+        source: Deployment,
+        target: Deployment,
+    ) -> None:
+        """Resume ROLLING_BACK safely: never skip a FAILED rollback step."""
+        steps = await repo.list_steps(uuid.UUID(str(operation.id)))
+        failed_rb = sorted(
+            [
+                s
+                for s in steps
+                if s.step_code in ROLLBACK_STEPS
+                and s.status == StepStatus.FAILED.value
+            ],
+            key=lambda s: int(s.sequence_no),
+        )
+        if failed_rb:
+            failed = failed_rb[0]
+            code = str(failed.error_code or "ROLLBACK_STEP_FAILED")
+            message = str(
+                failed.error_message
+                or "Rollback step previously failed; manual intervention required."
+            )
+            await self._fail_all(  # type: ignore[attr-defined]
+                repo,
+                job,
+                operation,
+                code=code,
+                message=message,
+                destructive=True,
+                alias=alias,
+                source=source,
+                gateway=gateway,
+            )
+            return
+
+        await self._run_pending_rollback_steps(
+            session,
+            repo,
+            client,
+            gateway,
+            operation,
+            job,
+            alias,
+            source,
+            target,
+        )
 
     async def _run_pending_rollback_steps(
         self,
@@ -442,14 +499,10 @@ class ColdSwitchRollbackMixin:
         await self._ensure_rollback_steps(session, operation)
         await session.commit()
 
-        # Reuse enter path's execution loop without re-writing diagnosis.
         class _ResumeMarker:
             step_code = "RESUME_ROLLBACK"
             id = getattr(operation, "id", uuid.uuid4())
 
-        # Directly execute remaining rollback steps via enter helper's loop by
-        # ensuring status stays ROLLING_BACK and skipping mark_operation_rolling_back
-        # when already set.
         if operation.status != OperationStatus.ROLLING_BACK.value:
             await repo.mark_operation_rolling_back(
                 uuid.UUID(str(operation.id)),
@@ -460,17 +513,6 @@ class ColdSwitchRollbackMixin:
             )
             await session.refresh(operation)
 
-        steps = await repo.list_steps(uuid.UUID(str(operation.id)))
-        pending = [
-            s
-            for s in steps
-            if s.step_code in ROLLBACK_STEPS
-            and s.status
-            in (StepStatus.PENDING.value, StepStatus.RUNNING.value)
-        ]
-        # Delegate to shared runner by temporarily invoking enter with a no-op
-        # mark: call internal execute loop via _enter_and_run_rollback after
-        # steps already exist — mark_operation_rolling_back is idempotent enough.
         await self._enter_and_run_rollback(
             session,
             repo,
@@ -492,12 +534,17 @@ class ColdSwitchRollbackMixin:
         self,
         operation: Operation,
         step: OperationStep,
+        *,
+        code: str | None = None,
     ) -> bool:
         from app.services.cold_switch import _destructive_entered
 
         if not _destructive_entered(operation):
             return False
         if step.step_code in MIR_ONLY_FORWARD_STEPS:
+            return False
+        # Third-party ACTIVE route cannot be safely overwritten by rollback.
+        if code == "UNEXPECTED_ACTIVE_ROUTE":
             return False
         if step.step_code in ROLLBACK_ENTER_FORWARD_STEPS:
             return True
@@ -882,9 +929,25 @@ class ColdSwitchRollbackMixin:
                     "already_active": True,
                 }
 
+            if active is not None and str(active.deployment_id) not in {
+                str(source.id),
+                str(target.id),
+            }:
+                # Do not overwrite an unexpected third-party ACTIVE route.
+                raise PermanentStepError(
+                    "ACTIVE route points to an unexpected third-party Deployment; "
+                    "rollback cannot safely mutate routing.",
+                    code="UNEXPECTED_ACTIVE_ROUTE",
+                    details={
+                        "active_deployment_id": str(active.deployment_id),
+                        "source_deployment_id": str(source.id),
+                        "target_deployment_id": str(target.id),
+                    },
+                )
+
             now = dt.datetime.now(tz=dt.UTC)
-            if active is not None:
-                # Preserve Target (or other) rewrite when deactivating.
+            if active is not None and str(active.deployment_id) == str(target.id):
+                # Preserve Target rewrite when deactivating.
                 active.status = RouteStatus.INACTIVE.value
                 active.deactivated_at = now
                 await tx.flush()
