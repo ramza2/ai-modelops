@@ -469,7 +469,7 @@ def _settings(**overrides: Any) -> Settings:
 
 
 @pytest.mark.asyncio
-async def test_cold_switch_happy_path(db) -> None:
+async def test_cold_switch_happy_path(db, monkeypatch) -> None:
     session_factory = db
     fake_node = ColdSwitchFakeNodeAgent()
     fake_gw = FakeGateway()
@@ -492,66 +492,51 @@ async def test_cold_switch_happy_path(db) -> None:
         fake_gw.traffic_state = TrafficState.SERVING.value
         op_id, job_id = await _enqueue_cold_switch(session, fixture=fixture)
 
-    # Sync FakeGateway with DB routing bumps by wrapping bump side-effect:
-    # poll loop expects applied_routing_version to catch up — advance on each
-    # GET by reading current routing_state version from a side channel.
     engine = session_factory.kw["bind"]
+    endpoint_id = fixture["endpoint_id"]
 
-    class SyncingGateway(FakeGateway):
-        def __init__(self, inner: FakeGateway) -> None:
-            super().__init__()
-            self.__dict__.update(inner.__dict__)
+    # Gateway fake mirrors DB traffic/route/version on each poll (async).
+    from app.clients.gateway import GatewayClient
 
-        def handler(self, request: httpx.Request) -> httpx.Response:
-            # Best-effort: bump applied version to current DB version.
-            import asyncio
-
-            async def _read_version() -> int:
-                async with session_factory() as s:
-                    row = (
-                        await s.execute(
-                            __import__("sqlalchemy").text(
-                                "SELECT version FROM routing_state WHERE id = 1"
-                            )
+    async def _synced_runtime(self: GatewayClient, alias: str) -> dict[str, Any]:
+        async with session_factory() as s:
+            version = int(
+                (
+                    await s.execute(
+                        __import__("sqlalchemy").text(
+                            "SELECT version FROM routing_state WHERE id = 1"
                         )
-                    ).scalar_one()
-                    return int(row)
-
-            # Sync transport is sync — use a nest-safe approach via connection.
-            from sqlalchemy import create_engine, text as sqla_text
-
-            sync_url = str(engine.url).replace("+asyncpg", "")
-            sync_engine = create_engine(sync_url)
-            with sync_engine.connect() as conn:
-                version = int(
-                    conn.execute(
-                        sqla_text("SELECT version FROM routing_state WHERE id = 1")
-                    ).scalar_one()
-                )
-                alias_row = conn.execute(
-                    sqla_text(
+                    )
+                ).scalar_one()
+            )
+            traffic = (
+                await s.execute(
+                    __import__("sqlalchemy").text(
                         "SELECT traffic_state FROM endpoint_alias WHERE id = :id"
                     ),
-                    {"id": str(fixture["endpoint_id"])},
-                ).one()
-                active = conn.execute(
-                    sqla_text(
+                    {"id": str(endpoint_id)},
+                )
+            ).scalar_one()
+            active = (
+                await s.execute(
+                    __import__("sqlalchemy").text(
                         """
                         SELECT deployment_id FROM endpoint_route
                         WHERE endpoint_alias_id = :id AND status = 'ACTIVE'
                         """
                     ),
-                    {"id": str(fixture["endpoint_id"])},
-                ).scalar_one_or_none()
-            sync_engine.dispose()
-            self.applied_routing_version = version
-            self.traffic_state = alias_row[0]
-            self.active_deployment_id = str(active) if active else None
-            self.inflight_requests = 0
-            return super().handler(request)
+                    {"id": str(endpoint_id)},
+                )
+            ).scalar_one_or_none()
+        return {
+            "alias": alias,
+            "applied_routing_version": version,
+            "traffic_state": str(traffic),
+            "active_deployment_id": str(active) if active else None,
+            "inflight_requests": 0,
+        }
 
-    fake_gw_sync = SyncingGateway(fake_gw)
-    transport = CombinedTransport(fake_node, fake_gw_sync)
+    monkeypatch.setattr(GatewayClient, "get_route_runtime", _synced_runtime)
 
     settings = _settings()
     executor = OperationExecutor(
