@@ -787,6 +787,47 @@ async def _mark_steps_status(
     await session.commit()
 
 
+async def _isolate_and_claim_job(
+    session_factory,
+    *,
+    job_id: uuid.UUID,
+    worker_id: str,
+) -> None:
+    """Clear other queued jobs so claim_next_job returns this test's job."""
+    async with session_factory() as session:
+        await session.execute(
+            __import__("sqlalchemy").text(
+                """
+                UPDATE operation_job
+                SET status = 'DONE',
+                    locked_by = NULL,
+                    locked_at = NULL,
+                    available_at = now() + interval '1 day',
+                    updated_at = now()
+                WHERE status IN ('QUEUED', 'RUNNING')
+                  AND id <> :id
+                """
+            ),
+            {"id": str(job_id)},
+        )
+        await session.execute(
+            __import__("sqlalchemy").text(
+                """
+                UPDATE operation_job
+                SET available_at = now() - interval '1 second',
+                    updated_at = now()
+                WHERE id = :id AND status = 'QUEUED'
+                """
+            ),
+            {"id": str(job_id)},
+        )
+        await session.commit()
+        repo = OperationJobRepository(session)
+        claimed = await repo.claim_next_job(worker_id=worker_id)
+        assert claimed is not None, f"expected to claim job {job_id}"
+        assert uuid.UUID(str(claimed.id)) == job_id
+
+
 async def _claim_and_execute(
     session_factory,
     *,
@@ -795,11 +836,9 @@ async def _claim_and_execute(
     transport: CombinedTransport,
     engine,
 ) -> None:
-    async with session_factory() as session:
-        repo = OperationJobRepository(session)
-        claimed = await repo.claim_next_job(worker_id=settings.worker_id)
-        assert claimed is not None
-        assert uuid.UUID(str(claimed.id)) == job_id
+    await _isolate_and_claim_job(
+        session_factory, job_id=job_id, worker_id=settings.worker_id
+    )
 
     executor = OperationExecutor(
         session_factory=session_factory,
@@ -1525,11 +1564,13 @@ async def test_cold_switch_advisory_lock_requeues_without_burning_attempt(
     holder = DeploymentAdvisoryLock(engine)
     assert await holder.try_acquire(fixture["source_id"]) is True
     try:
+        await _isolate_and_claim_job(
+            session_factory, job_id=job_id, worker_id="test-worker-cs"
+        )
         async with session_factory() as session:
-            repo = OperationJobRepository(session)
-            claimed = await repo.claim_next_job(worker_id="test-worker-cs")
-            assert claimed is not None
-            assert int(claimed.attempt_count) == 1
+            job = await session.get(OperationJob, job_id)
+            assert job is not None
+            assert int(job.attempt_count) == 1
 
         calls_before = len(fake_node.calls)
         executor = OperationExecutor(
@@ -1577,10 +1618,9 @@ async def test_cold_switch_conflicts_with_lifecycle_deployment_lock(db) -> None:
     holder = DeploymentAdvisoryLock(engine)
     assert await holder.try_acquire(fixture["target_id"]) is True
     try:
-        async with session_factory() as session:
-            repo = OperationJobRepository(session)
-            claimed = await repo.claim_next_job(worker_id="test-worker-cs")
-            assert claimed is not None
+        await _isolate_and_claim_job(
+            session_factory, job_id=job_id, worker_id="test-worker-cs"
+        )
 
         executor = OperationExecutor(
             session_factory=session_factory,
