@@ -508,11 +508,12 @@ Endpoint를 다른 Deployment로 전환하는 핵심 API.
 ```json
 {
   "target_deployment_id": "uuid",
-  "strategy": "AUTO",
+  "strategy": "COLD",
   "reason": "model upgrade",
-  "drain_timeout_seconds": 120,
+  "drain_timeout_seconds": 60,
   "health_timeout_seconds": 300,
-  "vram_release_timeout_seconds": 60
+  "vram_release_timeout_seconds": 30,
+  "gateway_apply_timeout_seconds": 30
 }
 ```
 
@@ -525,9 +526,24 @@ COLD
 ALTERNATE_NODE
 ```
 
-`AUTO`이면 Resource Preflight 결과에 따라 가능한 전략을 선택한다.
+**M5-B implementation note:** only `strategy=COLD` is executable. `HOT`,
+`AUTO`, and `ALTERNATE_NODE` are rejected with `VALIDATION_ERROR` until later
+milestones. The request shape remains forward-compatible.
+
+`AUTO`이면 Resource Preflight 결과에 따라 가능한 전략을 선택한다 (not yet
+implemented).
 
 Cold Switch 선택 시 `docs/state-machines/01-cold-switch.md`를 따른다.
+
+Enqueue는 Operation / OperationJob / OperationStep만 생성한다. Route,
+`traffic_state`, Deployment `desired_state`는 변경하지 않는다.
+
+Worker는 실행 직전 **authoritative fresh Resource Preflight**를 다시 수행한다.
+Standalone `POST /preflights` preview는 실행 승인으로 사용하지 않는다.
+
+**M5-B scope:** forward COLD path only. Automatic rollback / cancel / retry /
+reconciliation은 M5-C. Destructive boundary(`STOP_SOURCE`) 이후 복구 불가
+실패는 `MANUAL_INTERVENTION_REQUIRED` + Endpoint `MAINTENANCE`로 종료한다.
 
 응답: `202 Accepted`
 
