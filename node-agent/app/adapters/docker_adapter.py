@@ -848,12 +848,17 @@ def _host_process_tree(root_pid: int, *, proc_root: str = "/proc") -> set[int]:
     unknown rather than guessing that Docker ``State.Pid`` and NVML PIDs share
     a host namespace.
 
+    If ``root_pid`` itself is absent from the enumerated process set (stale
+    Docker ``State.Pid``, exited container), returns an empty set rather than
+    seeding traversal with a non-existent root.
+
     ``proc_root`` is overridable for deterministic unit tests only.
     """
     if root_pid <= 0:
         return set()
 
     children_by_ppid: dict[int, list[int]] = {}
+    present_pids: set[int] = set()
     try:
         entries = os.listdir(proc_root)
     except OSError:
@@ -863,6 +868,7 @@ def _host_process_tree(root_pid: int, *, proc_root: str = "/proc") -> set[int]:
         if not name.isdigit():
             continue
         pid = int(name)
+        present_pids.add(pid)
         try:
             with open(
                 os.path.join(proc_root, name, "status"), encoding="utf-8"
@@ -874,6 +880,9 @@ def _host_process_tree(root_pid: int, *, proc_root: str = "/proc") -> set[int]:
                         break
         except (OSError, ValueError, IndexError):
             continue
+
+    if root_pid not in present_pids:
+        return set()
 
     owned: set[int] = set()
     stack = [root_pid]

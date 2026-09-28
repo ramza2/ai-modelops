@@ -368,3 +368,35 @@ def test_host_process_tree_includes_descendants(tmp_path) -> None:
     assert 99 not in tree
     assert _host_process_tree(99, proc_root=str(proc)) == {99}
     assert _host_process_tree(0, proc_root=str(proc)) == set()
+
+
+def test_host_process_tree_absent_root_returns_empty(tmp_path) -> None:
+    """proc_root readable but root PID absent (stale Docker State.Pid) -> set()."""
+    from app.adapters.docker_adapter import _host_process_tree
+
+    proc = tmp_path / "proc"
+    for pid, ppid in ((11, 1), (12, 11), (99, 1)):
+        status_dir = proc / str(pid)
+        status_dir.mkdir(parents=True)
+        (status_dir / "status").write_text(
+            f"Name:\tfake\nPPid:\t{ppid}\n", encoding="utf-8"
+        )
+
+    # Stale root 10 is not present; must not seed traversal or claim children.
+    assert _host_process_tree(10, proc_root=str(proc)) == set()
+
+
+def test_host_process_tree_present_root_still_traverses(tmp_path) -> None:
+    """Root PID present -> root/child/grandchild traversal still works."""
+    from app.adapters.docker_adapter import _host_process_tree
+
+    proc = tmp_path / "proc"
+    for pid, ppid in ((20, 1), (21, 20), (22, 21), (88, 1)):
+        status_dir = proc / str(pid)
+        status_dir.mkdir(parents=True)
+        (status_dir / "status").write_text(
+            f"Name:\tfake\nPPid:\t{ppid}\n", encoding="utf-8"
+        )
+
+    assert _host_process_tree(20, proc_root=str(proc)) == {20, 21, 22}
+    assert 88 not in _host_process_tree(20, proc_root=str(proc))
