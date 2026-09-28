@@ -10,11 +10,15 @@ Cold Switch는 GPU VRAM이 부족하여 기존 모델과 신규 모델을 동시
 - **M5-B:** durable forward Cold Switch orchestration (enqueue → 14 steps → FINALIZE).
   Only `strategy=COLD` is executable. Worker always runs a **fresh** operation-bound
   Preflight; standalone M5-A preview is never treated as execution approval.
-  Automatic rollback, cancel policy, and full reconciliation are **not** in M5-B.
-  Failures after the `STOP_SOURCE` destructive boundary terminate as
-  `MANUAL_INTERVENTION_REQUIRED` with Endpoint `MAINTENANCE` where possible so
-  M5-C can resume from persisted state.
-- **M5-C:** automatic rollback state machine, cancel/retry policy, reconciliation.
+- **M5-C1:** automatic Cold Switch rollback (`ROLLBACK_*` steps → `ROLLED_BACK`).
+  Known forward failures after Source has actually stopped
+  (`WAIT_VRAM_RELEASE` … `ACTIVATE_TARGET_ROUTE`) enter durable automatic rollback
+  with Endpoint kept `MAINTENANCE` until Source is healthy and route/traffic restored.
+  `WAIT_ROUTE_APPLY` / `WAIT_TRAFFIC_APPLY` Gateway sync timeouts remain
+  `MANUAL_INTERVENTION_REQUIRED` + `MAINTENANCE` (Target may already be valid).
+  Unexpected worker exceptions keep the M5-B outer fail-safe (MIR after the
+  destructive boundary). Cancel/retry APIs and full reconciliation are **not** in M5-C1.
+- **M5-C2+:** cancel/retry policy, full reconciliation sweeper, HOT/AUTO, Admin UI.
 
 핵심 원칙은 다음과 같다.
 

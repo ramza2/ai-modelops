@@ -31,6 +31,7 @@ from app.core.enums import (
     HealthStatus,
     JobStatus,
     ModelType,
+    OperationStatus,
     OperationType,
     PreflightResult,
     RouteStatus,
@@ -61,6 +62,10 @@ from app.domain.preflight import (
     reclaimable_by_gpu_from_resources,
 )
 from app.repositories.operations import OperationJobRepository
+from app.services.cold_switch_rollback import (
+    ROLLBACK_STEPS,
+    ColdSwitchRollbackMixin,
+)
 from app.services.operation_executor import (
     OperationExecutor,
     PermanentStepError,
@@ -150,8 +155,8 @@ async def _bump_routing_version(session: AsyncSession) -> int:
     return version_int
 
 
-class ColdSwitchExecutor:
-    """Execute a claimed SWITCH/COLD Operation forward path."""
+class ColdSwitchExecutor(ColdSwitchRollbackMixin):
+    """Execute a claimed SWITCH/COLD Operation forward path (+ M5-C1 rollback)."""
 
     def __init__(self, lifecycle: OperationExecutor) -> None:
         self._lifecycle = lifecycle
@@ -423,11 +428,27 @@ class ColdSwitchExecutor:
                 transport=self._transport,
             )
 
+            # Resume durable rollback if Worker restarted mid-rollback.
+            if operation.status == OperationStatus.ROLLING_BACK.value:
+                await self._run_pending_rollback_steps(
+                    session,
+                    repo,
+                    client,
+                    gateway,
+                    operation,
+                    job,
+                    alias,
+                    source,
+                    target,
+                )
+                return
+
             steps = await repo.list_steps(operation_id)
             pending = [
                 s
                 for s in steps
                 if s.status in (StepStatus.PENDING.value, StepStatus.RUNNING.value)
+                and s.step_code not in ROLLBACK_STEPS
             ]
 
             for step in pending:
@@ -454,7 +475,17 @@ class ColdSwitchExecutor:
                         await session.refresh(step_ref)
                 except RetryableStepError as exc:
                     await self._handle_retryable_switch(
-                        repo, job, operation, step, exc
+                        repo,
+                        job,
+                        operation,
+                        step,
+                        exc,
+                        session=session,
+                        client=client,
+                        gateway=gateway,
+                        alias=alias,
+                        source=source,
+                        target=target,
                     )
                     return
                 except PermanentStepError as exc:
@@ -465,16 +496,19 @@ class ColdSwitchExecutor:
                         detail=exc.details,
                     )
                     await session.refresh(operation)
-                    await self._fail_all(
+                    await self._handle_forward_terminal_failure(
+                        session,
                         repo,
-                        job,
+                        client,
+                        gateway,
                         operation,
+                        job,
+                        alias,
+                        source,
+                        target,
+                        step,
                         code=exc.code,
                         message=exc.message,
-                        destructive=_destructive_entered(operation),
-                        alias=alias,
-                        source=source,
-                        gateway=gateway,
                     )
                     return
                 except NodeAgentError as exc:
@@ -487,6 +521,12 @@ class ColdSwitchExecutor:
                             RetryableStepError(
                                 exc.message, code=exc.code, details=exc.details
                             ),
+                            session=session,
+                            client=client,
+                            gateway=gateway,
+                            alias=alias,
+                            source=source,
+                            target=target,
                         )
                         return
                     await repo.fail_step(
@@ -496,16 +536,19 @@ class ColdSwitchExecutor:
                         detail=exc.details,
                     )
                     await session.refresh(operation)
-                    await self._fail_all(
+                    await self._handle_forward_terminal_failure(
+                        session,
                         repo,
-                        job,
+                        client,
+                        gateway,
                         operation,
+                        job,
+                        alias,
+                        source,
+                        target,
+                        step,
                         code=exc.code,
                         message=exc.message,
-                        destructive=_destructive_entered(operation),
-                        alias=alias,
-                        source=source,
-                        gateway=gateway,
                     )
                     return
                 except GatewayError as exc:
@@ -518,6 +561,12 @@ class ColdSwitchExecutor:
                             RetryableStepError(
                                 exc.message, code=exc.code, details=exc.details
                             ),
+                            session=session,
+                            client=client,
+                            gateway=gateway,
+                            alias=alias,
+                            source=source,
+                            target=target,
                         )
                         return
                     await repo.fail_step(
@@ -527,16 +576,19 @@ class ColdSwitchExecutor:
                         detail=exc.details,
                     )
                     await session.refresh(operation)
-                    await self._fail_all(
+                    await self._handle_forward_terminal_failure(
+                        session,
                         repo,
-                        job,
+                        client,
+                        gateway,
                         operation,
+                        job,
+                        alias,
+                        source,
+                        target,
+                        step,
                         code=exc.code,
                         message=exc.message,
-                        destructive=_destructive_entered(operation),
-                        alias=alias,
-                        source=source,
-                        gateway=gateway,
                     )
                     return
                 except Exception:  # noqa: BLE001 - never escape to JobRunner as FAILED
@@ -618,6 +670,69 @@ class ColdSwitchExecutor:
                     )
                 return
 
+    async def _handle_forward_terminal_failure(
+        self,
+        session: AsyncSession,
+        repo: OperationJobRepository,
+        client: NodeAgentClient,
+        gateway: GatewayClient,
+        operation: Operation,
+        job: OperationJob,
+        alias: EndpointAlias,
+        source: Deployment,
+        target: Deployment,
+        step: OperationStep,
+        *,
+        code: str,
+        message: str,
+    ) -> None:
+        """Route a forward-path terminal failure to FAILED / rollback / MIR."""
+        if step.step_code == STEP_STOP_SOURCE:
+            await self._handle_stop_source_terminal_failure(
+                session,
+                repo,
+                client,
+                gateway,
+                operation,
+                job,
+                alias,
+                source,
+                target,
+                step,
+                code=code,
+                message=message,
+            )
+            return
+
+        if self._should_enter_automatic_rollback(operation, step):
+            await self._enter_and_run_rollback(
+                session,
+                repo,
+                client,
+                gateway,
+                operation,
+                job,
+                alias,
+                source,
+                target,
+                failed_step=step,
+                code=code,
+                message=message,
+            )
+            return
+
+        await self._fail_all(
+            repo,
+            job,
+            operation,
+            code=code,
+            message=message,
+            destructive=_destructive_entered(operation),
+            alias=alias,
+            source=source,
+            gateway=gateway,
+        )
+
     async def _handle_retryable_switch(
         self,
         repo: OperationJobRepository,
@@ -625,6 +740,13 @@ class ColdSwitchExecutor:
         operation: Operation,
         step: OperationStep,
         exc: RetryableStepError,
+        *,
+        session: AsyncSession,
+        client: NodeAgentClient,
+        gateway: GatewayClient,
+        alias: EndpointAlias,
+        source: Deployment,
+        target: Deployment,
     ) -> None:
         max_attempts = int(job.max_attempts)
         if int(job.attempt_count) >= max_attempts:
@@ -634,22 +756,28 @@ class ColdSwitchExecutor:
                 message=exc.message,
                 detail=exc.details,
             )
-            await self._fail_all(
+            await self._handle_forward_terminal_failure(
+                session,
                 repo,
-                job,
+                client,
+                gateway,
                 operation,
+                job,
+                alias,
+                source,
+                target,
+                step,
                 code=exc.code,
                 message=f"{exc.message} (retry exhausted)",
-                destructive=_destructive_entered(operation),
             )
             return
 
         delay = float(2 ** max(0, int(job.attempt_count) - 1))
         delay = min(delay, 4.0)
         await repo.bump_step_attempt(uuid.UUID(str(step.id)))
-        async with self._session_factory() as session:
-            fresh_repo = OperationJobRepository(session)
-            fresh_job = await session.get(OperationJob, job.id)
+        async with self._session_factory() as fresh_session:
+            fresh_repo = OperationJobRepository(fresh_session)
+            fresh_job = await fresh_session.get(OperationJob, job.id)
             if fresh_job is None:
                 return
             if fresh_job.status != JobStatus.RUNNING.value:
@@ -874,10 +1002,24 @@ class ColdSwitchExecutor:
                 session, alias, source, target
             )
         else:
-            raise PermanentStepError(
-                f"Unknown Cold Switch step_code: {code}",
-                code="UNKNOWN_STEP",
+            rollback_detail = await self._dispatch_rollback_step(
+                session,
+                repo,
+                client,
+                gateway,
+                operation,
+                alias,
+                source,
+                target,
+                step,
+                mutation,
             )
+            if rollback_detail is None:
+                raise PermanentStepError(
+                    f"Unknown Cold Switch step_code: {code}",
+                    code="UNKNOWN_STEP",
+                )
+            detail = rollback_detail
 
         if detail:
             step.detail_json = {**(step.detail_json or {}), **detail}

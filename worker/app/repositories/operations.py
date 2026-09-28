@@ -206,6 +206,53 @@ class OperationJobRepository:
         operation.error_message = message
         await self._session.commit()
 
+    async def mark_operation_rolling_back(
+        self,
+        operation_id: uuid.UUID,
+        *,
+        code: str,
+        message: str,
+        metadata_patch: dict | None = None,
+    ) -> None:
+        """Enter ROLLING_BACK without finishing the Operation."""
+        operation = await self._session.get(Operation, operation_id)
+        if operation is None:
+            return
+        if operation.status == OperationStatus.MANUAL_INTERVENTION_REQUIRED.value:
+            return
+        if operation.status == OperationStatus.ROLLED_BACK.value:
+            return
+        operation.status = OperationStatus.ROLLING_BACK.value
+        operation.finished_at = None
+        # Keep forward failure diagnosable; do not clear error fields yet.
+        operation.error_code = code
+        operation.error_message = message
+        if metadata_patch:
+            meta = dict(operation.metadata_json or {})
+            meta.update(metadata_patch)
+            operation.metadata_json = meta
+        await self._session.commit()
+
+    async def mark_operation_rolled_back(
+        self,
+        operation_id: uuid.UUID,
+        *,
+        code: str | None = None,
+        message: str | None = None,
+    ) -> None:
+        now = dt.datetime.now(tz=dt.UTC)
+        operation = await self._session.get(Operation, operation_id)
+        if operation is None:
+            return
+        operation.status = OperationStatus.ROLLED_BACK.value
+        operation.finished_at = now
+        # Preserve original forward failure code/message when already set.
+        if code is not None:
+            operation.error_code = code
+        if message is not None:
+            operation.error_message = message
+        await self._session.commit()
+
     async def mark_operation_manual_intervention(
         self,
         operation_id: uuid.UUID,
