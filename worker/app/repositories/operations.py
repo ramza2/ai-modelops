@@ -185,6 +185,23 @@ class OperationJobRepository:
         operation.error_message = message
         await self._session.commit()
 
+    async def mark_operation_manual_intervention(
+        self,
+        operation_id: uuid.UUID,
+        *,
+        code: str,
+        message: str,
+    ) -> None:
+        now = dt.datetime.now(tz=dt.UTC)
+        operation = await self._session.get(Operation, operation_id)
+        if operation is None:
+            return
+        operation.status = OperationStatus.MANUAL_INTERVENTION_REQUIRED.value
+        operation.finished_at = now
+        operation.error_code = code
+        operation.error_message = message
+        await self._session.commit()
+
     async def begin_step(self, step: OperationStep) -> str:
         """Mark step RUNNING and ensure a stable request_id in detail_json."""
         now = dt.datetime.now(tz=dt.UTC)

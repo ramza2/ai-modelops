@@ -24,18 +24,35 @@ class RuntimeStatus(StrEnum):
     UNKNOWN = "UNKNOWN"
 
 
+class DeploymentType(StrEnum):
+    IMPORTED = "IMPORTED"
+    MANAGED = "MANAGED"
+
+
 class OperationType(StrEnum):
     START = "START"
     STOP = "STOP"
     RESTART = "RESTART"
     DELETE = "DELETE"
+    SWITCH = "SWITCH"
+    ROLLBACK = "ROLLBACK"
 
 
 class OperationStatus(StrEnum):
     QUEUED = "QUEUED"
     RUNNING = "RUNNING"
+    ROLLING_BACK = "ROLLING_BACK"
     SUCCEEDED = "SUCCEEDED"
     FAILED = "FAILED"
+    ROLLED_BACK = "ROLLED_BACK"
+    CANCELLED = "CANCELLED"
+    MANUAL_INTERVENTION_REQUIRED = "MANUAL_INTERVENTION_REQUIRED"
+
+
+class SwitchStrategy(StrEnum):
+    HOT = "HOT"
+    COLD = "COLD"
+    ALTERNATE_NODE = "ALTERNATE_NODE"
 
 
 class JobStatus(StrEnum):
@@ -76,3 +93,31 @@ class HealthCheckType(StrEnum):
 class HealthCheckResult(StrEnum):
     SUCCESS = "SUCCESS"
     FAILURE = "FAILURE"
+
+
+class TrafficState(StrEnum):
+    SERVING = "SERVING"
+    DRAINING = "DRAINING"
+    MAINTENANCE = "MAINTENANCE"
+
+
+class RouteStatus(StrEnum):
+    ACTIVE = "ACTIVE"
+    INACTIVE = "INACTIVE"
+
+
+class ApiType(StrEnum):
+    CHAT = "CHAT"
+    EMBEDDING = "EMBEDDING"
+
+
+class ModelType(StrEnum):
+    LLM = "LLM"
+    VLM = "VLM"
+    EMBEDDING = "EMBEDDING"
+
+
+class PreflightResult(StrEnum):
+    HOT_SWITCH_AVAILABLE = "HOT_SWITCH_AVAILABLE"
+    COLD_SWITCH_ONLY = "COLD_SWITCH_ONLY"
+    RESOURCE_INSUFFICIENT = "RESOURCE_INSUFFICIENT"

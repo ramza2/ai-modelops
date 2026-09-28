@@ -117,6 +117,7 @@ class OperationExecutor:
         raise RuntimeError("AsyncEngine is required for deployment advisory locks.")
 
     async def execute(self, job_id: uuid.UUID) -> None:
+        is_switch = False
         async with self._session_factory() as session:
             repo = OperationJobRepository(session)
             job = await session.get(OperationJob, job_id)
@@ -126,7 +127,11 @@ class OperationExecutor:
             if operation is None:
                 await repo.mark_job_failed(job_id, error="Operation row missing.")
                 return
-            if operation.target_deployment_id is None:
+            # SWITCH uses multi-key advisory locks inside ColdSwitchExecutor —
+            # do not take the single-deployment lifecycle lock.
+            if operation.operation_type == OperationType.SWITCH.value:
+                is_switch = True
+            elif operation.target_deployment_id is None:
                 await repo.mark_job_failed(job_id, error="Operation missing target deployment.")
                 await repo.mark_operation_failed(
                     uuid.UUID(str(operation.id)),
@@ -134,8 +139,15 @@ class OperationExecutor:
                     message="Operation missing target_deployment_id.",
                 )
                 return
-            deployment_id = uuid.UUID(str(operation.target_deployment_id))
-            operation_id = uuid.UUID(str(operation.id))
+            else:
+                deployment_id = uuid.UUID(str(operation.target_deployment_id))
+                operation_id = uuid.UUID(str(operation.id))
+
+        if is_switch:
+            from app.services.cold_switch import ColdSwitchExecutor
+
+            await ColdSwitchExecutor(self).execute(job_id)
+            return
 
         lock = DeploymentAdvisoryLock(self._resolve_engine())
         locked = await lock.try_acquire(deployment_id)
@@ -1048,6 +1060,9 @@ class OperationExecutor:
     ) -> None:
         now = dt.datetime.now(tz=dt.UTC)
         op = operation.operation_type
+        # SWITCH desired-state updates are owned by ColdSwitchExecutor.FINALIZE.
+        if op == OperationType.SWITCH.value:
+            return
         if op == OperationType.START.value:
             deployment.desired_state = DesiredState.RUNNING.value
             deployment.runtime_status = RuntimeStatus.RUNNING.value

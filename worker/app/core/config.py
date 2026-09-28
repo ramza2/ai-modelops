@@ -36,6 +36,14 @@ class Settings(BaseSettings):
     worker_stale_seconds: int = 60
     worker_lock_requeue_seconds: float = 2.0
 
+    # M5-B Cold Switch / Gateway control-plane settings (Worker only).
+    gateway_base_url: str = "http://127.0.0.1:8080"
+    gateway_timeout_seconds: float = 10.0
+    gateway_apply_timeout_seconds: float = 30.0
+    drain_timeout_seconds: float = 60.0
+    gateway_poll_interval_seconds: float = 0.5
+    default_gpu_safety_margin_mb: int = 1024
+
 
 @lru_cache
 def get_settings() -> Settings:
