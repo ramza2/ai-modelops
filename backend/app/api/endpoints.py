@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, Header, Query, Response, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_session
 from app.core.errors import ValidationError
 from app.services.endpoints import EndpointService, _UNSET
+from app.services.switch import SwitchService
 
 router = APIRouter(prefix="/api/v1", tags=["endpoints"])
 
@@ -38,6 +39,18 @@ class SetRouteRequest(BaseModel):
     deployment_id: uuid.UUID
     rewrite_model_name: str | None = Field(default=None, max_length=255)
     reason: str | None = None
+
+
+class SwitchEndpointRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    target_deployment_id: uuid.UUID
+    strategy: str = "COLD"
+    reason: str | None = None
+    drain_timeout_seconds: int = Field(default=60, ge=1)
+    health_timeout_seconds: int = Field(default=300, ge=1)
+    vram_release_timeout_seconds: int = Field(default=30, ge=1)
+    gateway_apply_timeout_seconds: int = Field(default=30, ge=1)
 
 
 def get_endpoint_service(
@@ -138,3 +151,40 @@ async def set_endpoint_route(
         rewrite_model_name=body.rewrite_model_name,
         reason=body.reason,
     )
+
+
+def get_switch_service(
+    session: AsyncSession = Depends(get_session),
+) -> SwitchService:
+    return SwitchService(session)
+
+
+@router.post(
+    "/endpoints/{endpoint_id}/switch",
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def switch_endpoint(
+    endpoint_id: uuid.UUID,
+    body: SwitchEndpointRequest,
+    response: Response,
+    service: SwitchService = Depends(get_switch_service),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+) -> dict:
+    """Enqueue a Cold Switch Operation (M5-B forward path only).
+
+    Only ``strategy=COLD`` is executable in M5-B. HOT/AUTO/ALTERNATE_NODE are
+    rejected. Does not mutate routes, traffic_state, or desired_state.
+    """
+    payload = await service.enqueue_cold_switch(
+        endpoint_id=endpoint_id,
+        target_deployment_id=body.target_deployment_id,
+        strategy=body.strategy,
+        reason=body.reason,
+        drain_timeout_seconds=body.drain_timeout_seconds,
+        health_timeout_seconds=body.health_timeout_seconds,
+        vram_release_timeout_seconds=body.vram_release_timeout_seconds,
+        gateway_apply_timeout_seconds=body.gateway_apply_timeout_seconds,
+        idempotency_key=idempotency_key,
+    )
+    response.status_code = status.HTTP_202_ACCEPTED
+    return payload

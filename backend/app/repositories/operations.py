@@ -33,10 +33,37 @@ class OperationRepository:
     async def find_active_for_deployment(
         self, deployment_id: uuid.UUID
     ) -> Operation | None:
+        """Active lifecycle or Switch involving this deployment as source/target."""
         stmt = (
             select(Operation)
             .where(
-                Operation.target_deployment_id == deployment_id,
+                Operation.status.in_(tuple(ACTIVE_OPERATION_STATUSES)),
+                (
+                    (Operation.target_deployment_id == deployment_id)
+                    | (Operation.source_deployment_id == deployment_id)
+                ),
+            )
+            .order_by(Operation.created_at.desc())
+            .limit(1)
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def find_active_switch_for_endpoint(
+        self, endpoint_id: uuid.UUID
+    ) -> Operation | None:
+        """Active SWITCH/ROLLBACK for an Endpoint Alias."""
+        from app.core.enums import OperationType
+
+        stmt = (
+            select(Operation)
+            .where(
+                Operation.endpoint_alias_id == endpoint_id,
+                Operation.operation_type.in_(
+                    (
+                        OperationType.SWITCH.value,
+                        OperationType.ROLLBACK.value,
+                    )
+                ),
                 Operation.status.in_(tuple(ACTIVE_OPERATION_STATUSES)),
             )
             .order_by(Operation.created_at.desc())

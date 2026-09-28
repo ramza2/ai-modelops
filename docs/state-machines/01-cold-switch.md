@@ -4,6 +4,18 @@
 
 Cold Switch는 GPU VRAM이 부족하여 기존 모델과 신규 모델을 동시에 실행할 수 없는 경우 안전하게 모델을 교체하기 위한 상태머신이다.
 
+### Implementation milestones
+
+- **M5-A:** Resource Preflight preview (`POST /preflights`) — analysis only; not Switch approval.
+- **M5-B:** durable forward Cold Switch orchestration (enqueue → 14 steps → FINALIZE).
+  Only `strategy=COLD` is executable. Worker always runs a **fresh** operation-bound
+  Preflight; standalone M5-A preview is never treated as execution approval.
+  Automatic rollback, cancel policy, and full reconciliation are **not** in M5-B.
+  Failures after the `STOP_SOURCE` destructive boundary terminate as
+  `MANUAL_INTERVENTION_REQUIRED` with Endpoint `MAINTENANCE` where possible so
+  M5-C can resume from persisted state.
+- **M5-C:** automatic rollback state machine, cancel/retry policy, reconciliation.
+
 핵심 원칙은 다음과 같다.
 
 1. 신규 모델 파일과 Docker Image는 기존 모델을 중지하기 전에 준비한다.

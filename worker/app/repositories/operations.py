@@ -8,7 +8,7 @@ import uuid
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.enums import JobStatus, OperationStatus, StepStatus
+from app.core.enums import JobStatus, OperationStatus, OperationType, StepStatus
 from app.domain.models import Operation, OperationJob, OperationStep
 
 
@@ -179,7 +179,45 @@ class OperationJobRepository:
         operation = await self._session.get(Operation, operation_id)
         if operation is None:
             return
+        # Never downgrade MANUAL_INTERVENTION_REQUIRED to ordinary FAILED.
+        if (
+            operation.status
+            == OperationStatus.MANUAL_INTERVENTION_REQUIRED.value
+        ):
+            return
+        # M5-B SWITCH backstop: after the destructive boundary, never land on
+        # ordinary FAILED even if a generic JobRunner/failure path calls this.
+        meta = operation.metadata_json or {}
+        if (
+            operation.operation_type == OperationType.SWITCH.value
+            and bool(meta.get("destructive_boundary_entered"))
+        ):
+            operation.status = (
+                OperationStatus.MANUAL_INTERVENTION_REQUIRED.value
+            )
+            operation.finished_at = now
+            operation.error_code = code
+            operation.error_message = message
+            await self._session.commit()
+            return
         operation.status = OperationStatus.FAILED.value
+        operation.finished_at = now
+        operation.error_code = code
+        operation.error_message = message
+        await self._session.commit()
+
+    async def mark_operation_manual_intervention(
+        self,
+        operation_id: uuid.UUID,
+        *,
+        code: str,
+        message: str,
+    ) -> None:
+        now = dt.datetime.now(tz=dt.UTC)
+        operation = await self._session.get(Operation, operation_id)
+        if operation is None:
+            return
+        operation.status = OperationStatus.MANUAL_INTERVENTION_REQUIRED.value
         operation.finished_at = now
         operation.error_code = code
         operation.error_message = message

@@ -384,3 +384,13 @@ class NodeAgentClient:
         )
         assert result is not None
         return result
+
+    async def fetch_resources(self) -> dict[str, Any]:
+        """GET /internal/v1/resources — fresh Host/GPU snapshot (read-only)."""
+        result = await self._request(
+            "GET",
+            "/internal/v1/resources",
+            headers=self._auth_headers(),
+        )
+        assert result is not None
+        return result
