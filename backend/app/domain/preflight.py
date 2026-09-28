@@ -101,15 +101,15 @@ def aggregate_preflight(
     else:
         overall = PreflightResult.HOT_SWITCH_AVAILABLE.value
 
-    # Parent numeric fields are diagnostic summaries; overall.result is authoritative.
-    # Use min() for available_* so a multi-GPU bottleneck is visible without summing
-    # free VRAM into a fake shared pool.
+    # Parent numeric fields are diagnostic aggregate totals only.
+    # Decision remains strictly per-GPU (gpu_results / result); totals must never
+    # be used to infer HOT/COLD feasibility and must not mix min/sum semantics.
     return PreflightDecision(
         result=overall,
         required_peak_vram_mb=sum(g.required_vram_mb for g in gpu_results),
-        available_hot_vram_mb=min(g.available_hot_vram_mb for g in gpu_results),
+        available_hot_vram_mb=sum(g.available_hot_vram_mb for g in gpu_results),
         reclaimable_vram_mb=sum(g.reclaimable_vram_mb for g in gpu_results),
-        available_after_reclaim_mb=min(
+        available_after_reclaim_mb=sum(
             g.available_after_reclaim_mb for g in gpu_results
         ),
         safety_margin_mb=gpu_results[0].safety_margin_mb,

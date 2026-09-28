@@ -402,6 +402,12 @@ RESOURCE_INSUFFICIENT
 
 판정은 **GPU별로** 수행한다. 여러 GPU의 free VRAM을 하나의 풀로 합산하지 않는다.
 
+Parent numeric fields (`required_peak_vram_mb`, `available_hot_vram_mb`,
+`reclaimable_vram_mb`, `available_after_reclaim_mb`)는 GPU별 값의
+**diagnostic aggregate totals (sum)** 이다. HOT/COLD 가능 여부는
+`result`와 `gpu_results[].result`만으로 판단하며, parent totals만으로
+feasibility를 추론하지 않는다.
+
 Safety margin은 `MODELOPS_DEFAULT_GPU_SAFETY_MARGIN_MB` (단위 MB)를 사용한다.
 
 이 API는 판단 정보 조회 성격이므로 동기 `200`을 기본으로 한다.

@@ -6,8 +6,10 @@ Docker SDK directly. Use :class:`FakeDockerAdapter` in Cloud Agent tests.
 
 from __future__ import annotations
 
+import os
 import time
 import uuid
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -63,6 +65,14 @@ class DockerStatus:
     reason: str | None = None
 
 
+@dataclass(frozen=True)
+class ManagedProcessOwnership:
+    """Unambiguous ownership of a host PID by a ModelOps-managed container."""
+
+    container_id: str
+    deployment_id: str
+
+
 class DockerAdapter(Protocol):
     def status(self) -> DockerStatus: ...
 
@@ -92,6 +102,20 @@ class DockerAdapter(Protocol):
         ``pull_timeout_seconds`` applies only to the pull path — not to ordinary
         lifecycle Docker SDK calls. Returns True when the image is available.
         May raise DockerUnavailableError for transient timeout/network failures.
+        """
+        ...
+
+    def map_host_pids_to_managed_ownership(
+        self, pids: set[int]
+    ) -> dict[int, ManagedProcessOwnership]:
+        """Map host PIDs to managed-container ownership when unambiguous.
+
+        Only ModelOps-managed containers (``ai.modelops.managed=true`` with a
+        ``ai.modelops.deployment_id`` label) are considered. Ownership includes
+        the container init PID and descendant host PIDs (worker/child processes).
+
+        Unmatched, unmanaged, or ambiguous PIDs are omitted so callers leave
+        ``container_id`` / ``deployment_id`` as null.
         """
         ...
 
@@ -483,6 +507,36 @@ class RealDockerAdapter:
                         pass
         return self.has_image(image)
 
+    def map_host_pids_to_managed_ownership(
+        self, pids: set[int]
+    ) -> dict[int, ManagedProcessOwnership]:
+        if not pids:
+            return {}
+        if self._client is None or not self.status().available:
+            return {}
+
+        candidates: list[tuple[set[int], ManagedProcessOwnership]] = []
+        for info in self.list_containers(all_containers=False):
+            ownership = _managed_ownership_from_labels(info)
+            if ownership is None:
+                continue
+            init_pid = info.pid
+            if init_pid is None or init_pid <= 0:
+                # Re-inspect for a fresh State.Pid when list view is incomplete.
+                inspected = self.inspect(info.id)
+                if inspected is None:
+                    continue
+                ownership = _managed_ownership_from_labels(inspected) or ownership
+                init_pid = inspected.pid
+            if init_pid is None or init_pid <= 0:
+                continue
+            tree = _host_process_tree(int(init_pid))
+            if not tree:
+                continue
+            candidates.append((tree, ownership))
+
+        return _resolve_pid_ownership(pids, candidates)
+
     def _to_info(
         self, container: Any, *, create_spec: CreateContainerSpec | None = None
     ) -> ContainerInfo:
@@ -767,6 +821,87 @@ def _is_conflict(exc: Exception) -> bool:
     )
 
 
+def _managed_ownership_from_labels(
+    info: ContainerInfo,
+) -> ManagedProcessOwnership | None:
+    labels = info.labels or {}
+    if labels.get(LABEL_MANAGED) != MANAGED_LABEL_VALUE:
+        return None
+    deployment_id = labels.get(LABEL_DEPLOYMENT_ID)
+    if not deployment_id:
+        return None
+    return ManagedProcessOwnership(
+        container_id=info.id,
+        deployment_id=str(deployment_id),
+    )
+
+
+def _host_process_tree(root_pid: int) -> set[int]:
+    """Return ``root_pid`` and all descendant host PIDs visible in ``/proc``.
+
+    Model runtimes often use worker/child processes; NVML may report those
+    PIDs rather than the container init PID. Only PIDs reachable from the
+    managed container's init PID are attributed.
+    """
+    if root_pid <= 0:
+        return set()
+
+    children_by_ppid: dict[int, list[int]] = {}
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return {root_pid}
+
+    for name in entries:
+        if not name.isdigit():
+            continue
+        pid = int(name)
+        try:
+            with open(f"/proc/{pid}/status", encoding="utf-8") as fh:
+                for line in fh:
+                    if line.startswith("PPid:"):
+                        ppid = int(line.split()[1])
+                        children_by_ppid.setdefault(ppid, []).append(pid)
+                        break
+        except (OSError, ValueError, IndexError):
+            continue
+
+    owned: set[int] = set()
+    stack = [root_pid]
+    while stack:
+        current = stack.pop()
+        if current in owned:
+            continue
+        owned.add(current)
+        stack.extend(children_by_ppid.get(current, ()))
+    return owned
+
+
+def _resolve_pid_ownership(
+    pids: set[int],
+    candidates: list[tuple[set[int], ManagedProcessOwnership]],
+) -> dict[int, ManagedProcessOwnership]:
+    """Attribute PIDs only when exactly one managed container claims them."""
+    claimed: dict[int, ManagedProcessOwnership] = {}
+    ambiguous: set[int] = set()
+    for tree, ownership in candidates:
+        for pid in pids:
+            if pid not in tree:
+                continue
+            if pid in ambiguous:
+                continue
+            existing = claimed.get(pid)
+            if existing is None:
+                claimed[pid] = ownership
+            elif (
+                existing.container_id != ownership.container_id
+                or existing.deployment_id != ownership.deployment_id
+            ):
+                ambiguous.add(pid)
+                claimed.pop(pid, None)
+    return claimed
+
+
 class FakeDockerAdapter:
     """In-memory Docker adapter for Cloud Agent unit tests (no Docker Engine)."""
 
@@ -817,6 +952,9 @@ class FakeDockerAdapter:
         self.start_reconcile_used = False
         self.known_images: set[str] = set()
         self.pull_attempts: list[str] = []
+        # container_id -> extra host PIDs in the container process tree
+        # (in addition to ContainerInfo.pid). Used to simulate worker/child GPUs.
+        self._extra_host_pids_by_container: dict[str, set[int]] = {}
         for c in containers or []:
             self._containers[c.id] = c
             if c.image:
@@ -1085,6 +1223,39 @@ class FakeDockerAdapter:
             self.known_images.add(image)
             return True
         return False
+
+    def set_container_host_pids(
+        self, container_id: str, pids: Iterable[int]
+    ) -> None:
+        """Test helper: declare host PIDs belonging to a container process tree.
+
+        Include child/worker PIDs that NVML may report in addition to (or instead
+        of) the container init PID. Does not invent managed ownership — the
+        container must still carry managed labels for attribution.
+        """
+        self._extra_host_pids_by_container[container_id] = {
+            int(pid) for pid in pids if int(pid) > 0
+        }
+
+    def map_host_pids_to_managed_ownership(
+        self, pids: set[int]
+    ) -> dict[int, ManagedProcessOwnership]:
+        if not pids or not self._available:
+            return {}
+
+        candidates: list[tuple[set[int], ManagedProcessOwnership]] = []
+        for info in self.list_containers(all_containers=False):
+            ownership = _managed_ownership_from_labels(info)
+            if ownership is None:
+                continue
+            tree: set[int] = set()
+            if info.pid is not None and info.pid > 0:
+                tree.add(int(info.pid))
+            tree |= self._extra_host_pids_by_container.get(info.id, set())
+            if not tree:
+                continue
+            candidates.append((tree, ownership))
+        return _resolve_pid_ownership(pids, candidates)
 
     def seed(self, info: ContainerInfo) -> None:
         """Test helper to insert an arbitrary container record."""

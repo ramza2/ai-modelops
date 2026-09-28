@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import asdict
 from datetime import UTC, datetime
 from typing import Any
 
@@ -53,18 +52,23 @@ class NodeService:
         collected_at = datetime.now(tz=UTC)
         host = self._host.get_resources()
         gpus = self._nvml.list_gpus()
-        return {
-            "collected_at": collected_at.isoformat().replace("+00:00", "Z"),
-            "host": {
-                "cpu_utilization_pct": host.cpu_utilization_pct,
-                "ram_total_mb": host.ram_total_mb,
-                "ram_used_mb": host.ram_used_mb,
-                "ram_free_mb": host.ram_free_mb,
-                "disk_total_mb": host.disk_total_mb,
-                "disk_used_mb": host.disk_used_mb,
-                "disk_free_mb": host.disk_free_mb,
-            },
-            "gpus": [
+        host_pids = {int(p.pid) for g in gpus for p in g.processes}
+        ownership = self._docker.map_host_pids_to_managed_ownership(host_pids)
+
+        gpu_payloads: list[dict[str, Any]] = []
+        for g in gpus:
+            processes: list[dict[str, Any]] = []
+            for proc in g.processes:
+                owned = ownership.get(int(proc.pid))
+                processes.append(
+                    {
+                        "pid": proc.pid,
+                        "used_vram_mb": proc.used_vram_mb,
+                        "container_id": owned.container_id if owned else None,
+                        "deployment_id": owned.deployment_id if owned else None,
+                    }
+                )
+            gpu_payloads.append(
                 {
                     "gpu_uuid": g.gpu_uuid,
                     "device_index": g.device_index,
@@ -77,10 +81,22 @@ class NodeService:
                     "temperature_c": g.temperature_c,
                     "power_w": g.power_w,
                     "compute_capability": g.compute_capability,
-                    "processes": [asdict(p) for p in g.processes],
+                    "processes": processes,
                 }
-                for g in gpus
-            ],
+            )
+
+        return {
+            "collected_at": collected_at.isoformat().replace("+00:00", "Z"),
+            "host": {
+                "cpu_utilization_pct": host.cpu_utilization_pct,
+                "ram_total_mb": host.ram_total_mb,
+                "ram_used_mb": host.ram_used_mb,
+                "ram_free_mb": host.ram_free_mb,
+                "disk_total_mb": host.disk_total_mb,
+                "disk_used_mb": host.disk_used_mb,
+                "disk_free_mb": host.disk_free_mb,
+            },
+            "gpus": gpu_payloads,
         }
 
     async def wait_vram_release(

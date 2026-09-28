@@ -85,6 +85,18 @@ def test_multi_gpu_success_each_gpu_individually() -> None:
     )
     assert decision.result == PreflightResult.HOT_SWITCH_AVAILABLE.value
     assert len(decision.gpu_results) == 2
+    g0, g1 = decision.gpu_results
+    # Parent fields are diagnostic sums (not min); decision remains per-GPU.
+    assert decision.required_peak_vram_mb == 8000 + 8000
+    assert decision.available_hot_vram_mb == (12000 - 1024) + (11000 - 1024)
+    assert decision.reclaimable_vram_mb == 0
+    assert decision.available_after_reclaim_mb == (
+        g0.available_after_reclaim_mb + g1.available_after_reclaim_mb
+    )
+    # Parent summary is not mathematically contradictory for HOT.
+    assert decision.required_peak_vram_mb < decision.available_hot_vram_mb
+    assert g0.result == PreflightResult.HOT_SWITCH_AVAILABLE.value
+    assert g1.result == PreflightResult.HOT_SWITCH_AVAILABLE.value
 
 
 def test_multi_gpu_aggregate_looks_enough_but_one_gpu_fails() -> None:
@@ -100,6 +112,9 @@ def test_multi_gpu_aggregate_looks_enough_but_one_gpu_fails() -> None:
         g.result == PreflightResult.RESOURCE_INSUFFICIENT.value
         for g in decision.gpu_results
     )
+    # Parent totals still sum (diagnostic only) — decision stays per-GPU.
+    assert decision.required_peak_vram_mb == 32000
+    assert decision.available_hot_vram_mb == 8000 + 8000
 
 
 def test_source_reclaim_only_on_matching_gpu() -> None:
@@ -404,20 +419,25 @@ def _resources(
     free1: int = 8000,
     source_used_on_gpu0: int | None = None,
     unrelated_used_on_gpu0: int | None = None,
+    include_real_form_process_fields: bool = False,
 ) -> dict[str, Any]:
     procs0: list[dict[str, Any]] = []
     if source_used_on_gpu0 is not None:
-        procs0.append(
-            {
-                "deployment_id": world["source_deployment_id"],
-                "used_vram_mb": source_used_on_gpu0,
-            }
-        )
+        proc: dict[str, Any] = {
+            "deployment_id": world["source_deployment_id"],
+            "used_vram_mb": source_used_on_gpu0,
+        }
+        if include_real_form_process_fields:
+            proc["pid"] = 4242
+            proc["container_id"] = f"ctr-{world['source_deployment_id'][:8]}"
+        procs0.append(proc)
     if unrelated_used_on_gpu0 is not None:
         procs0.append(
             {
                 "deployment_id": str(uuid.uuid4()),
                 "used_vram_mb": unrelated_used_on_gpu0,
+                "pid": 9999,
+                "container_id": "ctr-other",
             }
         )
     return {
@@ -562,6 +582,35 @@ async def test_api_cold_switch_only(pf_env) -> None:
 
 
 @pytest.mark.asyncio
+async def test_api_cold_with_real_form_attributed_source_processes(pf_env) -> None:
+    """Real Node Agent resources shape (pid + container_id + deployment_id)."""
+    sf = pf_env["session_factory"]
+    async with sf() as session:
+        world = await _seed_switch_world(
+            session, source_required_mb=10000, target_required_mb=16000
+        )
+    pf_env["fake_holder"]["agent"] = _FakeAgent(
+        _resources(
+            world,
+            free0=6000,
+            source_used_on_gpu0=12000,
+            include_real_form_process_fields=True,
+        )
+    )
+    resp = await pf_env["client"].post(
+        "/api/v1/preflights",
+        json={
+            "endpoint_id": world["endpoint_id"],
+            "target_deployment_id": world["target_deployment_id"],
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["result"] == "COLD_SWITCH_ONLY"
+    assert body["gpu_results"][0]["reclaimable_vram_mb"] == 12000
+
+
+@pytest.mark.asyncio
 async def test_api_insufficient_and_no_unrelated_reclaim(pf_env) -> None:
     sf = pf_env["session_factory"]
     async with sf() as session:
@@ -634,7 +683,16 @@ async def test_api_multi_gpu_hot_when_each_ok(pf_env) -> None:
         },
     )
     assert resp.status_code == 200
-    assert resp.json()["result"] == "HOT_SWITCH_AVAILABLE"
+    body = resp.json()
+    assert body["result"] == "HOT_SWITCH_AVAILABLE"
+    assert len(body["gpu_results"]) == 2
+    # Parent diagnostic totals are coherent sums (not min of per-GPU hot).
+    assert body["required_peak_vram_mb"] == 7000 + 7000
+    assert body["available_hot_vram_mb"] == (12000 - 1024) + (12000 - 1024)
+    assert body["required_peak_vram_mb"] < body["available_hot_vram_mb"]
+    assert body["available_after_reclaim_mb"] == sum(
+        g["available_after_reclaim_mb"] for g in body["gpu_results"]
+    )
 
 
 @pytest.mark.asyncio
@@ -662,6 +720,42 @@ async def test_api_validation_errors(pf_env) -> None:
     )
     assert same.status_code == 422
     assert same.json()["error"]["code"] == "VALIDATION_ERROR"
+
+    missing_target = await pf_env["client"].post(
+        "/api/v1/preflights",
+        json={
+            "endpoint_id": world["endpoint_id"],
+            "target_deployment_id": str(uuid.uuid4()),
+        },
+    )
+    assert missing_target.status_code == 404
+    assert missing_target.json()["error"]["code"] == "NOT_FOUND"
+
+
+@pytest.mark.asyncio
+async def test_api_endpoint_without_active_route(pf_env) -> None:
+    sf = pf_env["session_factory"]
+    async with sf() as session:
+        world = await _seed_switch_world(session)
+        await session.execute(
+            text(
+                "UPDATE endpoint_route SET status = 'INACTIVE' "
+                "WHERE endpoint_alias_id = CAST(:eid AS uuid)"
+            ),
+            {"eid": world["endpoint_id"]},
+        )
+        await session.commit()
+    pf_env["fake_holder"]["agent"] = _FakeAgent(_resources(world, free0=20000))
+
+    resp = await pf_env["client"].post(
+        "/api/v1/preflights",
+        json={
+            "endpoint_id": world["endpoint_id"],
+            "target_deployment_id": world["target_deployment_id"],
+        },
+    )
+    assert resp.status_code == 422
+    assert resp.json()["error"]["code"] == "VALIDATION_ERROR"
 
 
 @pytest.mark.asyncio

@@ -444,10 +444,10 @@ INDEX(operation_id, sequence_no)
 | target_model_version_id | UUID | N | FK model_version |
 | source_deployment_id | UUID | Y | FK deployment |
 | result | VARCHAR(32) | N | `HOT_SWITCH_AVAILABLE`, `COLD_SWITCH_ONLY`, `RESOURCE_INSUFFICIENT` |
-| required_peak_vram_mb | BIGINT | N |  |
-| available_hot_vram_mb | BIGINT | N |  |
-| reclaimable_vram_mb | BIGINT | N |  |
-| available_after_reclaim_mb | BIGINT | N |  |
+| required_peak_vram_mb | BIGINT | N | diagnostic sum of per-GPU required |
+| available_hot_vram_mb | BIGINT | N | diagnostic sum of per-GPU hot availability; not a feasibility oracle |
+| reclaimable_vram_mb | BIGINT | N | diagnostic sum of per-GPU reclaimable Source VRAM |
+| available_after_reclaim_mb | BIGINT | N | diagnostic sum of per-GPU post-reclaim availability |
 | safety_margin_mb | BIGINT | N |  |
 | detail_json | JSONB | N | default `{}` |
 | checked_at | TIMESTAMPTZ | N |  |
