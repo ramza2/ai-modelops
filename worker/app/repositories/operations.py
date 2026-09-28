@@ -179,6 +179,12 @@ class OperationJobRepository:
         operation = await self._session.get(Operation, operation_id)
         if operation is None:
             return
+        # Never downgrade MANUAL_INTERVENTION_REQUIRED to ordinary FAILED.
+        if (
+            operation.status
+            == OperationStatus.MANUAL_INTERVENTION_REQUIRED.value
+        ):
+            return
         operation.status = OperationStatus.FAILED.value
         operation.finished_at = now
         operation.error_code = code

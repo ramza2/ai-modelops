@@ -436,11 +436,84 @@ class ColdSwitchExecutor:
                         gateway=gateway,
                     )
                     return
+                except Exception:  # noqa: BLE001 - never escape to JobRunner as FAILED
+                    logger.exception(
+                        "Unexpected Cold Switch error operation=%s step=%s",
+                        operation.id,
+                        step.step_code,
+                    )
+                    try:
+                        await session.refresh(operation)
+                    except Exception:  # noqa: BLE001
+                        logger.exception(
+                            "Failed to refresh operation after unexpected error"
+                        )
+                    destructive = _destructive_entered(operation)
+                    try:
+                        await repo.fail_step(
+                            uuid.UUID(str(step.id)),
+                            code="WORKER_INTERNAL_ERROR",
+                            message="Unexpected worker error during Cold Switch.",
+                            detail={"step_code": step.step_code},
+                        )
+                    except Exception:  # noqa: BLE001
+                        logger.exception(
+                            "Failed to mark Cold Switch step FAILED after "
+                            "unexpected error"
+                        )
+                    try:
+                        await self._fail_all(
+                            repo,
+                            job,
+                            operation,
+                            code="WORKER_INTERNAL_ERROR",
+                            message="Unexpected worker error during Cold Switch.",
+                            destructive=destructive,
+                            alias=alias,
+                            source=source,
+                            gateway=gateway,
+                        )
+                    except Exception:  # noqa: BLE001
+                        logger.exception(
+                            "Failed to persist Cold Switch terminal state after "
+                            "unexpected error (destructive=%s)",
+                            destructive,
+                        )
+                    # Consume the exception so JobRunner cannot overwrite MIR/FAILED.
+                    return
 
-            await self._finalize_desired_states(session, source, target)
-            await session.commit()
-            await repo.mark_operation_succeeded(operation_id)
-            await repo.mark_job_done(uuid.UUID(str(job.id)))
+            try:
+                await self._finalize_desired_states(session, source, target)
+                await session.commit()
+                await repo.mark_operation_succeeded(operation_id)
+                await repo.mark_job_done(uuid.UUID(str(job.id)))
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "Unexpected Cold Switch error during FINALIZE commit "
+                    "operation=%s",
+                    operation_id,
+                )
+                try:
+                    await session.refresh(operation)
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    await self._fail_all(
+                        repo,
+                        job,
+                        operation,
+                        code="WORKER_INTERNAL_ERROR",
+                        message="Unexpected worker error during Cold Switch finalize.",
+                        destructive=True,
+                        alias=alias,
+                        source=source,
+                        gateway=gateway,
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "Failed to persist MIR after finalize internal error"
+                    )
+                return
 
     async def _handle_retryable_switch(
         self,
@@ -1149,13 +1222,39 @@ class ColdSwitchExecutor:
         existing_version = detail.get("requested_routing_version")
         await session.refresh(alias)
 
-        if (
-            existing_version is not None
-            and alias.traffic_state == TrafficState.DRAINING.value
-        ):
+        if existing_version is not None:
             version = int(existing_version)
+            if alias.traffic_state != TrafficState.DRAINING.value:
+                # Persisted version exists but traffic drifted; re-enter DRAINING.
+                async with self._session_factory() as tx:
+                    row = (
+                        await tx.execute(
+                            select(EndpointAlias)
+                            .where(EndpointAlias.id == alias.id)
+                            .with_for_update()
+                        )
+                    ).scalar_one()
+                    if row.traffic_state != TrafficState.DRAINING.value:
+                        row.traffic_state = TrafficState.DRAINING.value
+                        version = await _bump_routing_version(tx)
+                    else:
+                        state = await tx.get(RoutingState, 1)
+                        version = int(state.version) if state else version
+                    await tx.commit()
+                alias.traffic_state = TrafficState.DRAINING.value
+                detail["requested_routing_version"] = version
+                step.detail_json = {**(step.detail_json or {}), **detail}
+                await session.commit()
+        elif alias.traffic_state == TrafficState.DRAINING.value:
+            # Crash window: DB already DRAINING but Step detail lost the version.
+            # Recover current global version without bumping again.
+            state = await session.get(RoutingState, 1)
+            version = int(state.version) if state else 0
+            detail["requested_routing_version"] = version
+            step.detail_json = {**(step.detail_json or {}), **detail}
+            await session.commit()
         else:
-            # Short transaction: set DRAINING + bump + commit before HTTP.
+            # Fresh transition: set DRAINING + bump + commit before HTTP.
             async with self._session_factory() as tx:
                 row = (
                     await tx.execute(
@@ -1164,11 +1263,14 @@ class ColdSwitchExecutor:
                         .with_for_update()
                     )
                 ).scalar_one()
-                row.traffic_state = TrafficState.DRAINING.value
-                version = await _bump_routing_version(tx)
+                if row.traffic_state != TrafficState.DRAINING.value:
+                    row.traffic_state = TrafficState.DRAINING.value
+                    version = await _bump_routing_version(tx)
+                else:
+                    state = await tx.get(RoutingState, 1)
+                    version = int(state.version) if state else 0
                 await tx.commit()
             alias.traffic_state = TrafficState.DRAINING.value
-            # Persist version early for idempotent resume.
             detail["requested_routing_version"] = version
             step.detail_json = {**(step.detail_json or {}), **detail}
             await session.commit()
@@ -1228,11 +1330,35 @@ class ColdSwitchExecutor:
         # MAINTENANCE transition (idempotent).
         existing_version = detail.get("maintenance_routing_version")
         await session.refresh(alias)
-        if (
-            existing_version is not None
-            and alias.traffic_state == TrafficState.MAINTENANCE.value
-        ):
+        if existing_version is not None:
             version = int(existing_version)
+            if alias.traffic_state != TrafficState.MAINTENANCE.value:
+                async with self._session_factory() as tx:
+                    row = (
+                        await tx.execute(
+                            select(EndpointAlias)
+                            .where(EndpointAlias.id == alias.id)
+                            .with_for_update()
+                        )
+                    ).scalar_one()
+                    if row.traffic_state != TrafficState.MAINTENANCE.value:
+                        row.traffic_state = TrafficState.MAINTENANCE.value
+                        version = await _bump_routing_version(tx)
+                    else:
+                        state = await tx.get(RoutingState, 1)
+                        version = int(state.version) if state else version
+                    await tx.commit()
+                alias.traffic_state = TrafficState.MAINTENANCE.value
+                detail["maintenance_routing_version"] = version
+                step.detail_json = {**(step.detail_json or {}), **detail}
+                await session.commit()
+        elif alias.traffic_state == TrafficState.MAINTENANCE.value:
+            # Crash window: already MAINTENANCE; recover version without bump.
+            state = await session.get(RoutingState, 1)
+            version = int(state.version) if state else 0
+            detail["maintenance_routing_version"] = version
+            step.detail_json = {**(step.detail_json or {}), **detail}
+            await session.commit()
         else:
             async with self._session_factory() as tx:
                 row = (
@@ -1242,8 +1368,12 @@ class ColdSwitchExecutor:
                         .with_for_update()
                     )
                 ).scalar_one()
-                row.traffic_state = TrafficState.MAINTENANCE.value
-                version = await _bump_routing_version(tx)
+                if row.traffic_state != TrafficState.MAINTENANCE.value:
+                    row.traffic_state = TrafficState.MAINTENANCE.value
+                    version = await _bump_routing_version(tx)
+                else:
+                    state = await tx.get(RoutingState, 1)
+                    version = int(state.version) if state else 0
                 await tx.commit()
             alias.traffic_state = TrafficState.MAINTENANCE.value
             detail["maintenance_routing_version"] = version
@@ -1538,11 +1668,13 @@ class ColdSwitchExecutor:
                 )
 
             now = dt.datetime.now(tz=dt.UTC)
-            rewrite: str | None = None
             if active is not None:
-                rewrite = active.rewrite_model_name
+                # Keep Source route rewrite_model_name unchanged when deactivating.
                 active.status = RouteStatus.INACTIVE.value
                 active.deactivated_at = now
+                # Flush before activating Target so the partial unique ACTIVE-route
+                # constraint never sees two ACTIVE rows for the same alias.
+                await tx.flush()
 
             inactive_target = (
                 await tx.execute(
@@ -1558,19 +1690,20 @@ class ColdSwitchExecutor:
             ).scalar_one_or_none()
 
             if inactive_target is not None:
+                # Preserve Target route's own rewrite_model_name; never copy Source.
                 inactive_target.status = RouteStatus.ACTIVE.value
                 inactive_target.activated_at = now
                 inactive_target.deactivated_at = None
                 inactive_target.operation_id = operation.id
-                if rewrite is not None and inactive_target.rewrite_model_name is None:
-                    inactive_target.rewrite_model_name = rewrite
                 route_id = str(inactive_target.id)
             else:
+                # New Target route: rewrite=None → Gateway falls back to
+                # Target ModelVersion.served_model_name.
                 route = EndpointRoute(
                     endpoint_alias_id=alias.id,
                     deployment_id=target.id,
                     status=RouteStatus.ACTIVE.value,
-                    rewrite_model_name=rewrite,
+                    rewrite_model_name=None,
                     operation_id=operation.id,
                     activated_at=now,
                     deactivated_at=None,
@@ -1649,12 +1782,40 @@ class ColdSwitchExecutor:
         detail = dict(step.detail_json or {})
         existing = detail.get("serving_routing_version")
         await session.refresh(alias)
-        if (
-            existing is not None
-            and alias.traffic_state == TrafficState.SERVING.value
-        ):
+        if existing is not None:
+            version = int(existing)
+            if alias.traffic_state == TrafficState.SERVING.value:
+                return {
+                    "serving_routing_version": version,
+                    "traffic_state": TrafficState.SERVING.value,
+                }
+            async with self._session_factory() as tx:
+                row = (
+                    await tx.execute(
+                        select(EndpointAlias)
+                        .where(EndpointAlias.id == alias.id)
+                        .with_for_update()
+                    )
+                ).scalar_one()
+                if row.traffic_state != TrafficState.SERVING.value:
+                    row.traffic_state = TrafficState.SERVING.value
+                    version = await _bump_routing_version(tx)
+                else:
+                    state = await tx.get(RoutingState, 1)
+                    version = int(state.version) if state else version
+                await tx.commit()
+            alias.traffic_state = TrafficState.SERVING.value
             return {
-                "serving_routing_version": int(existing),
+                "serving_routing_version": version,
+                "traffic_state": TrafficState.SERVING.value,
+            }
+
+        if alias.traffic_state == TrafficState.SERVING.value:
+            # Crash window: already SERVING; recover version without bump.
+            state = await session.get(RoutingState, 1)
+            version = int(state.version) if state else 0
+            return {
+                "serving_routing_version": version,
                 "traffic_state": TrafficState.SERVING.value,
             }
 
@@ -1666,8 +1827,12 @@ class ColdSwitchExecutor:
                     .with_for_update()
                 )
             ).scalar_one()
-            row.traffic_state = TrafficState.SERVING.value
-            version = await _bump_routing_version(tx)
+            if row.traffic_state != TrafficState.SERVING.value:
+                row.traffic_state = TrafficState.SERVING.value
+                version = await _bump_routing_version(tx)
+            else:
+                state = await tx.get(RoutingState, 1)
+                version = int(state.version) if state else 0
             await tx.commit()
         alias.traffic_state = TrafficState.SERVING.value
         return {

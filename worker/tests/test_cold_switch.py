@@ -34,6 +34,7 @@ from app.domain.models import (
     OperationJob,
     OperationStep,
     ResourcePreflight,
+    RoutingState,
 )
 from app.repositories.operations import OperationJobRepository
 from app.services.cold_switch import COLD_SWITCH_STEPS, ColdSwitchExecutor
@@ -1641,3 +1642,880 @@ async def test_cold_switch_conflicts_with_lifecycle_deployment_lock(db) -> None:
             assert op.status != OperationStatus.FAILED.value
     finally:
         await holder.release()
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_requeues_when_cold_switch_node_lock_held(db) -> None:
+    """Lifecycle on a third deployment must conflict with Switch node lock."""
+    from app.core.advisory_lock import SessionAdvisoryLockSet, node_lock_key
+    from tests.test_operation_worker import _enqueue as _enqueue_lifecycle
+
+    session_factory = db
+    fake_node = ColdSwitchFakeNodeAgent()
+    engine = session_factory.kw["bind"]
+
+    async with session_factory() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        # Third deployment on the SAME node.
+        third_id = uuid.uuid4()
+        await session.execute(
+            __import__("sqlalchemy").text(
+                """
+                INSERT INTO deployment (
+                  id, name, model_version_id, node_id, deployment_type,
+                  desired_state, runtime_status, health_status,
+                  container_id, container_name, upstream_base_url, runtime_port,
+                  deployment_config_json
+                ) VALUES (
+                  :id, :name, :version_id, :node_id, 'MANAGED',
+                  'STOPPED', 'CREATED', 'UNKNOWN',
+                  :ctr, :name, :upstream, 8080,
+                  CAST(:cfg AS jsonb)
+                )
+                """
+            ),
+            {
+                "id": str(third_id),
+                "name": f"cs-third-{fixture['suffix']}",
+                "version_id": str(fixture["target_version"]),
+                "node_id": str(fixture["node_id"]),
+                "ctr": f"ctr-third-{fixture['suffix']}",
+                "upstream": f"http://cs-third-{fixture['suffix']}:8080",
+                "cfg": json.dumps(
+                    {
+                        "entrypoint": ["sleep", "3600"],
+                        "network_names": ["bridge"],
+                        "model_path": "/tmp/models/placeholder",
+                    }
+                ),
+            },
+        )
+        fake_node.containers[str(third_id)] = {
+            "deployment_id": str(third_id),
+            "container_id": f"ctr-third-{fixture['suffix']}",
+            "runtime_status": "CREATED",
+        }
+        op_id, job_id = await _enqueue_lifecycle(
+            session,
+            deployment_id=third_id,
+            operation_type=OperationType.START.value,
+            steps=["ENSURE_CONTAINER", "START_CONTAINER"],
+            desired_state=DesiredState.RUNNING.value,
+        )
+
+    holder = SessionAdvisoryLockSet(engine)
+    assert await holder.try_acquire([node_lock_key(fixture["node_id"])]) is True
+    try:
+        await _isolate_and_claim_job(
+            session_factory, job_id=job_id, worker_id="w-node-lock"
+        )
+        calls_before = len(fake_node.calls)
+        executor = OperationExecutor(
+            session_factory=session_factory,
+            settings=_settings(
+                worker_id="w-node-lock", worker_lock_requeue_seconds=0.01
+            ),
+            transport=httpx.MockTransport(fake_node.handler),
+            engine=engine,
+            sleep=lambda _s: __import__("asyncio").sleep(0),
+        )
+        await executor.execute(job_id)
+
+        async with session_factory() as session:
+            job = await session.get(OperationJob, job_id)
+            op = await session.get(Operation, op_id)
+            assert job is not None and op is not None
+            assert job.status == JobStatus.QUEUED.value
+            assert job.attempt_count == 0
+            assert "advisory lock" in (job.last_error or "").lower()
+            assert op.status != OperationStatus.FAILED.value
+        assert len(fake_node.calls) == calls_before
+    finally:
+        await holder.release()
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_other_node_does_not_conflict_with_switch_node_lock(
+    db,
+) -> None:
+    """Lifecycle on another Node must not collide with an unrelated node lock."""
+    from app.core.advisory_lock import SessionAdvisoryLockSet, node_lock_key
+    from tests.test_operation_worker import (
+        _enqueue as _enqueue_lifecycle,
+        _seed_deployment,
+    )
+
+    session_factory = db
+    fake = FakeNodeAgent()
+    engine = session_factory.kw["bind"]
+    foreign_node_id = uuid.uuid4()
+
+    async with session_factory() as session:
+        seeded = await _seed_deployment(
+            session,
+            runtime_status=RuntimeStatus.CREATED.value,
+            container_id=f"ctr-other-{uuid.uuid4().hex[:8]}",
+        )
+        dep_id = seeded["deployment_id"]
+        fake.containers[str(dep_id)] = {
+            "deployment_id": str(dep_id),
+            "container_id": seeded["container_id"],
+            "runtime_status": "CREATED",
+        }
+        op_id, job_id = await _enqueue_lifecycle(
+            session,
+            deployment_id=dep_id,
+            operation_type=OperationType.START.value,
+            steps=["ENSURE_CONTAINER", "START_CONTAINER"],
+            desired_state=DesiredState.RUNNING.value,
+        )
+
+    holder = SessionAdvisoryLockSet(engine)
+    assert await holder.try_acquire([node_lock_key(foreign_node_id)]) is True
+    try:
+        await _isolate_and_claim_job(
+            session_factory, job_id=job_id, worker_id="w-other-node"
+        )
+        executor = OperationExecutor(
+            session_factory=session_factory,
+            settings=_settings(
+                worker_id="w-other-node", worker_lock_requeue_seconds=0.01
+            ),
+            transport=httpx.MockTransport(fake.handler),
+            engine=engine,
+            sleep=lambda _s: __import__("asyncio").sleep(0),
+        )
+        await executor.execute(job_id)
+
+        async with session_factory() as session:
+            job = await session.get(OperationJob, job_id)
+            op = await session.get(Operation, op_id)
+            assert job is not None and op is not None
+            assert job.status == JobStatus.DONE.value
+            assert op.status == OperationStatus.SUCCEEDED.value
+    finally:
+        await holder.release()
+
+
+@pytest.mark.asyncio
+async def test_unexpected_error_before_destructive_restores_serving(
+    db, monkeypatch
+) -> None:
+    session_factory = db
+    fake_node = ColdSwitchFakeNodeAgent()
+    fake_gw = FakeGateway()
+    transport = CombinedTransport(fake_node, fake_gw)
+
+    async with session_factory() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        await _seed_standard_runtime(fake_node, fake_gw, fixture)
+        op_id, job_id = await _enqueue_cold_switch(session, fixture=fixture)
+        await _mark_steps_status(
+            session, op_id, succeeded_through="DRAIN_TRAFFIC"
+        )
+        alias = await session.get(EndpointAlias, fixture["endpoint_id"])
+        assert alias is not None
+        alias.traffic_state = TrafficState.DRAINING.value
+        await session.commit()
+
+    from app.clients.gateway import GatewayClient
+
+    monkeypatch.setattr(
+        GatewayClient,
+        "get_route_runtime",
+        _make_synced_runtime(session_factory, fixture["endpoint_id"]),
+    )
+
+    async def _boom(self, *args, **kwargs):  # noqa: ANN001, ANN002
+        raise RuntimeError("injected pre-destructive failure")
+
+    monkeypatch.setattr(ColdSwitchExecutor, "_step_stop_source", _boom)
+
+    await _claim_and_execute(
+        session_factory,
+        job_id=job_id,
+        settings=_settings(),
+        transport=transport,
+        engine=session_factory.kw["bind"],
+    )
+
+    async with session_factory() as session:
+        op = await session.get(Operation, op_id)
+        job = await session.get(OperationJob, job_id)
+        alias = await session.get(EndpointAlias, fixture["endpoint_id"])
+        source = await session.get(Deployment, fixture["source_id"])
+        stop_step = (
+            await session.execute(
+                __import__("sqlalchemy").select(OperationStep).where(
+                    OperationStep.operation_id == op_id,
+                    OperationStep.step_code == "STOP_SOURCE",
+                )
+            )
+        ).scalar_one()
+        assert op is not None and job is not None and alias is not None
+        assert source is not None
+        assert op.status == OperationStatus.FAILED.value
+        assert op.error_code == "WORKER_INTERNAL_ERROR"
+        assert job.status == JobStatus.FAILED.value
+        assert stop_step.status == StepStatus.FAILED.value
+        assert alias.traffic_state == TrafficState.SERVING.value
+        assert source.runtime_status == RuntimeStatus.RUNNING.value
+
+
+@pytest.mark.asyncio
+async def test_unexpected_error_after_destructive_marks_manual_intervention(
+    db, monkeypatch
+) -> None:
+    session_factory = db
+    fake_node = ColdSwitchFakeNodeAgent()
+    fake_gw = FakeGateway()
+    transport = CombinedTransport(fake_node, fake_gw)
+    fake_node.vram_free_mb = 14000
+    fake_node.source_used_vram_mb = 0
+
+    async with session_factory() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        await _seed_standard_runtime(fake_node, fake_gw, fixture)
+        source = await session.get(Deployment, fixture["source_id"])
+        alias = await session.get(EndpointAlias, fixture["endpoint_id"])
+        assert source and alias
+        source.runtime_status = RuntimeStatus.STOPPED.value
+        alias.traffic_state = TrafficState.MAINTENANCE.value
+        fake_node.containers[str(fixture["source_id"])]["runtime_status"] = (
+            "STOPPED"
+        )
+        op_id, job_id = await _enqueue_cold_switch(session, fixture=fixture)
+        await _mark_steps_status(
+            session, op_id, succeeded_through="STOP_SOURCE"
+        )
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        meta = dict(op.metadata_json or {})
+        meta["destructive_boundary_entered"] = True
+        op.metadata_json = meta
+        await session.commit()
+
+    from app.clients.gateway import GatewayClient
+
+    monkeypatch.setattr(
+        GatewayClient,
+        "get_route_runtime",
+        _make_synced_runtime(session_factory, fixture["endpoint_id"]),
+    )
+
+    async def _boom(self, *args, **kwargs):  # noqa: ANN001, ANN002
+        raise RuntimeError("injected post-destructive failure")
+
+    monkeypatch.setattr(ColdSwitchExecutor, "_step_wait_vram_release", _boom)
+
+    from app.services.job_runner import JobRunner
+
+    await _isolate_and_claim_job(
+        session_factory, job_id=job_id, worker_id="test-worker-cs"
+    )
+    # Drive through JobRunner so an escaped exception would overwrite MIR→FAILED.
+    # ColdSwitchExecutor must consume the unexpected error itself.
+    runner = JobRunner(
+        settings=_settings(),
+        session_factory=session_factory,
+        transport=transport,
+        engine=session_factory.kw["bind"],
+    )
+    # Job already claimed — invoke executor path used by poll_once.
+    await runner._executor.execute(job_id)
+    # Simulate JobRunner's unhandled handler being unable to downgrade MIR.
+    async with session_factory() as session:
+        repo = OperationJobRepository(session)
+        await repo.mark_job_failed(
+            job_id, error="Unhandled worker exception during execution."
+        )
+        await repo.mark_operation_failed(
+            op_id,
+            code="WORKER_INTERNAL_ERROR",
+            message="Unhandled worker exception during execution.",
+        )
+
+    async with session_factory() as session:
+        op = await session.get(Operation, op_id)
+        job = await session.get(OperationJob, job_id)
+        alias = await session.get(EndpointAlias, fixture["endpoint_id"])
+        vram_step = (
+            await session.execute(
+                __import__("sqlalchemy").select(OperationStep).where(
+                    OperationStep.operation_id == op_id,
+                    OperationStep.step_code == "WAIT_VRAM_RELEASE",
+                )
+            )
+        ).scalar_one()
+        assert op is not None and job is not None and alias is not None
+        assert op.status == OperationStatus.MANUAL_INTERVENTION_REQUIRED.value
+        assert op.error_code == "WORKER_INTERNAL_ERROR"
+        assert job.status == JobStatus.FAILED.value
+        assert vram_step.status == StepStatus.FAILED.value
+        assert alias.traffic_state == TrafficState.MAINTENANCE.value
+
+
+@pytest.mark.asyncio
+async def test_activate_target_route_does_not_copy_source_rewrite(
+    db, monkeypatch
+) -> None:
+    session_factory = db
+    fake_node = ColdSwitchFakeNodeAgent()
+    fake_gw = FakeGateway()
+    transport = CombinedTransport(fake_node, fake_gw)
+    fake_node.vram_free_mb = 14000
+    fake_node.source_used_vram_mb = 0
+
+    async with session_factory() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        await _seed_standard_runtime(fake_node, fake_gw, fixture)
+        # Source ACTIVE route carries a Source-specific rewrite.
+        await session.execute(
+            __import__("sqlalchemy").text(
+                """
+                UPDATE endpoint_route
+                SET rewrite_model_name = 'source-served-name'
+                WHERE id = :id
+                """
+            ),
+            {"id": str(fixture["route_id"])},
+        )
+        await session.execute(
+            __import__("sqlalchemy").text(
+                """
+                UPDATE model_version
+                SET served_model_name = 'target-served-name'
+                WHERE id = :id
+                """
+            ),
+            {"id": str(fixture["target_version"])},
+        )
+        source = await session.get(Deployment, fixture["source_id"])
+        target = await session.get(Deployment, fixture["target_id"])
+        alias = await session.get(EndpointAlias, fixture["endpoint_id"])
+        assert source and target and alias
+        source.runtime_status = RuntimeStatus.STOPPED.value
+        target.runtime_status = RuntimeStatus.RUNNING.value
+        target.health_status = HealthStatus.HEALTHY.value
+        target.container_id = f"ctr-tgt-{fixture['suffix']}"
+        alias.traffic_state = TrafficState.MAINTENANCE.value
+        fake_node.containers[str(fixture["source_id"])]["runtime_status"] = (
+            "STOPPED"
+        )
+        fake_node.containers[str(fixture["target_id"])] = {
+            "deployment_id": str(fixture["target_id"]),
+            "container_id": f"ctr-tgt-{fixture['suffix']}",
+            "container_name": f"cs-tgt-{fixture['suffix']}",
+            "runtime_status": "RUNNING",
+            "health_status": "HEALTHY",
+        }
+        op_id, job_id = await _enqueue_cold_switch(session, fixture=fixture)
+        await _mark_steps_status(
+            session, op_id, succeeded_through="PROBE_TARGET"
+        )
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        meta = dict(op.metadata_json or {})
+        meta["destructive_boundary_entered"] = True
+        op.metadata_json = meta
+        await session.commit()
+
+    from app.clients.gateway import GatewayClient
+
+    monkeypatch.setattr(
+        GatewayClient,
+        "get_route_runtime",
+        _make_synced_runtime(session_factory, fixture["endpoint_id"]),
+    )
+
+    await _claim_and_execute(
+        session_factory,
+        job_id=job_id,
+        settings=_settings(),
+        transport=transport,
+        engine=session_factory.kw["bind"],
+    )
+
+    async with session_factory() as session:
+        routes = (
+            await session.execute(
+                __import__("sqlalchemy").select(EndpointRoute).where(
+                    EndpointRoute.endpoint_alias_id == fixture["endpoint_id"]
+                )
+            )
+        ).scalars().all()
+        active = [r for r in routes if r.status == "ACTIVE"]
+        source_route = [
+            r for r in routes if str(r.deployment_id) == str(fixture["source_id"])
+        ]
+        assert len(active) == 1
+        assert str(active[0].deployment_id) == str(fixture["target_id"])
+        assert active[0].rewrite_model_name is None
+        assert source_route
+        assert source_route[0].rewrite_model_name == "source-served-name"
+        assert source_route[0].status == "INACTIVE"
+
+
+@pytest.mark.asyncio
+async def test_activate_preserves_existing_target_route_rewrite(
+    db, monkeypatch
+) -> None:
+    session_factory = db
+    fake_node = ColdSwitchFakeNodeAgent()
+    fake_gw = FakeGateway()
+    transport = CombinedTransport(fake_node, fake_gw)
+    fake_node.vram_free_mb = 14000
+    fake_node.source_used_vram_mb = 0
+
+    async with session_factory() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        await _seed_standard_runtime(fake_node, fake_gw, fixture)
+        await session.execute(
+            __import__("sqlalchemy").text(
+                """
+                UPDATE endpoint_route
+                SET rewrite_model_name = 'source-served-name'
+                WHERE id = :id
+                """
+            ),
+            {"id": str(fixture["route_id"])},
+        )
+        # Pre-existing inactive Target route with its own rewrite.
+        target_route_id = uuid.uuid4()
+        await session.execute(
+            __import__("sqlalchemy").text(
+                """
+                INSERT INTO endpoint_route (
+                  id, endpoint_alias_id, deployment_id, status, rewrite_model_name
+                ) VALUES (
+                  :id, :alias_id, :dep, 'INACTIVE', 'target-custom-rewrite'
+                )
+                """
+            ),
+            {
+                "id": str(target_route_id),
+                "alias_id": str(fixture["endpoint_id"]),
+                "dep": str(fixture["target_id"]),
+            },
+        )
+        source = await session.get(Deployment, fixture["source_id"])
+        target = await session.get(Deployment, fixture["target_id"])
+        alias = await session.get(EndpointAlias, fixture["endpoint_id"])
+        assert source and target and alias
+        source.runtime_status = RuntimeStatus.STOPPED.value
+        target.runtime_status = RuntimeStatus.RUNNING.value
+        target.health_status = HealthStatus.HEALTHY.value
+        target.container_id = f"ctr-tgt-{fixture['suffix']}"
+        alias.traffic_state = TrafficState.MAINTENANCE.value
+        fake_node.containers[str(fixture["source_id"])]["runtime_status"] = (
+            "STOPPED"
+        )
+        fake_node.containers[str(fixture["target_id"])] = {
+            "deployment_id": str(fixture["target_id"]),
+            "container_id": f"ctr-tgt-{fixture['suffix']}",
+            "container_name": f"cs-tgt-{fixture['suffix']}",
+            "runtime_status": "RUNNING",
+            "health_status": "HEALTHY",
+        }
+        op_id, job_id = await _enqueue_cold_switch(session, fixture=fixture)
+        await _mark_steps_status(
+            session, op_id, succeeded_through="PROBE_TARGET"
+        )
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        meta = dict(op.metadata_json or {})
+        meta["destructive_boundary_entered"] = True
+        op.metadata_json = meta
+        await session.commit()
+
+    from app.clients.gateway import GatewayClient
+
+    monkeypatch.setattr(
+        GatewayClient,
+        "get_route_runtime",
+        _make_synced_runtime(session_factory, fixture["endpoint_id"]),
+    )
+
+    await _claim_and_execute(
+        session_factory,
+        job_id=job_id,
+        settings=_settings(),
+        transport=transport,
+        engine=session_factory.kw["bind"],
+    )
+
+    async with session_factory() as session:
+        target_route = await session.get(EndpointRoute, target_route_id)
+        source_route = await session.get(EndpointRoute, fixture["route_id"])
+        assert target_route is not None and source_route is not None
+        assert target_route.status == "ACTIVE"
+        assert target_route.rewrite_model_name == "target-custom-rewrite"
+        assert source_route.status == "INACTIVE"
+        assert source_route.rewrite_model_name == "source-served-name"
+
+
+@pytest.mark.asyncio
+async def test_drain_resume_without_version_does_not_double_bump(
+    db, monkeypatch
+) -> None:
+    session_factory = db
+    fake_node = ColdSwitchFakeNodeAgent()
+    fake_gw = FakeGateway()
+    transport = CombinedTransport(fake_node, fake_gw)
+
+    async with session_factory() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        await _seed_standard_runtime(fake_node, fake_gw, fixture)
+        alias = await session.get(EndpointAlias, fixture["endpoint_id"])
+        assert alias is not None
+        alias.traffic_state = TrafficState.DRAINING.value
+        # Simulate crash after bump but before Step detail persistence.
+        await session.execute(
+            __import__("sqlalchemy").text(
+                "UPDATE routing_state SET version = 42, updated_at = now() WHERE id = 1"
+            )
+        )
+        op_id, job_id = await _enqueue_cold_switch(session, fixture=fixture)
+        await _mark_steps_status(
+            session, op_id, succeeded_through="PREPARE_TARGET", running="DRAIN_TRAFFIC"
+        )
+        await session.commit()
+        version_before = (
+            await session.execute(
+                __import__("sqlalchemy").text(
+                    "SELECT version FROM routing_state WHERE id = 1"
+                )
+            )
+        ).scalar_one()
+
+    from app.clients.gateway import GatewayClient
+
+    monkeypatch.setattr(
+        GatewayClient,
+        "get_route_runtime",
+        _make_synced_runtime(session_factory, fixture["endpoint_id"]),
+    )
+
+    # Only run through DRAIN by failing the next step after it succeeds.
+    async def _boom_stop(self, *args, **kwargs):  # noqa: ANN001, ANN002
+        raise PermanentStepError(
+            "stop after drain for version check",
+            code="TEST_STOP_AFTER_DRAIN",
+        )
+
+    from app.services.operation_executor import PermanentStepError
+
+    monkeypatch.setattr(ColdSwitchExecutor, "_step_stop_source", _boom_stop)
+
+    await _claim_and_execute(
+        session_factory,
+        job_id=job_id,
+        settings=_settings(),
+        transport=transport,
+        engine=session_factory.kw["bind"],
+    )
+
+    async with session_factory() as session:
+        version_after = (
+            await session.execute(
+                __import__("sqlalchemy").text(
+                    "SELECT version FROM routing_state WHERE id = 1"
+                )
+            )
+        ).scalar_one()
+        # Restore SERVING on pre-destructive failure bumps once — capture drain
+        # step detail before that by reading from FAILED op's drain step which
+        # was SUCCEEDED with recovered version.
+        drain_step = (
+            await session.execute(
+                __import__("sqlalchemy").select(OperationStep).where(
+                    OperationStep.operation_id == op_id,
+                    OperationStep.step_code == "DRAIN_TRAFFIC",
+                )
+            )
+        ).scalar_one()
+        assert drain_step.status == StepStatus.SUCCEEDED.value
+        recovered = (drain_step.detail_json or {}).get("requested_routing_version")
+        assert recovered == int(version_before)
+        # One bump is allowed for SERVING restore after injected permanent failure.
+        assert int(version_after) == int(version_before) + 1
+
+
+@pytest.mark.asyncio
+async def test_maintenance_resume_without_version_does_not_double_bump(
+    db, monkeypatch
+) -> None:
+    session_factory = db
+    fake_node = ColdSwitchFakeNodeAgent()
+    fake_gw = FakeGateway()
+    transport = CombinedTransport(fake_node, fake_gw)
+    fake_node.vram_free_mb = 14000
+    fake_node.source_used_vram_mb = 0
+
+    async with session_factory() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        await _seed_standard_runtime(fake_node, fake_gw, fixture)
+        alias = await session.get(EndpointAlias, fixture["endpoint_id"])
+        assert alias is not None
+        alias.traffic_state = TrafficState.MAINTENANCE.value
+        await session.execute(
+            __import__("sqlalchemy").text(
+                "UPDATE routing_state SET version = 77, updated_at = now() WHERE id = 1"
+            )
+        )
+        op_id, job_id = await _enqueue_cold_switch(session, fixture=fixture)
+        await _mark_steps_status(
+            session, op_id, succeeded_through="DRAIN_TRAFFIC", running="STOP_SOURCE"
+        )
+        # No maintenance_routing_version in Step detail (crash window).
+        await session.commit()
+        version_before = 77
+
+    observed_versions: list[int] = []
+
+    orig_stop = ColdSwitchExecutor._step_stop_source
+
+    async def _stop_capture(self, *args, **kwargs):  # noqa: ANN001, ANN002
+        # Capture routing version immediately after MAINTENANCE reconcile,
+        # before Node Agent stop, by wrapping wait_gateway.
+        session = args[0]
+        state = await session.get(RoutingState, 1)
+        observed_versions.append(int(state.version) if state else -1)
+        return await orig_stop(self, *args, **kwargs)
+
+    monkeypatch.setattr(ColdSwitchExecutor, "_step_stop_source", _stop_capture)
+
+    from app.clients.gateway import GatewayClient
+
+    monkeypatch.setattr(
+        GatewayClient,
+        "get_route_runtime",
+        _make_synced_runtime(session_factory, fixture["endpoint_id"]),
+    )
+
+    await _claim_and_execute(
+        session_factory,
+        job_id=job_id,
+        settings=_settings(),
+        transport=transport,
+        engine=session_factory.kw["bind"],
+    )
+
+    async with session_factory() as session:
+        stop_step = (
+            await session.execute(
+                __import__("sqlalchemy").select(OperationStep).where(
+                    OperationStep.operation_id == op_id,
+                    OperationStep.step_code == "STOP_SOURCE",
+                )
+            )
+        ).scalar_one()
+        recovered = (stop_step.detail_json or {}).get("maintenance_routing_version")
+        assert recovered == version_before
+        # First observation inside stop must still be 77 (no extra bump).
+        assert observed_versions
+        assert observed_versions[0] == version_before
+
+
+@pytest.mark.asyncio
+async def test_restore_traffic_resume_without_version_does_not_double_bump(
+    db, monkeypatch
+) -> None:
+    session_factory = db
+    fake_node = ColdSwitchFakeNodeAgent()
+    fake_gw = FakeGateway()
+    transport = CombinedTransport(fake_node, fake_gw)
+    fake_node.vram_free_mb = 14000
+    fake_node.source_used_vram_mb = 0
+
+    async with session_factory() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        await _seed_standard_runtime(fake_node, fake_gw, fixture)
+        source = await session.get(Deployment, fixture["source_id"])
+        target = await session.get(Deployment, fixture["target_id"])
+        alias = await session.get(EndpointAlias, fixture["endpoint_id"])
+        assert source and target and alias
+        source.runtime_status = RuntimeStatus.STOPPED.value
+        target.runtime_status = RuntimeStatus.RUNNING.value
+        target.health_status = HealthStatus.HEALTHY.value
+        target.container_id = f"ctr-tgt-{fixture['suffix']}"
+        # Crash window: SERVING already written, Step detail missing version.
+        alias.traffic_state = TrafficState.SERVING.value
+        await session.execute(
+            __import__("sqlalchemy").text(
+                """
+                UPDATE endpoint_route SET status = 'INACTIVE', deactivated_at = now()
+                WHERE id = :id
+                """
+            ),
+            {"id": str(fixture["route_id"])},
+        )
+        await session.execute(
+            __import__("sqlalchemy").text(
+                """
+                INSERT INTO endpoint_route (
+                  id, endpoint_alias_id, deployment_id, status, rewrite_model_name,
+                  activated_at
+                ) VALUES (
+                  :id, :alias_id, :dep, 'ACTIVE', NULL, now()
+                )
+                """
+            ),
+            {
+                "id": str(uuid.uuid4()),
+                "alias_id": str(fixture["endpoint_id"]),
+                "dep": str(fixture["target_id"]),
+            },
+        )
+        await session.execute(
+            __import__("sqlalchemy").text(
+                "UPDATE routing_state SET version = 91, updated_at = now() WHERE id = 1"
+            )
+        )
+        fake_node.containers[str(fixture["source_id"])]["runtime_status"] = (
+            "STOPPED"
+        )
+        fake_node.containers[str(fixture["target_id"])] = {
+            "deployment_id": str(fixture["target_id"]),
+            "container_id": f"ctr-tgt-{fixture['suffix']}",
+            "container_name": f"cs-tgt-{fixture['suffix']}",
+            "runtime_status": "RUNNING",
+            "health_status": "HEALTHY",
+        }
+        op_id, job_id = await _enqueue_cold_switch(session, fixture=fixture)
+        await _mark_steps_status(
+            session,
+            op_id,
+            succeeded_through="WAIT_ROUTE_APPLY",
+            running="RESTORE_TRAFFIC",
+        )
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        meta = dict(op.metadata_json or {})
+        meta["destructive_boundary_entered"] = True
+        op.metadata_json = meta
+        await session.commit()
+        version_before = 91
+
+    from app.clients.gateway import GatewayClient
+
+    monkeypatch.setattr(
+        GatewayClient,
+        "get_route_runtime",
+        _make_synced_runtime(session_factory, fixture["endpoint_id"]),
+    )
+
+    await _claim_and_execute(
+        session_factory,
+        job_id=job_id,
+        settings=_settings(),
+        transport=transport,
+        engine=session_factory.kw["bind"],
+    )
+
+    async with session_factory() as session:
+        version_after = (
+            await session.execute(
+                __import__("sqlalchemy").text(
+                    "SELECT version FROM routing_state WHERE id = 1"
+                )
+            )
+        ).scalar_one()
+        restore_step = (
+            await session.execute(
+                __import__("sqlalchemy").select(OperationStep).where(
+                    OperationStep.operation_id == op_id,
+                    OperationStep.step_code == "RESTORE_TRAFFIC",
+                )
+            )
+        ).scalar_one()
+        assert restore_step.status == StepStatus.SUCCEEDED.value
+        recovered = (restore_step.detail_json or {}).get("serving_routing_version")
+        assert recovered == version_before
+        assert int(version_after) == version_before
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        assert op.status == OperationStatus.SUCCEEDED.value
+
+
+@pytest.mark.asyncio
+async def test_fresh_drain_transition_bumps_exactly_once(db, monkeypatch) -> None:
+    session_factory = db
+    fake_node = ColdSwitchFakeNodeAgent()
+    fake_gw = FakeGateway()
+    transport = CombinedTransport(fake_node, fake_gw)
+
+    async with session_factory() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        await _seed_standard_runtime(fake_node, fake_gw, fixture)
+        await session.execute(
+            __import__("sqlalchemy").text(
+                "UPDATE routing_state SET version = 10, updated_at = now() WHERE id = 1"
+            )
+        )
+        op_id, job_id = await _enqueue_cold_switch(session, fixture=fixture)
+        await _mark_steps_status(
+            session, op_id, succeeded_through="PREPARE_TARGET"
+        )
+        await session.commit()
+
+    from app.clients.gateway import GatewayClient
+    from app.services.operation_executor import PermanentStepError
+
+    monkeypatch.setattr(
+        GatewayClient,
+        "get_route_runtime",
+        _make_synced_runtime(session_factory, fixture["endpoint_id"]),
+    )
+
+    async def _boom_stop(self, *args, **kwargs):  # noqa: ANN001, ANN002
+        raise PermanentStepError("stop after drain", code="TEST_AFTER_DRAIN")
+
+    monkeypatch.setattr(ColdSwitchExecutor, "_step_stop_source", _boom_stop)
+
+    await _claim_and_execute(
+        session_factory,
+        job_id=job_id,
+        settings=_settings(),
+        transport=transport,
+        engine=session_factory.kw["bind"],
+    )
+
+    async with session_factory() as session:
+        drain_step = (
+            await session.execute(
+                __import__("sqlalchemy").select(OperationStep).where(
+                    OperationStep.operation_id == op_id,
+                    OperationStep.step_code == "DRAIN_TRAFFIC",
+                )
+            )
+        ).scalar_one()
+        requested = (drain_step.detail_json or {}).get("requested_routing_version")
+        assert requested == 11  # exactly one bump from 10 → 11 for DRAIN
+        # Pre-destructive failure restores SERVING → one more bump (12).
+        version = (
+            await session.execute(
+                __import__("sqlalchemy").text(
+                    "SELECT version FROM routing_state WHERE id = 1"
+                )
+            )
+        ).scalar_one()
+        assert int(version) == 12
