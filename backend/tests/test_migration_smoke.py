@@ -71,13 +71,16 @@ def scratch_db():
         yield scratch_sync, db_name
     finally:
         with admin.connect() as conn:
-            conn.execute(
-                text(
-                    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
-                    "WHERE datname = :n AND pid <> pg_backend_pid()"
-                ),
-                {"n": db_name},
-            )
+            try:
+                conn.execute(
+                    text(
+                        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                        "WHERE datname = :n AND pid <> pg_backend_pid()"
+                    ),
+                    {"n": db_name},
+                )
+            except Exception:  # noqa: BLE001 - best-effort cleanup
+                pass
             conn.execute(text(f'DROP DATABASE IF EXISTS "{db_name}"'))
 
 
@@ -173,7 +176,145 @@ def test_upgrade_creates_all_tables_then_downgrade(scratch_db) -> None:
             )
             conn.commit()
 
+        # Preview preflight rows (operation_id NULL) must survive upgrade and
+        # be explicitly deleted on downgrade rather than inventing fake FKs.
+        with engine.connect() as conn:
+            nullable = conn.execute(
+                text(
+                    """
+                    SELECT is_nullable
+                    FROM information_schema.columns
+                    WHERE table_name = 'resource_preflight'
+                      AND column_name = 'operation_id'
+                    """
+                )
+            ).scalar_one()
+            assert nullable == "YES"
+
+            node_id = str(uuid.uuid4())
+            model_id = str(uuid.uuid4())
+            version_id = str(uuid.uuid4())
+            preflight_id = str(uuid.uuid4())
+            gpu_id = str(uuid.uuid4())
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO node (
+                      id, name, hostname, agent_base_url, environment,
+                      status, labels_json
+                    ) VALUES (
+                      :id, 'mig-node', 'mig-host', 'http://127.0.0.1:8100',
+                      'local', 'ONLINE', '{}'::jsonb
+                    )
+                    """
+                ),
+                {"id": node_id},
+            )
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO gpu_device (
+                      id, node_id, gpu_uuid, device_index, model_name,
+                      vram_total_mb, safety_margin_mb, status
+                    ) VALUES (
+                      :id, :node_id, 'GPU-mig', 0, 'Test',
+                      16000, 1024, 'AVAILABLE'
+                    )
+                    """
+                ),
+                {"id": gpu_id, "node_id": node_id},
+            )
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO model (id, slug, name, model_type, source_type)
+                    VALUES (:id, 'mig-model', 'Mig', 'LLM', 'LOCAL')
+                    """
+                ),
+                {"id": model_id},
+            )
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO model_version (
+                      id, model_id, version_label, runtime_type, runtime_image,
+                      served_model_name, runtime_config_json
+                    ) VALUES (
+                      :id, :model_id, 'v1', 'GENERIC_OPENAI', 'busybox:1.36',
+                      'served', '{}'::jsonb
+                    )
+                    """
+                ),
+                {"id": version_id, "model_id": model_id},
+            )
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO resource_preflight (
+                      id, operation_id, node_id, target_model_version_id,
+                      result, required_peak_vram_mb, available_hot_vram_mb,
+                      reclaimable_vram_mb, available_after_reclaim_mb,
+                      safety_margin_mb, detail_json, checked_at
+                    ) VALUES (
+                      :id, NULL, :node_id, :version_id,
+                      'HOT_SWITCH_AVAILABLE', 1000, 2000,
+                      0, 2000, 1024, '{}'::jsonb, now()
+                    )
+                    """
+                ),
+                {
+                    "id": preflight_id,
+                    "node_id": node_id,
+                    "version_id": version_id,
+                },
+            )
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO resource_preflight_gpu (
+                      id, resource_preflight_id, gpu_device_id,
+                      free_vram_mb, reclaimable_vram_mb, safety_margin_mb,
+                      required_vram_mb, available_hot_vram_mb,
+                      available_after_reclaim_mb, result
+                    ) VALUES (
+                      :id, :pf, :gpu,
+                      3000, 0, 1024, 1000, 1976, 1976, 'HOT_SWITCH_AVAILABLE'
+                    )
+                    """
+                ),
+                {
+                    "id": str(uuid.uuid4()),
+                    "pf": preflight_id,
+                    "gpu": gpu_id,
+                },
+            )
+            conn.commit()
+
+        # Downgrade only the nullable-operation_id revision and verify policy.
+        command.downgrade(cfg, "b7c2e91a4f10")
+        with engine.connect() as conn:
+            remaining = conn.execute(
+                text(
+                    "SELECT count(*) FROM resource_preflight WHERE id = CAST(:id AS uuid)"
+                ),
+                {"id": preflight_id},
+            ).scalar_one()
+            assert remaining == 0
+            nullable_after = conn.execute(
+                text(
+                    """
+                    SELECT is_nullable
+                    FROM information_schema.columns
+                    WHERE table_name = 'resource_preflight'
+                      AND column_name = 'operation_id'
+                    """
+                )
+            ).scalar_one()
+            assert nullable_after == "NO"
+
+        command.upgrade(cfg, "head")
         command.downgrade(cfg, "base")
+        engine.dispose()
     finally:
         if prev is None:
             os.environ.pop("MODELOPS_DATABASE_URL", None)

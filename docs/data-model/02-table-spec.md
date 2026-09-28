@@ -439,15 +439,15 @@ INDEX(operation_id, sequence_no)
 | Column | Type | Null | 비고 |
 |---|---|---:|---|
 | id | UUID | N | PK |
-| operation_id | UUID | N | FK operation |
+| operation_id | UUID | Y | FK operation; NULL for standalone preview preflights |
 | node_id | UUID | N | FK node |
 | target_model_version_id | UUID | N | FK model_version |
 | source_deployment_id | UUID | Y | FK deployment |
 | result | VARCHAR(32) | N | `HOT_SWITCH_AVAILABLE`, `COLD_SWITCH_ONLY`, `RESOURCE_INSUFFICIENT` |
-| required_peak_vram_mb | BIGINT | N |  |
-| available_hot_vram_mb | BIGINT | N |  |
-| reclaimable_vram_mb | BIGINT | N |  |
-| available_after_reclaim_mb | BIGINT | N |  |
+| required_peak_vram_mb | BIGINT | N | diagnostic sum of per-GPU required |
+| available_hot_vram_mb | BIGINT | N | diagnostic sum of per-GPU hot availability; not a feasibility oracle |
+| reclaimable_vram_mb | BIGINT | N | diagnostic sum of per-GPU reclaimable Source VRAM |
+| available_after_reclaim_mb | BIGINT | N | diagnostic sum of per-GPU post-reclaim availability |
 | safety_margin_mb | BIGINT | N |  |
 | detail_json | JSONB | N | default `{}` |
 | checked_at | TIMESTAMPTZ | N |  |
@@ -461,6 +461,14 @@ INDEX(target_model_version_id, checked_at DESC)
 ```
 
 하나의 Operation에서 재평가가 발생할 수 있으므로 `operation_id`는 UNIQUE가 아니다.
+
+`POST /api/v1/preflights` preview는 Operation 생성 전에 호출되므로 `operation_id`가 NULL일 수 있다.
+Worker가 실제 Cold Switch를 실행하기 직전에 수행하는 revalidation 기록만 `operation_id`를 채운다.
+Preview 결과만으로 Switch를 승인하지 않는다.
+
+Parent VRAM numeric columns are diagnostic aggregate totals (sums of
+`resource_preflight_gpu` counterparts). Feasibility is decided strictly per GPU;
+do not infer HOT/COLD from parent totals alone — use `result` and `gpu_results`.
 
 ---
 

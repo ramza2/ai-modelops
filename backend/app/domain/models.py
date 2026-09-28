@@ -557,8 +557,8 @@ class ResourcePreflight(Base):
     __tablename__ = "resource_preflight"
 
     id: Mapped[str] = _uuid_pk()
-    operation_id: Mapped[str] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("operation.id"), nullable=False
+    operation_id: Mapped[str | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("operation.id"), nullable=True
     )
     node_id: Mapped[str] = mapped_column(
         UUID(as_uuid=True), ForeignKey("node.id"), nullable=False

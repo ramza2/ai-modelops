@@ -20,6 +20,7 @@ from app.api.health import router as health_router
 from app.api.models import router as models_router
 from app.api.nodes import router as nodes_router
 from app.api.operations import router as operations_router
+from app.api.preflights import router as preflights_router
 from app.core.config import get_settings
 from app.core.errors import AppError, ErrorCode, error_envelope
 
@@ -72,6 +73,7 @@ def create_app() -> FastAPI:
     app.include_router(deployments_router)
     app.include_router(operations_router)
     app.include_router(endpoints_router)
+    app.include_router(preflights_router)
     return app
 
 

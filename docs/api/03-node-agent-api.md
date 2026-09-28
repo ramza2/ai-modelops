@@ -152,6 +152,20 @@ Docker Engine과 NVML 접근 가능 여부 확인.
 
 PID와 Container 매핑 실패 시 `container_id`, `deployment_id`는 `null`이다.
 
+GPU process attribution (Node Agent):
+
+- NVML reports host PIDs only; ownership is enriched by `DockerAdapter.map_host_pids_to_managed_ownership`.
+- Attribution is applied **only** when a PID belongs unambiguously to a ModelOps-managed
+  container (`ai.modelops.managed=true` + `ai.modelops.deployment_id`).
+- Mapping includes the container init PID and descendant host PIDs (worker/child processes).
+- Unmanaged containers are never attributed. Unmatched or ambiguous PIDs stay `null`.
+- Attribution is best-effort: if Docker is unavailable or raises `DockerUnavailableError`
+  during enrichment, Host/GPU metrics are still returned and process ownership stays `null`
+  (Backend Preflight then treats Source VRAM as non-reclaimable).
+- If host `/proc` cannot be enumerated, ownership stays unknown (no root-PID guess).
+- Backend reclaim logic still requires `process.deployment_id == source_deployment_id`
+  and remains conservative when attribution is missing.
+
 ---
 
 ## 7. Managed Deployment 식별

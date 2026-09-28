@@ -340,36 +340,55 @@ MVP에서는 물리 삭제를 일반 UI에서 제공하지 않는 것을 권장�
 
 ### POST /preflights
 
-신규 배포 또는 Switch 전에 자원 가능성을 계산한다.
+신규 배포 또는 Switch 전에 자원 가능성을 계산한다. **분석 전용**이며 Endpoint route / traffic_state / Deployment desired·runtime 상태를 변경하지 않는다.
+
+Preview 결과는 Switch 실행 승인으로 사용하지 않는다. Worker는 실제 Cold Switch 직전 최신 GPU 상태로 Preflight를 반드시 다시 수행한다.
+
+요청 (M5-A — Endpoint ACTIVE Source + concrete Target Deployment):
 
 ```json
 {
-  "node_id": "uuid",
-  "target_model_version_id": "uuid",
-  "target_gpu_ids": ["uuid"],
-  "source_deployment_id": "uuid",
-  "purpose": "SWITCH"
+  "endpoint_id": "uuid",
+  "target_deployment_id": "uuid"
 }
 ```
+
+- `endpoint_id`: enabled Endpoint Alias. Source는 현재 ACTIVE route Deployment.
+- `target_deployment_id`: 교체 대상 Deployment (GPU assignment + Model Version 포함).
 
 응답:
 
 ```json
 {
   "id": "uuid",
+  "operation_id": null,
+  "endpoint_id": "uuid",
+  "node_id": "uuid",
+  "target_model_version_id": "uuid",
+  "source_deployment_id": "uuid",
+  "target_deployment_id": "uuid",
   "result": "COLD_SWITCH_ONLY",
   "required_peak_vram_mb": 52000,
   "available_hot_vram_mb": 33000,
+  "reclaimable_vram_mb": 58000,
   "available_after_reclaim_mb": 91000,
-  "safety_margin_mb": 8000,
+  "safety_margin_mb": 1024,
   "gpu_results": [
     {
       "gpu_device_id": "uuid",
       "free_vram_mb": 41000,
-      "effective_available_mb": 33000
+      "reclaimable_vram_mb": 58000,
+      "required_vram_mb": 52000,
+      "available_hot_vram_mb": 39976,
+      "available_after_reclaim_mb": 97976,
+      "effective_available_mb": 39976,
+      "result": "COLD_SWITCH_ONLY",
+      "safety_margin_mb": 1024
     }
   ],
-  "evaluated_at": "2026-09-17T01:30:00Z"
+  "evaluated_at": "2026-09-17T01:30:00Z",
+  "preview_only": true,
+  "worker_must_revalidate": true
 }
 ```
 
@@ -381,7 +400,18 @@ COLD_SWITCH_ONLY
 RESOURCE_INSUFFICIENT
 ```
 
+판정은 **GPU별로** 수행한다. 여러 GPU의 free VRAM을 하나의 풀로 합산하지 않는다.
+
+Parent numeric fields (`required_peak_vram_mb`, `available_hot_vram_mb`,
+`reclaimable_vram_mb`, `available_after_reclaim_mb`)는 GPU별 값의
+**diagnostic aggregate totals (sum)** 이다. HOT/COLD 가능 여부는
+`result`와 `gpu_results[].result`만으로 판단하며, parent totals만으로
+feasibility를 추론하지 않는다.
+
+Safety margin은 `MODELOPS_DEFAULT_GPU_SAFETY_MARGIN_MB` (단위 MB)를 사용한다.
+
 이 API는 판단 정보 조회 성격이므로 동기 `200`을 기본으로 한다.
+Standalone preview의 `operation_id`는 NULL이다.
 
 ---
 
