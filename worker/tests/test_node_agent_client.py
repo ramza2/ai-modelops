@@ -156,3 +156,35 @@ async def test_lifecycle_timeouts_unchanged_by_prepare_budget() -> None:
     )
     # start uses default (None); stop/restart use graceful+10.
     assert client.captured_timeouts == [None, 40.0, 40.0]
+
+
+@pytest.mark.asyncio
+async def test_fetch_resources_success() -> None:
+    import httpx
+
+    payload = {
+        "gpus": [
+            {
+                "gpu_uuid": "GPU-abc",
+                "device_index": 0,
+                "vram_total_mb": 16000,
+                "vram_free_mb": 4000,
+                "vram_used_mb": 12000,
+                "processes": [],
+            }
+        ]
+    }
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        assert request.method.upper() == "GET"
+        assert request.url.path == "/internal/v1/resources"
+        return httpx.Response(200, json=payload)
+
+    client = NodeAgentClient(
+        base_url="http://node-agent.test",
+        timeout_seconds=5.0,
+        transport=httpx.MockTransport(_handler),
+    )
+    data = await client.fetch_resources()
+    assert data == payload
+    assert data["gpus"][0]["vram_free_mb"] == 4000
