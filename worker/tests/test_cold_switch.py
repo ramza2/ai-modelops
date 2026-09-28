@@ -2519,3 +2519,329 @@ async def test_fresh_drain_transition_bumps_exactly_once(db, monkeypatch) -> Non
             )
         ).scalar_one()
         assert int(version) == 12
+
+
+@pytest.mark.asyncio
+async def test_outer_unexpected_error_pre_destructive_restores_serving(
+    db, monkeypatch
+) -> None:
+    """Exception outside per-step loop before destructive boundary → FAILED."""
+    session_factory = db
+    fake_node = ColdSwitchFakeNodeAgent()
+    fake_gw = FakeGateway()
+    transport = CombinedTransport(fake_node, fake_gw)
+
+    async with session_factory() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        await _seed_standard_runtime(fake_node, fake_gw, fixture)
+        alias = await session.get(EndpointAlias, fixture["endpoint_id"])
+        assert alias is not None
+        alias.traffic_state = TrafficState.DRAINING.value
+        op_id, job_id = await _enqueue_cold_switch(session, fixture=fixture)
+        await session.commit()
+
+    from app.clients.gateway import GatewayClient
+
+    monkeypatch.setattr(
+        GatewayClient,
+        "get_route_runtime",
+        _make_synced_runtime(session_factory, fixture["endpoint_id"]),
+    )
+
+    async def _boom(self, *args, **kwargs):  # noqa: ANN001, ANN002
+        raise RuntimeError("injected outer setup failure")
+
+    monkeypatch.setattr(ColdSwitchExecutor, "_run_locked", _boom)
+
+    await _claim_and_execute(
+        session_factory,
+        job_id=job_id,
+        settings=_settings(),
+        transport=transport,
+        engine=session_factory.kw["bind"],
+    )
+
+    async with session_factory() as session:
+        op = await session.get(Operation, op_id)
+        job = await session.get(OperationJob, job_id)
+        alias = await session.get(EndpointAlias, fixture["endpoint_id"])
+        source = await session.get(Deployment, fixture["source_id"])
+        assert op is not None and job is not None and alias is not None
+        assert source is not None
+        assert op.status == OperationStatus.FAILED.value
+        assert op.error_code == "WORKER_INTERNAL_ERROR"
+        assert job.status == JobStatus.FAILED.value
+        assert alias.traffic_state == TrafficState.SERVING.value
+        assert source.runtime_status == RuntimeStatus.RUNNING.value
+
+
+@pytest.mark.asyncio
+async def test_outer_unexpected_error_post_destructive_marks_mir(
+    db, monkeypatch
+) -> None:
+    """Exception outside per-step loop after destructive boundary → MIR."""
+    session_factory = db
+    fake_node = ColdSwitchFakeNodeAgent()
+    fake_gw = FakeGateway()
+    transport = CombinedTransport(fake_node, fake_gw)
+
+    async with session_factory() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        await _seed_standard_runtime(fake_node, fake_gw, fixture)
+        source = await session.get(Deployment, fixture["source_id"])
+        alias = await session.get(EndpointAlias, fixture["endpoint_id"])
+        assert source and alias
+        source.runtime_status = RuntimeStatus.STOPPED.value
+        alias.traffic_state = TrafficState.MAINTENANCE.value
+        op_id, job_id = await _enqueue_cold_switch(session, fixture=fixture)
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        meta = dict(op.metadata_json or {})
+        meta["destructive_boundary_entered"] = True
+        op.metadata_json = meta
+        op.status = OperationStatus.RUNNING.value
+        await session.commit()
+
+    async def _boom(self, *args, **kwargs):  # noqa: ANN001, ANN002
+        raise RuntimeError("injected outer post-destructive failure")
+
+    monkeypatch.setattr(ColdSwitchExecutor, "_run_locked", _boom)
+
+    from app.services.job_runner import JobRunner
+
+    await _isolate_and_claim_job(
+        session_factory, job_id=job_id, worker_id="test-worker-cs"
+    )
+    runner = JobRunner(
+        settings=_settings(),
+        session_factory=session_factory,
+        transport=transport,
+        engine=session_factory.kw["bind"],
+    )
+    # Executor consumes the exception; JobRunner must not overwrite MIR.
+    await runner._executor.execute(job_id)
+    async with session_factory() as session:
+        repo = OperationJobRepository(session)
+        # Simulate JobRunner generic failure handler calling mark_operation_failed.
+        await repo.mark_operation_failed(
+            op_id,
+            code="WORKER_INTERNAL_ERROR",
+            message="Unhandled worker exception during execution.",
+        )
+
+    async with session_factory() as session:
+        op = await session.get(Operation, op_id)
+        job = await session.get(OperationJob, job_id)
+        alias = await session.get(EndpointAlias, fixture["endpoint_id"])
+        assert op is not None and job is not None and alias is not None
+        assert op.status == OperationStatus.MANUAL_INTERVENTION_REQUIRED.value
+        assert op.error_code == "WORKER_INTERNAL_ERROR"
+        assert job.status == JobStatus.FAILED.value
+        assert alias.traffic_state == TrafficState.MAINTENANCE.value
+
+
+@pytest.mark.asyncio
+async def test_lock_acquire_unexpected_exception_post_destructive_mir(
+    db, monkeypatch
+) -> None:
+    """Unexpected exception during lock acquire on destructive SWITCH → MIR."""
+    from app.core.advisory_lock import SessionAdvisoryLockSet
+
+    session_factory = db
+    fake_node = ColdSwitchFakeNodeAgent()
+    fake_gw = FakeGateway()
+    transport = CombinedTransport(fake_node, fake_gw)
+
+    async with session_factory() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        await _seed_standard_runtime(fake_node, fake_gw, fixture)
+        alias = await session.get(EndpointAlias, fixture["endpoint_id"])
+        assert alias is not None
+        alias.traffic_state = TrafficState.MAINTENANCE.value
+        op_id, job_id = await _enqueue_cold_switch(session, fixture=fixture)
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        meta = dict(op.metadata_json or {})
+        meta["destructive_boundary_entered"] = True
+        op.metadata_json = meta
+        await session.commit()
+
+    async def _boom_acquire(self, keys):  # noqa: ANN001
+        raise RuntimeError("injected lock acquire failure")
+
+    monkeypatch.setattr(SessionAdvisoryLockSet, "try_acquire", _boom_acquire)
+
+    await _claim_and_execute(
+        session_factory,
+        job_id=job_id,
+        settings=_settings(),
+        transport=transport,
+        engine=session_factory.kw["bind"],
+    )
+
+    async with session_factory() as session:
+        op = await session.get(Operation, op_id)
+        job = await session.get(OperationJob, job_id)
+        alias = await session.get(EndpointAlias, fixture["endpoint_id"])
+        assert op is not None and job is not None and alias is not None
+        assert op.status == OperationStatus.MANUAL_INTERVENTION_REQUIRED.value
+        assert job.status == JobStatus.FAILED.value
+        assert alias.traffic_state == TrafficState.MAINTENANCE.value
+
+
+@pytest.mark.asyncio
+async def test_entity_missing_post_destructive_marks_mir(db, monkeypatch) -> None:
+    """Source missing after destructive boundary → MIR, not FAILED."""
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    session_factory = db
+    fake_node = ColdSwitchFakeNodeAgent()
+    fake_gw = FakeGateway()
+    transport = CombinedTransport(fake_node, fake_gw)
+
+    async with session_factory() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        await _seed_standard_runtime(fake_node, fake_gw, fixture)
+        alias = await session.get(EndpointAlias, fixture["endpoint_id"])
+        assert alias is not None
+        alias.traffic_state = TrafficState.MAINTENANCE.value
+        op_id, job_id = await _enqueue_cold_switch(session, fixture=fixture)
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        meta = dict(op.metadata_json or {})
+        meta["destructive_boundary_entered"] = True
+        op.metadata_json = meta
+        await session.commit()
+
+    source_id = fixture["source_id"]
+    real_get = AsyncSession.get
+
+    async def _get_hide_source(self, entity, ident, **kwargs):  # noqa: ANN001
+        if entity is Deployment and uuid.UUID(str(ident)) == source_id:
+            return None
+        return await real_get(self, entity, ident, **kwargs)
+
+    monkeypatch.setattr(AsyncSession, "get", _get_hide_source)
+
+    await _claim_and_execute(
+        session_factory,
+        job_id=job_id,
+        settings=_settings(),
+        transport=transport,
+        engine=session_factory.kw["bind"],
+    )
+
+    async with session_factory() as session:
+        op = await session.get(Operation, op_id)
+        job = await session.get(OperationJob, job_id)
+        alias = await session.get(EndpointAlias, fixture["endpoint_id"])
+        assert op is not None and job is not None and alias is not None
+        assert op.status == OperationStatus.MANUAL_INTERVENTION_REQUIRED.value
+        assert op.error_code == "SWITCH_ENTITY_NOT_FOUND"
+        assert job.status == JobStatus.FAILED.value
+        assert alias.traffic_state == TrafficState.MAINTENANCE.value
+
+
+@pytest.mark.asyncio
+async def test_mark_operation_failed_backstop_destructive_switch(db) -> None:
+    """Repository backstop upgrades destructive SWITCH FAILED → MIR."""
+    session_factory = db
+    fake_node = ColdSwitchFakeNodeAgent()
+
+    async with session_factory() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        op_id, _job_id = await _enqueue_cold_switch(session, fixture=fixture)
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        op.status = OperationStatus.RUNNING.value
+        meta = dict(op.metadata_json or {})
+        meta["destructive_boundary_entered"] = True
+        op.metadata_json = meta
+        await session.commit()
+
+        repo = OperationJobRepository(session)
+        await repo.mark_operation_failed(
+            op_id,
+            code="WORKER_INTERNAL_ERROR",
+            message="Unhandled worker exception during execution.",
+        )
+
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        assert op.status == OperationStatus.MANUAL_INTERVENTION_REQUIRED.value
+        assert op.error_code == "WORKER_INTERNAL_ERROR"
+
+
+@pytest.mark.asyncio
+async def test_mark_operation_failed_pre_destructive_switch_stays_failed(
+    db,
+) -> None:
+    session_factory = db
+    fake_node = ColdSwitchFakeNodeAgent()
+
+    async with session_factory() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        op_id, _job_id = await _enqueue_cold_switch(session, fixture=fixture)
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        op.status = OperationStatus.RUNNING.value
+        # No destructive_boundary_entered.
+        await session.commit()
+
+        repo = OperationJobRepository(session)
+        await repo.mark_operation_failed(
+            op_id,
+            code="WORKER_INTERNAL_ERROR",
+            message="Unexpected worker error during Cold Switch.",
+        )
+
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        assert op.status == OperationStatus.FAILED.value
+
+
+@pytest.mark.asyncio
+async def test_mark_operation_failed_lifecycle_unchanged(db) -> None:
+    from tests.test_operation_worker import _enqueue as _enqueue_lifecycle
+    from tests.test_operation_worker import _seed_deployment
+
+    session_factory = db
+
+    async with session_factory() as session:
+        seeded = await _seed_deployment(session)
+        op_id, _job_id = await _enqueue_lifecycle(
+            session,
+            deployment_id=seeded["deployment_id"],
+            operation_type=OperationType.STOP.value,
+            steps=["STOP_CONTAINER"],
+            desired_state=DesiredState.STOPPED.value,
+        )
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        op.status = OperationStatus.RUNNING.value
+        # Even if a stray flag were present, lifecycle is not SWITCH.
+        op.metadata_json = {"destructive_boundary_entered": True}
+        await session.commit()
+
+        repo = OperationJobRepository(session)
+        await repo.mark_operation_failed(
+            op_id,
+            code="WORKER_INTERNAL_ERROR",
+            message="Unhandled worker exception during execution.",
+        )
+
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        assert op.status == OperationStatus.FAILED.value

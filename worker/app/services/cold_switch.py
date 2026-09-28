@@ -161,6 +161,23 @@ class ColdSwitchExecutor:
         self._sleep = lifecycle._sleep
 
     async def execute(self, job_id: uuid.UUID) -> None:
+        """Run Cold Switch with an outer fail-safe for unexpected errors.
+
+        Advisory lock *contention* (``try_acquire() is False``) still requeues
+        without terminalizing. Only unexpected exceptions hit the outer
+        fail-safe so a resumed destructive SWITCH cannot become ordinary FAILED.
+        """
+        try:
+            await self._execute_inner(job_id)
+        except Exception:  # noqa: BLE001 - never escape to JobRunner as FAILED
+            logger.exception(
+                "Unexpected Cold Switch error outside per-step handlers "
+                "job_id=%s",
+                job_id,
+            )
+            await self._terminalize_unexpected_switch_error(job_id)
+
+    async def _execute_inner(self, job_id: uuid.UUID) -> None:
         async with self._session_factory() as session:
             repo = OperationJobRepository(session)
             job = await session.get(OperationJob, job_id)
@@ -174,13 +191,16 @@ class ColdSwitchExecutor:
             try:
                 self._require_switch_shape(operation)
             except PermanentStepError as exc:
-                await repo.mark_operation_failed(
-                    uuid.UUID(str(operation.id)),
+                await self._fail_all(
+                    repo,
+                    job,
+                    operation,
                     code=exc.code,
                     message=exc.message,
-                )
-                await repo.mark_job_failed(
-                    job_id, error=f"{exc.code}: {exc.message}"
+                    destructive=_destructive_entered(operation),
+                    alias=await self._load_alias(session, operation),
+                    source=await self._load_source(session, operation),
+                    gateway=self._gateway_client(),
                 )
                 return
 
@@ -188,13 +208,16 @@ class ColdSwitchExecutor:
                 Deployment, uuid.UUID(str(operation.target_deployment_id))
             )
             if target is None or target.node_id is None:
-                await repo.mark_operation_failed(
-                    uuid.UUID(str(operation.id)),
+                await self._fail_all(
+                    repo,
+                    job,
+                    operation,
                     code="TARGET_NODE_REQUIRED",
                     message="Target deployment or node_id missing.",
-                )
-                await repo.mark_job_failed(
-                    job_id, error="TARGET_NODE_REQUIRED: Target deployment or node_id missing."
+                    destructive=_destructive_entered(operation),
+                    alias=await self._load_alias(session, operation),
+                    source=await self._load_source(session, operation),
+                    gateway=self._gateway_client(),
                 )
                 return
 
@@ -237,6 +260,79 @@ class ColdSwitchExecutor:
             )
         finally:
             await lock.release()
+
+    def _gateway_client(self) -> GatewayClient:
+        return GatewayClient(
+            base_url=self._settings.gateway_base_url,
+            timeout_seconds=self._settings.gateway_timeout_seconds,
+            transport=self._transport,
+        )
+
+    async def _load_alias(
+        self, session: AsyncSession, operation: Operation
+    ) -> EndpointAlias | None:
+        if operation.endpoint_alias_id is None:
+            return None
+        return await session.get(
+            EndpointAlias, uuid.UUID(str(operation.endpoint_alias_id))
+        )
+
+    async def _load_source(
+        self, session: AsyncSession, operation: Operation
+    ) -> Deployment | None:
+        if operation.source_deployment_id is None:
+            return None
+        return await session.get(
+            Deployment, uuid.UUID(str(operation.source_deployment_id))
+        )
+
+    async def _terminalize_unexpected_switch_error(
+        self, job_id: uuid.UUID
+    ) -> None:
+        """Persist safe terminal state for any unexpected Cold Switch failure.
+
+        Uses a fresh session so prior ORM failure cannot block terminalization.
+        Consumes the error so JobRunner cannot overwrite MIR/FAILED.
+        """
+        try:
+            async with self._session_factory() as session:
+                repo = OperationJobRepository(session)
+                job = await session.get(OperationJob, job_id)
+                if job is None:
+                    return
+                operation = await repo.get_operation(
+                    uuid.UUID(str(job.operation_id))
+                )
+                if operation is None:
+                    await repo.mark_job_failed(
+                        job_id,
+                        error=(
+                            "WORKER_INTERNAL_ERROR: Unexpected worker error "
+                            "during Cold Switch."
+                        ),
+                    )
+                    return
+
+                destructive = _destructive_entered(operation)
+                alias = await self._load_alias(session, operation)
+                source = await self._load_source(session, operation)
+                gateway = self._gateway_client() if alias is not None else None
+                await self._fail_all(
+                    repo,
+                    job,
+                    operation,
+                    code="WORKER_INTERNAL_ERROR",
+                    message="Unexpected worker error during Cold Switch.",
+                    destructive=destructive,
+                    alias=alias,
+                    source=source,
+                    gateway=gateway,
+                )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "Failed to terminalize unexpected Cold Switch error job_id=%s",
+                job_id,
+            )
 
     def _require_switch_shape(self, operation: Operation) -> None:
         if operation.operation_type != OperationType.SWITCH.value:
@@ -286,13 +382,17 @@ class ColdSwitchExecutor:
             target = await session.get(Deployment, target_id)
             alias = await session.get(EndpointAlias, endpoint_id)
             if source is None or target is None or alias is None:
+                gateway = self._gateway_client() if alias is not None else None
                 await self._fail_all(
                     repo,
                     job,
                     operation,
                     code="SWITCH_ENTITY_NOT_FOUND",
                     message="Source, Target, or Endpoint Alias not found.",
-                    destructive=False,
+                    destructive=_destructive_entered(operation),
+                    alias=alias,
+                    source=source,
+                    gateway=gateway,
                 )
                 return
 
@@ -305,6 +405,9 @@ class ColdSwitchExecutor:
                     code="NODE_AGENT_URL_MISSING",
                     message="Target node is missing agent_base_url.",
                     destructive=_destructive_entered(operation),
+                    alias=alias,
+                    source=source,
+                    gateway=self._gateway_client(),
                 )
                 return
 
