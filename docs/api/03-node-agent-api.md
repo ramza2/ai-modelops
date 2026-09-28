@@ -159,6 +159,10 @@ GPU process attribution (Node Agent):
   container (`ai.modelops.managed=true` + `ai.modelops.deployment_id`).
 - Mapping includes the container init PID and descendant host PIDs (worker/child processes).
 - Unmanaged containers are never attributed. Unmatched or ambiguous PIDs stay `null`.
+- Attribution is best-effort: if Docker is unavailable or raises `DockerUnavailableError`
+  during enrichment, Host/GPU metrics are still returned and process ownership stays `null`
+  (Backend Preflight then treats Source VRAM as non-reclaimable).
+- If host `/proc` cannot be enumerated, ownership stays unknown (no root-PID guess).
 - Backend reclaim logic still requires `process.deployment_id == source_deployment_id`
   and remains conservative when attribution is missing.
 

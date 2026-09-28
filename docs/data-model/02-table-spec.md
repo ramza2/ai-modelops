@@ -466,6 +466,10 @@ INDEX(target_model_version_id, checked_at DESC)
 Worker가 실제 Cold Switch를 실행하기 직전에 수행하는 revalidation 기록만 `operation_id`를 채운다.
 Preview 결과만으로 Switch를 승인하지 않는다.
 
+Parent VRAM numeric columns are diagnostic aggregate totals (sums of
+`resource_preflight_gpu` counterparts). Feasibility is decided strictly per GPU;
+do not infer HOT/COLD from parent totals alone — use `result` and `gpu_results`.
+
 ---
 
 ## 17. resource_preflight_gpu

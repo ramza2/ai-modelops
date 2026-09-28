@@ -283,3 +283,88 @@ def test_adapter_map_does_not_attribute_without_managed_label() -> None:
     docker.set_container_host_pids("ctr-no-managed", {6000, 6001})
     mapped = docker.map_host_pids_to_managed_ownership({6001})
     assert mapped == {}
+
+
+class _AttributionFailingDocker(FakeDockerAdapter):
+    """Docker adapter that is 'ready' but fails during process attribution."""
+
+    def map_host_pids_to_managed_ownership(self, pids: set[int]):
+        from app.core.errors import DockerUnavailableError
+
+        raise DockerUnavailableError(
+            "Docker Engine is unavailable.",
+            details={"reason": "transient list_containers failure"},
+        )
+
+
+@pytest.mark.asyncio
+async def test_resources_degrades_when_attribution_raises_docker_unavailable() -> None:
+    """Host/NVML metrics remain; ownership stays null on DockerUnavailableError."""
+    docker = _AttributionFailingDocker(available=True)
+    docker.seed(
+        ContainerInfo(
+            id="ctr-managed",
+            name="modelops-managed",
+            status="running",
+            labels=_managed_labels(str(uuid.uuid4())),
+            pid=7000,
+        )
+    )
+    docker.set_container_host_pids("ctr-managed", {7000, 7001})
+
+    app = create_app(
+        service=_service(
+            docker=docker,
+            processes=[GpuProcessInfo(pid=7001, used_vram_mb=5555)],
+        )
+    )
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        resp = await ac.get("/internal/v1/resources")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["gpus"][0]["vram_free_mb"] == 4000
+    proc = body["gpus"][0]["processes"][0]
+    assert proc["pid"] == 7001
+    assert proc["used_vram_mb"] == 5555
+    assert proc["container_id"] is None
+    assert proc["deployment_id"] is None
+
+
+def test_host_process_tree_empty_when_proc_unavailable(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without /proc enumeration proof, do not claim root PID ownership."""
+    from app.adapters import docker_adapter as docker_mod
+
+    missing = tmp_path / "no-proc-here"
+    assert not missing.exists()
+    assert docker_mod._host_process_tree(1234, proc_root=str(missing)) == set()
+
+    def boom(_path: str) -> list[str]:
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(docker_mod.os, "listdir", boom)
+    assert docker_mod._host_process_tree(1234) == set()
+
+
+def test_host_process_tree_includes_descendants(tmp_path) -> None:
+    """Real /proc descendant traversal: root + child + grandchild; exclude unrelated."""
+    from app.adapters.docker_adapter import _host_process_tree
+
+    proc = tmp_path / "proc"
+    # root=10 -> child=11 -> grandchild=12; unrelated=99 under init
+    for pid, ppid in ((10, 1), (11, 10), (12, 11), (99, 1)):
+        status_dir = proc / str(pid)
+        status_dir.mkdir(parents=True)
+        (status_dir / "status").write_text(
+            f"Name:\tfake\nPPid:\t{ppid}\n", encoding="utf-8"
+        )
+    (proc / "cpuinfo").write_text("processor\t: 0\n", encoding="utf-8")
+
+    tree = _host_process_tree(10, proc_root=str(proc))
+    assert tree == {10, 11, 12}
+    assert 99 not in tree
+    assert _host_process_tree(99, proc_root=str(proc)) == {99}
+    assert _host_process_tree(0, proc_root=str(proc)) == set()

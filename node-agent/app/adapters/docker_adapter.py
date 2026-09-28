@@ -836,28 +836,37 @@ def _managed_ownership_from_labels(
     )
 
 
-def _host_process_tree(root_pid: int) -> set[int]:
-    """Return ``root_pid`` and all descendant host PIDs visible in ``/proc``.
+def _host_process_tree(root_pid: int, *, proc_root: str = "/proc") -> set[int]:
+    """Return ``root_pid`` and all descendant host PIDs visible under ``proc_root``.
 
     Model runtimes often use worker/child processes; NVML may report those
     PIDs rather than the container init PID. Only PIDs reachable from the
     managed container's init PID are attributed.
+
+    When ``proc_root`` (normally ``/proc``) cannot be enumerated (non-Linux,
+    restricted namespace, etc.), returns an empty set so attribution stays
+    unknown rather than guessing that Docker ``State.Pid`` and NVML PIDs share
+    a host namespace.
+
+    ``proc_root`` is overridable for deterministic unit tests only.
     """
     if root_pid <= 0:
         return set()
 
     children_by_ppid: dict[int, list[int]] = {}
     try:
-        entries = os.listdir("/proc")
+        entries = os.listdir(proc_root)
     except OSError:
-        return {root_pid}
+        return set()
 
     for name in entries:
         if not name.isdigit():
             continue
         pid = int(name)
         try:
-            with open(f"/proc/{pid}/status", encoding="utf-8") as fh:
+            with open(
+                os.path.join(proc_root, name, "status"), encoding="utf-8"
+            ) as fh:
                 for line in fh:
                     if line.startswith("PPid:"):
                         ppid = int(line.split()[1])

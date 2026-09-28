@@ -11,7 +11,7 @@ from app.adapters.docker_adapter import DockerAdapter
 from app.adapters.host import HostAdapter
 from app.adapters.nvml import NvmlAdapter
 from app.core.config import get_settings
-from app.core.errors import ValidationError, VramNotReleasedError
+from app.core.errors import DockerUnavailableError, ValidationError, VramNotReleasedError
 
 
 class NodeService:
@@ -53,7 +53,12 @@ class NodeService:
         host = self._host.get_resources()
         gpus = self._nvml.list_gpus()
         host_pids = {int(p.pid) for g in gpus for p in g.processes}
-        ownership = self._docker.map_host_pids_to_managed_ownership(host_pids)
+        # Process ownership is best-effort. Docker attribution/transient failures
+        # must not turn Host/NVML resource queries into 5xx.
+        try:
+            ownership = self._docker.map_host_pids_to_managed_ownership(host_pids)
+        except DockerUnavailableError:
+            ownership = {}
 
         gpu_payloads: list[dict[str, Any]] = []
         for g in gpus:
