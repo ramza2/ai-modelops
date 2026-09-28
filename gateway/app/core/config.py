@@ -22,10 +22,12 @@ class Settings(BaseSettings):
     database_url: str = Field(
         default="postgresql+asyncpg://modelops:modelops@localhost:5432/modelops",
     )
-    # Upstream inference HTTP timeout (non-streaming).
+    # Upstream inference HTTP timeout (non-streaming / streaming).
     upstream_timeout_seconds: float = 60.0
-    # How often to poll routing_state.version for snapshot refresh.
+    # How often to poll routing_state.version for snapshot refresh (fallback).
     routing_poll_seconds: float = 2.0
+    # LISTEN reconnect backoff when NOTIFY connection drops.
+    routing_listen_reconnect_seconds: float = 2.0
 
 
 @lru_cache

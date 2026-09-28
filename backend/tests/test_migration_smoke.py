@@ -122,6 +122,57 @@ def test_upgrade_creates_all_tables_then_downgrade(scratch_db) -> None:
         assert row[0] == 1
         assert row[1] == 0
 
+        with engine.connect() as conn:
+            # request_id is opaque VARCHAR; UNIQUE removed; lookup index present.
+            col_type = conn.execute(
+                text(
+                    """
+                    SELECT data_type, character_maximum_length
+                    FROM information_schema.columns
+                    WHERE table_name = 'invocation_log' AND column_name = 'request_id'
+                    """
+                )
+            ).one()
+            assert col_type[0] in {"character varying", "varchar"}
+            assert col_type[1] == 255
+
+            unique_exists = conn.execute(
+                text(
+                    """
+                    SELECT 1 FROM pg_constraint
+                    WHERE conname = 'uq_invocation_log_request_id'
+                    """
+                )
+            ).scalar_one_or_none()
+            assert unique_exists is None
+
+            index_exists = conn.execute(
+                text(
+                    """
+                    SELECT 1 FROM pg_indexes
+                    WHERE tablename = 'invocation_log'
+                      AND indexname = 'ix_invocation_log_request_id'
+                    """
+                )
+            ).scalar_one_or_none()
+            assert index_exists == 1
+
+            # Opaque + duplicate request_ids must still allow a clean downgrade.
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO invocation_log (
+                      request_id, requested_at, api_path, http_status,
+                      latency_ms, is_streaming
+                    ) VALUES
+                      ('m4a-e2e-001', now(), '/v1/chat/completions', 200, 1, false),
+                      ('m4a-e2e-001', now(), '/v1/chat/completions', 200, 2, false),
+                      ('not-a-uuid', now(), '/v1/embeddings', 200, 3, false)
+                    """
+                )
+            )
+            conn.commit()
+
         command.downgrade(cfg, "base")
     finally:
         if prev is None:

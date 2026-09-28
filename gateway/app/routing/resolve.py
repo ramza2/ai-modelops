@@ -37,12 +37,17 @@ def resolve_route(
             param="model",
             details={"alias": alias},
         )
-    if entry.traffic_state in (
-        TrafficState.DRAINING.value,
-        TrafficState.MAINTENANCE.value,
-    ):
+    if entry.traffic_state == TrafficState.DRAINING.value:
         raise GatewayError(
-            f"Model alias '{alias}' is in {entry.traffic_state}.",
+            f"Model alias '{alias}' is draining; new requests are rejected.",
+            code=ErrorCode.ENDPOINT_DRAINING,
+            http_status=503,
+            param="model",
+            details={"alias": alias, "traffic_state": entry.traffic_state},
+        )
+    if entry.traffic_state == TrafficState.MAINTENANCE.value:
+        raise GatewayError(
+            f"Model alias '{alias}' is in MAINTENANCE.",
             code=ErrorCode.MODEL_MAINTENANCE,
             http_status=503,
             param="model",

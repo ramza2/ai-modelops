@@ -127,12 +127,9 @@ Gateway 자체 오류일 때만 ModelOps error code를 OpenAI-Compatible error b
 
 ### Streaming
 
-Milestone **4-A**에서는 `stream=true`를 지원하지 않는다.
-요청 시 `400 STREAMING_NOT_SUPPORTED`를 반환한다.
+`stream=true`이면 upstream SSE를 buffering 없이 passthrough 한다.
 
-Streaming/SSE proxy는 Milestone 4-B에서 구현한다.
-
-요청 예 (4-B):
+요청 예:
 
 ```json
 {
@@ -142,15 +139,12 @@ Streaming/SSE proxy는 Milestone 4-B에서 구현한다.
 }
 ```
 
-4-B에서 Gateway는 upstream SSE를 buffer 전체 수집하지 않고 chunk 단위로 전달한다.
+필수 원칙:
 
-필수 원칙 (4-B):
-
-- Client disconnect 감지
-- Upstream connection 정리
-- 전체 Prompt/Response body 로깅 금지
-- 가능한 경우 token usage 수집
+- Client disconnect 감지 및 upstream 정리
 - Streaming 종료까지 inflight request로 계산
+- 전체 Prompt/Response body 로깅 금지
+- `X-Request-ID` 유지
 
 ---
 
@@ -246,17 +240,19 @@ Gateway 메모리 Route Snapshot 예:
 
 매 요청마다 PostgreSQL을 조회하지 않는다.
 
-Route Snapshot 갱신 (Milestone 4-A):
+Route Snapshot 갱신 (Milestone 4-B):
 
 ```text
 startup load
         +
-주기적 routing_state.version polling
+PostgreSQL LISTEN / NOTIFY (modelops_routing_changed)
+        +
+주기적 routing_state.version polling (fallback)
         +
 POST /internal/v1/routes/reload
 ```
 
-PostgreSQL `LISTEN / NOTIFY`는 Milestone 4-B에서 추가한다.
+LISTEN 장애 시에도 polling fallback으로 serving을 유지한다.
 
 DB 일시 장애 시 Last Known Good Snapshot을 계속 사용한다.
 
@@ -327,7 +323,8 @@ Retry-After: 10
 | 400 | MODEL_API_TYPE_MISMATCH | Chat/Embedding 타입 불일치 |
 | 404 | MODEL_ALIAS_NOT_FOUND | Alias 없음 |
 | 503 | MODEL_ALIAS_DISABLED | Alias 비활성 |
-| 503 | MODEL_MAINTENANCE | DRAINING/MAINTENANCE |
+| 503 | MODEL_MAINTENANCE | MAINTENANCE |
+| 503 | ENDPOINT_DRAINING | DRAINING (신규 요청 차단) |
 | 503 | MODEL_UNAVAILABLE | Route 없음 또는 Deployment 사용 불가 |
 | 504 | UPSTREAM_TIMEOUT | 모델 응답 timeout |
 | 502 | UPSTREAM_ERROR | Upstream 연결/프로토콜 오류 |

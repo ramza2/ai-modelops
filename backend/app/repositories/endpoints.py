@@ -5,7 +5,7 @@ from __future__ import annotations
 import datetime as dt
 import uuid
 
-from sqlalchemy import Select, func, select, update
+from sqlalchemy import Select, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.models import (
@@ -16,6 +16,8 @@ from app.domain.models import (
     ModelVersion,
     RoutingState,
 )
+
+ROUTING_NOTIFY_CHANNEL = "modelops_routing_changed"
 
 
 class EndpointRepository:
@@ -139,7 +141,11 @@ class EndpointRepository:
         return route
 
     async def bump_routing_version(self, *, now: dt.datetime) -> int:
-        """Atomically increment routing_state.version (singleton id=1)."""
+        """Atomically increment routing_state.version (singleton id=1).
+
+        Emits ``pg_notify('modelops_routing_changed', version)`` in the same
+        transaction so Gateway LISTEN clients can reload promptly.
+        """
         stmt = (
             update(RoutingState)
             .where(RoutingState.id == 1)
@@ -157,8 +163,13 @@ class EndpointRepository:
                 RoutingState(id=1, version=1, updated_at=now)
             )
             await self._session.flush()
-            return 1
-        return int(version)
+            version = 1
+        version_int = int(version)
+        await self._session.execute(
+            text("SELECT pg_notify('modelops_routing_changed', :payload)"),
+            {"payload": str(version_int)},
+        )
+        return version_int
 
     async def get_routing_version(self) -> int:
         state = await self._session.get(RoutingState, 1)
