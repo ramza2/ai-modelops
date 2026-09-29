@@ -709,10 +709,11 @@ async def test_destructive_boundary_vs_cancel_ordering(db) -> None:
         assert op is not None
         assert (op.metadata_json or {}).get(DESTRUCTIVE_FLAG) is not True
 
-    # Case B: boundary wins first → later cancel is intent only (destructive stays).
+    # Case B: boundary wins first on a fresh operation; cancel reason survives.
+    fake_node2 = ColdSwitchFakeNodeAgent()
     async with session_factory() as session:
         fixture2 = await _seed_cold_switch_fixture(
-            session, gpu_uuid=fake_node.gpu_uuid
+            session, gpu_uuid=fake_node2.gpu_uuid
         )
         op2_id, _ = await _enqueue_cold_switch(session, fixture=fixture2)
         op2 = await session.get(Operation, op2_id)
@@ -728,26 +729,30 @@ async def test_destructive_boundary_vs_cancel_ordering(db) -> None:
         decision = await repo.decide_destructive_boundary(op2_id)
         assert decision == "boundary_entered"
 
-    # Concurrent-style: hold Operation lock in boundary txn, cancel waits then
+    async with session_factory() as session:
+        op = await session.get(Operation, op2_id)
+        assert op is not None
+        meta = op.metadata_json or {}
+        assert meta.get(DESTRUCTIVE_FLAG) is True
+        assert meta.get("cancel_reason") == "pre-existing-reason"
+
+    # Interleaving: hold Operation lock in boundary txn; cancel waits, then
     # only stamps intent because destructive already committed.
     gate = asyncio.Event()
     locked = asyncio.Event()
 
     async def boundary_holds() -> str:
         async with session_factory() as s:
-            repo = OperationJobRepository(s)
-            # Begin decide manually to hold lock mid-flight.
             op = (
                 await s.execute(
                     select(Operation)
                     .where(Operation.id == op2_id)
                     .with_for_update()
+                    .execution_options(populate_existing=True)
                 )
             ).scalar_one()
             locked.set()
             await gate.wait()
-            # Boundary already entered in prior step — re-decide should still
-            # see no cancel and keep flag (idempotent patch).
             if op.cancel_requested_at is not None:
                 await s.commit()
                 return "cancelled"
@@ -759,29 +764,30 @@ async def test_destructive_boundary_vs_cancel_ordering(db) -> None:
 
     async def cancel_after_lock() -> None:
         await locked.wait()
-        async with session_factory() as s:
-            # This blocks until boundary_holds commits.
-            task_op = asyncio.create_task(
-                s.execute(
-                    select(Operation)
-                    .where(Operation.id == op2_id)
-                    .with_for_update()
-                )
-            )
-            await asyncio.sleep(0.1)
-            gate.set()
-            result = await task_op
-            op = result.scalar_one()
-            if op.cancel_requested_at is None:
-                op.cancel_requested_at = dt.datetime.now(tz=dt.UTC)
-            meta = dict(op.metadata_json or {})
-            meta["cancel_reason"] = "after-boundary"
-            op.metadata_json = meta
-            await s.commit()
 
-    t1 = asyncio.create_task(boundary_holds())
-    t2 = asyncio.create_task(cancel_after_lock())
-    await asyncio.gather(t1, t2)
+        async def _stamp_cancel() -> None:
+            async with session_factory() as s:
+                op = (
+                    await s.execute(
+                        select(Operation)
+                        .where(Operation.id == op2_id)
+                        .with_for_update()
+                        .execution_options(populate_existing=True)
+                    )
+                ).scalar_one()
+                if op.cancel_requested_at is None:
+                    op.cancel_requested_at = dt.datetime.now(tz=dt.UTC)
+                meta = dict(op.metadata_json or {})
+                meta["cancel_reason"] = "after-boundary"
+                op.metadata_json = meta
+                await s.commit()
+
+        task = asyncio.create_task(_stamp_cancel())
+        await asyncio.sleep(0.2)
+        gate.set()
+        await task
+
+    await asyncio.gather(boundary_holds(), cancel_after_lock())
 
     async with session_factory() as session:
         op = await session.get(Operation, op2_id)
@@ -791,7 +797,6 @@ async def test_destructive_boundary_vs_cancel_ordering(db) -> None:
         assert meta.get("cancel_reason") == "after-boundary"
         assert op.cancel_requested_at is not None
         assert op.status == OperationStatus.RUNNING.value
-
 
 @pytest.mark.asyncio
 async def test_metadata_cancel_reason_survives_boundary(db) -> None:

@@ -532,11 +532,18 @@ class OperationJobRepository:
         Metadata is patched from the freshly locked JSONB so concurrent
         ``cancel_reason`` / other keys are preserved.
         """
+        # Expire any cached identity so FOR UPDATE reloads cancel_requested_at /
+        # metadata_json from the database (READ COMMITTED + populate_existing).
+        cached = await self._session.get(Operation, operation_id)
+        if cached is not None:
+            self._session.expire(cached)
+
         operation = (
             await self._session.execute(
                 select(Operation)
                 .where(Operation.id == operation_id)
                 .with_for_update()
+                .execution_options(populate_existing=True)
             )
         ).scalar_one_or_none()
         if operation is None:

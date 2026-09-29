@@ -459,6 +459,7 @@ async def test_cancel_vs_claim_race_intent_only_when_claimed(client) -> None:
     from sqlalchemy import select
 
     from app.domain.models import Operation, OperationJob
+    from app.repositories.operations import OperationRepository
 
     sf = client["session_factory"]
     ac = client["client"]
@@ -476,9 +477,10 @@ async def test_cancel_vs_claim_race_intent_only_when_claimed(client) -> None:
     op_id = enq.json()["id"]
 
     gate = asyncio.Event()
-    claimed = asyncio.Event()
+    locked = asyncio.Event()
+    decisions: list[str] = []
 
-    async def claim_first() -> None:
+    async def claim_holds_job_lock() -> None:
         async with sf() as s:
             job = (
                 await s.execute(
@@ -487,7 +489,7 @@ async def test_cancel_vs_claim_race_intent_only_when_claimed(client) -> None:
                     .with_for_update()
                 )
             ).scalar_one()
-            claimed.set()
+            locked.set()
             await gate.wait()
             now = dt.datetime.now(tz=dt.UTC)
             job.status = JobStatus.RUNNING.value
@@ -498,30 +500,35 @@ async def test_cancel_vs_claim_race_intent_only_when_claimed(client) -> None:
                     select(Operation)
                     .where(Operation.id == uuid.UUID(op_id))
                     .with_for_update()
+                    .execution_options(populate_existing=True)
                 )
             ).scalar_one()
             op.status = OperationStatus.RUNNING.value
             op.started_at = now
             await s.commit()
 
-    async def cancel_after_claim_holds_lock():
-        await claimed.wait()
-        # Cancel blocks on Job FOR UPDATE until claim commits.
-        task = asyncio.create_task(
-            ac.post(
-                f"/api/v1/operations/{op_id}/cancel",
-                json={"reason": "race"},
-            )
-        )
-        await asyncio.sleep(0.15)
+    async def cancel_waits_then_decides() -> None:
+        await locked.wait()
+        # Start cancel decision in a separate session; blocks on Job lock.
+        async def _run_cancel() -> str:
+            async with sf() as s:
+                repo = OperationRepository(s)
+                _op, decision = await repo.apply_cancel_decision(
+                    uuid.UUID(op_id), reason="race"
+                )
+                await s.commit()
+                return decision
+
+        task = asyncio.create_task(_run_cancel())
+        await asyncio.sleep(0.2)  # ensure cancel is blocked on Job lock
         gate.set()
-        return await task
+        decisions.append(await task)
 
-    claim_task = asyncio.create_task(claim_first())
-    resp = await cancel_after_claim_holds_lock()
-    await claim_task
+    await asyncio.gather(claim_holds_job_lock(), cancel_waits_then_decides())
+    assert decisions == ["intent_only"]
 
-    assert resp.status_code == 202, resp.text
+    resp = await ac.get(f"/api/v1/operations/{op_id}")
+    assert resp.status_code == 200
     body = resp.json()
     assert body["status"] == OperationStatus.RUNNING.value
     assert body["cancel_requested_at"] is not None
@@ -538,7 +545,6 @@ async def test_cancel_vs_claim_race_intent_only_when_claimed(client) -> None:
             )
         ).scalar_one()
         assert job == JobStatus.RUNNING.value
-
 
 @pytest.mark.asyncio
 async def test_cancel_preserves_destructive_metadata(client) -> None:

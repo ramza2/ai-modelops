@@ -169,6 +169,20 @@ class OperationRepository:
         """
         now = dt.datetime.now(tz=dt.UTC)
 
+        # Expire cached identities so FOR UPDATE reloads committed claim state.
+        cached_job = (
+            await self._session.execute(
+                select(OperationJob).where(
+                    OperationJob.operation_id == operation_id
+                )
+            )
+        ).scalar_one_or_none()
+        if cached_job is not None:
+            self._session.expire(cached_job)
+        cached_op = await self._session.get(Operation, operation_id)
+        if cached_op is not None:
+            self._session.expire(cached_op)
+
         # Lock Job first (same order as claim). Wait — do not SKIP LOCKED —
         # so we observe the post-claim state when Worker wins the race.
         job = (
@@ -176,6 +190,7 @@ class OperationRepository:
                 select(OperationJob)
                 .where(OperationJob.operation_id == operation_id)
                 .with_for_update()
+                .execution_options(populate_existing=True)
             )
         ).scalar_one_or_none()
 
@@ -184,6 +199,7 @@ class OperationRepository:
                 select(Operation)
                 .where(Operation.id == operation_id)
                 .with_for_update()
+                .execution_options(populate_existing=True)
             )
         ).scalar_one_or_none()
         if operation is None:
