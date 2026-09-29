@@ -439,6 +439,77 @@ class OperationJobRepository:
             job.updated_at = now
         await self._session.commit()
 
+    async def finalize_operation_cancelled(
+        self,
+        *,
+        operation_id: uuid.UUID,
+        job_id: uuid.UUID,
+        code: str = "USER_CANCELLED",
+        message: str = "Operation cancelled by user.",
+    ) -> None:
+        """Set Operation CANCELLED + Job FAILED + skip open forward steps."""
+        now = dt.datetime.now(tz=dt.UTC)
+        operation = await self._session.get(Operation, operation_id)
+        job = await self._session.get(OperationJob, job_id)
+        if operation is None:
+            return
+        # Never overwrite a stronger terminal outcome.
+        if operation.status in {
+            OperationStatus.SUCCEEDED.value,
+            OperationStatus.ROLLED_BACK.value,
+            OperationStatus.MANUAL_INTERVENTION_REQUIRED.value,
+            OperationStatus.FAILED.value,
+        }:
+            return
+        if operation.cancel_requested_at is None:
+            operation.cancel_requested_at = now
+        if operation.status != OperationStatus.CANCELLED.value:
+            operation.status = OperationStatus.CANCELLED.value
+            operation.finished_at = now
+            operation.error_code = code
+            operation.error_message = message
+
+        steps = await self.list_steps(operation_id)
+        for step in steps:
+            # Only skip non-rollback forward/open steps.
+            if step.step_code.startswith("ROLLBACK_"):
+                continue
+            if step.status in (
+                StepStatus.PENDING.value,
+                StepStatus.RUNNING.value,
+            ):
+                step.status = StepStatus.SKIPPED.value
+                step.finished_at = now
+                detail = dict(step.detail_json or {})
+                detail["skipped_reason"] = code
+                step.detail_json = detail
+
+        if job is not None and job.status not in {
+            JobStatus.FAILED.value,
+            JobStatus.DONE.value,
+        }:
+            job.status = JobStatus.FAILED.value
+            job.locked_by = None
+            job.locked_at = None
+            job.last_error = f"{code}: {message}"
+            job.updated_at = now
+        await self._session.commit()
+
+    async def refresh_cancel_requested_at(
+        self, operation_id: uuid.UUID
+    ) -> dt.datetime | None:
+        """Re-read cancel_requested_at from DB (authoritative cancel intent)."""
+        row = (
+            await self._session.execute(
+                select(Operation.cancel_requested_at).where(
+                    Operation.id == operation_id
+                )
+            )
+        ).one_or_none()
+        if row is None:
+            return None
+        return row[0]
+
     async def reconcile_terminal_operation_job(
         self,
         *,

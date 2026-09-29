@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import uuid
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.enums import OperationStatus
+from app.core.enums import JobStatus, OperationStatus, StepStatus
 from app.domain.models import Operation, OperationJob, OperationStep
 
 ACTIVE_OPERATION_STATUSES = frozenset(
@@ -15,6 +16,16 @@ ACTIVE_OPERATION_STATUSES = frozenset(
         OperationStatus.QUEUED.value,
         OperationStatus.RUNNING.value,
         OperationStatus.ROLLING_BACK.value,
+    }
+)
+
+TERMINAL_OPERATION_STATUSES = frozenset(
+    {
+        OperationStatus.SUCCEEDED.value,
+        OperationStatus.FAILED.value,
+        OperationStatus.CANCELLED.value,
+        OperationStatus.ROLLED_BACK.value,
+        OperationStatus.MANUAL_INTERVENTION_REQUIRED.value,
     }
 )
 
@@ -99,3 +110,85 @@ class OperationRepository:
     ) -> OperationJob | None:
         stmt = select(OperationJob).where(OperationJob.operation_id == operation_id)
         return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def request_cancel(
+        self,
+        operation: Operation,
+        *,
+        reason: str | None = None,
+        now: dt.datetime | None = None,
+    ) -> bool:
+        """Record cancel intent. Returns True when cancel_requested_at was newly set.
+
+        Never clears ``destructive_boundary_entered`` or other metadata keys.
+        Does not terminalize the Operation — caller decides QUEUED vs RUNNING.
+        """
+        stamp = now or dt.datetime.now(tz=dt.UTC)
+        newly_set = operation.cancel_requested_at is None
+        if newly_set:
+            operation.cancel_requested_at = stamp
+        if reason:
+            meta = dict(operation.metadata_json or {})
+            meta["cancel_reason"] = reason
+            operation.metadata_json = meta
+        await self._session.flush()
+        return newly_set
+
+    async def finalize_operation_cancelled(
+        self,
+        *,
+        operation: Operation,
+        job: OperationJob | None,
+        code: str = "USER_CANCELLED",
+        message: str = "Operation cancelled by user.",
+        now: dt.datetime | None = None,
+    ) -> None:
+        """Atomically CANCELLED + Job FAILED + skip remaining PENDING/RUNNING steps."""
+        stamp = now or dt.datetime.now(tz=dt.UTC)
+        if operation.cancel_requested_at is None:
+            operation.cancel_requested_at = stamp
+        if operation.status != OperationStatus.CANCELLED.value:
+            operation.status = OperationStatus.CANCELLED.value
+            operation.finished_at = stamp
+            operation.error_code = code
+            operation.error_message = message
+
+        steps = await self.list_steps(uuid.UUID(str(operation.id)))
+        for step in steps:
+            if step.status in (
+                StepStatus.PENDING.value,
+                StepStatus.RUNNING.value,
+            ):
+                step.status = StepStatus.SKIPPED.value
+                step.finished_at = stamp
+                detail = dict(step.detail_json or {})
+                detail["skipped_reason"] = "USER_CANCELLED"
+                step.detail_json = detail
+
+        if job is not None and job.status not in (
+            JobStatus.FAILED.value,
+            JobStatus.DONE.value,
+        ):
+            job.status = JobStatus.FAILED.value
+            job.locked_by = None
+            job.locked_at = None
+            job.last_error = f"{code}: {message}"
+            job.updated_at = stamp
+
+        await self._session.flush()
+
+    @staticmethod
+    def is_cancel_idempotent_terminal(operation: Operation) -> bool:
+        """CANCELLED, or ROLLED_BACK that was driven by a prior cancel request."""
+        if operation.status == OperationStatus.CANCELLED.value:
+            return True
+        if (
+            operation.status == OperationStatus.ROLLED_BACK.value
+            and operation.cancel_requested_at is not None
+        ):
+            return True
+        return False
+
+    @staticmethod
+    def is_terminal(operation: Operation) -> bool:
+        return operation.status in TERMINAL_OPERATION_STATUSES

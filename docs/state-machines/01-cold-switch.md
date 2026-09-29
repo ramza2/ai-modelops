@@ -18,7 +18,14 @@ Cold Switch는 GPU VRAM이 부족하여 기존 모델과 신규 모델을 동시
   `MANUAL_INTERVENTION_REQUIRED` + `MAINTENANCE` (Target may already be valid).
   Unexpected worker exceptions keep the M5-B outer fail-safe (MIR after the
   destructive boundary). Cancel/retry APIs and full reconciliation are **not** in M5-C1.
-- **M5-C2+:** cancel/retry policy, full reconciliation sweeper, HOT/AUTO, Admin UI.
+- **M5-C2-A:** Safe Cancel (`POST /operations/{id}/cancel`) — **implemented**.
+  `cancel_requested_at` is authoritative intent. Pre-destructive cancel → `CANCELLED`
+  (restore `SERVING` when traffic was DRAINING/MAINTENANCE; Source stays RUNNING).
+  Post-destructive cancel → durable M5-C1 rollback (`ROLLING_BACK` → `ROLLED_BACK`),
+  never direct `CANCELLED`. STOP_SOURCE re-reads cancel intent immediately before
+  committing `destructive_boundary_entered` / Source stop.
+- **M5-C2-B / M5-C2-C (not implemented):** Retry API, full reconciliation sweeper,
+  HOT/AUTO/ALTERNATE_NODE, Admin UI.
 
 핵심 원칙은 다음과 같다.
 
@@ -816,36 +823,84 @@ Operation 재개 시 Lock을 다시 획득하고 DB/Node/Gateway 실제 상태�
 
 ---
 
-## 13. Cancel 정책
+## 13. Cancel 정책 (M5-C2-A Safe Cancel — implemented)
 
-### Source 중지 전
+`POST /api/v1/operations/{operation_id}/cancel` records cancellation intent.
+Management API does **not** call Docker, Node Agent, or Gateway. Worker owns
+runtime orchestration. Authoritative intent field: `operation.cancel_requested_at`.
 
-다음 단계에서는 취소 가능하다.
+Do **not** introduce statuses such as `CANCEL_REQUESTED` or `ROLLBACK_REQUESTED`.
+
+### QUEUED (job not running)
+
+- Set `cancel_requested_at`
+- Terminalize Operation as `CANCELLED` and Job as `FAILED` atomically
+- Mark remaining `PENDING` forward steps `SKIPPED`
+- No Node Agent / Gateway / route side effects
+- Repeated cancel is idempotent
+
+### Source 중지 전 (pre-destructive; `destructive_boundary_entered` unset)
+
+Safe cancel checkpoints: before each forward step, and the critical STOP_SOURCE
+race window (below).
 
 ```text
 VALIDATE
 PREFLIGHT
 PREPARE_TARGET
 DRAIN_TRAFFIC
+STOP_SOURCE  (before destructive_boundary_entered commit / Source stop)
 ```
 
-DRAIN 중 취소하면 Traffic을 SERVING으로 복구한 뒤 `CANCELLED` 처리한다.
+Behavior:
 
-### Source 중지 시작 후
+- Source remains `RUNNING`
+- If traffic is `DRAINING` or `MAINTENANCE`, restore `SERVING` via existing
+  routing-version bump + Gateway apply wait
+- Remaining forward steps → `SKIPPED`
+- Operation → `CANCELLED` (atomic with Job terminal update)
+- Never call Source stop after a pre-destructive cancel is observed
 
-```text
-STOP_SOURCE 이후
-```
+DRAIN 중 취소하면 Drain 단계가 끝난 뒤 다음 checkpoint에서 Traffic을 SERVING으로
+복구하고 `CANCELLED` 처리한다.
 
-에는 단순 Cancel을 허용하지 않는다.
+### Critical STOP_SOURCE race
 
-사용자 Cancel 요청은:
+`STOP_SOURCE` enters `MAINTENANCE`, waits for Gateway apply, then would commit
+`destructive_boundary_entered` and stop Source. Immediately **before** that
+commit / Source stop, Worker re-reads `cancel_requested_at`. If set:
 
-```text
-ROLLBACK_REQUESTED
-```
+- Do **not** set `destructive_boundary_entered`
+- Do **not** call Source stop
+- Restore `SERVING`
+- Finish as `CANCELLED`
 
-로 해석하여 안전하게 Source 복구 절차를 수행한다.
+A generic “check cancel before each step” alone is not sufficient for this race.
+
+### Source 중지 시작 후 (post-destructive)
+
+Once `destructive_boundary_entered=true`, never terminalize directly as `CANCELLED`.
+
+Cancel request means rollback intent:
+
+- Keep Endpoint `MAINTENANCE`
+- Enter/reuse durable M5-C1 `ROLLBACK_*` path
+- Operation → `ROLLING_BACK` → `ROLLED_BACK` on success
+- Preserve `cancel_requested_at` for diagnosis
+- Error code/message: `USER_CANCELLED` / cancellation after destructive boundary
+
+### Cancel while already `ROLLING_BACK`
+
+- Do not interrupt or restart rollback
+- Record `cancel_requested_at` if missing (API)
+- Continue the existing rollback exactly once (no duplicate steps / version bumps)
+
+### Terminal Operations
+
+- `CANCELLED` (with cancel intent): repeated cancel is idempotent
+- `ROLLED_BACK` caused after a cancel request: repeated cancel is idempotent
+- `SUCCEEDED` / `FAILED` / `MIR` / unrelated `ROLLED_BACK`: `409 INVALID_OPERATION_STATE`
+- Never reopen a terminal Operation
 
 ---
 

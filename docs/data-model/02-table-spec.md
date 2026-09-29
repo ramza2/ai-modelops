@@ -341,7 +341,7 @@ Route commit 시 `version = version + 1`을 같은 transaction에 포함한다.
 |---|---|---:|---|
 | id | UUID | N | PK |
 | operation_type | VARCHAR(32) | N | `DEPLOY`, `START`, `STOP`, `RESTART`, `SWITCH`, `ROLLBACK`, `DELETE`, `IMPORT` |
-| status | VARCHAR(32) | N | `QUEUED`, `RUNNING`, `SUCCEEDED`, `FAILED`, `CANCELLED` |
+| status | VARCHAR(32) | N | `QUEUED`, `RUNNING`, `ROLLING_BACK`, `SUCCEEDED`, `FAILED`, `ROLLED_BACK`, `CANCELLED`, `MANUAL_INTERVENTION_REQUIRED` |
 | switch_strategy | VARCHAR(32) | Y | `HOT`, `COLD`, `ALTERNATE_NODE` |
 | endpoint_alias_id | UUID | Y | FK endpoint_alias |
 | source_deployment_id | UUID | Y | FK deployment |
@@ -351,7 +351,8 @@ Route commit 시 `version = version + 1`을 같은 transaction에 포함한다.
 | idempotency_key | VARCHAR(255) | Y | API 중복 방지 |
 | error_code | VARCHAR(100) | Y |  |
 | error_message | TEXT | Y |  |
-| metadata_json | JSONB | N | default `{}` |
+| cancel_requested_at | TIMESTAMPTZ | Y | M5-C2-A cancel intent; Worker observes this (not a separate status) |
+| metadata_json | JSONB | N | default `{}`; may include `destructive_boundary_entered`, optional `cancel_reason` |
 | created_at | TIMESTAMPTZ | N |  |
 | started_at | TIMESTAMPTZ | Y |  |
 | finished_at | TIMESTAMPTZ | Y |  |

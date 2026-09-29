@@ -160,6 +160,60 @@ class OperationService:
         steps = await self._operations.list_steps(operation_id)
         return self._serialize_operation(operation, steps)
 
+    async def cancel_operation(
+        self,
+        operation_id: uuid.UUID,
+        *,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        """Record cancellation intent (M5-C2-A).
+
+        Management API never performs Docker/Node Agent/Gateway side effects.
+        QUEUED operations are terminalized here; RUNNING/ROLLING_BACK only stamp
+        ``cancel_requested_at`` for the Worker to observe.
+        """
+        operation = await self._operations.get(operation_id)
+        if operation is None:
+            raise NotFoundError(
+                "Operation not found.",
+                details={"operation_id": str(operation_id)},
+            )
+
+        if self._operations.is_cancel_idempotent_terminal(operation):
+            # Repeated cancel is a no-op: return current state.
+            if reason:
+                await self._operations.request_cancel(operation, reason=reason)
+                await self._session.commit()
+            return await self.get_operation(operation_id)
+
+        if self._operations.is_terminal(operation):
+            raise ConflictError(
+                "Operation is already terminal and cannot be cancelled.",
+                code="INVALID_OPERATION_STATE",
+                details={
+                    "operation_id": str(operation_id),
+                    "status": operation.status,
+                },
+            )
+
+        job = await self._operations.get_job_for_operation(operation_id)
+        status = str(operation.status)
+
+        if status == OperationStatus.QUEUED.value:
+            # Job not running yet — safe immediate CANCELLED, no runtime mutation.
+            await self._operations.request_cancel(operation, reason=reason)
+            await self._operations.finalize_operation_cancelled(
+                operation=operation,
+                job=job,
+            )
+            await self._session.commit()
+            return await self.get_operation(operation_id)
+
+        # RUNNING or ROLLING_BACK: intent only. Worker owns orchestration.
+        await self._operations.request_cancel(operation, reason=reason)
+        await self._session.commit()
+        return await self.get_operation(operation_id)
+
     async def _require_managed_deployment(
         self, deployment_id: uuid.UUID
     ) -> Deployment:
