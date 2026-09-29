@@ -60,7 +60,9 @@ class FakeNodeAgent:
         self.prepare_fail_artifacts = False
         self.health_fail_times = 0
         self.health_calls = 0
+        self.health_fail_for: set[str] = set()
         self.probe_mode = "success"  # success|malformed|transport|http
+        self.probe_mode_for: dict[str, str] = {}
         self.vram_mode = "immediate"  # immediate|poll_then_ok|timeout
         self.vram_calls = 0
 
@@ -263,8 +265,11 @@ class FakeNodeAgent:
                     },
                 )
             self.health_calls += 1
-            if self.health_fail_times > 0:
+            fail_health = deployment_id in self.health_fail_for
+            if not fail_health and self.health_fail_times > 0:
                 self.health_fail_times -= 1
+                fail_health = True
+            if fail_health:
                 return httpx.Response(
                     200,
                     json={
@@ -302,7 +307,8 @@ class FakeNodeAgent:
                         }
                     },
                 )
-            if self.probe_mode == "success":
+            mode = self.probe_mode_for.get(deployment_id, self.probe_mode)
+            if mode == "success":
                 return httpx.Response(
                     200,
                     json={
@@ -313,7 +319,7 @@ class FakeNodeAgent:
                         "error_message": None,
                     },
                 )
-            if self.probe_mode == "malformed":
+            if mode == "malformed":
                 return httpx.Response(
                     200,
                     json={
@@ -324,7 +330,7 @@ class FakeNodeAgent:
                         "error_message": "Chat probe response missing choices.",
                     },
                 )
-            if self.probe_mode == "transport":
+            if mode == "transport":
                 return httpx.Response(
                     200,
                     json={

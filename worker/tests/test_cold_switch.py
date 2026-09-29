@@ -1110,14 +1110,14 @@ async def test_cold_switch_drain_timeout_restores_serving(db, monkeypatch) -> No
 
 
 @pytest.mark.asyncio
-async def test_cold_switch_post_destructive_vram_failure_manual(
+async def test_cold_switch_post_destructive_vram_failure_rolls_back(
     db, monkeypatch
 ) -> None:
     session_factory = db
     fake_node = ColdSwitchFakeNodeAgent()
     fake_gw = FakeGateway()
     transport = CombinedTransport(fake_node, fake_gw)
-    # After STOP_SOURCE, VRAM never frees enough for Target.
+    # After STOP_SOURCE, VRAM never frees enough for Target → automatic rollback.
     fake_node.release_vram_on_stop = False
     fake_node.vram_free_mb = 2000
 
@@ -1152,14 +1152,32 @@ async def test_cold_switch_post_destructive_vram_failure_manual(
 
     async with session_factory() as session:
         op = await session.get(Operation, op_id)
+        job = await session.get(OperationJob, job_id)
         alias = await session.get(EndpointAlias, fixture["endpoint_id"])
         source = await session.get(Deployment, fixture["source_id"])
-        assert op is not None and alias is not None and source is not None
-        assert op.status == OperationStatus.MANUAL_INTERVENTION_REQUIRED.value
+        target = await session.get(Deployment, fixture["target_id"])
+        assert op is not None and job is not None and alias is not None
+        assert source is not None and target is not None
+        assert op.status == OperationStatus.ROLLED_BACK.value
         assert op.error_code == "VRAM_NOT_RELEASED"
-        assert alias.traffic_state == TrafficState.MAINTENANCE.value
-        assert source.runtime_status == RuntimeStatus.STOPPED.value
-        assert (op.metadata_json or {}).get("destructive_boundary_entered") is True
+        assert job.status == JobStatus.DONE.value
+        assert alias.traffic_state == TrafficState.SERVING.value
+        assert source.runtime_status == RuntimeStatus.RUNNING.value
+        assert source.health_status == HealthStatus.HEALTHY.value
+        assert source.desired_state == DesiredState.RUNNING.value
+        assert target.runtime_status == RuntimeStatus.STOPPED.value
+        assert target.desired_state == DesiredState.STOPPED.value
+        assert (op.metadata_json or {}).get("rollback_entered") is True
+        steps = (
+            await session.execute(
+                __import__("sqlalchemy").select(OperationStep)
+                .where(OperationStep.operation_id == op_id)
+                .order_by(OperationStep.sequence_no.asc())
+            )
+        ).scalars().all()
+        rb = [s for s in steps if str(s.step_code).startswith("ROLLBACK_")]
+        assert len(rb) == 10
+        assert all(s.status == StepStatus.SUCCEEDED.value for s in rb)
 
 
 @pytest.mark.asyncio
@@ -1544,10 +1562,25 @@ async def test_cold_switch_unexpected_active_route_manual(
     async with session_factory() as session:
         op = await session.get(Operation, op_id)
         alias = await session.get(EndpointAlias, fixture["endpoint_id"])
-        assert op is not None and alias is not None
+        source = await session.get(Deployment, fixture["source_id"])
+        assert op is not None and alias is not None and source is not None
         assert op.status == OperationStatus.MANUAL_INTERVENTION_REQUIRED.value
         assert op.error_code == "UNEXPECTED_ACTIVE_ROUTE"
         assert alias.traffic_state == TrafficState.MAINTENANCE.value
+        # Third-party ACTIVE route must not be overwritten by automatic rollback.
+        third = (
+            await session.execute(
+                __import__("sqlalchemy").text(
+                    """
+                    SELECT status FROM endpoint_route
+                    WHERE endpoint_alias_id = :alias_id
+                      AND deployment_id = :dep
+                    """
+                ),
+                {"alias_id": str(fixture["endpoint_id"]), "dep": str(third_id)},
+            )
+        ).scalar_one()
+        assert third == "ACTIVE"
 
 
 @pytest.mark.asyncio
@@ -2850,3 +2883,1631 @@ async def test_mark_operation_failed_lifecycle_unchanged(db) -> None:
         op = await session.get(Operation, op_id)
         assert op is not None
         assert op.status == OperationStatus.FAILED.value
+
+
+@pytest.mark.asyncio
+async def test_target_start_failure_rolls_back(db, monkeypatch) -> None:
+    session_factory = db
+    fake_node = ColdSwitchFakeNodeAgent()
+    fake_gw = FakeGateway()
+    transport = CombinedTransport(fake_node, fake_gw)
+    fake_node.vram_free_mb = 14000
+    fake_node.source_used_vram_mb = 0
+
+    async with session_factory() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        await _seed_standard_runtime(fake_node, fake_gw, fixture)
+        source = await session.get(Deployment, fixture["source_id"])
+        alias = await session.get(EndpointAlias, fixture["endpoint_id"])
+        assert source and alias
+        source.runtime_status = RuntimeStatus.STOPPED.value
+        alias.traffic_state = TrafficState.MAINTENANCE.value
+        fake_node.containers[str(fixture["source_id"])]["runtime_status"] = (
+            "STOPPED"
+        )
+        op_id, job_id = await _enqueue_cold_switch(session, fixture=fixture)
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        meta = dict(op.metadata_json or {})
+        meta["destructive_boundary_entered"] = True
+        op.metadata_json = meta
+        await session.commit()
+        await _mark_steps_status(
+            session, op_id, succeeded_through="WAIT_VRAM_RELEASE"
+        )
+
+    from app.clients.gateway import GatewayClient
+    from app.services.operation_executor import PermanentStepError
+
+    monkeypatch.setattr(
+        GatewayClient,
+        "get_route_runtime",
+        _make_synced_runtime(session_factory, fixture["endpoint_id"]),
+    )
+
+    async def _boom(self, *args, **kwargs):  # noqa: ANN001, ANN002
+        raise PermanentStepError("target OOM", code="TARGET_START_OOM")
+
+    monkeypatch.setattr(ColdSwitchExecutor, "_step_start_target", _boom)
+
+    await _claim_and_execute(
+        session_factory,
+        job_id=job_id,
+        settings=_settings(),
+        transport=transport,
+        engine=session_factory.kw["bind"],
+    )
+
+    async with session_factory() as session:
+        op = await session.get(Operation, op_id)
+        job = await session.get(OperationJob, job_id)
+        source = await session.get(Deployment, fixture["source_id"])
+        alias = await session.get(EndpointAlias, fixture["endpoint_id"])
+        assert op is not None and job is not None
+        assert source is not None and alias is not None
+        assert op.status == OperationStatus.ROLLED_BACK.value
+        assert op.error_code == "TARGET_START_OOM"
+        assert job.status == JobStatus.DONE.value
+        assert source.runtime_status == RuntimeStatus.RUNNING.value
+        assert alias.traffic_state == TrafficState.SERVING.value
+
+
+@pytest.mark.asyncio
+async def test_source_health_failure_during_rollback_marks_mir(
+    db, monkeypatch
+) -> None:
+    session_factory = db
+    fake_node = ColdSwitchFakeNodeAgent()
+    fake_gw = FakeGateway()
+    transport = CombinedTransport(fake_node, fake_gw)
+    fake_node.release_vram_on_stop = False
+    fake_node.vram_free_mb = 2000
+    # Source never becomes healthy during rollback recovery.
+    fake_node.health_fail_times = 10_000
+
+    async with session_factory() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        await _seed_standard_runtime(fake_node, fake_gw, fixture)
+        op_id, job_id = await _enqueue_cold_switch(session, fixture=fixture)
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        meta = dict(op.metadata_json or {})
+        meta["vram_release_timeout_seconds"] = 0.05
+        meta["health_timeout_seconds"] = 0.05
+        op.metadata_json = meta
+        await session.commit()
+
+    from app.clients.gateway import GatewayClient
+
+    monkeypatch.setattr(
+        GatewayClient,
+        "get_route_runtime",
+        _make_synced_runtime(session_factory, fixture["endpoint_id"]),
+    )
+
+    await _claim_and_execute(
+        session_factory,
+        job_id=job_id,
+        settings=_settings(
+            vram_release_timeout_seconds=0.05, health_timeout_seconds=0.05
+        ),
+        transport=transport,
+        engine=session_factory.kw["bind"],
+    )
+
+    async with session_factory() as session:
+        op = await session.get(Operation, op_id)
+        job = await session.get(OperationJob, job_id)
+        alias = await session.get(EndpointAlias, fixture["endpoint_id"])
+        assert op is not None and job is not None and alias is not None
+        assert op.status == OperationStatus.MANUAL_INTERVENTION_REQUIRED.value
+        assert op.error_code == "HEALTH_TIMEOUT"
+        assert job.status == JobStatus.FAILED.value
+        assert alias.traffic_state == TrafficState.MAINTENANCE.value
+
+
+@pytest.mark.asyncio
+async def test_stop_source_failure_source_still_running_fails_serving(
+    db, monkeypatch
+) -> None:
+    session_factory = db
+    fake_node = ColdSwitchFakeNodeAgent()
+    fake_gw = FakeGateway()
+    transport = CombinedTransport(fake_node, fake_gw)
+
+    async with session_factory() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        await _seed_standard_runtime(fake_node, fake_gw, fixture)
+        op_id, job_id = await _enqueue_cold_switch(session, fixture=fixture)
+        await _mark_steps_status(
+            session, op_id, succeeded_through="DRAIN_TRAFFIC"
+        )
+        alias = await session.get(EndpointAlias, fixture["endpoint_id"])
+        assert alias is not None
+        alias.traffic_state = TrafficState.DRAINING.value
+        await session.commit()
+
+    from app.clients.gateway import GatewayClient
+    from app.clients.node_agent import NodeAgentError
+
+    monkeypatch.setattr(
+        GatewayClient,
+        "get_route_runtime",
+        _make_synced_runtime(session_factory, fixture["endpoint_id"]),
+    )
+
+    real_stop = None
+
+    async def _fail_stop(self, deployment_id, **kwargs):  # noqa: ANN001
+        raise NodeAgentError(
+            "stop failed", code="DOCKER_STOP_FAILED", retryable=False
+        )
+
+    from app.clients.node_agent import NodeAgentClient
+
+    monkeypatch.setattr(NodeAgentClient, "stop_deployment", _fail_stop)
+
+    await _claim_and_execute(
+        session_factory,
+        job_id=job_id,
+        settings=_settings(),
+        transport=transport,
+        engine=session_factory.kw["bind"],
+    )
+
+    async with session_factory() as session:
+        op = await session.get(Operation, op_id)
+        job = await session.get(OperationJob, job_id)
+        alias = await session.get(EndpointAlias, fixture["endpoint_id"])
+        source = await session.get(Deployment, fixture["source_id"])
+        assert op is not None and job is not None and alias is not None
+        assert source is not None
+        assert op.status == OperationStatus.FAILED.value
+        assert job.status == JobStatus.FAILED.value
+        assert alias.traffic_state == TrafficState.SERVING.value
+        assert source.runtime_status == RuntimeStatus.RUNNING.value
+        assert (op.metadata_json or {}).get(
+            "stop_source_reconciled_still_running"
+        ) is True
+
+
+@pytest.mark.asyncio
+async def test_stop_source_failure_source_stopped_enters_rollback(
+    db, monkeypatch
+) -> None:
+    session_factory = db
+    fake_node = ColdSwitchFakeNodeAgent()
+    fake_gw = FakeGateway()
+    transport = CombinedTransport(fake_node, fake_gw)
+
+    async with session_factory() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        await _seed_standard_runtime(fake_node, fake_gw, fixture)
+        op_id, job_id = await _enqueue_cold_switch(session, fixture=fixture)
+        await _mark_steps_status(
+            session, op_id, succeeded_through="DRAIN_TRAFFIC"
+        )
+        alias = await session.get(EndpointAlias, fixture["endpoint_id"])
+        assert alias is not None
+        alias.traffic_state = TrafficState.DRAINING.value
+        await session.commit()
+
+    from app.clients.gateway import GatewayClient
+    from app.clients.node_agent import NodeAgentClient, NodeAgentError
+
+    monkeypatch.setattr(
+        GatewayClient,
+        "get_route_runtime",
+        _make_synced_runtime(session_factory, fixture["endpoint_id"]),
+    )
+
+    async def _fail_stop_after_stopping(self, deployment_id, **kwargs):  # noqa: ANN001
+        # Simulate: stop actually happened then agent returned an error, or
+        # crash after stop — inspect will show STOPPED.
+        ctr = fake_node.containers.get(str(deployment_id))
+        if ctr is not None:
+            ctr["runtime_status"] = "STOPPED"
+        raise NodeAgentError(
+            "stop transport error after effect",
+            code="DOCKER_STOP_UNCERTAIN",
+            retryable=False,
+        )
+
+    monkeypatch.setattr(NodeAgentClient, "stop_deployment", _fail_stop_after_stopping)
+
+    await _claim_and_execute(
+        session_factory,
+        job_id=job_id,
+        settings=_settings(),
+        transport=transport,
+        engine=session_factory.kw["bind"],
+    )
+
+    async with session_factory() as session:
+        op = await session.get(Operation, op_id)
+        job = await session.get(OperationJob, job_id)
+        source = await session.get(Deployment, fixture["source_id"])
+        alias = await session.get(EndpointAlias, fixture["endpoint_id"])
+        assert op is not None and job is not None
+        assert source is not None and alias is not None
+        assert op.status == OperationStatus.ROLLED_BACK.value
+        assert job.status == JobStatus.DONE.value
+        assert source.runtime_status == RuntimeStatus.RUNNING.value
+        assert alias.traffic_state == TrafficState.SERVING.value
+
+
+@pytest.mark.asyncio
+async def test_rollback_preserves_route_rewrites(db, monkeypatch) -> None:
+    session_factory = db
+    fake_node = ColdSwitchFakeNodeAgent()
+    fake_gw = FakeGateway()
+    transport = CombinedTransport(fake_node, fake_gw)
+    fake_node.vram_free_mb = 14000
+    fake_node.source_used_vram_mb = 0
+
+    async with session_factory() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        await _seed_standard_runtime(fake_node, fake_gw, fixture)
+        await session.execute(
+            __import__("sqlalchemy").text(
+                """
+                UPDATE endpoint_route
+                SET rewrite_model_name = 'source-rewrite'
+                WHERE id = :id
+                """
+            ),
+            {"id": str(fixture["route_id"])},
+        )
+        # Target already ACTIVE with its own rewrite (post ACTIVATE crash window).
+        await session.execute(
+            __import__("sqlalchemy").text(
+                """
+                UPDATE endpoint_route SET status = 'INACTIVE', deactivated_at = now()
+                WHERE id = :id
+                """
+            ),
+            {"id": str(fixture["route_id"])},
+        )
+        target_route_id = uuid.uuid4()
+        await session.execute(
+            __import__("sqlalchemy").text(
+                """
+                INSERT INTO endpoint_route (
+                  id, endpoint_alias_id, deployment_id, status, rewrite_model_name,
+                  activated_at
+                ) VALUES (
+                  :id, :alias_id, :dep, 'ACTIVE', 'target-rewrite', now()
+                )
+                """
+            ),
+            {
+                "id": str(target_route_id),
+                "alias_id": str(fixture["endpoint_id"]),
+                "dep": str(fixture["target_id"]),
+            },
+        )
+        source = await session.get(Deployment, fixture["source_id"])
+        target = await session.get(Deployment, fixture["target_id"])
+        alias = await session.get(EndpointAlias, fixture["endpoint_id"])
+        assert source and target and alias
+        source.runtime_status = RuntimeStatus.STOPPED.value
+        target.runtime_status = RuntimeStatus.RUNNING.value
+        target.health_status = HealthStatus.HEALTHY.value
+        target.container_id = f"ctr-tgt-{fixture['suffix']}"
+        alias.traffic_state = TrafficState.MAINTENANCE.value
+        fake_node.containers[str(fixture["source_id"])]["runtime_status"] = (
+            "STOPPED"
+        )
+        fake_node.containers[str(fixture["target_id"])] = {
+            "deployment_id": str(fixture["target_id"]),
+            "container_id": f"ctr-tgt-{fixture['suffix']}",
+            "container_name": f"cs-tgt-{fixture['suffix']}",
+            "runtime_status": "RUNNING",
+            "health_status": "HEALTHY",
+        }
+        op_id, job_id = await _enqueue_cold_switch(session, fixture=fixture)
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        meta = dict(op.metadata_json or {})
+        meta["destructive_boundary_entered"] = True
+        op.metadata_json = meta
+        await session.commit()
+        await _mark_steps_status(
+            session, op_id, succeeded_through="ACTIVATE_TARGET_ROUTE"
+        )
+
+    from app.clients.gateway import GatewayClient
+    from app.services.operation_executor import PermanentStepError
+
+    monkeypatch.setattr(
+        GatewayClient,
+        "get_route_runtime",
+        _make_synced_runtime(session_factory, fixture["endpoint_id"]),
+    )
+
+    # Force WAIT_ROUTE_APPLY to MIR (not rollback) — so use probe failure path:
+    # reset to PROBE and fail probe → rollback with Target ACTIVE.
+    async with session_factory() as session:
+        await session.execute(
+            __import__("sqlalchemy").text(
+                """
+                UPDATE operation_step SET status = 'PENDING', finished_at = NULL
+                WHERE operation_id = :oid AND step_code = 'WAIT_ROUTE_APPLY'
+                """
+            ),
+            {"oid": str(op_id)},
+        )
+        await session.execute(
+            __import__("sqlalchemy").text(
+                """
+                UPDATE operation_step SET status = 'FAILED',
+                  error_code = 'FORCED', error_message = 'force rollback entry'
+                WHERE operation_id = :oid AND step_code = 'ACTIVATE_TARGET_ROUTE'
+                """
+            ),
+            {"oid": str(op_id)},
+        )
+        # Enter rollback via ACTIVATE failure by re-running from ACTIVATE:
+        await session.execute(
+            __import__("sqlalchemy").text(
+                """
+                UPDATE operation_step SET status = 'PENDING', finished_at = NULL,
+                  error_code = NULL, error_message = NULL
+                WHERE operation_id = :oid AND step_code = 'ACTIVATE_TARGET_ROUTE'
+                """
+            ),
+            {"oid": str(op_id)},
+        )
+        await session.commit()
+
+    async def _boom_activate(self, *args, **kwargs):  # noqa: ANN001, ANN002
+        raise PermanentStepError("forced activate fail", code="ACTIVATE_FORCED")
+
+    monkeypatch.setattr(
+        ColdSwitchExecutor, "_step_activate_target_route", _boom_activate
+    )
+
+    await _claim_and_execute(
+        session_factory,
+        job_id=job_id,
+        settings=_settings(),
+        transport=transport,
+        engine=session_factory.kw["bind"],
+    )
+
+    async with session_factory() as session:
+        op = await session.get(Operation, op_id)
+        source_route = await session.get(EndpointRoute, fixture["route_id"])
+        target_route = await session.get(EndpointRoute, target_route_id)
+        assert op is not None
+        assert op.status == OperationStatus.ROLLED_BACK.value
+        assert source_route is not None and target_route is not None
+        assert source_route.status == "ACTIVE"
+        assert source_route.rewrite_model_name == "source-rewrite"
+        assert target_route.status == "INACTIVE"
+        assert target_route.rewrite_model_name == "target-rewrite"
+
+
+@pytest.mark.asyncio
+async def test_rollback_route_already_source_no_double_bump(
+    db, monkeypatch
+) -> None:
+    session_factory = db
+    fake_node = ColdSwitchFakeNodeAgent()
+    fake_gw = FakeGateway()
+    transport = CombinedTransport(fake_node, fake_gw)
+    fake_node.release_vram_on_stop = False
+    fake_node.vram_free_mb = 2000
+
+    async with session_factory() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        await _seed_standard_runtime(fake_node, fake_gw, fixture)
+        await session.execute(
+            __import__("sqlalchemy").text(
+                "UPDATE routing_state SET version = 50, updated_at = now() WHERE id = 1"
+            )
+        )
+        op_id, job_id = await _enqueue_cold_switch(session, fixture=fixture)
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        meta = dict(op.metadata_json or {})
+        meta["vram_release_timeout_seconds"] = 0.05
+        op.metadata_json = meta
+        await session.commit()
+
+    from app.clients.gateway import GatewayClient
+
+    monkeypatch.setattr(
+        GatewayClient,
+        "get_route_runtime",
+        _make_synced_runtime(session_factory, fixture["endpoint_id"]),
+    )
+
+    await _claim_and_execute(
+        session_factory,
+        job_id=job_id,
+        settings=_settings(vram_release_timeout_seconds=0.05),
+        transport=transport,
+        engine=session_factory.kw["bind"],
+    )
+
+    async with session_factory() as session:
+        op = await session.get(Operation, op_id)
+        activate = (
+            await session.execute(
+                __import__("sqlalchemy").select(OperationStep).where(
+                    OperationStep.operation_id == op_id,
+                    OperationStep.step_code == "ROLLBACK_ACTIVATE_SOURCE_ROUTE",
+                )
+            )
+        ).scalar_one()
+        assert op is not None
+        assert op.status == OperationStatus.ROLLED_BACK.value
+        # Source stayed ACTIVE throughout → already_active reconcile.
+        assert (activate.detail_json or {}).get("already_active") is True
+
+
+@pytest.mark.asyncio
+async def test_resume_failed_rollback_step_marks_mir_not_rolled_back(
+    db, monkeypatch
+) -> None:
+    """Crash after rollback step FAILED before MIR → resume must MIR, not continue."""
+    session_factory = db
+    fake_node = ColdSwitchFakeNodeAgent()
+    fake_gw = FakeGateway()
+    transport = CombinedTransport(fake_node, fake_gw)
+
+    async with session_factory() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        await _seed_standard_runtime(fake_node, fake_gw, fixture)
+        source = await session.get(Deployment, fixture["source_id"])
+        alias = await session.get(EndpointAlias, fixture["endpoint_id"])
+        assert source and alias
+        source.runtime_status = RuntimeStatus.STOPPED.value
+        alias.traffic_state = TrafficState.MAINTENANCE.value
+        fake_node.containers[str(fixture["source_id"])]["runtime_status"] = (
+            "STOPPED"
+        )
+        op_id, job_id = await _enqueue_cold_switch(session, fixture=fixture)
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        meta = dict(op.metadata_json or {})
+        meta["destructive_boundary_entered"] = True
+        meta["rollback_entered"] = True
+        op.metadata_json = meta
+        op.status = OperationStatus.ROLLING_BACK.value
+        op.error_code = "VRAM_NOT_RELEASED"
+        op.error_message = "VRAM release timed out."
+        await session.commit()
+
+        # Persist rollback steps; mark early ones succeeded, one FAILED, later PENDING.
+        from app.services.cold_switch_rollback import ROLLBACK_STEPS
+
+        cs = ColdSwitchExecutor(
+            OperationExecutor(
+                session_factory=session_factory,
+                settings=_settings(),
+                transport=transport,
+                engine=session_factory.kw["bind"],
+            )
+        )
+        await cs._ensure_rollback_steps(session, op)
+        await session.commit()
+        steps = (
+            await session.execute(
+                __import__("sqlalchemy").select(OperationStep)
+                .where(OperationStep.operation_id == op_id)
+                .order_by(OperationStep.sequence_no.asc())
+            )
+        ).scalars().all()
+        rb = [s for s in steps if s.step_code in ROLLBACK_STEPS]
+        for s in rb:
+            if s.step_code in {
+                "ROLLBACK_BEGIN",
+                "ROLLBACK_BLOCK_TRAFFIC",
+                "ROLLBACK_STOP_TARGET",
+            }:
+                s.status = StepStatus.SUCCEEDED.value
+            elif s.step_code == "ROLLBACK_START_SOURCE":
+                s.status = StepStatus.FAILED.value
+                s.error_code = "SOURCE_START_FAILED"
+                s.error_message = "Source start failed during rollback."
+            else:
+                s.status = StepStatus.PENDING.value
+        job = await session.get(OperationJob, job_id)
+        assert job is not None
+        job.status = JobStatus.QUEUED.value
+        await session.commit()
+
+    calls_before = len(fake_node.calls)
+    await _claim_and_execute(
+        session_factory,
+        job_id=job_id,
+        settings=_settings(),
+        transport=transport,
+        engine=session_factory.kw["bind"],
+    )
+
+    async with session_factory() as session:
+        op = await session.get(Operation, op_id)
+        job = await session.get(OperationJob, job_id)
+        alias = await session.get(EndpointAlias, fixture["endpoint_id"])
+        assert op is not None and job is not None and alias is not None
+        assert op.status == OperationStatus.MANUAL_INTERVENTION_REQUIRED.value
+        assert op.error_code == "SOURCE_START_FAILED"
+        assert job.status == JobStatus.FAILED.value
+        assert alias.traffic_state == TrafficState.MAINTENANCE.value
+        # Must not continue to later rollback steps / Node Agent mutations.
+        assert len(fake_node.calls) == calls_before
+
+
+@pytest.mark.asyncio
+async def test_resume_rolled_back_operation_reconciles_job_done(
+    db, monkeypatch
+) -> None:
+    session_factory = db
+    fake_node = ColdSwitchFakeNodeAgent()
+    fake_gw = FakeGateway()
+    transport = CombinedTransport(fake_node, fake_gw)
+
+    async with session_factory() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        await _seed_standard_runtime(fake_node, fake_gw, fixture)
+        op_id, job_id = await _enqueue_cold_switch(session, fixture=fixture)
+        op = await session.get(Operation, op_id)
+        job = await session.get(OperationJob, job_id)
+        assert op is not None and job is not None
+        op.status = OperationStatus.ROLLED_BACK.value
+        op.error_code = "VRAM_NOT_RELEASED"
+        op.finished_at = dt.datetime.now(tz=dt.UTC)
+        # Crash window: operation terminal, job still RUNNING.
+        job.status = JobStatus.RUNNING.value
+        job.locked_by = "stale-worker"
+        await session.commit()
+
+    calls_before = len(fake_node.calls)
+    await _claim_and_execute(
+        session_factory,
+        job_id=job_id,
+        settings=_settings(),
+        transport=transport,
+        engine=session_factory.kw["bind"],
+    )
+
+    async with session_factory() as session:
+        op = await session.get(Operation, op_id)
+        job = await session.get(OperationJob, job_id)
+        assert op is not None and job is not None
+        assert op.status == OperationStatus.ROLLED_BACK.value
+        assert op.error_code == "VRAM_NOT_RELEASED"
+        assert job.status == JobStatus.DONE.value
+        assert len(fake_node.calls) == calls_before
+
+
+@pytest.mark.asyncio
+async def test_resume_mir_operation_reconciles_job_failed(db) -> None:
+    session_factory = db
+    fake_node = ColdSwitchFakeNodeAgent()
+    fake_gw = FakeGateway()
+    transport = CombinedTransport(fake_node, fake_gw)
+
+    async with session_factory() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        await _seed_standard_runtime(fake_node, fake_gw, fixture)
+        op_id, job_id = await _enqueue_cold_switch(session, fixture=fixture)
+        op = await session.get(Operation, op_id)
+        job = await session.get(OperationJob, job_id)
+        assert op is not None and job is not None
+        op.status = OperationStatus.MANUAL_INTERVENTION_REQUIRED.value
+        op.error_code = "HEALTH_TIMEOUT"
+        op.error_message = "Source health failed."
+        op.finished_at = dt.datetime.now(tz=dt.UTC)
+        job.status = JobStatus.QUEUED.value
+        await session.commit()
+
+    calls_before = len(fake_node.calls)
+    await _claim_and_execute(
+        session_factory,
+        job_id=job_id,
+        settings=_settings(),
+        transport=transport,
+        engine=session_factory.kw["bind"],
+    )
+
+    async with session_factory() as session:
+        op = await session.get(Operation, op_id)
+        job = await session.get(OperationJob, job_id)
+        assert op is not None and job is not None
+        assert op.status == OperationStatus.MANUAL_INTERVENTION_REQUIRED.value
+        assert op.error_code == "HEALTH_TIMEOUT"
+        assert job.status == JobStatus.FAILED.value
+        assert len(fake_node.calls) == calls_before
+
+
+@pytest.mark.asyncio
+async def test_probe_target_failure_rolls_back(db, monkeypatch) -> None:
+    session_factory = db
+    fake_node = ColdSwitchFakeNodeAgent()
+    fake_gw = FakeGateway()
+    transport = CombinedTransport(fake_node, fake_gw)
+    fake_node.vram_free_mb = 14000
+    fake_node.source_used_vram_mb = 0
+
+    async with session_factory() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        await _seed_standard_runtime(fake_node, fake_gw, fixture)
+        # Fail Target probe only; Source probe during rollback must succeed.
+        fake_node.probe_mode_for[str(fixture["target_id"])] = "malformed"
+        source = await session.get(Deployment, fixture["source_id"])
+        target = await session.get(Deployment, fixture["target_id"])
+        alias = await session.get(EndpointAlias, fixture["endpoint_id"])
+        assert source and target and alias
+        source.runtime_status = RuntimeStatus.STOPPED.value
+        target.runtime_status = RuntimeStatus.RUNNING.value
+        target.health_status = HealthStatus.HEALTHY.value
+        target.container_id = f"ctr-tgt-{fixture['suffix']}"
+        alias.traffic_state = TrafficState.MAINTENANCE.value
+        fake_node.containers[str(fixture["source_id"])]["runtime_status"] = (
+            "STOPPED"
+        )
+        fake_node.containers[str(fixture["target_id"])] = {
+            "deployment_id": str(fixture["target_id"]),
+            "container_id": f"ctr-tgt-{fixture['suffix']}",
+            "container_name": f"cs-tgt-{fixture['suffix']}",
+            "runtime_status": "RUNNING",
+            "health_status": "HEALTHY",
+        }
+        op_id, job_id = await _enqueue_cold_switch(session, fixture=fixture)
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        meta = dict(op.metadata_json or {})
+        meta["destructive_boundary_entered"] = True
+        op.metadata_json = meta
+        await session.commit()
+        await _mark_steps_status(
+            session, op_id, succeeded_through="WAIT_TARGET_HEALTH"
+        )
+
+    from app.clients.gateway import GatewayClient
+
+    monkeypatch.setattr(
+        GatewayClient,
+        "get_route_runtime",
+        _make_synced_runtime(session_factory, fixture["endpoint_id"]),
+    )
+
+    await _claim_and_execute(
+        session_factory,
+        job_id=job_id,
+        settings=_settings(),
+        transport=transport,
+        engine=session_factory.kw["bind"],
+    )
+
+    async with session_factory() as session:
+        op = await session.get(Operation, op_id)
+        source = await session.get(Deployment, fixture["source_id"])
+        target = await session.get(Deployment, fixture["target_id"])
+        alias = await session.get(EndpointAlias, fixture["endpoint_id"])
+        assert op is not None and source is not None and target is not None
+        assert alias is not None
+        assert op.status == OperationStatus.ROLLED_BACK.value
+        assert source.runtime_status == RuntimeStatus.RUNNING.value
+        assert target.runtime_status == RuntimeStatus.STOPPED.value
+        assert alias.traffic_state == TrafficState.SERVING.value
+
+
+@pytest.mark.asyncio
+async def test_target_health_failure_rolls_back(db, monkeypatch) -> None:
+    session_factory = db
+    fake_node = ColdSwitchFakeNodeAgent()
+    fake_gw = FakeGateway()
+    transport = CombinedTransport(fake_node, fake_gw)
+    fake_node.vram_free_mb = 14000
+    fake_node.source_used_vram_mb = 0
+
+    async with session_factory() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        await _seed_standard_runtime(fake_node, fake_gw, fixture)
+        # Fail Target health only; Source health during rollback must succeed.
+        fake_node.health_fail_for.add(str(fixture["target_id"]))
+        source = await session.get(Deployment, fixture["source_id"])
+        target = await session.get(Deployment, fixture["target_id"])
+        alias = await session.get(EndpointAlias, fixture["endpoint_id"])
+        assert source and target and alias
+        source.runtime_status = RuntimeStatus.STOPPED.value
+        target.runtime_status = RuntimeStatus.RUNNING.value
+        target.container_id = f"ctr-tgt-{fixture['suffix']}"
+        alias.traffic_state = TrafficState.MAINTENANCE.value
+        fake_node.containers[str(fixture["source_id"])]["runtime_status"] = (
+            "STOPPED"
+        )
+        fake_node.containers[str(fixture["target_id"])] = {
+            "deployment_id": str(fixture["target_id"]),
+            "container_id": f"ctr-tgt-{fixture['suffix']}",
+            "container_name": f"cs-tgt-{fixture['suffix']}",
+            "runtime_status": "RUNNING",
+        }
+        op_id, job_id = await _enqueue_cold_switch(session, fixture=fixture)
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        meta = dict(op.metadata_json or {})
+        meta["destructive_boundary_entered"] = True
+        meta["health_timeout_seconds"] = 0.05
+        op.metadata_json = meta
+        await session.commit()
+        await _mark_steps_status(
+            session, op_id, succeeded_through="START_TARGET"
+        )
+
+    from app.clients.gateway import GatewayClient
+
+    monkeypatch.setattr(
+        GatewayClient,
+        "get_route_runtime",
+        _make_synced_runtime(session_factory, fixture["endpoint_id"]),
+    )
+
+    await _claim_and_execute(
+        session_factory,
+        job_id=job_id,
+        settings=_settings(health_timeout_seconds=0.05),
+        transport=transport,
+        engine=session_factory.kw["bind"],
+    )
+
+    async with session_factory() as session:
+        op = await session.get(Operation, op_id)
+        source = await session.get(Deployment, fixture["source_id"])
+        assert op is not None and source is not None
+        assert op.status == OperationStatus.ROLLED_BACK.value
+        assert source.runtime_status == RuntimeStatus.RUNNING.value
+
+
+@pytest.mark.asyncio
+async def test_source_probe_failure_during_rollback_marks_mir(
+    db, monkeypatch
+) -> None:
+    session_factory = db
+    fake_node = ColdSwitchFakeNodeAgent()
+    fake_gw = FakeGateway()
+    transport = CombinedTransport(fake_node, fake_gw)
+    fake_node.release_vram_on_stop = False
+    fake_node.vram_free_mb = 2000
+    # Allow health during rollback, fail probe.
+    fake_node.probe_mode = "malformed"
+
+    async with session_factory() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        await _seed_standard_runtime(fake_node, fake_gw, fixture)
+        op_id, job_id = await _enqueue_cold_switch(session, fixture=fixture)
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        meta = dict(op.metadata_json or {})
+        meta["vram_release_timeout_seconds"] = 0.05
+        op.metadata_json = meta
+        await session.commit()
+
+    from app.clients.gateway import GatewayClient
+
+    monkeypatch.setattr(
+        GatewayClient,
+        "get_route_runtime",
+        _make_synced_runtime(session_factory, fixture["endpoint_id"]),
+    )
+
+    await _claim_and_execute(
+        session_factory,
+        job_id=job_id,
+        settings=_settings(vram_release_timeout_seconds=0.05),
+        transport=transport,
+        engine=session_factory.kw["bind"],
+    )
+
+    async with session_factory() as session:
+        op = await session.get(Operation, op_id)
+        job = await session.get(OperationJob, job_id)
+        alias = await session.get(EndpointAlias, fixture["endpoint_id"])
+        assert op is not None and job is not None and alias is not None
+        assert op.status == OperationStatus.MANUAL_INTERVENTION_REQUIRED.value
+        assert job.status == JobStatus.FAILED.value
+        assert alias.traffic_state == TrafficState.MAINTENANCE.value
+
+
+@pytest.mark.asyncio
+async def test_rollback_wait_route_apply_timeout_marks_mir(
+    db, monkeypatch
+) -> None:
+    session_factory = db
+    fake_node = ColdSwitchFakeNodeAgent()
+    fake_gw = FakeGateway()
+    transport = CombinedTransport(fake_node, fake_gw)
+    fake_node.release_vram_on_stop = False
+    fake_node.vram_free_mb = 2000
+
+    async with session_factory() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        await _seed_standard_runtime(fake_node, fake_gw, fixture)
+        op_id, job_id = await _enqueue_cold_switch(session, fixture=fixture)
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        meta = dict(op.metadata_json or {})
+        meta["vram_release_timeout_seconds"] = 0.05
+        op.metadata_json = meta
+        await session.commit()
+
+    from app.clients.gateway import GatewayClient
+    from app.services.operation_executor import PermanentStepError
+
+    monkeypatch.setattr(
+        GatewayClient,
+        "get_route_runtime",
+        _make_synced_runtime(session_factory, fixture["endpoint_id"]),
+    )
+
+    async def _boom_route_apply(self, *args, **kwargs):  # noqa: ANN001, ANN002
+        raise PermanentStepError(
+            "Timed out waiting for Gateway apply (GATEWAY_ROUTE_APPLY_TIMEOUT).",
+            code="GATEWAY_ROUTE_APPLY_TIMEOUT",
+        )
+
+    monkeypatch.setattr(
+        ColdSwitchExecutor,
+        "_step_rollback_wait_route_apply",
+        _boom_route_apply,
+    )
+
+    await _claim_and_execute(
+        session_factory,
+        job_id=job_id,
+        settings=_settings(vram_release_timeout_seconds=0.05),
+        transport=transport,
+        engine=session_factory.kw["bind"],
+    )
+
+    async with session_factory() as session:
+        op = await session.get(Operation, op_id)
+        alias = await session.get(EndpointAlias, fixture["endpoint_id"])
+        assert op is not None and alias is not None
+        assert op.status == OperationStatus.MANUAL_INTERVENTION_REQUIRED.value
+        assert op.error_code == "GATEWAY_ROUTE_APPLY_TIMEOUT"
+        assert alias.traffic_state == TrafficState.MAINTENANCE.value
+
+
+@pytest.mark.asyncio
+async def test_rollback_third_party_active_route_no_mutation(
+    db, monkeypatch
+) -> None:
+    session_factory = db
+    fake_node = ColdSwitchFakeNodeAgent()
+    fake_gw = FakeGateway()
+    transport = CombinedTransport(fake_node, fake_gw)
+    fake_node.vram_free_mb = 14000
+    fake_node.source_used_vram_mb = 0
+
+    async with session_factory() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        await _seed_standard_runtime(fake_node, fake_gw, fixture)
+        third_id = uuid.uuid4()
+        await session.execute(
+            __import__("sqlalchemy").text(
+                """
+                INSERT INTO deployment (
+                  id, name, model_version_id, node_id, deployment_type,
+                  desired_state, runtime_status, health_status,
+                  container_name, upstream_base_url, runtime_port,
+                  deployment_config_json
+                ) VALUES (
+                  :id, :name, :version_id, :node_id, 'MANAGED',
+                  'RUNNING', 'RUNNING', 'HEALTHY',
+                  :name, :upstream, 8080, '{}'::jsonb
+                )
+                """
+            ),
+            {
+                "id": str(third_id),
+                "name": f"cs-third2-{fixture['suffix']}",
+                "version_id": str(fixture["source_version"]),
+                "node_id": str(fixture["node_id"]),
+                "upstream": f"http://cs-third2-{fixture['suffix']}:8080",
+            },
+        )
+        source = await session.get(Deployment, fixture["source_id"])
+        target = await session.get(Deployment, fixture["target_id"])
+        alias = await session.get(EndpointAlias, fixture["endpoint_id"])
+        assert source and target and alias
+        source.runtime_status = RuntimeStatus.RUNNING.value
+        source.health_status = HealthStatus.HEALTHY.value
+        target.runtime_status = RuntimeStatus.STOPPED.value
+        alias.traffic_state = TrafficState.MAINTENANCE.value
+        await session.execute(
+            __import__("sqlalchemy").text(
+                """
+                UPDATE endpoint_route SET status = 'INACTIVE', deactivated_at = now()
+                WHERE id = :id
+                """
+            ),
+            {"id": str(fixture["route_id"])},
+        )
+        third_route = uuid.uuid4()
+        await session.execute(
+            __import__("sqlalchemy").text(
+                """
+                INSERT INTO endpoint_route (
+                  id, endpoint_alias_id, deployment_id, status, rewrite_model_name,
+                  activated_at
+                ) VALUES (
+                  :id, :alias_id, :dep, 'ACTIVE', 'third-rewrite', now()
+                )
+                """
+            ),
+            {
+                "id": str(third_route),
+                "alias_id": str(fixture["endpoint_id"]),
+                "dep": str(third_id),
+            },
+        )
+        op_id, job_id = await _enqueue_cold_switch(session, fixture=fixture)
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        meta = dict(op.metadata_json or {})
+        meta["destructive_boundary_entered"] = True
+        meta["rollback_entered"] = True
+        op.metadata_json = meta
+        op.status = OperationStatus.ROLLING_BACK.value
+        op.error_code = "PROBE_FAILED"
+        await session.commit()
+
+        from app.services.cold_switch_rollback import ROLLBACK_STEPS
+
+        cs = ColdSwitchExecutor(
+            OperationExecutor(
+                session_factory=session_factory,
+                settings=_settings(),
+                transport=transport,
+                engine=session_factory.kw["bind"],
+            )
+        )
+        await cs._ensure_rollback_steps(session, op)
+        await session.commit()
+        for step in (
+            await session.execute(
+                __import__("sqlalchemy").select(OperationStep).where(
+                    OperationStep.operation_id == op_id
+                )
+            )
+        ).scalars():
+            if step.step_code in {
+                "ROLLBACK_BEGIN",
+                "ROLLBACK_BLOCK_TRAFFIC",
+                "ROLLBACK_STOP_TARGET",
+                "ROLLBACK_START_SOURCE",
+                "ROLLBACK_WAIT_SOURCE_HEALTH",
+                "ROLLBACK_PROBE_SOURCE",
+            }:
+                step.status = StepStatus.SUCCEEDED.value
+            elif step.step_code in ROLLBACK_STEPS:
+                step.status = StepStatus.PENDING.value
+        await session.commit()
+
+    from app.clients.gateway import GatewayClient
+
+    monkeypatch.setattr(
+        GatewayClient,
+        "get_route_runtime",
+        _make_synced_runtime(session_factory, fixture["endpoint_id"]),
+    )
+
+    await _claim_and_execute(
+        session_factory,
+        job_id=job_id,
+        settings=_settings(),
+        transport=transport,
+        engine=session_factory.kw["bind"],
+    )
+
+    async with session_factory() as session:
+        op = await session.get(Operation, op_id)
+        third = await session.get(EndpointRoute, third_route)
+        source_route = await session.get(EndpointRoute, fixture["route_id"])
+        alias = await session.get(EndpointAlias, fixture["endpoint_id"])
+        assert op is not None and third is not None and source_route is not None
+        assert alias is not None
+        assert op.status == OperationStatus.MANUAL_INTERVENTION_REQUIRED.value
+        assert op.error_code == "UNEXPECTED_ACTIVE_ROUTE"
+        assert third.status == "ACTIVE"
+        assert third.rewrite_model_name == "third-rewrite"
+        assert source_route.status == "INACTIVE"
+        assert alias.traffic_state == TrafficState.MAINTENANCE.value
+
+
+@pytest.mark.asyncio
+async def test_rollback_restore_traffic_gateway_timeout_marks_mir(
+    db, monkeypatch
+) -> None:
+    session_factory = db
+    fake_node = ColdSwitchFakeNodeAgent()
+    fake_gw = FakeGateway()
+    transport = CombinedTransport(fake_node, fake_gw)
+    fake_node.release_vram_on_stop = False
+    fake_node.vram_free_mb = 2000
+
+    async with session_factory() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        await _seed_standard_runtime(fake_node, fake_gw, fixture)
+        op_id, job_id = await _enqueue_cold_switch(session, fixture=fixture)
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        meta = dict(op.metadata_json or {})
+        meta["vram_release_timeout_seconds"] = 0.05
+        op.metadata_json = meta
+        await session.commit()
+
+    from app.clients.gateway import GatewayClient
+    from app.services.operation_executor import PermanentStepError
+
+    monkeypatch.setattr(
+        GatewayClient,
+        "get_route_runtime",
+        _make_synced_runtime(session_factory, fixture["endpoint_id"]),
+    )
+
+    async def _boom_restore(self, *args, **kwargs):  # noqa: ANN001, ANN002
+        raise PermanentStepError(
+            "Timed out waiting for Gateway apply (GATEWAY_TRAFFIC_APPLY_TIMEOUT).",
+            code="GATEWAY_TRAFFIC_APPLY_TIMEOUT",
+        )
+
+    monkeypatch.setattr(
+        ColdSwitchExecutor,
+        "_step_rollback_restore_traffic",
+        _boom_restore,
+    )
+
+    await _claim_and_execute(
+        session_factory,
+        job_id=job_id,
+        settings=_settings(vram_release_timeout_seconds=0.05),
+        transport=transport,
+        engine=session_factory.kw["bind"],
+    )
+
+    async with session_factory() as session:
+        op = await session.get(Operation, op_id)
+        job = await session.get(OperationJob, job_id)
+        alias = await session.get(EndpointAlias, fixture["endpoint_id"])
+        assert op is not None and job is not None and alias is not None
+        assert op.status == OperationStatus.MANUAL_INTERVENTION_REQUIRED.value
+        assert op.error_code == "GATEWAY_TRAFFIC_APPLY_TIMEOUT"
+        assert job.status == JobStatus.FAILED.value
+        assert alias.traffic_state == TrafficState.MAINTENANCE.value
+
+
+@pytest.mark.asyncio
+async def test_rollback_target_already_stopped_reconciles(
+    db, monkeypatch
+) -> None:
+    session_factory = db
+    fake_node = ColdSwitchFakeNodeAgent()
+    fake_gw = FakeGateway()
+    transport = CombinedTransport(fake_node, fake_gw)
+    fake_node.vram_free_mb = 14000
+    fake_node.source_used_vram_mb = 0
+
+    async with session_factory() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        await _seed_standard_runtime(fake_node, fake_gw, fixture)
+        source = await session.get(Deployment, fixture["source_id"])
+        target = await session.get(Deployment, fixture["target_id"])
+        alias = await session.get(EndpointAlias, fixture["endpoint_id"])
+        assert source and target and alias
+        source.runtime_status = RuntimeStatus.STOPPED.value
+        target.runtime_status = RuntimeStatus.STOPPED.value
+        alias.traffic_state = TrafficState.MAINTENANCE.value
+        fake_node.containers[str(fixture["source_id"])]["runtime_status"] = (
+            "STOPPED"
+        )
+        fake_node.containers[str(fixture["target_id"])] = {
+            "deployment_id": str(fixture["target_id"]),
+            "container_id": f"ctr-tgt-{fixture['suffix']}",
+            "container_name": f"cs-tgt-{fixture['suffix']}",
+            "runtime_status": "STOPPED",
+        }
+        op_id, job_id = await _enqueue_cold_switch(session, fixture=fixture)
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        meta = dict(op.metadata_json or {})
+        meta["destructive_boundary_entered"] = True
+        meta["rollback_entered"] = True
+        op.metadata_json = meta
+        op.status = OperationStatus.ROLLING_BACK.value
+        op.error_code = "PROBE_FAILED"
+        op.error_message = "Target probe failed."
+        await session.commit()
+
+        from app.services.cold_switch_rollback import ROLLBACK_STEPS
+
+        cs = ColdSwitchExecutor(
+            OperationExecutor(
+                session_factory=session_factory,
+                settings=_settings(),
+                transport=transport,
+                engine=session_factory.kw["bind"],
+            )
+        )
+        await cs._ensure_rollback_steps(session, op)
+        await session.commit()
+        for step in (
+            await session.execute(
+                __import__("sqlalchemy").select(OperationStep).where(
+                    OperationStep.operation_id == op_id
+                )
+            )
+        ).scalars():
+            if step.step_code in {
+                "ROLLBACK_BEGIN",
+                "ROLLBACK_BLOCK_TRAFFIC",
+            }:
+                step.status = StepStatus.SUCCEEDED.value
+            elif step.step_code in ROLLBACK_STEPS:
+                step.status = StepStatus.PENDING.value
+        await session.commit()
+
+    from app.clients.gateway import GatewayClient
+
+    monkeypatch.setattr(
+        GatewayClient,
+        "get_route_runtime",
+        _make_synced_runtime(session_factory, fixture["endpoint_id"]),
+    )
+
+    await _claim_and_execute(
+        session_factory,
+        job_id=job_id,
+        settings=_settings(),
+        transport=transport,
+        engine=session_factory.kw["bind"],
+    )
+
+    async with session_factory() as session:
+        op = await session.get(Operation, op_id)
+        stop_step = (
+            await session.execute(
+                __import__("sqlalchemy").select(OperationStep).where(
+                    OperationStep.operation_id == op_id,
+                    OperationStep.step_code == "ROLLBACK_STOP_TARGET",
+                )
+            )
+        ).scalar_one()
+        assert op is not None
+        assert op.status == OperationStatus.ROLLED_BACK.value
+        assert (stop_step.detail_json or {}).get(
+            "reconciled_already_stopped"
+        ) is True
+
+
+@pytest.mark.asyncio
+async def test_rollback_source_already_running_reconciles(
+    db, monkeypatch
+) -> None:
+    session_factory = db
+    fake_node = ColdSwitchFakeNodeAgent()
+    fake_gw = FakeGateway()
+    transport = CombinedTransport(fake_node, fake_gw)
+    fake_node.vram_free_mb = 14000
+    fake_node.source_used_vram_mb = 0
+
+    async with session_factory() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        await _seed_standard_runtime(fake_node, fake_gw, fixture)
+        source = await session.get(Deployment, fixture["source_id"])
+        target = await session.get(Deployment, fixture["target_id"])
+        alias = await session.get(EndpointAlias, fixture["endpoint_id"])
+        assert source and target and alias
+        # Source already RUNNING; Target already STOPPED (external recovery).
+        source.runtime_status = RuntimeStatus.RUNNING.value
+        source.health_status = HealthStatus.HEALTHY.value
+        target.runtime_status = RuntimeStatus.STOPPED.value
+        alias.traffic_state = TrafficState.MAINTENANCE.value
+        fake_node.containers[str(fixture["source_id"])]["runtime_status"] = (
+            "RUNNING"
+        )
+        fake_node.containers[str(fixture["target_id"])] = {
+            "deployment_id": str(fixture["target_id"]),
+            "container_id": f"ctr-tgt-{fixture['suffix']}",
+            "container_name": f"cs-tgt-{fixture['suffix']}",
+            "runtime_status": "STOPPED",
+        }
+        op_id, job_id = await _enqueue_cold_switch(session, fixture=fixture)
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        meta = dict(op.metadata_json or {})
+        meta["destructive_boundary_entered"] = True
+        meta["rollback_entered"] = True
+        op.metadata_json = meta
+        op.status = OperationStatus.ROLLING_BACK.value
+        op.error_code = "TARGET_START_OOM"
+        await session.commit()
+
+        from app.services.cold_switch_rollback import ROLLBACK_STEPS
+
+        cs = ColdSwitchExecutor(
+            OperationExecutor(
+                session_factory=session_factory,
+                settings=_settings(),
+                transport=transport,
+                engine=session_factory.kw["bind"],
+            )
+        )
+        await cs._ensure_rollback_steps(session, op)
+        await session.commit()
+        for step in (
+            await session.execute(
+                __import__("sqlalchemy").select(OperationStep).where(
+                    OperationStep.operation_id == op_id
+                )
+            )
+        ).scalars():
+            if step.step_code in {
+                "ROLLBACK_BEGIN",
+                "ROLLBACK_BLOCK_TRAFFIC",
+                "ROLLBACK_STOP_TARGET",
+            }:
+                step.status = StepStatus.SUCCEEDED.value
+            elif step.step_code in ROLLBACK_STEPS:
+                step.status = StepStatus.PENDING.value
+        await session.commit()
+
+    from app.clients.gateway import GatewayClient
+
+    monkeypatch.setattr(
+        GatewayClient,
+        "get_route_runtime",
+        _make_synced_runtime(session_factory, fixture["endpoint_id"]),
+    )
+
+    await _claim_and_execute(
+        session_factory,
+        job_id=job_id,
+        settings=_settings(),
+        transport=transport,
+        engine=session_factory.kw["bind"],
+    )
+
+    async with session_factory() as session:
+        op = await session.get(Operation, op_id)
+        start_step = (
+            await session.execute(
+                __import__("sqlalchemy").select(OperationStep).where(
+                    OperationStep.operation_id == op_id,
+                    OperationStep.step_code == "ROLLBACK_START_SOURCE",
+                )
+            )
+        ).scalar_one()
+        assert op is not None
+        assert op.status == OperationStatus.ROLLED_BACK.value
+        assert (start_step.detail_json or {}).get(
+            "reconciled_already_running"
+        ) is True
+
+
+@pytest.mark.asyncio
+async def test_rollback_target_active_route_restores_source_atomically(
+    db, monkeypatch
+) -> None:
+    """ACTIVE Target route flips to Source ACTIVE with independent rewrites."""
+    session_factory = db
+    fake_node = ColdSwitchFakeNodeAgent()
+    fake_gw = FakeGateway()
+    transport = CombinedTransport(fake_node, fake_gw)
+    fake_node.vram_free_mb = 14000
+    fake_node.source_used_vram_mb = 0
+
+    async with session_factory() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        await _seed_standard_runtime(fake_node, fake_gw, fixture)
+        await session.execute(
+            __import__("sqlalchemy").text(
+                """
+                UPDATE endpoint_route
+                SET rewrite_model_name = 'src-rewrite',
+                    status = 'INACTIVE', deactivated_at = now()
+                WHERE id = :id
+                """
+            ),
+            {"id": str(fixture["route_id"])},
+        )
+        target_route_id = uuid.uuid4()
+        await session.execute(
+            __import__("sqlalchemy").text(
+                """
+                INSERT INTO endpoint_route (
+                  id, endpoint_alias_id, deployment_id, status, rewrite_model_name,
+                  activated_at
+                ) VALUES (
+                  :id, :alias_id, :dep, 'ACTIVE', 'tgt-rewrite', now()
+                )
+                """
+            ),
+            {
+                "id": str(target_route_id),
+                "alias_id": str(fixture["endpoint_id"]),
+                "dep": str(fixture["target_id"]),
+            },
+        )
+        await session.execute(
+            __import__("sqlalchemy").text(
+                "UPDATE routing_state SET version = 40, updated_at = now() WHERE id = 1"
+            )
+        )
+        source = await session.get(Deployment, fixture["source_id"])
+        target = await session.get(Deployment, fixture["target_id"])
+        alias = await session.get(EndpointAlias, fixture["endpoint_id"])
+        assert source and target and alias
+        source.runtime_status = RuntimeStatus.RUNNING.value
+        source.health_status = HealthStatus.HEALTHY.value
+        target.runtime_status = RuntimeStatus.STOPPED.value
+        alias.traffic_state = TrafficState.MAINTENANCE.value
+        fake_node.containers[str(fixture["target_id"])] = {
+            "deployment_id": str(fixture["target_id"]),
+            "container_id": f"ctr-tgt-{fixture['suffix']}",
+            "container_name": f"cs-tgt-{fixture['suffix']}",
+            "runtime_status": "STOPPED",
+        }
+        op_id, job_id = await _enqueue_cold_switch(session, fixture=fixture)
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        meta = dict(op.metadata_json or {})
+        meta["destructive_boundary_entered"] = True
+        meta["rollback_entered"] = True
+        op.metadata_json = meta
+        op.status = OperationStatus.ROLLING_BACK.value
+        op.error_code = "PROBE_FAILED"
+        await session.commit()
+
+        from app.services.cold_switch_rollback import ROLLBACK_STEPS
+
+        cs = ColdSwitchExecutor(
+            OperationExecutor(
+                session_factory=session_factory,
+                settings=_settings(),
+                transport=transport,
+                engine=session_factory.kw["bind"],
+            )
+        )
+        await cs._ensure_rollback_steps(session, op)
+        await session.commit()
+        for step in (
+            await session.execute(
+                __import__("sqlalchemy").select(OperationStep).where(
+                    OperationStep.operation_id == op_id
+                )
+            )
+        ).scalars():
+            if step.step_code in {
+                "ROLLBACK_BEGIN",
+                "ROLLBACK_BLOCK_TRAFFIC",
+                "ROLLBACK_STOP_TARGET",
+                "ROLLBACK_START_SOURCE",
+                "ROLLBACK_WAIT_SOURCE_HEALTH",
+                "ROLLBACK_PROBE_SOURCE",
+            }:
+                step.status = StepStatus.SUCCEEDED.value
+            elif step.step_code in ROLLBACK_STEPS:
+                step.status = StepStatus.PENDING.value
+        await session.commit()
+
+    from app.clients.gateway import GatewayClient
+
+    monkeypatch.setattr(
+        GatewayClient,
+        "get_route_runtime",
+        _make_synced_runtime(session_factory, fixture["endpoint_id"]),
+    )
+
+    await _claim_and_execute(
+        session_factory,
+        job_id=job_id,
+        settings=_settings(),
+        transport=transport,
+        engine=session_factory.kw["bind"],
+    )
+
+    async with session_factory() as session:
+        op = await session.get(Operation, op_id)
+        source_route = await session.get(EndpointRoute, fixture["route_id"])
+        target_route = await session.get(EndpointRoute, target_route_id)
+        activate = (
+            await session.execute(
+                __import__("sqlalchemy").select(OperationStep).where(
+                    OperationStep.operation_id == op_id,
+                    OperationStep.step_code == "ROLLBACK_ACTIVATE_SOURCE_ROUTE",
+                )
+            )
+        ).scalar_one()
+        version = (
+            await session.execute(
+                __import__("sqlalchemy").text(
+                    "SELECT version FROM routing_state WHERE id = 1"
+                )
+            )
+        ).scalar_one()
+        assert op is not None
+        assert op.status == OperationStatus.ROLLED_BACK.value
+        assert source_route is not None and target_route is not None
+        assert source_route.status == "ACTIVE"
+        assert source_route.rewrite_model_name == "src-rewrite"
+        assert target_route.status == "INACTIVE"
+        assert target_route.rewrite_model_name == "tgt-rewrite"
+        assert (activate.detail_json or {}).get("already_active") is not True
+        # Activate bumps 40→41; RESTORE_TRAFFIC bumps 41→42 for SERVING.
+        assert int(version) == 42
+        assert int((activate.detail_json or {}).get("route_routing_version")) == 41
+
+
+@pytest.mark.asyncio
+async def test_resume_after_rollback_route_activate_continues(
+    db, monkeypatch
+) -> None:
+    """Crash after ROLLBACK_ACTIVATE_SOURCE_ROUTE → resume without double bump."""
+    session_factory = db
+    fake_node = ColdSwitchFakeNodeAgent()
+    fake_gw = FakeGateway()
+    transport = CombinedTransport(fake_node, fake_gw)
+    fake_node.vram_free_mb = 14000
+    fake_node.source_used_vram_mb = 0
+
+    async with session_factory() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        await _seed_standard_runtime(fake_node, fake_gw, fixture)
+        # Source already ACTIVE after prior activate step; version already bumped.
+        await session.execute(
+            __import__("sqlalchemy").text(
+                "UPDATE routing_state SET version = 77, updated_at = now() WHERE id = 1"
+            )
+        )
+        source = await session.get(Deployment, fixture["source_id"])
+        target = await session.get(Deployment, fixture["target_id"])
+        alias = await session.get(EndpointAlias, fixture["endpoint_id"])
+        assert source and target and alias
+        source.runtime_status = RuntimeStatus.RUNNING.value
+        source.health_status = HealthStatus.HEALTHY.value
+        target.runtime_status = RuntimeStatus.STOPPED.value
+        alias.traffic_state = TrafficState.MAINTENANCE.value
+        fake_node.containers[str(fixture["target_id"])] = {
+            "deployment_id": str(fixture["target_id"]),
+            "container_id": f"ctr-tgt-{fixture['suffix']}",
+            "container_name": f"cs-tgt-{fixture['suffix']}",
+            "runtime_status": "STOPPED",
+        }
+        op_id, job_id = await _enqueue_cold_switch(session, fixture=fixture)
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        meta = dict(op.metadata_json or {})
+        meta["destructive_boundary_entered"] = True
+        meta["rollback_entered"] = True
+        op.metadata_json = meta
+        op.status = OperationStatus.ROLLING_BACK.value
+        op.error_code = "VRAM_NOT_RELEASED"
+        await session.commit()
+
+        from app.services.cold_switch_rollback import ROLLBACK_STEPS
+
+        cs = ColdSwitchExecutor(
+            OperationExecutor(
+                session_factory=session_factory,
+                settings=_settings(),
+                transport=transport,
+                engine=session_factory.kw["bind"],
+            )
+        )
+        await cs._ensure_rollback_steps(session, op)
+        await session.commit()
+        for step in (
+            await session.execute(
+                __import__("sqlalchemy").select(OperationStep).where(
+                    OperationStep.operation_id == op_id
+                )
+            )
+        ).scalars():
+            if step.step_code in {
+                "ROLLBACK_BEGIN",
+                "ROLLBACK_BLOCK_TRAFFIC",
+                "ROLLBACK_STOP_TARGET",
+                "ROLLBACK_START_SOURCE",
+                "ROLLBACK_WAIT_SOURCE_HEALTH",
+                "ROLLBACK_PROBE_SOURCE",
+                "ROLLBACK_ACTIVATE_SOURCE_ROUTE",
+            }:
+                step.status = StepStatus.SUCCEEDED.value
+                if step.step_code == "ROLLBACK_ACTIVATE_SOURCE_ROUTE":
+                    step.detail_json = {
+                        "route_routing_version": 77,
+                        "active_deployment_id": str(fixture["source_id"]),
+                        "already_active": True,
+                    }
+            elif step.step_code in ROLLBACK_STEPS:
+                step.status = StepStatus.PENDING.value
+        job = await session.get(OperationJob, job_id)
+        assert job is not None
+        job.status = JobStatus.QUEUED.value
+        await session.commit()
+
+    from app.clients.gateway import GatewayClient
+
+    monkeypatch.setattr(
+        GatewayClient,
+        "get_route_runtime",
+        _make_synced_runtime(session_factory, fixture["endpoint_id"]),
+    )
+
+    calls_before = len(fake_node.calls)
+    await _claim_and_execute(
+        session_factory,
+        job_id=job_id,
+        settings=_settings(),
+        transport=transport,
+        engine=session_factory.kw["bind"],
+    )
+
+    async with session_factory() as session:
+        op = await session.get(Operation, op_id)
+        alias = await session.get(EndpointAlias, fixture["endpoint_id"])
+        version = (
+            await session.execute(
+                __import__("sqlalchemy").text(
+                    "SELECT version FROM routing_state WHERE id = 1"
+                )
+            )
+        ).scalar_one()
+        assert op is not None and alias is not None
+        assert op.status == OperationStatus.ROLLED_BACK.value
+        assert alias.traffic_state == TrafficState.SERVING.value
+        # Activate already reconciled at v77; only RESTORE_TRAFFIC bumps for SERVING.
+        assert int(version) == 78
+        # Resume must not re-run stop/start mutations for already-succeeded steps.
+        stop_start_calls = [
+            c
+            for c in fake_node.calls[calls_before:]
+            if str(c.get("path", "")).endswith("/stop")
+            or str(c.get("path", "")).endswith("/start")
+        ]
+        assert stop_start_calls == []
