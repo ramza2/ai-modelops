@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import datetime as dt
+import os
 import uuid
 
 import pytest
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from app.core.db import Base
 from app.core.enums import (
     HealthStatus,
     JobStatus,
@@ -37,6 +40,29 @@ from tests.test_cold_switch import (
     _seed_standard_runtime,
     _settings,
 )
+
+
+def _database_url() -> str:
+    return os.environ.get(
+        "MODELOPS_DATABASE_URL",
+        "postgresql+asyncpg://modelops:modelops@localhost:5432/modelops",
+    )
+
+
+@pytest.fixture
+def anyio_backend() -> str:
+    return "asyncio"
+
+
+@pytest.fixture
+async def db():
+    engine = create_async_engine(_database_url(), future=True)
+    session_factory = async_sessionmaker(
+        engine, expire_on_commit=False, autoflush=False
+    )
+    _ = Base.metadata
+    yield session_factory
+    await engine.dispose()
 
 
 @pytest.mark.asyncio
