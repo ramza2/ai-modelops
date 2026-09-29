@@ -94,7 +94,14 @@ class OperationJobRepository:
         job.updated_at = now
         job.last_error = None
 
-        operation = await self._session.get(Operation, job.operation_id)
+        # Lock Operation after Job (same order as Cancel API) before status bump.
+        operation = (
+            await self._session.execute(
+                select(Operation)
+                .where(Operation.id == job.operation_id)
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
         if operation is not None and operation.status == OperationStatus.QUEUED.value:
             operation.status = OperationStatus.RUNNING.value
             if operation.started_at is None:
@@ -509,6 +516,71 @@ class OperationJobRepository:
         if row is None:
             return None
         return row[0]
+
+    async def decide_destructive_boundary(
+        self,
+        operation_id: uuid.UUID,
+        *,
+        step_id: uuid.UUID | None = None,
+        step_detail_patch: dict | None = None,
+    ) -> str:
+        """Atomically decide cancel vs destructive_boundary_entered under FOR UPDATE.
+
+        Short persistence transaction only — caller must not hold this lock across
+        Node Agent / Gateway HTTP. Returns ``\"cancelled\"`` or ``\"boundary_entered\"``.
+
+        Metadata is patched from the freshly locked JSONB so concurrent
+        ``cancel_reason`` / other keys are preserved.
+        """
+        operation = (
+            await self._session.execute(
+                select(Operation)
+                .where(Operation.id == operation_id)
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if operation is None:
+            return "cancelled"
+
+        if operation.cancel_requested_at is not None:
+            await self._session.commit()
+            return "cancelled"
+
+        meta = dict(operation.metadata_json or {})
+        meta["destructive_boundary_entered"] = True
+        operation.metadata_json = meta
+
+        if step_id is not None and step_detail_patch is not None:
+            step = await self._session.get(OperationStep, step_id)
+            if step is not None:
+                detail = dict(step.detail_json or {})
+                detail.update(step_detail_patch)
+                detail["destructive_boundary_entered"] = True
+                step.detail_json = detail
+
+        await self._session.commit()
+        return "boundary_entered"
+
+    async def patch_operation_metadata(
+        self,
+        operation_id: uuid.UUID,
+        patch: dict,
+    ) -> dict:
+        """Merge metadata keys under Operation FOR UPDATE; return fresh metadata."""
+        operation = (
+            await self._session.execute(
+                select(Operation)
+                .where(Operation.id == operation_id)
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if operation is None:
+            return {}
+        meta = dict(operation.metadata_json or {})
+        meta.update(patch)
+        operation.metadata_json = meta
+        await self._session.commit()
+        return meta
 
     async def reconcile_terminal_operation_job(
         self,

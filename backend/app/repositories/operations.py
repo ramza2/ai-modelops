@@ -4,11 +4,18 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
+from typing import Any, Literal
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.enums import JobStatus, OperationStatus, StepStatus
+from app.core.enums import (
+    JobStatus,
+    OperationStatus,
+    OperationType,
+    StepStatus,
+    SwitchStrategy,
+)
 from app.domain.models import Operation, OperationJob, OperationStep
 
 ACTIVE_OPERATION_STATUSES = frozenset(
@@ -28,6 +35,8 @@ TERMINAL_OPERATION_STATUSES = frozenset(
         OperationStatus.MANUAL_INTERVENTION_REQUIRED.value,
     }
 )
+
+CancelDecision = Literal["cancelled", "intent_only", "idempotent"]
 
 
 class OperationRepository:
@@ -63,8 +72,6 @@ class OperationRepository:
         self, endpoint_id: uuid.UUID
     ) -> Operation | None:
         """Active SWITCH/ROLLBACK for an Endpoint Alias."""
-        from app.core.enums import OperationType
-
         stmt = (
             select(Operation)
             .where(
@@ -111,28 +118,108 @@ class OperationRepository:
         stmt = select(OperationJob).where(OperationJob.operation_id == operation_id)
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
-    async def request_cancel(
+    @staticmethod
+    def is_cold_switch(operation: Operation) -> bool:
+        return (
+            operation.operation_type == OperationType.SWITCH.value
+            and operation.switch_strategy == SwitchStrategy.COLD.value
+        )
+
+    @staticmethod
+    def is_cancel_idempotent_terminal(operation: Operation) -> bool:
+        """CANCELLED, or ROLLED_BACK that was driven by a prior cancel request."""
+        if operation.status == OperationStatus.CANCELLED.value:
+            return True
+        if (
+            operation.status == OperationStatus.ROLLED_BACK.value
+            and operation.cancel_requested_at is not None
+        ):
+            return True
+        return False
+
+    @staticmethod
+    def is_terminal(operation: Operation) -> bool:
+        return operation.status in TERMINAL_OPERATION_STATUSES
+
+    @staticmethod
+    def _patch_metadata(
+        operation: Operation, patch: dict[str, Any]
+    ) -> None:
+        """Merge keys into metadata from the current ORM value (must be locked)."""
+        meta = dict(operation.metadata_json or {})
+        meta.update(patch)
+        operation.metadata_json = meta
+
+    async def apply_cancel_decision(
         self,
-        operation: Operation,
+        operation_id: uuid.UUID,
         *,
         reason: str | None = None,
-        now: dt.datetime | None = None,
-    ) -> bool:
-        """Record cancel intent. Returns True when cancel_requested_at was newly set.
+    ) -> tuple[Operation, CancelDecision]:
+        """Lock Job then Operation and apply cancel (M5-C2-A).
 
-        Never clears ``destructive_boundary_entered`` or other metadata keys.
-        Does not terminalize the Operation — caller decides QUEUED vs RUNNING.
+        Lock ordering matches Worker ``claim_next_job`` (Job first, then
+        Operation) so QUEUED cancel vs claim is deterministic:
+
+        - still QUEUED (+ job QUEUED/absent) → atomic CANCELLED
+        - already claimed / RUNNING / ROLLING_BACK → intent only
+
+        Never overwrites a concurrently RUNNING/post-destructive Operation with
+        direct CANCELLED. Metadata patches use the freshly locked JSONB value.
         """
-        stamp = now or dt.datetime.now(tz=dt.UTC)
-        newly_set = operation.cancel_requested_at is None
-        if newly_set:
-            operation.cancel_requested_at = stamp
+        now = dt.datetime.now(tz=dt.UTC)
+
+        # Lock Job first (same order as claim). Wait — do not SKIP LOCKED —
+        # so we observe the post-claim state when Worker wins the race.
+        job = (
+            await self._session.execute(
+                select(OperationJob)
+                .where(OperationJob.operation_id == operation_id)
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+
+        operation = (
+            await self._session.execute(
+                select(Operation)
+                .where(Operation.id == operation_id)
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if operation is None:
+            raise LookupError("operation_missing")
+
+        if self.is_cancel_idempotent_terminal(operation):
+            if reason:
+                self._patch_metadata(operation, {"cancel_reason": reason})
+            await self._session.flush()
+            return operation, "idempotent"
+
+        if self.is_terminal(operation):
+            raise RuntimeError("already_terminal")
+
+        # Record cancel intent from fresh locked metadata.
+        if operation.cancel_requested_at is None:
+            operation.cancel_requested_at = now
         if reason:
-            meta = dict(operation.metadata_json or {})
-            meta["cancel_reason"] = reason
-            operation.metadata_json = meta
+            self._patch_metadata(operation, {"cancel_reason": reason})
+
+        job_still_queued = job is None or job.status == JobStatus.QUEUED.value
+        if (
+            operation.status == OperationStatus.QUEUED.value
+            and job_still_queued
+        ):
+            await self.finalize_operation_cancelled(
+                operation=operation,
+                job=job,
+                now=now,
+            )
+            await self._session.flush()
+            return operation, "cancelled"
+
+        # Worker already claimed / RUNNING / ROLLING_BACK — intent only.
         await self._session.flush()
-        return newly_set
+        return operation, "intent_only"
 
     async def finalize_operation_cancelled(
         self,
@@ -176,19 +263,3 @@ class OperationRepository:
             job.updated_at = stamp
 
         await self._session.flush()
-
-    @staticmethod
-    def is_cancel_idempotent_terminal(operation: Operation) -> bool:
-        """CANCELLED, or ROLLED_BACK that was driven by a prior cancel request."""
-        if operation.status == OperationStatus.CANCELLED.value:
-            return True
-        if (
-            operation.status == OperationStatus.ROLLED_BACK.value
-            and operation.cancel_requested_at is not None
-        ):
-            return True
-        return False
-
-    @staticmethod
-    def is_terminal(operation: Operation) -> bool:
-        return operation.status in TERMINAL_OPERATION_STATUSES

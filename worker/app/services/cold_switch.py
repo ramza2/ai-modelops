@@ -936,6 +936,7 @@ class ColdSwitchExecutor(ColdSwitchRollbackMixin):
 
         Returns True when cancel was handled and the caller must return.
         """
+        await session.refresh(operation)
         cancel_at = await repo.refresh_cancel_requested_at(
             uuid.UUID(str(operation.id))
         )
@@ -943,6 +944,8 @@ class ColdSwitchExecutor(ColdSwitchRollbackMixin):
             return False
         if cancel_at is not None:
             operation.cancel_requested_at = cancel_at
+        # Re-load metadata after refresh so destructive_boundary_entered is fresh.
+        await session.refresh(operation)
 
         if _destructive_entered(operation):
             # Post-destructive cancel = rollback intent; never CANCELLED.
@@ -1000,28 +1003,104 @@ class ColdSwitchExecutor(ColdSwitchRollbackMixin):
         code: str,
         message: str,
     ) -> None:
-        """Restore SERVING if needed and terminalize as CANCELLED (atomic)."""
+        """Strict SERVING+Source-route restore, then CANCELLED — or MIR on failure.
+
+        Never uses the exception-swallowing best-effort traffic helper for a
+        successful cancel finalization.
+        """
         await session.refresh(alias)
         await session.refresh(source)
-        source_stopped = source.runtime_status == RuntimeStatus.STOPPED.value
-        if (
-            alias.traffic_state
-            in (TrafficState.DRAINING.value, TrafficState.MAINTENANCE.value)
-            and not source_stopped
-        ):
-            await self._best_effort_set_traffic(
-                alias=alias,
-                traffic=TrafficState.SERVING.value,
-                gateway=gateway,
-                wait=True,
+        if source.runtime_status == RuntimeStatus.STOPPED.value:
+            # Ambiguous: do not invent runtime; escalate MIR.
+            await repo.finalize_operation_manual_intervention(
+                operation_id=uuid.UUID(str(operation.id)),
+                job_id=uuid.UUID(str(job.id)),
+                code="CANCEL_RESTORE_FAILED",
+                message=(
+                    "Pre-destructive cancel observed but Source is STOPPED; "
+                    "manual intervention required."
+                ),
             )
-            await session.refresh(alias)
+            return
+
+        try:
+            await self._strict_restore_serving_for_cancel(
+                alias=alias,
+                source=source,
+                gateway=gateway,
+                operation=operation,
+            )
+        except Exception as exc:  # noqa: BLE001 - map to MIR, never CANCELLED
+            underlying = getattr(exc, "code", None) or type(exc).__name__
+            underlying_msg = getattr(exc, "message", None) or str(exc)
+            logger.exception(
+                "Strict SERVING restore failed during cancel operation=%s",
+                operation.id,
+            )
+            await repo.finalize_operation_manual_intervention(
+                operation_id=uuid.UUID(str(operation.id)),
+                job_id=uuid.UUID(str(job.id)),
+                code="CANCEL_RESTORE_FAILED",
+                message=(
+                    f"Cancel requested but Gateway SERVING/Source-route apply "
+                    f"could not be confirmed ({underlying}: {underlying_msg})."
+                ),
+            )
+            return
 
         await repo.finalize_operation_cancelled(
             operation_id=uuid.UUID(str(operation.id)),
             job_id=uuid.UUID(str(job.id)),
             code=code,
             message=message,
+        )
+
+    async def _strict_restore_serving_for_cancel(
+        self,
+        *,
+        alias: EndpointAlias,
+        source: Deployment,
+        gateway: GatewayClient,
+        operation: Operation,
+    ) -> None:
+        """Idempotently set DB SERVING and wait for Gateway confirmation.
+
+        Raises on Gateway/apply failure (does not swallow). Confirms:
+        applied_routing_version >= requested, traffic_state=SERVING,
+        active_deployment_id == Source.
+        """
+        meta = operation.metadata_json or {}
+        timeout = float(
+            meta.get("gateway_apply_timeout_seconds")
+            or self._settings.gateway_apply_timeout_seconds
+        )
+
+        async with self._session_factory() as tx:
+            row = (
+                await tx.execute(
+                    select(EndpointAlias)
+                    .where(EndpointAlias.id == alias.id)
+                    .with_for_update()
+                )
+            ).scalar_one()
+            if row.traffic_state != TrafficState.SERVING.value:
+                row.traffic_state = TrafficState.SERVING.value
+                version = await _bump_routing_version(tx)
+            else:
+                state = await tx.get(RoutingState, 1)
+                version = int(state.version) if state else 0
+            await tx.commit()
+
+        alias.traffic_state = TrafficState.SERVING.value
+        await self._wait_gateway(
+            gateway,
+            alias=str(alias.alias),
+            min_version=version,
+            traffic_state=TrafficState.SERVING.value,
+            active_deployment_id=str(source.id),
+            require_inflight_zero=False,
+            timeout_seconds=timeout,
+            error_code="GATEWAY_APPLY_TIMEOUT",
         )
 
     async def _best_effort_set_traffic(
@@ -1814,34 +1893,33 @@ class ColdSwitchExecutor(ColdSwitchRollbackMixin):
             error_code="GATEWAY_APPLY_TIMEOUT",
         )
 
-        # Critical cancel race: re-read intent BEFORE destructive boundary commit
-        # and BEFORE any Source stop side effect.
-        cancel_at = await repo.refresh_cancel_requested_at(
-            uuid.UUID(str(operation.id))
+        # Atomic cancel vs destructive-boundary decision under Operation FOR UPDATE.
+        # Do not hold the lock across Node Agent HTTP — decide, commit, then stop.
+        decision = await repo.decide_destructive_boundary(
+            uuid.UUID(str(operation.id)),
+            step_id=uuid.UUID(str(step.id)),
+            step_detail_patch={
+                "maintenance_routing_version": version,
+                **{
+                    k: v
+                    for k, v in detail.items()
+                    if k != DESTRUCTIVE_FLAG
+                },
+            },
         )
-        if cancel_at is not None:
-            operation.cancel_requested_at = cancel_at
+        await session.refresh(operation)
+        if decision == "cancelled":
             # Do NOT set destructive_boundary_entered; do NOT stop Source.
-            await self._best_effort_set_traffic(
-                alias=alias,
-                traffic=TrafficState.SERVING.value,
-                gateway=gateway,
-                wait=True,
-            )
-            await session.refresh(alias)
+            # Strict SERVING restore happens in _finalize_pre_destructive_cancel.
             raise CancelRequestedError(
                 "Cancellation observed after MAINTENANCE apply and before "
                 "Source stop; Source left RUNNING.",
                 code=USER_CANCELLED,
             )
 
-        # Persist destructive boundary BEFORE Node Agent stop; commit first.
         detail[DESTRUCTIVE_FLAG] = True
+        detail["maintenance_routing_version"] = version
         step.detail_json = {**(step.detail_json or {}), **detail}
-        op_meta = dict(operation.metadata_json or {})
-        op_meta[DESTRUCTIVE_FLAG] = True
-        operation.metadata_json = op_meta
-        await session.commit()
 
         graceful = int(
             (operation.metadata_json or {}).get("graceful_timeout_seconds") or 30

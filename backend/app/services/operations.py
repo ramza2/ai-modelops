@@ -166,11 +166,11 @@ class OperationService:
         *,
         reason: str | None = None,
     ) -> dict[str, Any]:
-        """Record cancellation intent (M5-C2-A).
+        """Record cancellation intent (M5-C2-A Cold SWITCH only).
 
         Management API never performs Docker/Node Agent/Gateway side effects.
-        QUEUED operations are terminalized here; RUNNING/ROLLING_BACK only stamp
-        ``cancel_requested_at`` for the Worker to observe.
+        QUEUED Cold SWITCH is terminalized under Job+Operation row locks;
+        RUNNING/ROLLING_BACK only stamp ``cancel_requested_at``.
         """
         operation = await self._operations.get(operation_id)
         if operation is None:
@@ -179,40 +179,44 @@ class OperationService:
                 details={"operation_id": str(operation_id)},
             )
 
-        if self._operations.is_cancel_idempotent_terminal(operation):
-            # Repeated cancel is a no-op: return current state.
-            if reason:
-                await self._operations.request_cancel(operation, reason=reason)
-                await self._session.commit()
-            return await self.get_operation(operation_id)
-
-        if self._operations.is_terminal(operation):
+        # M5-C2-A: Cold SWITCH only. Reject before any cancel mutation.
+        if not self._operations.is_cold_switch(operation):
             raise ConflictError(
-                "Operation is already terminal and cannot be cancelled.",
+                "Cancel is only supported for Cold SWITCH operations.",
                 code="INVALID_OPERATION_STATE",
                 details={
                     "operation_id": str(operation_id),
-                    "status": operation.status,
+                    "operation_type": operation.operation_type,
+                    "switch_strategy": operation.switch_strategy,
                 },
             )
 
-        job = await self._operations.get_job_for_operation(operation_id)
-        status = str(operation.status)
-
-        if status == OperationStatus.QUEUED.value:
-            # Job not running yet — safe immediate CANCELLED, no runtime mutation.
-            await self._operations.request_cancel(operation, reason=reason)
-            await self._operations.finalize_operation_cancelled(
-                operation=operation,
-                job=job,
+        try:
+            locked_op, decision = await self._operations.apply_cancel_decision(
+                operation_id,
+                reason=reason,
             )
-            await self._session.commit()
-            return await self.get_operation(operation_id)
+        except LookupError:
+            raise NotFoundError(
+                "Operation not found.",
+                details={"operation_id": str(operation_id)},
+            ) from None
+        except RuntimeError as exc:
+            if str(exc) == "already_terminal":
+                op = await self._operations.get(operation_id)
+                raise ConflictError(
+                    "Operation is already terminal and cannot be cancelled.",
+                    code="INVALID_OPERATION_STATE",
+                    details={
+                        "operation_id": str(operation_id),
+                        "status": op.status if op is not None else None,
+                    },
+                ) from None
+            raise
 
-        # RUNNING or ROLLING_BACK: intent only. Worker owns orchestration.
-        await self._operations.request_cancel(operation, reason=reason)
         await self._session.commit()
-        return await self.get_operation(operation_id)
+        _ = decision
+        return await self.get_operation(uuid.UUID(str(locked_op.id)))
 
     async def _require_managed_deployment(
         self, deployment_id: uuid.UUID

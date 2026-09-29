@@ -6,7 +6,10 @@ import datetime as dt
 import os
 import uuid
 
+from typing import Any
+
 import pytest
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.core.db import Base
@@ -26,8 +29,13 @@ from app.domain.models import (
     OperationJob,
     OperationStep,
 )
-from app.services.cold_switch import ColdSwitchExecutor, USER_CANCELLED
-from app.services.operation_executor import OperationExecutor
+from app.repositories.operations import OperationJobRepository
+from app.services.cold_switch import (
+    DESTRUCTIVE_FLAG,
+    ColdSwitchExecutor,
+    USER_CANCELLED,
+)
+from app.services.operation_executor import OperationExecutor, PermanentStepError
 from tests.test_cold_switch import (
     ColdSwitchFakeNodeAgent,
     CombinedTransport,
@@ -661,3 +669,357 @@ async def test_terminal_cancelled_job_mismatch_no_node_calls(db) -> None:
         assert op.status == OperationStatus.CANCELLED.value
         assert job.status == JobStatus.FAILED.value
         assert len(fake_node.calls) == calls_before
+
+
+@pytest.mark.asyncio
+async def test_destructive_boundary_vs_cancel_ordering(db) -> None:
+    """Cancel lock vs boundary lock: winner determines CANCELLED vs rollback intent."""
+    import asyncio
+
+    session_factory = db
+    fake_node = ColdSwitchFakeNodeAgent()
+
+    async with session_factory() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        op_id, _job_id = await _enqueue_cold_switch(session, fixture=fixture)
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        op.status = OperationStatus.RUNNING.value
+        await session.commit()
+
+    # Case A: cancel wins first → boundary decision returns cancelled.
+    async with session_factory() as s1:
+        op = (
+            await s1.execute(
+                select(Operation)
+                .where(Operation.id == op_id)
+                .with_for_update()
+            )
+        ).scalar_one()
+        op.cancel_requested_at = dt.datetime.now(tz=dt.UTC)
+        await s1.commit()
+
+    async with session_factory() as s2:
+        repo = OperationJobRepository(s2)
+        decision = await repo.decide_destructive_boundary(op_id)
+        assert decision == "cancelled"
+        op = await s2.get(Operation, op_id)
+        assert op is not None
+        assert (op.metadata_json or {}).get(DESTRUCTIVE_FLAG) is not True
+
+    # Case B: boundary wins first → later cancel is intent only (destructive stays).
+    async with session_factory() as session:
+        fixture2 = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        op2_id, _ = await _enqueue_cold_switch(session, fixture=fixture2)
+        op2 = await session.get(Operation, op2_id)
+        assert op2 is not None
+        op2.status = OperationStatus.RUNNING.value
+        meta = dict(op2.metadata_json or {})
+        meta["cancel_reason"] = "pre-existing-reason"
+        op2.metadata_json = meta
+        await session.commit()
+
+    async with session_factory() as s3:
+        repo = OperationJobRepository(s3)
+        decision = await repo.decide_destructive_boundary(op2_id)
+        assert decision == "boundary_entered"
+
+    # Concurrent-style: hold Operation lock in boundary txn, cancel waits then
+    # only stamps intent because destructive already committed.
+    gate = asyncio.Event()
+    locked = asyncio.Event()
+
+    async def boundary_holds() -> str:
+        async with session_factory() as s:
+            repo = OperationJobRepository(s)
+            # Begin decide manually to hold lock mid-flight.
+            op = (
+                await s.execute(
+                    select(Operation)
+                    .where(Operation.id == op2_id)
+                    .with_for_update()
+                )
+            ).scalar_one()
+            locked.set()
+            await gate.wait()
+            # Boundary already entered in prior step — re-decide should still
+            # see no cancel and keep flag (idempotent patch).
+            if op.cancel_requested_at is not None:
+                await s.commit()
+                return "cancelled"
+            meta = dict(op.metadata_json or {})
+            meta[DESTRUCTIVE_FLAG] = True
+            op.metadata_json = meta
+            await s.commit()
+            return "boundary_entered"
+
+    async def cancel_after_lock() -> None:
+        await locked.wait()
+        async with session_factory() as s:
+            # This blocks until boundary_holds commits.
+            task_op = asyncio.create_task(
+                s.execute(
+                    select(Operation)
+                    .where(Operation.id == op2_id)
+                    .with_for_update()
+                )
+            )
+            await asyncio.sleep(0.1)
+            gate.set()
+            result = await task_op
+            op = result.scalar_one()
+            if op.cancel_requested_at is None:
+                op.cancel_requested_at = dt.datetime.now(tz=dt.UTC)
+            meta = dict(op.metadata_json or {})
+            meta["cancel_reason"] = "after-boundary"
+            op.metadata_json = meta
+            await s.commit()
+
+    t1 = asyncio.create_task(boundary_holds())
+    t2 = asyncio.create_task(cancel_after_lock())
+    await asyncio.gather(t1, t2)
+
+    async with session_factory() as session:
+        op = await session.get(Operation, op2_id)
+        assert op is not None
+        meta = op.metadata_json or {}
+        assert meta.get(DESTRUCTIVE_FLAG) is True
+        assert meta.get("cancel_reason") == "after-boundary"
+        assert op.cancel_requested_at is not None
+        assert op.status == OperationStatus.RUNNING.value
+
+
+@pytest.mark.asyncio
+async def test_metadata_cancel_reason_survives_boundary(db) -> None:
+    session_factory = db
+    fake_node = ColdSwitchFakeNodeAgent()
+
+    async with session_factory() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        op_id, _ = await _enqueue_cold_switch(session, fixture=fixture)
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        meta = dict(op.metadata_json or {})
+        meta["cancel_reason"] = "operator-abort"
+        op.metadata_json = meta
+        op.cancel_requested_at = None  # boundary first, cancel reason already set
+        await session.commit()
+
+    async with session_factory() as session:
+        # Simulate cancel reason present, then boundary entered (no cancel_at yet).
+        repo = OperationJobRepository(session)
+        decision = await repo.decide_destructive_boundary(op_id)
+        assert decision == "boundary_entered"
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        meta = op.metadata_json or {}
+        assert meta.get(DESTRUCTIVE_FLAG) is True
+        assert meta.get("cancel_reason") == "operator-abort"
+
+
+@pytest.mark.asyncio
+async def test_metadata_destructive_survives_cancel_reason_patch(db) -> None:
+    session_factory = db
+    fake_node = ColdSwitchFakeNodeAgent()
+
+    async with session_factory() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        op_id, _ = await _enqueue_cold_switch(session, fixture=fixture)
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        meta = dict(op.metadata_json or {})
+        meta[DESTRUCTIVE_FLAG] = True
+        op.metadata_json = meta
+        op.status = OperationStatus.RUNNING.value
+        await session.commit()
+
+    async with session_factory() as session:
+        repo = OperationJobRepository(session)
+        meta = await repo.patch_operation_metadata(
+            op_id, {"cancel_reason": "late-cancel"}
+        )
+        assert meta.get(DESTRUCTIVE_FLAG) is True
+        assert meta.get("cancel_reason") == "late-cancel"
+
+
+@pytest.mark.asyncio
+async def test_cancel_from_draining_strict_restore_cancels(
+    db, monkeypatch
+) -> None:
+    session_factory = db
+    fake_node = ColdSwitchFakeNodeAgent()
+    fake_gw = FakeGateway()
+    transport = CombinedTransport(fake_node, fake_gw)
+    fake_node.vram_free_mb = 2000
+
+    async with session_factory() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        await _seed_standard_runtime(fake_node, fake_gw, fixture)
+        alias = await session.get(EndpointAlias, fixture["endpoint_id"])
+        assert alias is not None
+        alias.traffic_state = TrafficState.DRAINING.value
+        fake_gw.traffic_state = TrafficState.DRAINING.value
+        op_id, job_id = await _enqueue_cold_switch(session, fixture=fixture)
+        await _mark_steps_status(
+            session, op_id, succeeded_through="DRAIN_TRAFFIC"
+        )
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        op.cancel_requested_at = dt.datetime.now(tz=dt.UTC)
+        op.status = OperationStatus.RUNNING.value
+        await session.commit()
+
+    from app.clients.gateway import GatewayClient
+
+    monkeypatch.setattr(
+        GatewayClient,
+        "get_route_runtime",
+        _make_synced_runtime(session_factory, fixture["endpoint_id"]),
+    )
+
+    await _claim_and_execute(
+        session_factory,
+        job_id=job_id,
+        settings=_settings(),
+        transport=transport,
+        engine=session_factory.kw["bind"],
+    )
+
+    async with session_factory() as session:
+        op = await session.get(Operation, op_id)
+        alias = await session.get(EndpointAlias, fixture["endpoint_id"])
+        source = await session.get(Deployment, fixture["source_id"])
+        assert op and alias and source
+        assert op.status == OperationStatus.CANCELLED.value
+        assert alias.traffic_state == TrafficState.SERVING.value
+        assert source.runtime_status == RuntimeStatus.RUNNING.value
+
+
+@pytest.mark.asyncio
+async def test_cancel_from_maintenance_strict_restore_cancels(
+    db, monkeypatch
+) -> None:
+    session_factory = db
+    fake_node = ColdSwitchFakeNodeAgent()
+    fake_gw = FakeGateway()
+    transport = CombinedTransport(fake_node, fake_gw)
+
+    async with session_factory() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        await _seed_standard_runtime(fake_node, fake_gw, fixture)
+        alias = await session.get(EndpointAlias, fixture["endpoint_id"])
+        assert alias is not None
+        alias.traffic_state = TrafficState.MAINTENANCE.value
+        fake_gw.traffic_state = TrafficState.MAINTENANCE.value
+        op_id, job_id = await _enqueue_cold_switch(session, fixture=fixture)
+        await _mark_steps_status(
+            session, op_id, succeeded_through="PREPARE_TARGET"
+        )
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        op.cancel_requested_at = dt.datetime.now(tz=dt.UTC)
+        op.status = OperationStatus.RUNNING.value
+        await session.commit()
+
+    from app.clients.gateway import GatewayClient
+
+    monkeypatch.setattr(
+        GatewayClient,
+        "get_route_runtime",
+        _make_synced_runtime(session_factory, fixture["endpoint_id"]),
+    )
+
+    await _claim_and_execute(
+        session_factory,
+        job_id=job_id,
+        settings=_settings(),
+        transport=transport,
+        engine=session_factory.kw["bind"],
+    )
+
+    async with session_factory() as session:
+        op = await session.get(Operation, op_id)
+        alias = await session.get(EndpointAlias, fixture["endpoint_id"])
+        assert op and alias
+        assert op.status == OperationStatus.CANCELLED.value
+        assert alias.traffic_state == TrafficState.SERVING.value
+
+
+@pytest.mark.asyncio
+async def test_cancel_gateway_restore_failure_marks_mir(
+    db, monkeypatch
+) -> None:
+    session_factory = db
+    fake_node = ColdSwitchFakeNodeAgent()
+    fake_gw = FakeGateway()
+    transport = CombinedTransport(fake_node, fake_gw)
+
+    async with session_factory() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        await _seed_standard_runtime(fake_node, fake_gw, fixture)
+        alias = await session.get(EndpointAlias, fixture["endpoint_id"])
+        assert alias is not None
+        alias.traffic_state = TrafficState.DRAINING.value
+        op_id, job_id = await _enqueue_cold_switch(session, fixture=fixture)
+        await _mark_steps_status(
+            session, op_id, succeeded_through="DRAIN_TRAFFIC"
+        )
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        op.cancel_requested_at = dt.datetime.now(tz=dt.UTC)
+        op.status = OperationStatus.RUNNING.value
+        await session.commit()
+
+    async def _boom_restore(self, *args, **kwargs):  # noqa: ANN001, ANN002
+        raise PermanentStepError(
+            "Gateway apply timed out.",
+            code="GATEWAY_APPLY_TIMEOUT",
+        )
+
+    monkeypatch.setattr(
+        ColdSwitchExecutor,
+        "_strict_restore_serving_for_cancel",
+        _boom_restore,
+    )
+
+    stop_before = sum(
+        1 for c in fake_node.calls if str(c.get("path", "")).endswith("/stop")
+    )
+    await _claim_and_execute(
+        session_factory,
+        job_id=job_id,
+        settings=_settings(),
+        transport=transport,
+        engine=session_factory.kw["bind"],
+    )
+
+    async with session_factory() as session:
+        op = await session.get(Operation, op_id)
+        job = await session.get(OperationJob, job_id)
+        source = await session.get(Deployment, fixture["source_id"])
+        assert op and job and source
+        assert op.status == OperationStatus.MANUAL_INTERVENTION_REQUIRED.value
+        assert op.error_code == "CANCEL_RESTORE_FAILED"
+        assert op.cancel_requested_at is not None
+        assert job.status == JobStatus.FAILED.value
+        assert source.runtime_status == RuntimeStatus.RUNNING.value
+        stop_after = sum(
+            1
+            for c in fake_node.calls
+            if str(c.get("path", "")).endswith("/stop")
+        )
+        assert stop_after == stop_before
