@@ -118,6 +118,47 @@ class OperationRepository:
         stmt = select(OperationJob).where(OperationJob.operation_id == operation_id)
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
+    async def lock_operation_for_update(
+        self, operation_id: uuid.UUID
+    ) -> Operation | None:
+        """FOR UPDATE lock on Operation after expiring any cached identity."""
+        cached = await self._session.get(Operation, operation_id)
+        if cached is not None:
+            self._session.expire(cached)
+        return (
+            await self._session.execute(
+                select(Operation)
+                .where(Operation.id == operation_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one_or_none()
+
+    async def find_active_retry_of(
+        self, original_operation_id: uuid.UUID
+    ) -> Operation | None:
+        """Active (QUEUED/RUNNING/ROLLING_BACK) retry child of an Operation."""
+        stmt = (
+            select(Operation)
+            .where(
+                Operation.retry_of_operation_id == original_operation_id,
+                Operation.status.in_(tuple(ACTIVE_OPERATION_STATUSES)),
+            )
+            .order_by(Operation.created_at.desc())
+            .limit(1)
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def list_retries_of(
+        self, original_operation_id: uuid.UUID
+    ) -> list[Operation]:
+        stmt = (
+            select(Operation)
+            .where(Operation.retry_of_operation_id == original_operation_id)
+            .order_by(Operation.created_at.asc())
+        )
+        return list((await self._session.execute(stmt)).scalars().all())
+
     @staticmethod
     def is_cold_switch(operation: Operation) -> bool:
         return (

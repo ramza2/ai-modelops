@@ -508,6 +508,8 @@ Gateway는 NOTIFY를 놓쳐도 주기적으로 `routing_state.version`을 비교
 - `idempotency_key`
 - `error_code`
 - `error_message`
+- `cancel_requested_at`
+- `retry_of_operation_id` (M5-C2-B lineage; nullable self-FK)
 - `metadata_json`
 - `created_at`
 - `started_at`

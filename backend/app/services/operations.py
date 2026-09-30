@@ -286,6 +286,11 @@ class OperationService:
             ),
             "current_step": current_step,
             "cancel_requested_at": isoformat_utc(operation.cancel_requested_at),
+            "retry_of_operation_id": (
+                str(operation.retry_of_operation_id)
+                if operation.retry_of_operation_id
+                else None
+            ),
             "requested_by": operation.requested_by,
             "request_reason": operation.request_reason,
             "metadata": operation.metadata_json,
