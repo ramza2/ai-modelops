@@ -36,7 +36,9 @@ TERMINAL_OPERATION_STATUSES = frozenset(
     }
 )
 
-CancelDecision = Literal["cancelled", "intent_only", "idempotent"]
+CancelDecision = Literal[
+    "cancelled", "intent_only", "idempotent", "rejected_not_queued"
+]
 
 
 class OperationRepository:
@@ -203,17 +205,24 @@ class OperationRepository:
         operation_id: uuid.UUID,
         *,
         reason: str | None = None,
+        queued_only: bool = False,
     ) -> tuple[Operation, CancelDecision]:
-        """Lock Job then Operation and apply cancel (M5-C2-A).
+        """Lock Job then Operation and apply cancel (M5-C2-A / M5-D1).
 
         Lock ordering matches Worker ``claim_next_job`` (Job first, then
         Operation) so QUEUED cancel vs claim is deterministic:
 
         - still QUEUED (+ job QUEUED/absent) → atomic CANCELLED
         - already claimed / RUNNING / ROLLING_BACK → intent only
+          (or ``rejected_not_queued`` when ``queued_only`` — M5-D1 HOT)
 
         Never overwrites a concurrently RUNNING/post-destructive Operation with
         direct CANCELLED. Metadata patches use the freshly locked JSONB value.
+
+        When ``queued_only`` is True (Hot SWITCH D1), after locks are held and
+        before any ``cancel_requested_at`` mutation: if Operation/Job are no
+        longer QUEUED, return ``rejected_not_queued`` with no side effects.
+        Idempotent CANCELLED/ROLLED_BACK-after-cancel still returns ``idempotent``.
         """
         now = dt.datetime.now(tz=dt.UTC)
 
@@ -262,17 +271,22 @@ class OperationRepository:
         if self.is_terminal(operation):
             raise RuntimeError("already_terminal")
 
+        job_still_queued = job is None or job.status == JobStatus.QUEUED.value
+        still_queued = (
+            operation.status == OperationStatus.QUEUED.value and job_still_queued
+        )
+
+        # M5-D1 Hot: queued-only cancel must not stamp intent on RUNNING.
+        if queued_only and not still_queued:
+            return operation, "rejected_not_queued"
+
         # Record cancel intent from fresh locked metadata.
         if operation.cancel_requested_at is None:
             operation.cancel_requested_at = now
         if reason:
             self._patch_metadata(operation, {"cancel_reason": reason})
 
-        job_still_queued = job is None or job.status == JobStatus.QUEUED.value
-        if (
-            operation.status == OperationStatus.QUEUED.value
-            and job_still_queued
-        ):
+        if still_queued:
             await self.finalize_operation_cancelled(
                 operation=operation,
                 job=job,

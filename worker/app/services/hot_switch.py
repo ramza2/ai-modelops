@@ -7,6 +7,7 @@ Does not implement HOT cancel, retry, rollback, or reconciliation.
 
 from __future__ import annotations
 
+import datetime as dt
 import logging
 import uuid
 from typing import Any
@@ -1011,9 +1012,10 @@ class HotSwitchExecutor:
         message: str,
     ) -> None:
         if step.step_code in _POST_ROUTE_STEPS:
-            await self._handle_post_route_failure(
+            await self._classify_post_route_and_terminalize(
                 session,
                 repo,
+                client,
                 gateway,
                 operation,
                 job,
@@ -1032,10 +1034,83 @@ class HotSwitchExecutor:
             repo, job, operation, code=code, message=message
         )
 
-    async def _handle_post_route_failure(
+    async def _route_activation_may_have_occurred(
+        self,
+        session: AsyncSession,
+        operation: Operation,
+        alias: EndpointAlias,
+        target: Deployment,
+    ) -> bool:
+        """True when persisted step/route state may already reflect ACTIVATE."""
+        steps = (
+            await session.execute(
+                select(OperationStep).where(
+                    OperationStep.operation_id == operation.id,
+                    OperationStep.step_code.in_(tuple(_POST_ROUTE_STEPS)),
+                )
+            )
+        ).scalars().all()
+        for step in steps:
+            if step.status != StepStatus.PENDING.value:
+                return True
+
+        active = (
+            await session.execute(
+                select(EndpointRoute).where(
+                    EndpointRoute.endpoint_alias_id == alias.id,
+                    EndpointRoute.status == RouteStatus.ACTIVE.value,
+                )
+            )
+        ).scalar_one_or_none()
+        return active is not None and str(active.deployment_id) == str(target.id)
+
+    def _required_route_routing_version(
+        self, activate: OperationStep | None, wait: OperationStep | None
+    ) -> int | None:
+        """Prefer ACTIVATE detail; never invent success from RoutingState alone."""
+        for step in (activate, wait):
+            if step is None:
+                continue
+            version = (step.detail_json or {}).get("route_routing_version")
+            if version is not None:
+                try:
+                    return int(version)
+                except (TypeError, ValueError):
+                    return None
+        return None
+
+    async def _reconcile_post_route_steps_succeeded(
+        self,
+        session: AsyncSession,
+        operation: Operation,
+    ) -> None:
+        """Align WAIT_ROUTE_APPLY / FINALIZE (and ACTIVATE) with proven success."""
+        now = dt.datetime.now(tz=dt.UTC)
+        steps = (
+            await session.execute(
+                select(OperationStep).where(
+                    OperationStep.operation_id == operation.id,
+                    OperationStep.step_code.in_(tuple(_POST_ROUTE_STEPS)),
+                )
+            )
+        ).scalars().all()
+        for step in steps:
+            if step.status == StepStatus.SUCCEEDED.value:
+                continue
+            detail = dict(step.detail_json or {})
+            detail["reconciled_already_complete"] = True
+            step.detail_json = detail
+            step.status = StepStatus.SUCCEEDED.value
+            step.finished_at = now
+            step.error_code = None
+            step.error_message = None
+        await session.flush()
+
+    async def _classify_post_route_and_terminalize(
         self,
         session: AsyncSession,
         repo: OperationJobRepository,
+        client: NodeAgentClient | None,
         gateway: GatewayClient,
         operation: Operation,
         job: OperationJob,
@@ -1046,6 +1121,7 @@ class HotSwitchExecutor:
         code: str,
         message: str,
     ) -> None:
+        """Strict post-route outcome: Source+GW FAILED, Target fully proven SUCCEEDED, else MIR."""
         await session.refresh(alias)
         await session.refresh(source)
         await session.refresh(target)
@@ -1066,58 +1142,92 @@ class HotSwitchExecutor:
         except Exception:  # noqa: BLE001
             gw = None
 
+        # Gateway unavailable / timeout / malformed → cannot infer runtime from DB.
+        if gw is None:
+            await repo.finalize_operation_manual_intervention(
+                operation_id=uuid.UUID(str(operation.id)),
+                job_id=uuid.UUID(str(job.id)),
+                code=code,
+                message=message,
+            )
+            return
+
         gw_active = (
             str(gw.get("active_deployment_id"))
-            if gw and gw.get("active_deployment_id") is not None
+            if gw.get("active_deployment_id") is not None
             else None
         )
-        gw_traffic = str(gw.get("traffic_state") or "") if gw else ""
+        gw_traffic = str(gw.get("traffic_state") or "")
+        try:
+            gw_applied = int(gw.get("applied_routing_version"))
+        except (TypeError, ValueError):
+            gw_applied = None
 
-        # Prove Source still serving → fail safely (customer traffic never left).
+        # Prove Source still serving via BOTH DB and Gateway → fail safely.
         if (
             db_active == str(source.id)
             and db_traffic == TrafficState.SERVING.value
-            and (
-                gw is None
-                or (
-                    gw_active == str(source.id)
-                    and gw_traffic == TrafficState.SERVING.value
-                )
-            )
+            and gw_active == str(source.id)
+            and gw_traffic == TrafficState.SERVING.value
         ):
+            if client is not None:
+                await self._best_effort_stop_target_if_started(
+                    session, repo, client, operation, target
+                )
             await self._fail_pre_route(
                 repo, job, operation, code=code, message=message
             )
             return
 
-        # Prove Target fully serving + healthy → treat as SUCCEEDED.
+        activate = (
+            await session.execute(
+                select(OperationStep).where(
+                    OperationStep.operation_id == operation.id,
+                    OperationStep.step_code == STEP_ACTIVATE_TARGET_ROUTE,
+                )
+            )
+        ).scalar_one_or_none()
+        wait = (
+            await session.execute(
+                select(OperationStep).where(
+                    OperationStep.operation_id == operation.id,
+                    OperationStep.step_code == STEP_WAIT_ROUTE_APPLY,
+                )
+            )
+        ).scalar_one_or_none()
+        probe = (
+            await session.execute(
+                select(OperationStep).where(
+                    OperationStep.operation_id == operation.id,
+                    OperationStep.step_code == STEP_PROBE_TARGET,
+                )
+            )
+        ).scalar_one_or_none()
+        required_version = self._required_route_routing_version(activate, wait)
+
+        # Prove Target fully serving with probe + applied version + Source RUNNING.
         if (
-            db_active == str(target.id)
+            probe is not None
+            and probe.status == StepStatus.SUCCEEDED.value
+            and db_active == str(target.id)
             and db_traffic == TrafficState.SERVING.value
             and gw_active == str(target.id)
             and gw_traffic == TrafficState.SERVING.value
+            and required_version is not None
+            and gw_applied is not None
+            and gw_applied >= required_version
             and target.runtime_status == RuntimeStatus.RUNNING.value
             and target.health_status == HealthStatus.HEALTHY.value
+            and source.runtime_status == RuntimeStatus.RUNNING.value
         ):
-            probe = (
-                await session.execute(
-                    select(OperationStep).where(
-                        OperationStep.operation_id == operation.id,
-                        OperationStep.step_code == STEP_PROBE_TARGET,
-                    )
-                )
-            ).scalar_one_or_none()
-            if probe is not None and probe.status == StepStatus.SUCCEEDED.value:
-                source.desired_state = DesiredState.RUNNING.value
-                target.desired_state = DesiredState.RUNNING.value
-                await session.flush()
-                await repo.mark_operation_succeeded(
-                    uuid.UUID(str(operation.id))
-                )
-                await repo.mark_job_done(uuid.UUID(str(job.id)))
-                return
+            source.desired_state = DesiredState.RUNNING.value
+            target.desired_state = DesiredState.RUNNING.value
+            await self._reconcile_post_route_steps_succeeded(session, operation)
+            await session.flush()
+            await repo.mark_operation_succeeded(uuid.UUID(str(operation.id)))
+            await repo.mark_job_done(uuid.UUID(str(job.id)))
+            return
 
-        # Ambiguous → MIR.
         await repo.finalize_operation_manual_intervention(
             operation_id=uuid.UUID(str(operation.id)),
             job_id=uuid.UUID(str(job.id)),
@@ -1143,7 +1253,9 @@ class HotSwitchExecutor:
                 request_id=str(uuid.uuid4()),
             )
             await client.stop_deployment(
-                str(target.id), mutation=mutation, timeout_seconds=30
+                str(target.id),
+                mutation=mutation,
+                graceful_timeout_seconds=30,
             )
             target.runtime_status = RuntimeStatus.STOPPED.value
             await session.flush()
@@ -1205,10 +1317,70 @@ class HotSwitchExecutor:
                     operation=operation, job=job
                 )
                 return
+
+            code = "WORKER_INTERNAL_ERROR"
+            message = "Unexpected worker error during Hot Switch."
+
+            source = (
+                await session.get(
+                    Deployment, uuid.UUID(str(operation.source_deployment_id))
+                )
+                if operation.source_deployment_id is not None
+                else None
+            )
+            target = (
+                await session.get(
+                    Deployment, uuid.UUID(str(operation.target_deployment_id))
+                )
+                if operation.target_deployment_id is not None
+                else None
+            )
+            alias = (
+                await session.get(
+                    EndpointAlias, uuid.UUID(str(operation.endpoint_alias_id))
+                )
+                if operation.endpoint_alias_id is not None
+                else None
+            )
+            if source is None or target is None or alias is None:
+                await self._fail_pre_route(
+                    repo, job, operation, code=code, message=message
+                )
+                return
+
+            client: NodeAgentClient | None = None
+            node = await session.get(Node, target.node_id) if target.node_id else None
+            if node is not None and node.agent_base_url:
+                client = NodeAgentClient(
+                    base_url=str(node.agent_base_url),
+                    token=self._settings.node_agent_token,
+                    timeout_seconds=self._settings.node_agent_timeout_seconds,
+                    transport=self._transport,
+                )
+            gateway = self._gateway_client()
+
+            if await self._route_activation_may_have_occurred(
+                session, operation, alias, target
+            ):
+                await self._classify_post_route_and_terminalize(
+                    session,
+                    repo,
+                    client,
+                    gateway,
+                    operation,
+                    job,
+                    alias,
+                    source,
+                    target,
+                    code=code,
+                    message=message,
+                )
+                return
+
+            if client is not None:
+                await self._best_effort_stop_target_if_started(
+                    session, repo, client, operation, target
+                )
             await self._fail_pre_route(
-                repo,
-                job,
-                operation,
-                code="WORKER_INTERNAL_ERROR",
-                message="Unexpected worker error during Hot Switch.",
+                repo, job, operation, code=code, message=message
             )

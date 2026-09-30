@@ -868,3 +868,384 @@ async def test_hot_advisory_lock_contention_requeues(db) -> None:
         }
         assert job.status == JobStatus.QUEUED.value
         assert int(job.attempt_count) == 0 or int(job.attempt_count) <= 1
+
+
+@pytest.mark.asyncio
+async def test_hot_post_route_gateway_unavailable_is_mir(db, monkeypatch) -> None:
+    """DB Source ACTIVE/SERVING + Gateway unavailable → MIR, not FAILED."""
+    sf = db
+    fake_node = ColdSwitchFakeNodeAgent()
+    fake_gw = FakeGateway()
+    transport = CombinedTransport(fake_node, fake_gw)
+    _configure_hot_vram(fake_node)
+
+    async with sf() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        await _seed_standard_runtime(fake_node, fake_gw, fixture)
+        fake_node.containers[str(fixture["source_id"])]["health_status"] = "HEALTHY"
+        op_id, job_id = await _enqueue_hot_switch(session, fixture=fixture)
+        await _mark_steps_status(
+            session, op_id, succeeded_through="ACTIVATE_TARGET_ROUTE"
+        )
+        # Keep DB ACTIVE = Source / SERVING (no route cutover committed).
+        activate = (
+            await session.execute(
+                select(OperationStep).where(
+                    OperationStep.operation_id == op_id,
+                    OperationStep.step_code == "ACTIVATE_TARGET_ROUTE",
+                )
+            )
+        ).scalar_one()
+        activate.detail_json = {"route_routing_version": 1}
+        await session.commit()
+
+    from app.clients.gateway import GatewayClient, GatewayError
+
+    async def _gw_down(self, alias: str) -> dict[str, Any]:  # noqa: ANN001
+        raise GatewayError("gateway unavailable", code="GATEWAY_UNAVAILABLE")
+
+    monkeypatch.setattr(GatewayClient, "get_route_runtime", _gw_down)
+
+    await _claim_and_execute(
+        sf,
+        job_id=job_id,
+        settings=_settings(gateway_apply_timeout_seconds=0.05),
+        transport=transport,
+        engine=sf.kw["bind"],
+    )
+
+    async with sf() as session:
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        assert op.status == OperationStatus.MANUAL_INTERVENTION_REQUIRED.value
+        assert op.status != OperationStatus.FAILED.value
+
+
+@pytest.mark.asyncio
+async def test_hot_post_route_stale_gateway_version_is_mir(db, monkeypatch) -> None:
+    """Target/SERVING on GW but applied version behind route version → MIR."""
+    sf = db
+    fake_node = ColdSwitchFakeNodeAgent()
+    fake_gw = FakeGateway()
+    transport = CombinedTransport(fake_node, fake_gw)
+    _configure_hot_vram(fake_node)
+
+    async with sf() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        await _seed_standard_runtime(fake_node, fake_gw, fixture)
+        fake_node.containers[str(fixture["source_id"])]["health_status"] = "HEALTHY"
+        op_id, job_id = await _enqueue_hot_switch(session, fixture=fixture)
+        await _mark_steps_status(
+            session, op_id, succeeded_through="ACTIVATE_TARGET_ROUTE"
+        )
+        now = dt.datetime.now(tz=dt.UTC)
+        for route in (
+            await session.execute(
+                select(EndpointRoute).where(
+                    EndpointRoute.endpoint_alias_id == fixture["endpoint_id"]
+                )
+            )
+        ).scalars().all():
+            if str(route.deployment_id) == str(fixture["source_id"]):
+                route.status = "INACTIVE"
+                route.deactivated_at = now
+        session.add(
+            EndpointRoute(
+                id=uuid.uuid4(),
+                endpoint_alias_id=fixture["endpoint_id"],
+                deployment_id=fixture["target_id"],
+                status="ACTIVE",
+                activated_at=now,
+            )
+        )
+        state = await session.get(RoutingState, 1)
+        assert state is not None
+        state.version = int(state.version) + 1
+        route_version = int(state.version)
+        activate = (
+            await session.execute(
+                select(OperationStep).where(
+                    OperationStep.operation_id == op_id,
+                    OperationStep.step_code == "ACTIVATE_TARGET_ROUTE",
+                )
+            )
+        ).scalar_one()
+        activate.detail_json = {"route_routing_version": route_version}
+        # Target runtime healthy; Source still RUNNING (HOT invariant).
+        target = await session.get(Deployment, fixture["target_id"])
+        source = await session.get(Deployment, fixture["source_id"])
+        assert target and source
+        target.runtime_status = RuntimeStatus.RUNNING.value
+        target.health_status = HealthStatus.HEALTHY.value
+        source.runtime_status = RuntimeStatus.RUNNING.value
+        await session.commit()
+
+    fake_node.containers[str(fixture["target_id"])] = {
+        "deployment_id": str(fixture["target_id"]),
+        "container_id": f"ctr-tgt-stale-{fixture['suffix']}",
+        "container_name": "tgt",
+        "runtime_status": "RUNNING",
+        "health_status": "HEALTHY",
+    }
+    fake_gw.active_deployment_id = str(fixture["target_id"])
+    fake_gw.traffic_state = TrafficState.SERVING.value
+    # Applied version older than this Hot Switch route version.
+    fake_gw.applied_routing_version = max(0, route_version - 1)
+    fake_gw.auto_apply = False
+
+    await _claim_and_execute(
+        sf,
+        job_id=job_id,
+        settings=_settings(gateway_apply_timeout_seconds=0.05),
+        transport=transport,
+        engine=sf.kw["bind"],
+    )
+
+    async with sf() as session:
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        assert op.status == OperationStatus.MANUAL_INTERVENTION_REQUIRED.value
+        assert op.status != OperationStatus.SUCCEEDED.value
+
+
+@pytest.mark.asyncio
+async def test_hot_unexpected_exception_after_activate_not_blind_failed(
+    db, monkeypatch
+) -> None:
+    """Outer unexpected crash after Target route activation must not be FAILED via DB-only."""
+    sf = db
+    fake_node = ColdSwitchFakeNodeAgent()
+    fake_gw = FakeGateway()
+    transport = CombinedTransport(fake_node, fake_gw)
+    _configure_hot_vram(fake_node)
+
+    async with sf() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        await _seed_standard_runtime(fake_node, fake_gw, fixture)
+        fake_node.containers[str(fixture["source_id"])]["health_status"] = "HEALTHY"
+        op_id, job_id = await _enqueue_hot_switch(session, fixture=fixture)
+        await _mark_steps_status(
+            session, op_id, succeeded_through="ACTIVATE_TARGET_ROUTE"
+        )
+        now = dt.datetime.now(tz=dt.UTC)
+        for route in (
+            await session.execute(
+                select(EndpointRoute).where(
+                    EndpointRoute.endpoint_alias_id == fixture["endpoint_id"]
+                )
+            )
+        ).scalars().all():
+            if str(route.deployment_id) == str(fixture["source_id"]):
+                route.status = "INACTIVE"
+                route.deactivated_at = now
+        session.add(
+            EndpointRoute(
+                id=uuid.uuid4(),
+                endpoint_alias_id=fixture["endpoint_id"],
+                deployment_id=fixture["target_id"],
+                status="ACTIVE",
+                activated_at=now,
+            )
+        )
+        state = await session.get(RoutingState, 1)
+        assert state is not None
+        state.version = int(state.version) + 1
+        route_version = int(state.version)
+        activate = (
+            await session.execute(
+                select(OperationStep).where(
+                    OperationStep.operation_id == op_id,
+                    OperationStep.step_code == "ACTIVATE_TARGET_ROUTE",
+                )
+            )
+        ).scalar_one()
+        activate.detail_json = {"route_routing_version": route_version}
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        op.status = OperationStatus.RUNNING.value
+        job = await session.get(OperationJob, job_id)
+        assert job is not None
+        job.status = JobStatus.RUNNING.value
+        await session.commit()
+
+    from app.clients.gateway import GatewayClient, GatewayError
+    from app.services.hot_switch import HotSwitchExecutor
+
+    async def _gw_down(self, alias: str) -> dict[str, Any]:  # noqa: ANN001
+        raise GatewayError("gateway unavailable", code="GATEWAY_UNAVAILABLE")
+
+    monkeypatch.setattr(GatewayClient, "get_route_runtime", _gw_down)
+
+    settings = _settings()
+    executor = OperationExecutor(
+        session_factory=sf,
+        settings=settings,
+        transport=transport,
+        engine=sf.kw["bind"],
+        sleep=lambda _s: __import__("asyncio").sleep(0),
+    )
+    hot = HotSwitchExecutor(executor)
+    await hot._terminalize_unexpected(job_id)
+
+    async with sf() as session:
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        assert op.status == OperationStatus.MANUAL_INTERVENTION_REQUIRED.value
+        assert op.status != OperationStatus.FAILED.value
+
+
+@pytest.mark.asyncio
+async def test_hot_pre_route_failure_stops_started_target(db, monkeypatch) -> None:
+    """HOT starts Target then later pre-route fails → Target /stop + Source SERVING."""
+    sf = db
+    fake_node = ColdSwitchFakeNodeAgent()
+    fake_gw = FakeGateway()
+    transport = CombinedTransport(fake_node, fake_gw)
+    _configure_hot_vram(fake_node)
+
+    async with sf() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        await _seed_standard_runtime(fake_node, fake_gw, fixture)
+        fake_node.containers[str(fixture["source_id"])]["health_status"] = "HEALTHY"
+        op_id, job_id = await _enqueue_hot_switch(session, fixture=fixture)
+        # Resume from PREPARE so START_TARGET actually runs and sets hot_target_started.
+        await _mark_steps_status(session, op_id, succeeded_through="PREPARE_TARGET")
+
+    from app.clients.gateway import GatewayClient
+    from app.services.operation_executor import (
+        OperationExecutor,
+        PermanentStepError,
+    )
+
+    monkeypatch.setattr(
+        GatewayClient,
+        "get_route_runtime",
+        _make_synced_runtime(sf, fixture["endpoint_id"]),
+    )
+
+    async def _boom_health(self, *args, **kwargs):  # noqa: ANN001, ANN002
+        raise PermanentStepError("unhealthy after start", code="HEALTH_TIMEOUT")
+
+    monkeypatch.setattr(OperationExecutor, "_wait_health", _boom_health)
+
+    stop_before = sum(
+        1 for c in fake_node.calls if str(c.get("path", "")).endswith("/stop")
+    )
+    await _claim_and_execute(
+        sf,
+        job_id=job_id,
+        settings=_settings(),
+        transport=transport,
+        engine=sf.kw["bind"],
+    )
+    stop_after = sum(
+        1 for c in fake_node.calls if str(c.get("path", "")).endswith("/stop")
+    )
+    assert stop_after > stop_before
+
+    target_stops = [
+        c
+        for c in fake_node.calls
+        if str(c.get("path", "")).endswith("/stop")
+        and str(fixture["target_id"]) in str(c.get("path", ""))
+    ]
+    assert target_stops, "Target /stop must be invoked after HOT started Target"
+
+    async with sf() as session:
+        op = await session.get(Operation, op_id)
+        source = await session.get(Deployment, fixture["source_id"])
+        target = await session.get(Deployment, fixture["target_id"])
+        alias = await session.get(EndpointAlias, fixture["endpoint_id"])
+        active = (
+            await session.execute(
+                select(EndpointRoute).where(
+                    EndpointRoute.endpoint_alias_id == fixture["endpoint_id"],
+                    EndpointRoute.status == "ACTIVE",
+                )
+            )
+        ).scalar_one()
+        assert op and source and target and alias
+        assert op.status == OperationStatus.FAILED.value
+        assert op.error_code == "HEALTH_TIMEOUT"
+        assert str(active.deployment_id) == str(fixture["source_id"])
+        assert alias.traffic_state == TrafficState.SERVING.value
+        assert source.runtime_status == RuntimeStatus.RUNNING.value
+        assert target.runtime_status == RuntimeStatus.STOPPED.value
+        meta = op.metadata_json or {}
+        assert meta.get("hot_target_started") is True
+        assert meta.get("hot_target_cleanup") == "stopped"
+
+
+@pytest.mark.asyncio
+async def test_hot_pre_route_cleanup_failure_preserves_diagnostics(
+    db, monkeypatch
+) -> None:
+    """If Target cleanup fails, Source stays serving and cleanup error is retained."""
+    sf = db
+    fake_node = ColdSwitchFakeNodeAgent()
+    fake_gw = FakeGateway()
+    transport = CombinedTransport(fake_node, fake_gw)
+    _configure_hot_vram(fake_node)
+
+    async with sf() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        await _seed_standard_runtime(fake_node, fake_gw, fixture)
+        fake_node.containers[str(fixture["source_id"])]["health_status"] = "HEALTHY"
+        op_id, job_id = await _enqueue_hot_switch(session, fixture=fixture)
+        await _mark_steps_status(session, op_id, succeeded_through="PREPARE_TARGET")
+
+    from app.clients.gateway import GatewayClient
+    from app.clients.node_agent import NodeAgentClient, NodeAgentError
+    from app.services.operation_executor import (
+        OperationExecutor,
+        PermanentStepError,
+    )
+
+    monkeypatch.setattr(
+        GatewayClient,
+        "get_route_runtime",
+        _make_synced_runtime(sf, fixture["endpoint_id"]),
+    )
+
+    async def _boom_health(self, *args, **kwargs):  # noqa: ANN001, ANN002
+        raise PermanentStepError("unhealthy", code="HEALTH_TIMEOUT")
+
+    monkeypatch.setattr(OperationExecutor, "_wait_health", _boom_health)
+
+    async def _boom_stop(self, *args, **kwargs):  # noqa: ANN001, ANN002
+        raise NodeAgentError("stop failed", code="STOP_FAILED", status_code=500)
+
+    monkeypatch.setattr(NodeAgentClient, "stop_deployment", _boom_stop)
+
+    await _claim_and_execute(
+        sf,
+        job_id=job_id,
+        settings=_settings(),
+        transport=transport,
+        engine=sf.kw["bind"],
+    )
+
+    async with sf() as session:
+        op = await session.get(Operation, op_id)
+        source = await session.get(Deployment, fixture["source_id"])
+        alias = await session.get(EndpointAlias, fixture["endpoint_id"])
+        assert op and source and alias
+        assert op.status == OperationStatus.FAILED.value
+        assert op.error_code == "HEALTH_TIMEOUT"
+        assert source.runtime_status == RuntimeStatus.RUNNING.value
+        assert alias.traffic_state == TrafficState.SERVING.value
+        meta = op.metadata_json or {}
+        assert meta.get("hot_target_started") is True
+        assert meta.get("hot_target_cleanup") == "failed"
+        assert meta.get("hot_target_cleanup_error")
+        assert "stop failed" in str(meta.get("hot_target_cleanup_error"))
