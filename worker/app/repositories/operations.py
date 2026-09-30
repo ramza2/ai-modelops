@@ -201,18 +201,18 @@ class OperationJobRepository:
         operation = await self._session.get(Operation, operation_id)
         if operation is None:
             return
-        # Never downgrade MANUAL_INTERVENTION_REQUIRED to ordinary FAILED.
-        if (
-            operation.status
-            == OperationStatus.MANUAL_INTERVENTION_REQUIRED.value
-        ):
+        # Never overwrite proven/terminal success or existing MIR.
+        if operation.status in {
+            OperationStatus.MANUAL_INTERVENTION_REQUIRED.value,
+            OperationStatus.SUCCEEDED.value,
+        }:
             return
-        # M5-B SWITCH backstop: after the destructive boundary, never land on
-        # ordinary FAILED even if a generic JobRunner/failure path calls this.
+        # SWITCH backstop: after Cold destructive OR Hot route boundary, never
+        # land on ordinary FAILED even if a generic JobRunner path calls this.
         meta = operation.metadata_json or {}
-        if (
-            operation.operation_type == OperationType.SWITCH.value
-            and bool(meta.get("destructive_boundary_entered"))
+        if operation.operation_type == OperationType.SWITCH.value and (
+            bool(meta.get("destructive_boundary_entered"))
+            or bool(meta.get("hot_route_boundary_entered"))
         ):
             operation.status = (
                 OperationStatus.MANUAL_INTERVENTION_REQUIRED.value
@@ -424,9 +424,9 @@ class OperationJobRepository:
             return
         if operation.status != OperationStatus.MANUAL_INTERVENTION_REQUIRED.value:
             meta = operation.metadata_json or {}
-            if (
-                operation.operation_type == OperationType.SWITCH.value
-                and bool(meta.get("destructive_boundary_entered"))
+            if operation.operation_type == OperationType.SWITCH.value and (
+                bool(meta.get("destructive_boundary_entered"))
+                or bool(meta.get("hot_route_boundary_entered"))
             ):
                 operation.status = (
                     OperationStatus.MANUAL_INTERVENTION_REQUIRED.value

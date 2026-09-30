@@ -59,6 +59,7 @@ from app.services.hot_switch_rollback import (
     STEP_HOT_ROLLBACK_BEGIN,
     STEP_HOT_ROLLBACK_PROBE_SOURCE,
     STEP_HOT_ROLLBACK_WAIT_ROUTE_APPLY,
+    durable_hot_route_mutation_from_steps,
 )
 
 logger = logging.getLogger(__name__)
@@ -565,12 +566,10 @@ class HotSwitchReconciler:
     def _route_mutation_evidence(
         steps: list[OperationStep], db_active: str | None, target_id: str
     ) -> bool:
+        """Durable route-mutation evidence only — ACTIVATE RUNNING alone is not."""
         if db_active == target_id:
             return True
-        return any(
-            s.step_code in _POST_ROUTE_STEPS and s.status != StepStatus.PENDING.value
-            for s in steps
-        )
+        return durable_hot_route_mutation_from_steps(steps)
 
     @staticmethod
     def _target_fully_serving(

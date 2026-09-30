@@ -68,6 +68,7 @@ from app.services.hot_switch_rollback import (
     USER_CANCELLED,
     HotSwitchRollbackMixin,
     _hot_route_boundary_entered,
+    durable_hot_route_mutation_from_steps,
 )
 from app.services.operation_executor import (
     OperationExecutor,
@@ -1385,7 +1386,7 @@ class HotSwitchExecutor(HotSwitchRollbackMixin):
             )
             return
 
-        # Live Source RUNNING preferred; DB fallback only if NA inspect works.
+        # Live Source RUNNING is mandatory; never fall back to DB runtime.
         try:
             mutation = MutationHeaders(
                 operation_id=str(operation.id),
@@ -1395,23 +1396,40 @@ class HotSwitchExecutor(HotSwitchRollbackMixin):
             inspected = await client.get_deployment(
                 str(source.id), mutation=mutation
             )
-            if inspected is not None:
-                live_runtime = str(inspected.get("runtime_status") or "")
-                if live_runtime and live_runtime != RuntimeStatus.RUNNING.value:
-                    await repo.finalize_operation_manual_intervention(
-                        operation_id=uuid.UUID(str(operation.id)),
-                        job_id=uuid.UUID(str(job.id)),
-                        code="CANCEL_SOURCE_NOT_RUNNING",
-                        message="Pre-route cancel observed Source not RUNNING.",
-                    )
-                    return
         except NodeAgentError:
-            # Observation unavailable → MIR rather than inventing Source safety.
             await repo.finalize_operation_manual_intervention(
                 operation_id=uuid.UUID(str(operation.id)),
                 job_id=uuid.UUID(str(job.id)),
                 code="CANCEL_NODE_AGENT_UNAVAILABLE",
                 message="Pre-route cancel cannot observe Source runtime.",
+            )
+            return
+
+        if inspected is None:
+            await repo.finalize_operation_manual_intervention(
+                operation_id=uuid.UUID(str(operation.id)),
+                job_id=uuid.UUID(str(job.id)),
+                code="CANCEL_SOURCE_NOT_OBSERVED",
+                message=(
+                    "Pre-route cancel requires a live Node Agent Source "
+                    "observation; payload was empty."
+                ),
+            )
+            return
+
+        raw_runtime = inspected.get("runtime_status")
+        live_runtime = (
+            str(raw_runtime).strip() if raw_runtime is not None else ""
+        )
+        if live_runtime != RuntimeStatus.RUNNING.value:
+            await repo.finalize_operation_manual_intervention(
+                operation_id=uuid.UUID(str(operation.id)),
+                job_id=uuid.UUID(str(job.id)),
+                code="CANCEL_SOURCE_NOT_RUNNING",
+                message=(
+                    "Pre-route cancel requires live Source runtime_status="
+                    f"RUNNING (observed={raw_runtime!r})."
+                ),
             )
             return
 
@@ -1434,7 +1452,11 @@ class HotSwitchExecutor(HotSwitchRollbackMixin):
         alias: EndpointAlias,
         target: Deployment,
     ) -> bool:
-        """True when persisted step/route state may already reflect ACTIVATE."""
+        """True when durable evidence shows route mutation may have occurred.
+
+        ``ACTIVATE_TARGET_ROUTE == RUNNING`` alone is NOT evidence — that is the
+        normal state after ``begin_step`` and before the cancel/boundary race.
+        """
         steps = (
             await session.execute(
                 select(OperationStep).where(
@@ -1443,9 +1465,8 @@ class HotSwitchExecutor(HotSwitchRollbackMixin):
                 )
             )
         ).scalars().all()
-        for step in steps:
-            if step.status != StepStatus.PENDING.value:
-                return True
+        if durable_hot_route_mutation_from_steps(steps):
+            return True
 
         active = (
             await session.execute(

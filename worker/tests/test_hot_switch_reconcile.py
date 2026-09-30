@@ -1040,3 +1040,75 @@ async def test_hot_reconcile_does_not_duplicate_rollback_steps(db) -> None:
         assert codes == list(HOT_ROLLBACK_STEPS)
         assert len(set(codes)) == len(HOT_ROLLBACK_STEPS)
         _ = second
+
+
+@pytest.mark.asyncio
+async def test_hot_reconcile_activate_running_only_pre_route_cancel(
+    db,
+) -> None:
+    """MIR + cancel + ACTIVATE RUNNING only + Source proven → CANCELLED."""
+    sf = db
+    fake_node = ColdSwitchFakeNodeAgent()
+    fake_gw = FakeGateway()
+    transport = CombinedTransport(fake_node, fake_gw)
+    _configure_hot_vram(fake_node)
+
+    async with sf() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        await _seed_standard_runtime(fake_node, fake_gw, fixture)
+        op_id, _job_id = await _enqueue_hot_switch(session, fixture=fixture)
+        await _mark_steps_status(session, op_id, succeeded_through="PROBE_TARGET")
+        activate = (
+            await session.execute(
+                select(OperationStep).where(
+                    OperationStep.operation_id == op_id,
+                    OperationStep.step_code == "ACTIVATE_TARGET_ROUTE",
+                )
+            )
+        ).scalar_one()
+        activate.status = StepStatus.RUNNING.value
+        activate.started_at = dt.datetime.now(tz=dt.UTC)
+        # No route_routing_version — begin_step only.
+        activate.detail_json = {"request_id": str(uuid.uuid4())}
+        source = await session.get(Deployment, fixture["source_id"])
+        assert source is not None
+        source.runtime_status = RuntimeStatus.RUNNING.value
+        source.health_status = HealthStatus.HEALTHY.value
+        await session.commit()
+        await _force_hot_mir(session, op_id, boundary=False, cancel=True)
+
+    fake_node.containers[str(fixture["source_id"])]["runtime_status"] = "RUNNING"
+    fake_node.containers[str(fixture["source_id"])]["health_status"] = "HEALTHY"
+    fake_node.containers[str(fixture["target_id"])] = {
+        "deployment_id": str(fixture["target_id"]),
+        "container_id": f"ctr-tgt-actrun-{fixture['suffix']}",
+        "container_name": "tgt",
+        "runtime_status": "CREATED",
+        "health_status": "UNKNOWN",
+    }
+    fake_gw.active_deployment_id = str(fixture["source_id"])
+    fake_gw.traffic_state = TrafficState.SERVING.value
+    fake_gw.applied_routing_version = 1
+    fake_gw.auto_apply = False
+
+    result = await _reconciler(sf, transport, sf.kw["bind"]).reconcile_operation(
+        op_id
+    )
+    assert result.outcome == "CANCELLED", result
+    assert result.outcome != "RESUME_ROLLBACK"
+
+    async with sf() as session:
+        op = await session.get(Operation, op_id)
+        rb_steps = (
+            await session.execute(
+                select(OperationStep).where(
+                    OperationStep.operation_id == op_id,
+                    OperationStep.step_code.in_(HOT_ROLLBACK_STEPS),
+                )
+            )
+        ).scalars().all()
+        assert op is not None
+        assert op.status == OperationStatus.CANCELLED.value
+        assert rb_steps == []

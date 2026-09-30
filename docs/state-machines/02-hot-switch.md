@@ -67,6 +67,14 @@ Never hold DB row locks across Gateway / Node Agent HTTP.
 Cancel after the boundary marker is **post-route rollback intent** only
 (never direct `CANCELLED`).
 
+`ACTIVATE_TARGET_ROUTE == RUNNING` alone (post-`begin_step`, pre-boundary
+decision) is **not** route-mutation evidence. Durable evidence requires
+`hot_route_boundary_entered`, DB ACTIVE=Target, persisted
+`route_routing_version`, ACTIVATE `SUCCEEDED`, or WAIT/FINALIZE progress.
+
+Generic Worker `mark_operation_failed` backstop: SWITCH +
+(`destructive_boundary_entered` **or** `hot_route_boundary_entered`) → MIR.
+
 ## 7. RUNNING HOT cancel
 
 | Phase | Outcome |

@@ -62,9 +62,45 @@ HOT_ROLLBACK_STEPS: tuple[str, ...] = (
 
 HOT_ROUTE_BOUNDARY_FLAG = "hot_route_boundary_entered"
 
+# Forward post-route step codes used for durable mutation evidence.
+_HOT_FORWARD_POST_ROUTE_STEPS = frozenset(
+    {
+        "ACTIVATE_TARGET_ROUTE",
+        "WAIT_ROUTE_APPLY",
+        "FINALIZE",
+    }
+)
+
 
 def _hot_route_boundary_entered(operation: Operation) -> bool:
     return bool((operation.metadata_json or {}).get(HOT_ROUTE_BOUNDARY_FLAG))
+
+
+def durable_hot_route_mutation_from_steps(steps: list[OperationStep]) -> bool:
+    """True when durable evidence shows HOT route mutation may have occurred.
+
+    ``ACTIVATE_TARGET_ROUTE == RUNNING`` alone is NOT evidence — that is the
+    normal pre-boundary state after ``begin_step`` and before the cancel race.
+    Durable evidence requires ACTIVATE SUCCEEDED, a persisted
+    ``route_routing_version``, or WAIT_ROUTE_APPLY / FINALIZE progress beyond
+    PENDING.
+    """
+    for step in steps:
+        code = str(step.step_code)
+        if code not in _HOT_FORWARD_POST_ROUTE_STEPS:
+            continue
+        status = str(step.status)
+        if code == "ACTIVATE_TARGET_ROUTE":
+            if status == StepStatus.SUCCEEDED.value:
+                return True
+            version = (step.detail_json or {}).get("route_routing_version")
+            if version is not None:
+                return True
+            continue
+        # WAIT_ROUTE_APPLY / FINALIZE: any progress beyond PENDING.
+        if status != StepStatus.PENDING.value:
+            return True
+    return False
 
 
 class HotSwitchRollbackMixin:

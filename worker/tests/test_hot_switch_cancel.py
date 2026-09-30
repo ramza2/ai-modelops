@@ -1188,3 +1188,285 @@ async def test_hot_crash_after_boundary_before_route_never_cancelled(
         assert len(rb_steps) == len(HOT_ROLLBACK_STEPS)
         # Post-boundary: Target must not be cleanup-stopped.
         assert stop_after == stop_before
+
+
+@pytest.mark.asyncio
+async def test_hot_cancel_wins_after_activate_begin_step_is_cancelled(
+    db, monkeypatch
+) -> None:
+    """Cancel stamped after begin_step(ACTIVATE)=RUNNING but before boundary.
+
+    Must remain pre-route CANCELLED — ACTIVATE RUNNING alone is not mutation.
+    """
+    from app.repositories.operations import OperationJobRepository
+
+    sf = db
+    fake_node = ColdSwitchFakeNodeAgent()
+    fake_gw = FakeGateway()
+    transport = CombinedTransport(fake_node, fake_gw)
+    _configure_hot_vram(fake_node)
+
+    async with sf() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        await _seed_standard_runtime(fake_node, fake_gw, fixture)
+        fake_node.containers[str(fixture["source_id"])]["health_status"] = "HEALTHY"
+        op_id, job_id = await _enqueue_hot_switch(session, fixture=fixture)
+        await _mark_steps_status(session, op_id, succeeded_through="PROBE_TARGET")
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        meta = dict(op.metadata_json or {})
+        meta["hot_target_start_owned_by_operation"] = True
+        op.metadata_json = meta
+        source = await session.get(Deployment, fixture["source_id"])
+        target = await session.get(Deployment, fixture["target_id"])
+        assert source and target
+        source.runtime_status = RuntimeStatus.RUNNING.value
+        source.health_status = HealthStatus.HEALTHY.value
+        tgt = f"ctr-tgt-race-{fixture['suffix']}"
+        target.runtime_status = RuntimeStatus.RUNNING.value
+        target.health_status = HealthStatus.HEALTHY.value
+        target.container_id = tgt
+        state = await session.get(RoutingState, 1)
+        version_before = int(state.version) if state else 0
+        await session.commit()
+        # Do NOT stamp cancel yet — race injects it after begin_step.
+
+    fake_node.containers[str(fixture["target_id"])] = {
+        "deployment_id": str(fixture["target_id"]),
+        "container_id": tgt,
+        "container_name": "tgt",
+        "runtime_status": "RUNNING",
+        "health_status": "HEALTHY",
+    }
+    fake_node.containers[str(fixture["source_id"])]["runtime_status"] = "RUNNING"
+    fake_node.containers[str(fixture["source_id"])]["health_status"] = "HEALTHY"
+
+    from app.clients.gateway import GatewayClient
+
+    monkeypatch.setattr(
+        GatewayClient,
+        "get_route_runtime",
+        _make_synced_runtime(sf, fixture["endpoint_id"]),
+    )
+
+    original_begin = OperationJobRepository.begin_step
+
+    async def begin_then_cancel(self, step):  # noqa: ANN001
+        request_id = await original_begin(self, step)
+        if step.step_code == "ACTIVATE_TARGET_ROUTE":
+            async with sf() as other:
+                await _stamp_cancel(other, op_id, reason="race-after-begin")
+        return request_id
+
+    monkeypatch.setattr(OperationJobRepository, "begin_step", begin_then_cancel)
+
+    await _claim_and_execute(
+        sf,
+        job_id=job_id,
+        settings=_settings(),
+        transport=transport,
+        engine=sf.kw["bind"],
+    )
+
+    async with sf() as session:
+        op = await session.get(Operation, op_id)
+        active = (
+            await session.execute(
+                select(EndpointRoute).where(
+                    EndpointRoute.endpoint_alias_id == fixture["endpoint_id"],
+                    EndpointRoute.status == "ACTIVE",
+                )
+            )
+        ).scalar_one()
+        state = await session.get(RoutingState, 1)
+        rb_steps = (
+            await session.execute(
+                select(OperationStep).where(
+                    OperationStep.operation_id == op_id,
+                    OperationStep.step_code.in_(HOT_ROLLBACK_STEPS),
+                )
+            )
+        ).scalars().all()
+        activate = (
+            await session.execute(
+                select(OperationStep).where(
+                    OperationStep.operation_id == op_id,
+                    OperationStep.step_code == "ACTIVATE_TARGET_ROUTE",
+                )
+            )
+        ).scalar_one()
+        assert op is not None
+        assert op.status == OperationStatus.CANCELLED.value
+        assert (op.metadata_json or {}).get("hot_route_boundary_entered") is not True
+        assert str(active.deployment_id) == str(fixture["source_id"])
+        assert int(state.version) == version_before
+        assert rb_steps == []
+        assert (activate.detail_json or {}).get("route_routing_version") is None
+
+
+@pytest.mark.asyncio
+async def test_hot_pre_route_cancel_source_payload_none_mir(
+    db, monkeypatch
+) -> None:
+    sf = db
+    fake_node = ColdSwitchFakeNodeAgent()
+    fake_gw = FakeGateway()
+    transport = CombinedTransport(fake_node, fake_gw)
+    _configure_hot_vram(fake_node)
+
+    async with sf() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        await _seed_standard_runtime(fake_node, fake_gw, fixture)
+        op_id, job_id = await _enqueue_hot_switch(session, fixture=fixture)
+        await _mark_steps_status(session, op_id, succeeded_through="PREPARE_TARGET")
+        await session.commit()
+        await _stamp_cancel(session, op_id)
+
+    # Remove Source container so get_deployment returns None / 404 → None.
+    fake_node.containers.pop(str(fixture["source_id"]), None)
+
+    from app.clients.gateway import GatewayClient
+
+    monkeypatch.setattr(
+        GatewayClient,
+        "get_route_runtime",
+        _make_synced_runtime(sf, fixture["endpoint_id"]),
+    )
+
+    await _claim_and_execute(
+        sf,
+        job_id=job_id,
+        settings=_settings(),
+        transport=transport,
+        engine=sf.kw["bind"],
+    )
+
+    async with sf() as session:
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        assert op.status == OperationStatus.MANUAL_INTERVENTION_REQUIRED.value
+        assert op.error_code in {
+            "CANCEL_SOURCE_NOT_OBSERVED",
+            "CANCEL_SOURCE_NOT_RUNNING",
+            "CANCEL_NODE_AGENT_UNAVAILABLE",
+        }
+
+
+@pytest.mark.asyncio
+async def test_hot_pre_route_cancel_source_runtime_missing_mir(
+    db, monkeypatch
+) -> None:
+    sf = db
+    fake_node = ColdSwitchFakeNodeAgent()
+    fake_gw = FakeGateway()
+    transport = CombinedTransport(fake_node, fake_gw)
+    _configure_hot_vram(fake_node)
+
+    async with sf() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        await _seed_standard_runtime(fake_node, fake_gw, fixture)
+        op_id, job_id = await _enqueue_hot_switch(session, fixture=fixture)
+        await _mark_steps_status(session, op_id, succeeded_through="PREPARE_TARGET")
+        await session.commit()
+        await _stamp_cancel(session, op_id)
+
+    # Payload exists but runtime_status key absent.
+    src_id = str(fixture["source_id"])
+    fake_node.containers[src_id] = {
+        "deployment_id": src_id,
+        "container_id": "ctr-src-missing-rt",
+        "container_name": "src",
+        # no runtime_status
+        "health_status": "HEALTHY",
+    }
+
+    from app.clients.gateway import GatewayClient
+
+    monkeypatch.setattr(
+        GatewayClient,
+        "get_route_runtime",
+        _make_synced_runtime(sf, fixture["endpoint_id"]),
+    )
+
+    await _claim_and_execute(
+        sf,
+        job_id=job_id,
+        settings=_settings(),
+        transport=transport,
+        engine=sf.kw["bind"],
+    )
+
+    async with sf() as session:
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        assert op.status == OperationStatus.MANUAL_INTERVENTION_REQUIRED.value
+        assert op.error_code == "CANCEL_SOURCE_NOT_RUNNING"
+
+
+@pytest.mark.asyncio
+async def test_mark_operation_failed_hot_boundary_backstop_mir(db) -> None:
+    from app.repositories.operations import OperationJobRepository
+
+    sf = db
+    fake_node = ColdSwitchFakeNodeAgent()
+
+    async with sf() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        op_id, _job_id = await _enqueue_hot_switch(session, fixture=fixture)
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        op.status = OperationStatus.RUNNING.value
+        meta = dict(op.metadata_json or {})
+        meta["hot_route_boundary_entered"] = True
+        op.metadata_json = meta
+        await session.commit()
+
+        repo = OperationJobRepository(session)
+        await repo.mark_operation_failed(
+            op_id,
+            code="WORKER_INTERNAL_ERROR",
+            message="Unhandled worker exception during Hot Switch.",
+        )
+
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        assert op.status == OperationStatus.MANUAL_INTERVENTION_REQUIRED.value
+        assert op.error_code == "WORKER_INTERNAL_ERROR"
+
+
+@pytest.mark.asyncio
+async def test_mark_operation_failed_hot_pre_boundary_stays_failed(db) -> None:
+    from app.repositories.operations import OperationJobRepository
+
+    sf = db
+    fake_node = ColdSwitchFakeNodeAgent()
+
+    async with sf() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        op_id, _job_id = await _enqueue_hot_switch(session, fixture=fixture)
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        op.status = OperationStatus.RUNNING.value
+        # No hot_route_boundary_entered.
+        await session.commit()
+
+        repo = OperationJobRepository(session)
+        await repo.mark_operation_failed(
+            op_id,
+            code="WORKER_INTERNAL_ERROR",
+            message="Unexpected worker error during Hot Switch.",
+        )
+
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        assert op.status == OperationStatus.FAILED.value
