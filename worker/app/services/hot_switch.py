@@ -511,11 +511,9 @@ class HotSwitchExecutor:
             )
             detail["container_ensured"] = True
         elif code == STEP_START_TARGET:
-            detail = await self._cs._step_start_target(
-                session, client, target, mutation
+            detail = await self._step_start_target_hot(
+                session, repo, client, operation, target, mutation
             )
-            if not detail.get("reconciled_already_running"):
-                await self._mark_hot_target_started(session, operation)
         elif code == STEP_WAIT_TARGET_HEALTH:
             detail = await self._lifecycle._wait_health(
                 session, client, operation, target, mutation
@@ -753,10 +751,87 @@ class HotSwitchExecutor:
     async def _mark_hot_target_started(
         self, session: AsyncSession, operation: Operation
     ) -> None:
+        """Observed-success diagnostic only; cleanup uses ownership marker."""
         meta = dict(operation.metadata_json or {})
         meta["hot_target_started"] = True
         operation.metadata_json = meta
         await session.flush()
+
+    async def _claim_hot_target_start_ownership(
+        self,
+        session: AsyncSession,
+        repo: OperationJobRepository,
+        operation: Operation,
+    ) -> None:
+        """Persist start ownership before Node Agent start (crash-safe).
+
+        Commits via metadata patch so a lost start response still allows
+        this Operation to cleanup-stop Target. Does not hold a lock across
+        the subsequent Node Agent call.
+        """
+        meta = await repo.patch_operation_metadata(
+            uuid.UUID(str(operation.id)),
+            {"hot_target_start_owned_by_operation": True},
+        )
+        operation.metadata_json = meta
+        await session.refresh(operation)
+
+    def _hot_owns_target_start(self, operation: Operation) -> bool:
+        meta = dict(operation.metadata_json or {})
+        return bool(meta.get("hot_target_start_owned_by_operation"))
+
+    async def _step_start_target_hot(
+        self,
+        session: AsyncSession,
+        repo: OperationJobRepository,
+        client: NodeAgentClient,
+        operation: Operation,
+        target: Deployment,
+        mutation: MutationHeaders,
+    ) -> dict[str, Any]:
+        """HOT START_TARGET with durable ownership provenance.
+
+        Ownership is claimed only when this Operation authorizes an external
+        start of a non-RUNNING Target, and is committed before the Node Agent
+        mutation so crash/timeout cannot lose cleanup eligibility.
+        """
+        inspected = await client.get_deployment(str(target.id), mutation=mutation)
+        already_running = inspected is not None and str(
+            inspected.get("runtime_status") or ""
+        ) == RuntimeStatus.RUNNING.value
+        owned = self._hot_owns_target_start(operation)
+
+        if already_running:
+            # Pre-existing RUNNING → never claim ownership retrospectively.
+            # Crash-window RUNNING with prior ownership → keep ownership, no re-start.
+            self._lifecycle._merge_container_id(target, inspected)
+            self._lifecycle._mark_runtime_started(target)
+            await session.flush()
+            return {
+                "reconciled_already_running": True,
+                "runtime_status": RuntimeStatus.RUNNING.value,
+                "hot_target_start_owned_by_operation": owned,
+            }
+
+        # Not RUNNING: authorize/start. Claim ownership before external mutation.
+        if not owned:
+            await self._claim_hot_target_start_ownership(session, repo, operation)
+            owned = True
+
+        result = await client.start_deployment(
+            str(target.id), mutation=mutation, timeout_seconds=30
+        )
+        self._lifecycle._merge_container_id(target, result)
+        self._lifecycle._mark_runtime_started(target)
+        await self._mark_hot_target_started(session, operation)
+        await session.flush()
+        return {
+            "runtime_status": RuntimeStatus.RUNNING.value,
+            "health_status": HealthStatus.STARTING.value,
+            "container_id": target.container_id,
+            "hot_target_start_owned_by_operation": True,
+            "hot_target_started": True,
+        }
 
     async def _step_activate_target_route(
         self,
@@ -1243,8 +1318,10 @@ class HotSwitchExecutor:
         operation: Operation,
         target: Deployment,
     ) -> None:
+        await session.refresh(operation)
         meta = dict(operation.metadata_json or {})
-        if not meta.get("hot_target_started"):
+        # Durable ownership — not post-call hot_target_started — gates cleanup.
+        if not meta.get("hot_target_start_owned_by_operation"):
             return
         try:
             mutation = MutationHeaders(

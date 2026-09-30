@@ -741,6 +741,12 @@ async def test_hot_target_already_running_no_duplicate_start(
             op.error_message,
         )
         assert (start_step.detail_json or {}).get("reconciled_already_running") is True
+        assert (start_step.detail_json or {}).get(
+            "hot_target_start_owned_by_operation"
+        ) is False
+        assert (op.metadata_json or {}).get(
+            "hot_target_start_owned_by_operation"
+        ) is not True
 
 
 @pytest.mark.asyncio
@@ -1189,6 +1195,7 @@ async def test_hot_pre_route_failure_stops_started_target(db, monkeypatch) -> No
         assert source.runtime_status == RuntimeStatus.RUNNING.value
         assert target.runtime_status == RuntimeStatus.STOPPED.value
         meta = op.metadata_json or {}
+        assert meta.get("hot_target_start_owned_by_operation") is True
         assert meta.get("hot_target_started") is True
         assert meta.get("hot_target_cleanup") == "stopped"
 
@@ -1262,7 +1269,246 @@ async def test_hot_pre_route_cleanup_failure_preserves_diagnostics(
         assert source.runtime_status == RuntimeStatus.RUNNING.value
         assert alias.traffic_state == TrafficState.SERVING.value
         meta = op.metadata_json or {}
+        assert meta.get("hot_target_start_owned_by_operation") is True
         assert meta.get("hot_target_started") is True
         assert meta.get("hot_target_cleanup") == "failed"
         assert meta.get("hot_target_cleanup_error")
         assert "stop failed" in str(meta.get("hot_target_cleanup_error"))
+
+
+@pytest.mark.asyncio
+async def test_hot_crash_window_ownership_survives_resume_cleanup(
+    db, monkeypatch
+) -> None:
+    """Ownership committed before start + crash before hot_target_started → cleanup OK."""
+    sf = db
+    fake_node = ColdSwitchFakeNodeAgent()
+    fake_gw = FakeGateway()
+    transport = CombinedTransport(fake_node, fake_gw)
+    _configure_hot_vram(fake_node)
+
+    async with sf() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        await _seed_standard_runtime(fake_node, fake_gw, fixture)
+        fake_node.containers[str(fixture["source_id"])]["health_status"] = "HEALTHY"
+        op_id, job_id = await _enqueue_hot_switch(session, fixture=fixture)
+        await _mark_steps_status(session, op_id, succeeded_through="PREPARE_TARGET")
+
+        # Crash window: ownership durable, observed-success flag absent,
+        # START_TARGET left RUNNING, live Target already RUNNING from side effect.
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        meta = dict(op.metadata_json or {})
+        meta["hot_target_start_owned_by_operation"] = True
+        meta.pop("hot_target_started", None)
+        op.metadata_json = meta
+        start_step = (
+            await session.execute(
+                select(OperationStep).where(
+                    OperationStep.operation_id == op_id,
+                    OperationStep.step_code == "START_TARGET",
+                )
+            )
+        ).scalar_one()
+        start_step.status = StepStatus.RUNNING.value
+        start_step.detail_json = {"request_id": str(uuid.uuid4())}
+        target = await session.get(Deployment, fixture["target_id"])
+        assert target is not None
+        tgt_ctr = f"ctr-tgt-crash-{fixture['suffix']}"
+        target.runtime_status = RuntimeStatus.RUNNING.value
+        target.health_status = HealthStatus.STARTING.value
+        target.container_id = tgt_ctr
+        await session.commit()
+
+    fake_node.containers[str(fixture["target_id"])] = {
+        "deployment_id": str(fixture["target_id"]),
+        "container_id": tgt_ctr,
+        "container_name": f"tgt-crash-{fixture['suffix']}",
+        "runtime_status": "RUNNING",
+        "health_status": "STARTING",
+    }
+
+    from app.clients.gateway import GatewayClient
+    from app.services.operation_executor import (
+        OperationExecutor,
+        PermanentStepError,
+    )
+
+    monkeypatch.setattr(
+        GatewayClient,
+        "get_route_runtime",
+        _make_synced_runtime(sf, fixture["endpoint_id"]),
+    )
+
+    async def _boom_health(self, *args, **kwargs):  # noqa: ANN001, ANN002
+        raise PermanentStepError("unhealthy after crash resume", code="HEALTH_TIMEOUT")
+
+    monkeypatch.setattr(OperationExecutor, "_wait_health", _boom_health)
+
+    start_before = sum(
+        1 for c in fake_node.calls if str(c.get("path", "")).endswith("/start")
+    )
+    await _claim_and_execute(
+        sf,
+        job_id=job_id,
+        settings=_settings(),
+        transport=transport,
+        engine=sf.kw["bind"],
+    )
+    start_after = sum(
+        1 for c in fake_node.calls if str(c.get("path", "")).endswith("/start")
+    )
+    assert start_after == start_before, "must not re-start owned already-RUNNING Target"
+
+    target_stops = [
+        c
+        for c in fake_node.calls
+        if str(c.get("path", "")).endswith("/stop")
+        and str(fixture["target_id"]) in str(c.get("path", ""))
+    ]
+    assert target_stops, "owned Target must be cleanup-stopped after pre-route fail"
+
+    async with sf() as session:
+        op = await session.get(Operation, op_id)
+        source = await session.get(Deployment, fixture["source_id"])
+        target = await session.get(Deployment, fixture["target_id"])
+        alias = await session.get(EndpointAlias, fixture["endpoint_id"])
+        active = (
+            await session.execute(
+                select(EndpointRoute).where(
+                    EndpointRoute.endpoint_alias_id == fixture["endpoint_id"],
+                    EndpointRoute.status == "ACTIVE",
+                )
+            )
+        ).scalar_one()
+        assert op and source and target and alias
+        assert op.status == OperationStatus.FAILED.value
+        assert op.error_code == "HEALTH_TIMEOUT"
+        assert str(active.deployment_id) == str(fixture["source_id"])
+        assert alias.traffic_state == TrafficState.SERVING.value
+        assert source.runtime_status == RuntimeStatus.RUNNING.value
+        assert target.runtime_status == RuntimeStatus.STOPPED.value
+        meta = op.metadata_json or {}
+        assert meta.get("hot_target_start_owned_by_operation") is True
+        assert meta.get("hot_target_started") is not True
+        assert meta.get("hot_target_cleanup") == "stopped"
+
+
+@pytest.mark.asyncio
+async def test_hot_preexisting_target_never_cleanup_stopped(
+    db, monkeypatch
+) -> None:
+    """Pre-existing RUNNING Target without ownership must never be /stop'd."""
+    sf = db
+    fake_node = ColdSwitchFakeNodeAgent()
+    fake_gw = FakeGateway()
+    transport = CombinedTransport(fake_node, fake_gw)
+    _configure_hot_vram(fake_node)
+
+    async with sf() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        await _seed_standard_runtime(fake_node, fake_gw, fixture)
+        fake_node.containers[str(fixture["source_id"])]["health_status"] = "HEALTHY"
+        op_id, job_id = await _enqueue_hot_switch(session, fixture=fixture)
+        await _mark_steps_status(session, op_id, succeeded_through="PREPARE_TARGET")
+        target = await session.get(Deployment, fixture["target_id"])
+        assert target is not None
+        tgt_ctr = f"ctr-tgt-preexist-{fixture['suffix']}"
+        target.runtime_status = RuntimeStatus.RUNNING.value
+        target.health_status = HealthStatus.HEALTHY.value
+        target.container_id = tgt_ctr
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        meta = dict(op.metadata_json or {})
+        meta.pop("hot_target_start_owned_by_operation", None)
+        meta.pop("hot_target_started", None)
+        op.metadata_json = meta
+        await session.commit()
+
+    fake_node.containers[str(fixture["target_id"])] = {
+        "deployment_id": str(fixture["target_id"]),
+        "container_id": tgt_ctr,
+        "container_name": f"tgt-preexist-{fixture['suffix']}",
+        "runtime_status": "RUNNING",
+        "health_status": "HEALTHY",
+    }
+
+    from app.clients.gateway import GatewayClient
+    from app.services.operation_executor import (
+        OperationExecutor,
+        PermanentStepError,
+    )
+
+    monkeypatch.setattr(
+        GatewayClient,
+        "get_route_runtime",
+        _make_synced_runtime(sf, fixture["endpoint_id"]),
+    )
+
+    async def _boom_health(self, *args, **kwargs):  # noqa: ANN001, ANN002
+        raise PermanentStepError("unhealthy pre-existing", code="HEALTH_TIMEOUT")
+
+    monkeypatch.setattr(OperationExecutor, "_wait_health", _boom_health)
+
+    start_before = sum(
+        1 for c in fake_node.calls if str(c.get("path", "")).endswith("/start")
+    )
+    stop_before = sum(
+        1 for c in fake_node.calls if str(c.get("path", "")).endswith("/stop")
+    )
+    await _claim_and_execute(
+        sf,
+        job_id=job_id,
+        settings=_settings(),
+        transport=transport,
+        engine=sf.kw["bind"],
+    )
+    start_after = sum(
+        1 for c in fake_node.calls if str(c.get("path", "")).endswith("/start")
+    )
+    stop_after = sum(
+        1 for c in fake_node.calls if str(c.get("path", "")).endswith("/stop")
+    )
+    assert start_after == start_before
+    assert stop_after == stop_before
+
+    async with sf() as session:
+        op = await session.get(Operation, op_id)
+        source = await session.get(Deployment, fixture["source_id"])
+        target = await session.get(Deployment, fixture["target_id"])
+        alias = await session.get(EndpointAlias, fixture["endpoint_id"])
+        active = (
+            await session.execute(
+                select(EndpointRoute).where(
+                    EndpointRoute.endpoint_alias_id == fixture["endpoint_id"],
+                    EndpointRoute.status == "ACTIVE",
+                )
+            )
+        ).scalar_one()
+        start_step = (
+            await session.execute(
+                select(OperationStep).where(
+                    OperationStep.operation_id == op_id,
+                    OperationStep.step_code == "START_TARGET",
+                )
+            )
+        ).scalar_one()
+        assert op and source and target and alias
+        assert op.status == OperationStatus.FAILED.value
+        assert op.error_code == "HEALTH_TIMEOUT"
+        assert str(active.deployment_id) == str(fixture["source_id"])
+        assert alias.traffic_state == TrafficState.SERVING.value
+        assert source.runtime_status == RuntimeStatus.RUNNING.value
+        assert target.runtime_status == RuntimeStatus.RUNNING.value
+        meta = op.metadata_json or {}
+        assert meta.get("hot_target_start_owned_by_operation") is not True
+        assert meta.get("hot_target_started") is not True
+        assert meta.get("hot_target_cleanup") is None
+        assert (start_step.detail_json or {}).get("reconciled_already_running") is True
+        assert (start_step.detail_json or {}).get(
+            "hot_target_start_owned_by_operation"
+        ) is False
