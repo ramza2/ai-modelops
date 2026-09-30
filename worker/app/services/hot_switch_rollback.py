@@ -533,11 +533,9 @@ class HotSwitchRollbackMixin:
                 )
 
             now = dt.datetime.now(tz=dt.UTC)
-            if active is not None and str(active.deployment_id) == str(target.id):
-                active.status = RouteStatus.INACTIVE.value
-                active.deactivated_at = now
-                await tx.flush()
 
+            # Require the persisted Source route before mutating ACTIVE Target.
+            # Never invent a Source route or guess rewrite_model_name.
             inactive_source = (
                 await tx.execute(
                     select(EndpointRoute)
@@ -551,26 +549,34 @@ class HotSwitchRollbackMixin:
                 )
             ).scalar_one_or_none()
 
-            if inactive_source is not None:
-                inactive_source.status = RouteStatus.ACTIVE.value
-                inactive_source.activated_at = now
-                inactive_source.deactivated_at = None
-                inactive_source.operation_id = operation.id
-                route_id = str(inactive_source.id)
-            else:
-                route = EndpointRoute(
-                    endpoint_alias_id=alias.id,
-                    deployment_id=source.id,
-                    status=RouteStatus.ACTIVE.value,
-                    rewrite_model_name=None,
-                    operation_id=operation.id,
-                    activated_at=now,
-                    deactivated_at=None,
-                    created_at=now,
+            if inactive_source is None:
+                raise PermanentStepError(
+                    "Hot rollback cannot restore Source: the original Source "
+                    "route row is missing. Refusing to invent rewrite/routing "
+                    "configuration.",
+                    code="SOURCE_ROUTE_MISSING",
+                    details={
+                        "endpoint_alias_id": str(alias.id),
+                        "source_deployment_id": str(source.id),
+                        "active_deployment_id": (
+                            str(active.deployment_id) if active is not None else None
+                        ),
+                    },
                 )
-                tx.add(route)
+
+            if active is not None and str(active.deployment_id) == str(target.id):
+                active.status = RouteStatus.INACTIVE.value
+                active.deactivated_at = now
                 await tx.flush()
-                route_id = str(route.id)
+
+            # Reactivate the exact persisted Source route row — preserve
+            # rewrite_model_name and other configuration on that row.
+            inactive_source.status = RouteStatus.ACTIVE.value
+            inactive_source.activated_at = now
+            inactive_source.deactivated_at = None
+            inactive_source.operation_id = operation.id
+            route_id = str(inactive_source.id)
+            preserved_rewrite = inactive_source.rewrite_model_name
 
             version = await _bump_routing_version(tx)
             await tx.commit()
@@ -579,6 +585,7 @@ class HotSwitchRollbackMixin:
             "route_routing_version": version,
             "active_deployment_id": str(source.id),
             "route_id": route_id,
+            "rewrite_model_name": preserved_rewrite,
             "traffic_state": TrafficState.SERVING.value,
         }
 

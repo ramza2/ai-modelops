@@ -105,6 +105,11 @@ HOT_ROLLBACK_WAIT_ROUTE_APPLY
 HOT_ROLLBACK_FINALIZE        # Target retained RUNNING if it may have served
 ```
 
+HOT rollback reactivates the **persisted original Source route** row and
+preserves its `rewrite_model_name`. If that Source route configuration is
+missing, automatic rollback ends in `MANUAL_INTERVENTION_REQUIRED` rather
+than reconstructing routing configuration.
+
 Successful finalize → `ROLLED_BACK` + Job `DONE` +
 `hot_target_retained_after_rollback=true`.
 
