@@ -30,8 +30,13 @@ Cold Switch는 GPU VRAM이 부족하여 기존 모델과 신규 모델을 동시
   Eligible only for terminal `FAILED` / `ROLLED_BACK` Cold SWITCH after a safe
   baseline revalidation. `MANUAL_INTERVENTION_REQUIRED` retry remains blocked
   until M5-C2-C reconciliation. Fresh Worker Preflight is always authoritative.
-- **M5-C2-C (not implemented):** full reconciliation sweeper, MIR recovery/retry,
-  HOT/AUTO/ALTERNATE_NODE, Admin UI.
+- **M5-C2-C:** Cold SWITCH MIR reconciliation sweeper — **implemented**.
+  Worker observes DB + Gateway + Node Agent and may terminalize MIR to
+  `SUCCEEDED` / `ROLLED_BACK` / `CANCELLED`, or safely resume forward
+  (`WAIT_ROUTE_APPLY`…`FINALIZE`) / existing rollback without new Operations
+  or duplicate side effects. Ambiguous / dependency-unavailable states remain
+  MIR with bounded attempt + cooldown. HOT/AUTO/ALTERNATE_NODE and Admin UI
+  remain out of scope.
 
 핵심 원칙은 다음과 같다.
 
@@ -964,6 +969,62 @@ State / safety conflicts remain `409 INVALID_OPERATION_STATE`.
 ### Worker
 
 No new retry state machine. The new Operation enters the normal Cold Switch queue.
+
+---
+
+## 13c. MIR Reconciliation (M5-C2-C — implemented)
+
+Worker runs a bounded Cold SWITCH MIR sweeper each poll (after stale RUNNING
+lease recovery). Scope: `status=MANUAL_INTERVENTION_REQUIRED`,
+`operation_type=SWITCH`, `switch_strategy=COLD` only.
+
+### Safety
+
+- Never guess. Observe Operation/Job/Steps, Endpoint traffic + ACTIVE route,
+  Gateway applied route/traffic/version, and **live** Node Agent deployment
+  runtime/health. DB runtime/health is diagnostic only — never a substitute
+  when NA observation is missing (404 / absent fields → remain MIR).
+- Target terminal `SUCCEEDED` requires persisted `PROBE_TARGET == SUCCEEDED`
+  in addition to ACTIVE Target route, Gateway SERVING Target, Target
+  RUNNING+HEALTHY, and Source STOPPED. Container health alone must not imply
+  inference readiness. `INFERENCE_PROBE_FAILED` / `PROBE_FAILED` with no later
+  successful probe remain MIR.
+- Direct `ROLLED_BACK` requires the same final invariants as
+  `ROLLBACK_FINALIZE`: Source RUNNING+HEALTHY, Target STOPPED, Source ACTIVE
+  route/Gateway SERVING. Desired states are normalized to Source `RUNNING` /
+  Target `STOPPED`. If Source is restored but Target is still running, resume
+  an existing rollback step when safe; otherwise remain MIR.
+- Forward resume of `WAIT_ROUTE_APPLY` / `RESTORE_TRAFFIC` /
+  `WAIT_TRAFFIC_APPLY` / `FINALIZE` requires `PROBE_TARGET == SUCCEEDED`,
+  live Target RUNNING+HEALTHY, Source STOPPED, and DB ACTIVE route == Target.
+  Preserve already-SUCCEEDED steps; do not replay earlier destructive steps.
+- `reopen_mir_for_resume` / `reconcile_mir_to_terminal` lock Operation + Job
+  (+ Step) first. Missing Job/Step returns False with **no** Operation/Step
+  mutation (Operation stays MIR).
+- Do not hold DB row locks across Node Agent / Gateway HTTP.
+- Use existing advisory locks (Endpoint + Node + Source + Target).
+- Concurrent Workers: `FOR UPDATE SKIP LOCKED` claim + claim lease in metadata.
+
+### Outcomes (exactly one)
+
+| Proven state | Result |
+|---|---|
+| Target fully serving **and** `PROBE_TARGET` succeeded | `SUCCEEDED` (no destructive side effects) |
+| Source fully restored + Target STOPPED + cancel intent + pre-destructive | `CANCELLED` |
+| Source fully restored + Target STOPPED otherwise | `ROLLED_BACK` (+ desired-state normalize) |
+| Source restored, Target still running, rollback step reopenable | resume `ROLLING_BACK` |
+| Safe post-activation forward step with probe/runtime gates | resume `RUNNING` (reopen that step only) |
+| Safe in-progress rollback otherwise | resume `ROLLING_BACK` (reopen failed rollback step; no duplicate steps) |
+| Ambiguous / Gateway or Node Agent unavailable / missing NA payload / deterministic unsafe failure / missing probe evidence | remain MIR |
+
+### Cooldown
+
+`metadata_json` tracks `reconciliation_attempt_count`, `reconciliation_last_at`,
+`reconciliation_last_outcome`, `reconciliation_last_reason`,
+`reconciliation_next_attempt_at`. Unresolved MIR is never silently dropped.
+
+MIR `/retry` still does not blind-create a new Switch; reconciliation should
+resolve MIR first when state is determinable.
 
 ---
 

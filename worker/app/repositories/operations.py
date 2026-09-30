@@ -5,10 +5,16 @@ from __future__ import annotations
 import datetime as dt
 import uuid
 
-from sqlalchemy import select, update
+from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.enums import JobStatus, OperationStatus, OperationType, StepStatus
+from app.core.enums import (
+    JobStatus,
+    OperationStatus,
+    OperationType,
+    StepStatus,
+    SwitchStrategy,
+)
 from app.domain.models import Operation, OperationJob, OperationStep
 
 
@@ -693,3 +699,295 @@ class OperationJobRepository:
         step.status = StepStatus.PENDING.value
         step.finished_at = None
         await self._session.commit()
+
+    async def claim_mir_cold_switch_ids(
+        self,
+        *,
+        worker_id: str,
+        limit: int,
+        max_attempts: int,
+        now: dt.datetime | None = None,
+    ) -> list[uuid.UUID]:
+        """Claim a bounded batch of Cold SWITCH MIR Operations (SKIP LOCKED).
+
+        Stamps reconciliation claim metadata and commits before returning so
+        callers never hold row locks across Node Agent / Gateway HTTP.
+        """
+        stamp = now or dt.datetime.now(tz=dt.UTC)
+        result = await self._session.execute(
+            text(
+                """
+                SELECT id
+                FROM operation
+                WHERE status = 'MANUAL_INTERVENTION_REQUIRED'
+                  AND operation_type = 'SWITCH'
+                  AND switch_strategy = 'COLD'
+                  AND COALESCE(
+                        (metadata_json->>'reconciliation_attempt_count')::int, 0
+                      ) < :max_attempts
+                  AND (
+                        metadata_json->>'reconciliation_next_attempt_at' IS NULL
+                        OR (metadata_json->>'reconciliation_next_attempt_at'
+                           )::timestamptz <= :now
+                      )
+                ORDER BY finished_at ASC NULLS FIRST, created_at ASC
+                FOR UPDATE SKIP LOCKED
+                LIMIT :lim
+                """
+            ),
+            {
+                "max_attempts": int(max_attempts),
+                "now": stamp,
+                "lim": max(1, int(limit)),
+            },
+        )
+        ids = [uuid.UUID(str(row[0])) for row in result.all()]
+        if not ids:
+            await self._session.rollback()
+            return []
+
+        claimed: list[uuid.UUID] = []
+        # Hold the row out of the sweeper until reconciliation finishes or lease expires.
+        claim_lease = stamp + dt.timedelta(seconds=120)
+        for operation_id in ids:
+            operation = await self._session.get(Operation, operation_id)
+            if operation is None:
+                continue
+            meta = dict(operation.metadata_json or {})
+            meta["reconciliation_claimed_by"] = worker_id
+            meta["reconciliation_claimed_at"] = stamp.isoformat()
+            meta["reconciliation_next_attempt_at"] = claim_lease.isoformat()
+            operation.metadata_json = meta
+            claimed.append(operation_id)
+        await self._session.commit()
+        return claimed
+
+    async def get_job_for_operation(
+        self, operation_id: uuid.UUID
+    ) -> OperationJob | None:
+        stmt = select(OperationJob).where(OperationJob.operation_id == operation_id)
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def record_reconciliation_outcome(
+        self,
+        operation_id: uuid.UUID,
+        *,
+        outcome: str,
+        reason: str,
+        attempt_count: int,
+        next_attempt_at: dt.datetime | None,
+        clear_claim: bool = True,
+    ) -> None:
+        """Persist reconciliation diagnostics on Operation.metadata_json."""
+        operation = (
+            await self._session.execute(
+                select(Operation)
+                .where(Operation.id == operation_id)
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if operation is None:
+            return
+        now = dt.datetime.now(tz=dt.UTC)
+        meta = dict(operation.metadata_json or {})
+        meta["reconciliation_attempt_count"] = int(attempt_count)
+        meta["reconciliation_last_at"] = now.isoformat()
+        meta["reconciliation_last_outcome"] = outcome
+        meta["reconciliation_last_reason"] = reason[:2000]
+        if next_attempt_at is not None:
+            meta["reconciliation_next_attempt_at"] = next_attempt_at.isoformat()
+        else:
+            meta.pop("reconciliation_next_attempt_at", None)
+        if clear_claim:
+            meta.pop("reconciliation_claimed_by", None)
+            meta.pop("reconciliation_claimed_at", None)
+        operation.metadata_json = meta
+        await self._session.commit()
+
+    async def reconcile_mir_to_terminal(
+        self,
+        *,
+        operation_id: uuid.UUID,
+        job_id: uuid.UUID,
+        status: str,
+        code: str | None = None,
+        message: str | None = None,
+        skip_open_forward_steps: bool = False,
+    ) -> bool:
+        """Transition MIR → SUCCEEDED / ROLLED_BACK / CANCELLED.
+
+        Returns False if not MIR or Job is missing. Missing Job must not
+        terminalize the Operation (no partial commit).
+
+        Lock order matches Safe Cancel / Worker claim: Job → Operation
+        (then Step rows via list_steps reads only — no external calls while
+        locks are held).
+        """
+        now = dt.datetime.now(tz=dt.UTC)
+        allowed = {
+            OperationStatus.SUCCEEDED.value,
+            OperationStatus.ROLLED_BACK.value,
+            OperationStatus.CANCELLED.value,
+        }
+        if status not in allowed:
+            raise ValueError(f"unsupported reconcile terminal status: {status}")
+
+        # Global invariant: OperationJob FOR UPDATE → Operation FOR UPDATE.
+        job = (
+            await self._session.execute(
+                select(OperationJob)
+                .where(OperationJob.id == job_id)
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if job is None:
+            # Do not lock/mutate Operation when Job is missing.
+            await self._session.rollback()
+            return False
+
+        operation = (
+            await self._session.execute(
+                select(Operation)
+                .where(Operation.id == operation_id)
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if operation is None:
+            await self._session.rollback()
+            return False
+        if operation.status != OperationStatus.MANUAL_INTERVENTION_REQUIRED.value:
+            await self._session.rollback()
+            return False
+
+        operation.status = status
+        operation.finished_at = now
+        if code is not None:
+            operation.error_code = code
+        if message is not None:
+            operation.error_message = message
+
+        if skip_open_forward_steps or status == OperationStatus.CANCELLED.value:
+            steps = await self.list_steps(operation_id)
+            for step in steps:
+                if str(step.step_code).startswith("ROLLBACK_"):
+                    continue
+                if step.status in (
+                    StepStatus.PENDING.value,
+                    StepStatus.RUNNING.value,
+                    StepStatus.FAILED.value,
+                ):
+                    if status == OperationStatus.CANCELLED.value and step.status in (
+                        StepStatus.PENDING.value,
+                        StepStatus.RUNNING.value,
+                    ):
+                        step.status = StepStatus.SKIPPED.value
+                        step.finished_at = now
+                        detail = dict(step.detail_json or {})
+                        detail["skipped_reason"] = code or "RECONCILED_CANCELLED"
+                        step.detail_json = detail
+
+        if status == OperationStatus.SUCCEEDED.value:
+            job.status = JobStatus.DONE.value
+            job.last_error = None
+        elif status == OperationStatus.ROLLED_BACK.value:
+            job.status = JobStatus.DONE.value
+            job.last_error = None
+        else:
+            job.status = JobStatus.FAILED.value
+            job.last_error = f"{code or 'RECONCILED'}: {message or status}"
+        job.locked_by = None
+        job.locked_at = None
+        job.updated_at = now
+
+        await self._session.commit()
+        return True
+
+    async def reopen_mir_for_resume(
+        self,
+        *,
+        operation_id: uuid.UUID,
+        job_id: uuid.UUID,
+        resume_status: str,
+        step_id: uuid.UUID,
+        code: str,
+        message: str,
+    ) -> bool:
+        """Reopen a MIR Cold Switch for forward (RUNNING) or rollback resume.
+
+        Lock order matches Safe Cancel / Worker claim: Job → Operation → Step.
+        If Job or Step is missing, returns False without committing any
+        mutation (Operation stays MIR). No external calls while locks held.
+        """
+        now = dt.datetime.now(tz=dt.UTC)
+        if resume_status not in {
+            OperationStatus.RUNNING.value,
+            OperationStatus.ROLLING_BACK.value,
+        }:
+            raise ValueError(f"unsupported resume status: {resume_status}")
+
+        # Global invariant: OperationJob FOR UPDATE → Operation FOR UPDATE
+        # → OperationStep FOR UPDATE.
+        job = (
+            await self._session.execute(
+                select(OperationJob)
+                .where(OperationJob.id == job_id)
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if job is None:
+            await self._session.rollback()
+            return False
+
+        operation = (
+            await self._session.execute(
+                select(Operation)
+                .where(Operation.id == operation_id)
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if operation is None:
+            await self._session.rollback()
+            return False
+        if operation.status != OperationStatus.MANUAL_INTERVENTION_REQUIRED.value:
+            await self._session.rollback()
+            return False
+
+        step = (
+            await self._session.execute(
+                select(OperationStep)
+                .where(OperationStep.id == step_id)
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if step is None or str(step.operation_id) != str(operation_id):
+            await self._session.rollback()
+            return False
+
+        operation.status = resume_status
+        operation.finished_at = None
+        operation.error_code = code
+        operation.error_message = message
+
+        # Preserve SUCCEEDED history; only reopen the failed/current step.
+        if step.status in {
+            StepStatus.FAILED.value,
+            StepStatus.RUNNING.value,
+            StepStatus.PENDING.value,
+        }:
+            step.attempt_no = int(step.attempt_no) + 1
+            step.status = StepStatus.PENDING.value
+            step.finished_at = None
+            step.error_code = None
+            step.error_message = None
+            detail = dict(step.detail_json or {})
+            detail["reopened_by_reconciliation"] = True
+            step.detail_json = detail
+
+        job.status = JobStatus.QUEUED.value
+        job.locked_by = None
+        job.locked_at = None
+        job.available_at = now
+        job.updated_at = now
+        job.last_error = f"{code}: {message}"
+        await self._session.commit()
+        return True

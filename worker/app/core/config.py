@@ -36,6 +36,12 @@ class Settings(BaseSettings):
     worker_stale_seconds: int = 60
     worker_lock_requeue_seconds: float = 2.0
 
+    # M5-C2-C Cold SWITCH MIR reconciliation sweeper.
+    reconcile_batch_size: int = 3
+    reconcile_max_attempts: int = 10
+    reconcile_cooldown_seconds: float = 30.0
+    reconcile_cooldown_max_seconds: float = 300.0
+
     # M5-B Cold Switch / Gateway control-plane settings (Worker only).
     gateway_base_url: str = "http://127.0.0.1:8080"
     gateway_timeout_seconds: float = 10.0
