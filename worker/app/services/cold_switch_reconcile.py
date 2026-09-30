@@ -453,6 +453,20 @@ class ColdSwitchReconciler:
         )
 
         if cancel_requested and not destructive and source_restored_for_cancel:
+            # Pre-destructive flow must not have started Target. Anomalous
+            # Target RUNNING/FAILED/UNKNOWN remains MIR (do not CANCEL).
+            if target_runtime not in {
+                RuntimeStatus.CREATED.value,
+                RuntimeStatus.STOPPED.value,
+            }:
+                return await self._finish_unresolved(
+                    operation_id,
+                    attempt=attempt,
+                    reason=(
+                        "pre-destructive cancel: anomalous Target runtime "
+                        f"{target_runtime}; remain MIR"
+                    ),
+                )
             return await self._finish_cancelled(
                 operation_id=operation_id,
                 job_id=job_id,

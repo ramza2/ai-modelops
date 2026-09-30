@@ -428,6 +428,66 @@ async def test_pre_destructive_cancel_mir_source_restored_cancels(db) -> None:
 
 
 @pytest.mark.asyncio
+async def test_pre_destructive_cancel_anomalous_target_running_remains_mir(
+    db,
+) -> None:
+    """Pre-destructive cancel must not CANCEL when Target is unexpectedly RUNNING."""
+    sf = db
+    fake_node = ColdSwitchFakeNodeAgent()
+    fake_gw = FakeGateway()
+    transport = CombinedTransport(fake_node, fake_gw)
+
+    async with sf() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        await _seed_standard_runtime(fake_node, fake_gw, fixture)
+        op_id, job_id = await _enqueue_cold_switch(session, fixture=fixture)
+        await _force_mir(
+            session,
+            op_id=op_id,
+            job_id=job_id,
+            code="CANCEL_RESTORE_FAILED",
+            message="gateway restore failed",
+            destructive=False,
+            cancel=True,
+            succeeded_through="DRAIN_TRAFFIC",
+        )
+        source = await session.get(Deployment, fixture["source_id"])
+        assert source is not None
+        source.runtime_status = RuntimeStatus.RUNNING.value
+        source.health_status = HealthStatus.HEALTHY.value
+        version = await _set_active_route(
+            session,
+            endpoint_id=fixture["endpoint_id"],
+            deployment_id=fixture["source_id"],
+            traffic=TrafficState.SERVING.value,
+        )
+
+    _set_containers(
+        fake_node,
+        source_id=str(fixture["source_id"]),
+        target_id=str(fixture["target_id"]),
+        source_runtime="RUNNING",
+        target_runtime="RUNNING",
+        target_health="HEALTHY",
+    )
+    fake_gw.active_deployment_id = str(fixture["source_id"])
+    fake_gw.traffic_state = TrafficState.SERVING.value
+    fake_gw.applied_routing_version = version
+
+    result = await _reconciler(sf, transport).reconcile_operation(op_id)
+    assert result.outcome == "UNRESOLVED"
+    assert "anomalous" in result.reason.lower() or "target" in result.reason.lower()
+
+    async with sf() as session:
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        assert op.status == OperationStatus.MANUAL_INTERVENTION_REQUIRED.value
+        assert op.cancel_requested_at is not None
+
+
+@pytest.mark.asyncio
 async def test_wait_route_apply_mir_safe_forward_resume(db) -> None:
     sf = db
     fake_node = ColdSwitchFakeNodeAgent()
@@ -1365,3 +1425,89 @@ async def test_reconcile_terminal_missing_job_leaves_state_unchanged(db) -> None
         assert op is not None
         assert op.status == OperationStatus.MANUAL_INTERVENTION_REQUIRED.value
         assert op.error_code == "GATEWAY_TRAFFIC_APPLY_TIMEOUT"
+
+
+@pytest.mark.asyncio
+async def test_reconcile_mir_job_then_operation_lock_order_no_deadlock(db) -> None:
+    """Reconciliation and Job→Operation claim-order txn must serialize safely."""
+    import asyncio
+
+    from sqlalchemy import select as sa_select
+
+    from app.domain.models import Operation as OpModel
+    from app.domain.models import OperationJob as JobModel
+
+    sf = db
+    async with sf() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=f"GPU-{uuid.uuid4().hex[:12]}"
+        )
+        op_id, job_id = await _enqueue_cold_switch(session, fixture=fixture)
+        await _force_mir(
+            session,
+            op_id=op_id,
+            job_id=job_id,
+            code="GATEWAY_TRAFFIC_APPLY_TIMEOUT",
+            message="timeout",
+            succeeded_through=STEP_WAIT_TRAFFIC_APPLY,
+            failed_step=STEP_FINALIZE,
+        )
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def holder_job_then_operation() -> None:
+        async with sf() as session:
+            # Existing Safe Cancel / Worker claim order: Job → Operation.
+            job = (
+                await session.execute(
+                    sa_select(JobModel)
+                    .where(JobModel.id == job_id)
+                    .with_for_update()
+                )
+            ).scalar_one()
+            _ = job
+            op = (
+                await session.execute(
+                    sa_select(OpModel)
+                    .where(OpModel.id == op_id)
+                    .with_for_update()
+                )
+            ).scalar_one()
+            _ = op
+            started.set()
+            await asyncio.wait_for(release.wait(), timeout=5.0)
+            await session.rollback()
+
+    async def reconciler_transition() -> bool:
+        await started.wait()
+        async with sf() as session:
+            repo = OperationJobRepository(session)
+            # Same Job → Operation order; must wait then succeed (no deadlock).
+            return await asyncio.wait_for(
+                repo.reconcile_mir_to_terminal(
+                    operation_id=op_id,
+                    job_id=job_id,
+                    status=OperationStatus.CANCELLED.value,
+                    code="RECONCILED_CANCELLED",
+                    message="lock-order concurrency",
+                    skip_open_forward_steps=True,
+                ),
+                timeout=5.0,
+            )
+
+    holder_task = asyncio.create_task(holder_job_then_operation())
+    reconcile_task = asyncio.create_task(reconciler_transition())
+    await started.wait()
+    await asyncio.sleep(0.05)
+    release.set()
+    ok = await reconcile_task
+    await holder_task
+    assert ok is True
+
+    async with sf() as session:
+        op = await session.get(Operation, op_id)
+        job = await session.get(OperationJob, job_id)
+        assert op is not None and job is not None
+        assert op.status == OperationStatus.CANCELLED.value
+        assert job.status == JobStatus.FAILED.value

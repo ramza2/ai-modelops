@@ -818,6 +818,10 @@ class OperationJobRepository:
 
         Returns False if not MIR or Job is missing. Missing Job must not
         terminalize the Operation (no partial commit).
+
+        Lock order matches Safe Cancel / Worker claim: Job → Operation
+        (then Step rows via list_steps reads only — no external calls while
+        locks are held).
         """
         now = dt.datetime.now(tz=dt.UTC)
         allowed = {
@@ -828,18 +832,7 @@ class OperationJobRepository:
         if status not in allowed:
             raise ValueError(f"unsupported reconcile terminal status: {status}")
 
-        operation = (
-            await self._session.execute(
-                select(Operation)
-                .where(Operation.id == operation_id)
-                .with_for_update()
-            )
-        ).scalar_one_or_none()
-        if operation is None:
-            return False
-        if operation.status != OperationStatus.MANUAL_INTERVENTION_REQUIRED.value:
-            return False
-
+        # Global invariant: OperationJob FOR UPDATE → Operation FOR UPDATE.
         job = (
             await self._session.execute(
                 select(OperationJob)
@@ -848,7 +841,21 @@ class OperationJobRepository:
             )
         ).scalar_one_or_none()
         if job is None:
-            # Do not mutate Operation when Job is missing.
+            # Do not lock/mutate Operation when Job is missing.
+            await self._session.rollback()
+            return False
+
+        operation = (
+            await self._session.execute(
+                select(Operation)
+                .where(Operation.id == operation_id)
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if operation is None:
+            await self._session.rollback()
+            return False
+        if operation.status != OperationStatus.MANUAL_INTERVENTION_REQUIRED.value:
             await self._session.rollback()
             return False
 
@@ -907,8 +914,9 @@ class OperationJobRepository:
     ) -> bool:
         """Reopen a MIR Cold Switch for forward (RUNNING) or rollback resume.
 
-        Locks Operation + Job + Step first. If Job or Step is missing, returns
-        False without committing any mutation (Operation stays MIR).
+        Lock order matches Safe Cancel / Worker claim: Job → Operation → Step.
+        If Job or Step is missing, returns False without committing any
+        mutation (Operation stays MIR). No external calls while locks held.
         """
         now = dt.datetime.now(tz=dt.UTC)
         if resume_status not in {
@@ -916,6 +924,19 @@ class OperationJobRepository:
             OperationStatus.ROLLING_BACK.value,
         }:
             raise ValueError(f"unsupported resume status: {resume_status}")
+
+        # Global invariant: OperationJob FOR UPDATE → Operation FOR UPDATE
+        # → OperationStep FOR UPDATE.
+        job = (
+            await self._session.execute(
+                select(OperationJob)
+                .where(OperationJob.id == job_id)
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if job is None:
+            await self._session.rollback()
+            return False
 
         operation = (
             await self._session.execute(
@@ -925,17 +946,12 @@ class OperationJobRepository:
             )
         ).scalar_one_or_none()
         if operation is None:
+            await self._session.rollback()
             return False
         if operation.status != OperationStatus.MANUAL_INTERVENTION_REQUIRED.value:
+            await self._session.rollback()
             return False
 
-        job = (
-            await self._session.execute(
-                select(OperationJob)
-                .where(OperationJob.id == job_id)
-                .with_for_update()
-            )
-        ).scalar_one_or_none()
         step = (
             await self._session.execute(
                 select(OperationStep)
@@ -943,7 +959,7 @@ class OperationJobRepository:
                 .with_for_update()
             )
         ).scalar_one_or_none()
-        if job is None or step is None or str(step.operation_id) != str(operation_id):
+        if step is None or str(step.operation_id) != str(operation_id):
             await self._session.rollback()
             return False
 
