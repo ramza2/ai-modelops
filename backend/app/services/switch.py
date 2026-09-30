@@ -191,11 +191,18 @@ class SwitchService:
 
         Never mutates the original Operation / Job / Steps.
         MIR retry is out of scope until M5-C2-C reconciliation.
+
+        Idempotency-Key (retry-scoped only):
+        - same key + same original → return the existing retry child
+        - same key + different original / non-retry Operation → 409
+          ``IDEMPOTENCY_KEY_CONFLICT``
         """
+        # Fast path before lock; must still validate key belongs to this original.
         if idempotency_key:
             existing = await self._operations.get_by_idempotency_key(idempotency_key)
-            if existing is not None:
-                return await self._switch_response(uuid.UUID(str(existing.id)))
+            replay = self._retry_idempotency_replay(existing, operation_id)
+            if replay is not None:
+                return await self._switch_response(uuid.UUID(str(replay.id)))
 
         # Short lock around original + retry decision. No external calls under lock.
         original = await self._operations.lock_operation_for_update(operation_id)
@@ -204,6 +211,15 @@ class SwitchService:
                 "Operation not found.",
                 details={"operation_id": str(operation_id)},
             )
+
+        # Re-check after FOR UPDATE so concurrent identical retries return the
+        # same child instead of racing into active-child conflict.
+        if idempotency_key:
+            existing = await self._operations.get_by_idempotency_key(idempotency_key)
+            replay = self._retry_idempotency_replay(existing, operation_id)
+            if replay is not None:
+                await self._session.commit()
+                return await self._switch_response(uuid.UUID(str(replay.id)))
 
         if not self._operations.is_cold_switch(original):
             raise ConflictError(
@@ -353,6 +369,33 @@ class SwitchService:
         )
         await self._session.commit()
         return await self._switch_response(uuid.UUID(str(operation.id)))
+
+    @staticmethod
+    def _retry_idempotency_replay(
+        existing: Operation | None,
+        operation_id: uuid.UUID,
+    ) -> Operation | None:
+        """Return existing retry child if key matches this original; else conflict.
+
+        ``None`` means the key is unused (caller may create). Raises when the key
+        is already bound to a different Operation.
+        """
+        if existing is None:
+            return None
+        retry_of = existing.retry_of_operation_id
+        if retry_of is not None and str(retry_of) == str(operation_id):
+            return existing
+        raise ConflictError(
+            "Idempotency-Key is already bound to a different Operation.",
+            code="IDEMPOTENCY_KEY_CONFLICT",
+            details={
+                "operation_id": str(operation_id),
+                "idempotency_key_operation_id": str(existing.id),
+                "idempotency_key_retry_of_operation_id": (
+                    str(retry_of) if retry_of is not None else None
+                ),
+            },
+        )
 
     async def _create_cold_switch_operation(
         self,

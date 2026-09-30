@@ -204,6 +204,8 @@ async def test_retry_failed_cold_switch_creates_new_queued(client) -> None:
     op_id = await _enqueue_cold(client, world)
     snap0 = await _mark_terminal(sf, op_id, status=OperationStatus.FAILED.value)
 
+    # Original immutable — exact metadata snapshot before vs after retry.
+    pre_retry = await _snapshot_operation(sf, op_id)
     resp = await ac.post(f"/api/v1/operations/{op_id}/retry")
     assert resp.status_code == 202, resp.text
     body = resp.json()
@@ -232,10 +234,9 @@ async def test_retry_failed_cold_switch_creates_new_queued(client) -> None:
     assert body["metadata"].get("cancel_reason") is None
     assert "m5c_rollback_not_implemented" not in body["metadata"]
 
-    # Original immutable.
     after = await _snapshot_operation(sf, op_id)
     assert after["op"]["status"] == OperationStatus.FAILED.value
-    assert after["op"]["meta"] == snap0["before"]["meta"] or True  # may have patch
+    assert after["op"]["meta"] == pre_retry["op"]["meta"]
     assert after["job"]["id"] == snap0["job_before"]["id"]
     assert after["job"]["status"] == JobStatus.FAILED.value
     assert [s["id"] for s in after["steps"]] == [
@@ -556,6 +557,7 @@ async def test_concurrent_retry_creates_single_child(client) -> None:
 
 @pytest.mark.asyncio
 async def test_retry_idempotency_key_replay(client) -> None:
+    """Same key + same original → same retry child."""
     sf = client["session_factory"]
     ac = client["client"]
     async with sf() as session:
@@ -575,6 +577,7 @@ async def test_retry_idempotency_key_replay(client) -> None:
     )
     assert second.status_code == 202, second.text
     assert second.json()["id"] == first.json()["id"]
+    assert second.json()["retry_of_operation_id"] == op_id
 
     async with sf() as session:
         count = (
@@ -589,3 +592,86 @@ async def test_retry_idempotency_key_replay(client) -> None:
             )
         ).scalar_one()
     assert int(count) == 1
+
+
+@pytest.mark.asyncio
+async def test_retry_idempotency_key_conflict_different_original(client) -> None:
+    """Same key + different original → 409 IDEMPOTENCY_KEY_CONFLICT."""
+    sf = client["session_factory"]
+    ac = client["client"]
+    async with sf() as session:
+        world_a = await _seed_world(session)
+    async with sf() as session:
+        world_b = await _seed_world(session)
+
+    op_a = await _enqueue_cold(client, world_a)
+    op_b = await _enqueue_cold(client, world_b)
+    await _mark_terminal(sf, op_a, status=OperationStatus.FAILED.value)
+    await _mark_terminal(sf, op_b, status=OperationStatus.FAILED.value)
+
+    key = f"retry-conflict-{uuid.uuid4()}"
+    first = await ac.post(
+        f"/api/v1/operations/{op_a}/retry",
+        headers={"Idempotency-Key": key},
+    )
+    assert first.status_code == 202, first.text
+
+    second = await ac.post(
+        f"/api/v1/operations/{op_b}/retry",
+        headers={"Idempotency-Key": key},
+    )
+    assert second.status_code == 409, second.text
+    assert second.json()["error"]["code"] == "IDEMPOTENCY_KEY_CONFLICT"
+
+    async with sf() as session:
+        count_b = (
+            await session.execute(
+                text(
+                    """
+                    SELECT count(*) FROM operation
+                    WHERE retry_of_operation_id = CAST(:id AS uuid)
+                    """
+                ),
+                {"id": op_b},
+            )
+        ).scalar_one()
+    assert int(count_b) == 0
+
+
+@pytest.mark.asyncio
+async def test_retry_idempotency_key_conflict_non_retry_operation(client) -> None:
+    """Same key already used by a normal/non-retry Operation → 409."""
+    sf = client["session_factory"]
+    ac = client["client"]
+    async with sf() as session:
+        world = await _seed_world(session)
+
+    key = f"retry-vs-enqueue-{uuid.uuid4()}"
+    # Bind the key to a normal Cold Switch enqueue (retry_of is NULL).
+    enq = await ac.post(
+        f"/api/v1/endpoints/{world['endpoint_id']}/switch",
+        json={
+            "target_deployment_id": world["target_deployment_id"],
+            "strategy": "COLD",
+        },
+        headers={"Idempotency-Key": key},
+    )
+    assert enq.status_code == 202, enq.text
+    bound_id = enq.json()["id"]
+    await _mark_terminal(sf, bound_id, status=OperationStatus.FAILED.value)
+
+    # A different failed switch tries to reuse that key for retry.
+    async with sf() as session:
+        world2 = await _seed_world(session)
+    other = await _enqueue_cold(client, world2)
+    await _mark_terminal(sf, other, status=OperationStatus.FAILED.value)
+
+    resp = await ac.post(
+        f"/api/v1/operations/{other}/retry",
+        headers={"Idempotency-Key": key},
+    )
+    assert resp.status_code == 409, resp.text
+    err = resp.json()["error"]
+    assert err["code"] == "IDEMPOTENCY_KEY_CONFLICT"
+    assert err["details"]["idempotency_key_operation_id"] == bound_id
+    assert err["details"]["idempotency_key_retry_of_operation_id"] is None

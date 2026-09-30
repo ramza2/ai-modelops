@@ -691,9 +691,15 @@ M5-C2-B Explicit Retry. **원본 Operation을 재개/리셋하지 않는다.**
 - 새 Job + 14 forward Steps (`PENDING`)
 - metadata whitelist만 복사 (timeouts / strategy / reason)
 - 기존 Cold Switch enqueue/Worker 경로로 실행 (별도 retry SM 없음)
-- `Idempotency-Key` 지원
+- `Idempotency-Key` (retry-scoped):
+  - same key + same original → 기존 retry child 반환
+  - same key + different original / non-retry Operation →
+    `409 IDEMPOTENCY_KEY_CONFLICT`
+  - original `FOR UPDATE` 이후 key를 재확인하여 concurrent identical retry가
+    동일 child를 반환하도록 한다
 
 응답: `202 Accepted` + **새** Operation projection (`retry_of_operation_id` 포함)
+(동일 Idempotency-Key replay 시에는 기존 child projection)
 
 ---
 

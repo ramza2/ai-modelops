@@ -951,7 +951,15 @@ Reuse Cold Switch validation. Require at least:
 Lock the original Operation for the retry decision. Concurrent retries of the
 same original must not create two active children
 (`uq_operation_active_retry_of`). Do not hold DB locks across external calls.
-Preserve `Idempotency-Key` when provided.
+Preserve `Idempotency-Key` when provided (retry-scoped only):
+
+- same key + same original → return the existing retry child
+- same key bound to a different original or a non-retry Operation →
+  `409 IDEMPOTENCY_KEY_CONFLICT`
+- re-check the key after acquiring the original Operation `FOR UPDATE` so
+  concurrent identical retries return the same child
+
+State / safety conflicts remain `409 INVALID_OPERATION_STATE`.
 
 ### Worker
 
