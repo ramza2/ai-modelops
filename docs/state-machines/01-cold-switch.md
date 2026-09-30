@@ -28,8 +28,9 @@ Cold Switch는 GPU VRAM이 부족하여 기존 모델과 신규 모델을 동시
   Creates a **new** Cold SWITCH Operation / Job / 14 PENDING steps with
   `retry_of_operation_id` lineage. Original Operation/Job/Steps remain immutable.
   Eligible only for terminal `FAILED` / `ROLLED_BACK` Cold SWITCH after a safe
-  baseline revalidation. `MANUAL_INTERVENTION_REQUIRED` retry remains blocked
-  until M5-C2-C reconciliation. Fresh Worker Preflight is always authoritative.
+  baseline revalidation. `MANUAL_INTERVENTION_REQUIRED` is never eligible for
+  explicit blind retry; M5-C2-C reconciliation may first terminalize MIR to a
+  retryable state (e.g. `ROLLED_BACK`). Fresh Worker Preflight is always authoritative.
 - **M5-C2-C:** Cold SWITCH MIR reconciliation sweeper — **implemented**.
   Worker observes DB + Gateway + Node Agent and may terminalize MIR to
   `SUCCEEDED` / `ROLLED_BACK` / `CANCELLED`, or safely resume forward
@@ -928,7 +929,7 @@ Operation. The original Operation / Job / Steps are **never** revived or reset.
 | `ROLLED_BACK` | Yes, after Source-restored baseline |
 | `QUEUED` / `RUNNING` / `ROLLING_BACK` | No — `409 INVALID_OPERATION_STATE` |
 | `SUCCEEDED` / `CANCELLED` | No — `409` |
-| `MANUAL_INTERVENTION_REQUIRED` | No — blocked until M5-C2-C |
+| `MANUAL_INTERVENTION_REQUIRED` | No — never blind-retried; reconcile first (M5-C2-C) |
 | non-SWITCH / non-COLD | No — `409` |
 
 ### Lineage

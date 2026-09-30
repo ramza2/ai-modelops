@@ -284,6 +284,43 @@ async def test_retry_rolled_back_cold_switch(client) -> None:
 
 
 @pytest.mark.asyncio
+async def test_retry_after_mir_reconciled_rolled_back_metadata(client) -> None:
+    """ROLLED_BACK from MIR reconciliation remains explicitly retryable."""
+    sf = client["session_factory"]
+    ac = client["client"]
+    async with sf() as session:
+        world = await _seed_world(session)
+    op_id = await _enqueue_cold(client, world)
+    await _mark_terminal(
+        sf,
+        op_id,
+        status=OperationStatus.ROLLED_BACK.value,
+        metadata_patch={
+            "destructive_boundary_entered": True,
+            "reconciliation_last_outcome": "ROLLED_BACK",
+            "reconciliation_last_reason": "source fully restored",
+            "reconciliation_attempt_count": 1,
+        },
+    )
+
+    resp = await ac.post(f"/api/v1/operations/{op_id}/retry")
+    assert resp.status_code == 202, resp.text
+    body = resp.json()
+    assert body["status"] == OperationStatus.QUEUED.value
+    assert body["retry_of_operation_id"] == op_id
+    assert body["id"] != op_id
+    assert len(body["steps"]) == 14
+    assert all(s["status"] == StepStatus.PENDING.value for s in body["steps"])
+    # Reconciliation / destructive metadata must not copy onto the child.
+    assert body["metadata"].get("destructive_boundary_entered") is None
+    assert body["metadata"].get("reconciliation_last_outcome") is None
+    assert body["metadata"].get("reconciliation_attempt_count") is None
+
+    original = await _snapshot_operation(sf, op_id)
+    assert original["op"]["status"] == OperationStatus.ROLLED_BACK.value
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "status",
     [
