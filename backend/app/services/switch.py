@@ -1,8 +1,12 @@
-"""Cold Switch enqueue (Management API — Milestone 5-B).
+"""Cold Switch enqueue and explicit retry (Management API — M5-B / M5-C2-B).
 
 Validates enough to create Operation/Job/Steps and returns immediately.
 Never mutates routes, traffic_state, or deployment desired_state.
 Never calls Docker, Node Agent, or Gateway.
+
+Retry (M5-C2-B) never revives the original Operation: it creates a new
+Operation/Job/14 PENDING steps with ``retry_of_operation_id`` lineage and
+re-enters the normal Cold Switch queue.
 """
 
 from __future__ import annotations
@@ -58,6 +62,32 @@ _KNOWN_STRATEGIES = frozenset(
         SwitchStrategy.COLD.value,
         SwitchStrategy.ALTERNATE_NODE.value,
         "AUTO",
+    }
+)
+
+# Explicit metadata whitelist for retry — never clone transient runtime state.
+_RETRY_METADATA_TIMEOUT_KEYS: tuple[str, ...] = (
+    "drain_timeout_seconds",
+    "health_timeout_seconds",
+    "vram_release_timeout_seconds",
+    "gateway_apply_timeout_seconds",
+)
+
+_RETRY_ELIGIBLE_STATUSES = frozenset(
+    {
+        OperationStatus.FAILED.value,
+        OperationStatus.ROLLED_BACK.value,
+    }
+)
+
+_RETRY_REJECT_STATUSES = frozenset(
+    {
+        OperationStatus.QUEUED.value,
+        OperationStatus.RUNNING.value,
+        OperationStatus.ROLLING_BACK.value,
+        OperationStatus.SUCCEEDED.value,
+        OperationStatus.CANCELLED.value,
+        OperationStatus.MANUAL_INTERVENTION_REQUIRED.value,
     }
 )
 
@@ -118,6 +148,303 @@ class SwitchService:
                     details={"field": name, "value": value},
                 )
 
+        alias, source, target = await self._validate_cold_switch_baseline(
+            endpoint_id=endpoint_id,
+            target_deployment_id=target_deployment_id,
+            expected_source_deployment_id=None,
+        )
+
+        metadata: dict[str, Any] = {
+            "strategy": SwitchStrategy.COLD.value,
+            "drain_timeout_seconds": int(drain_timeout_seconds),
+            "health_timeout_seconds": int(health_timeout_seconds),
+            "vram_release_timeout_seconds": int(vram_release_timeout_seconds),
+            "gateway_apply_timeout_seconds": int(gateway_apply_timeout_seconds),
+            "m5b_forward_cold_only": True,
+            "m5c_rollback_not_implemented": True,
+        }
+        if reason:
+            metadata["reason"] = reason
+
+        operation = await self._create_cold_switch_operation(
+            alias_id=uuid.UUID(str(alias.id)),
+            source=source,
+            target=target,
+            reason=reason,
+            requested_by=requested_by,
+            idempotency_key=idempotency_key,
+            metadata=metadata,
+            max_attempts=max_attempts,
+            retry_of_operation_id=None,
+        )
+        await self._session.commit()
+        return await self._switch_response(uuid.UUID(str(operation.id)))
+
+    async def retry_cold_switch(
+        self,
+        operation_id: uuid.UUID,
+        *,
+        idempotency_key: str | None = None,
+        requested_by: str | None = None,
+    ) -> dict[str, Any]:
+        """Create a NEW Cold Switch Operation that retries a terminal one (M5-C2-B).
+
+        Never mutates the original Operation / Job / Steps.
+        MIR retry is out of scope until M5-C2-C reconciliation.
+        """
+        if idempotency_key:
+            existing = await self._operations.get_by_idempotency_key(idempotency_key)
+            if existing is not None:
+                return await self._switch_response(uuid.UUID(str(existing.id)))
+
+        # Short lock around original + retry decision. No external calls under lock.
+        original = await self._operations.lock_operation_for_update(operation_id)
+        if original is None:
+            raise NotFoundError(
+                "Operation not found.",
+                details={"operation_id": str(operation_id)},
+            )
+
+        if not self._operations.is_cold_switch(original):
+            raise ConflictError(
+                "Retry is only supported for Cold SWITCH operations.",
+                code="INVALID_OPERATION_STATE",
+                details={
+                    "operation_id": str(operation_id),
+                    "operation_type": original.operation_type,
+                    "switch_strategy": original.switch_strategy,
+                },
+            )
+
+        if original.status in _RETRY_REJECT_STATUSES:
+            raise ConflictError(
+                "Operation is not eligible for retry.",
+                code="INVALID_OPERATION_STATE",
+                details={
+                    "operation_id": str(operation_id),
+                    "status": original.status,
+                    "eligible_statuses": sorted(_RETRY_ELIGIBLE_STATUSES),
+                },
+            )
+
+        if original.status not in _RETRY_ELIGIBLE_STATUSES:
+            raise ConflictError(
+                "Operation is not eligible for retry.",
+                code="INVALID_OPERATION_STATE",
+                details={
+                    "operation_id": str(operation_id),
+                    "status": original.status,
+                },
+            )
+
+        # FAILED that crossed the destructive boundary is unsafe to blind-retry.
+        original_meta = dict(original.metadata_json or {})
+        if (
+            original.status == OperationStatus.FAILED.value
+            and original_meta.get("destructive_boundary_entered") is True
+        ):
+            raise ConflictError(
+                "FAILED Cold Switch that crossed the destructive boundary "
+                "cannot be retried without reconciliation (M5-C2-C).",
+                code="INVALID_OPERATION_STATE",
+                details={
+                    "operation_id": str(operation_id),
+                    "status": original.status,
+                    "destructive_boundary_entered": True,
+                },
+            )
+
+        # Concurrent retry: at most one active child of this original.
+        active_child = await self._operations.find_active_retry_of(operation_id)
+        if active_child is not None:
+            raise ConflictError(
+                "An active retry Operation already exists for this Operation.",
+                code="INVALID_OPERATION_STATE",
+                details={
+                    "operation_id": str(operation_id),
+                    "active_retry_operation_id": str(active_child.id),
+                    "active_status": active_child.status,
+                },
+            )
+
+        if original.endpoint_alias_id is None:
+            raise ConflictError(
+                "Original SWITCH is missing endpoint_alias_id.",
+                code="INVALID_OPERATION_STATE",
+                details={"operation_id": str(operation_id)},
+            )
+        if original.source_deployment_id is None or original.target_deployment_id is None:
+            raise ConflictError(
+                "Original SWITCH is missing source/target deployment ids.",
+                code="INVALID_OPERATION_STATE",
+                details={"operation_id": str(operation_id)},
+            )
+
+        endpoint_id = uuid.UUID(str(original.endpoint_alias_id))
+        source_id = uuid.UUID(str(original.source_deployment_id))
+        target_id = uuid.UUID(str(original.target_deployment_id))
+
+        # Re-check active conflicts after acquiring the original lock.
+        busy_endpoint = await self._operations.find_active_switch_for_endpoint(
+            endpoint_id
+        )
+        if busy_endpoint is not None:
+            raise ConflictError(
+                "A SWITCH/ROLLBACK operation is already active for this Endpoint.",
+                code="INVALID_OPERATION_STATE",
+                details={
+                    "endpoint_id": str(endpoint_id),
+                    "active_operation_id": str(busy_endpoint.id),
+                    "active_status": busy_endpoint.status,
+                },
+            )
+
+        alias, source, target = await self._validate_cold_switch_baseline(
+            endpoint_id=endpoint_id,
+            target_deployment_id=target_id,
+            expected_source_deployment_id=source_id,
+            skip_active_operation_checks=True,
+            conflict_on_unsafe=True,
+        )
+
+        # Re-check deployment conflicts after lock (baseline skipped them above
+        # only for the skip flag path; still enforce here for clarity).
+        for dep, role in ((source, "Source"), (target, "Target")):
+            active = await self._operations.find_active_for_deployment(
+                uuid.UUID(str(dep.id))
+            )
+            if active is not None:
+                raise ConflictError(
+                    f"An active operation already exists for the {role} Deployment.",
+                    code="INVALID_OPERATION_STATE",
+                    details={
+                        "deployment_id": str(dep.id),
+                        "role": role,
+                        "active_operation_id": str(active.id),
+                        "active_status": active.status,
+                    },
+                )
+
+        metadata = self._retry_metadata_from_original(original_meta)
+        reason = original.request_reason
+        if reason and "reason" not in metadata:
+            metadata["reason"] = reason
+
+        original_job = await self._operations.get_job_for_operation(operation_id)
+        max_attempts = (
+            int(original_job.max_attempts)
+            if original_job is not None and original_job.max_attempts
+            else 3
+        )
+
+        # Capture immutable snapshot fields before creating the child.
+        original_id = uuid.UUID(str(original.id))
+
+        operation = await self._create_cold_switch_operation(
+            alias_id=uuid.UUID(str(alias.id)),
+            source=source,
+            target=target,
+            reason=reason,
+            requested_by=requested_by or original.requested_by,
+            idempotency_key=idempotency_key,
+            metadata=metadata,
+            max_attempts=max_attempts,
+            retry_of_operation_id=original_id,
+        )
+        await self._session.commit()
+        return await self._switch_response(uuid.UUID(str(operation.id)))
+
+    async def _create_cold_switch_operation(
+        self,
+        *,
+        alias_id: uuid.UUID,
+        source: Deployment,
+        target: Deployment,
+        reason: str | None,
+        requested_by: str | None,
+        idempotency_key: str | None,
+        metadata: dict[str, Any],
+        max_attempts: int,
+        retry_of_operation_id: uuid.UUID | None,
+    ) -> Operation:
+        now = dt.datetime.now(tz=dt.UTC)
+        operation = Operation(
+            operation_type=OperationType.SWITCH.value,
+            status=OperationStatus.QUEUED.value,
+            switch_strategy=SwitchStrategy.COLD.value,
+            endpoint_alias_id=alias_id,
+            source_deployment_id=source.id,
+            target_deployment_id=target.id,
+            requested_by=requested_by,
+            request_reason=reason,
+            idempotency_key=idempotency_key,
+            cancel_requested_at=None,
+            retry_of_operation_id=retry_of_operation_id,
+            metadata_json=metadata,
+        )
+        await self._operations.add(operation)
+
+        for seq, step_code in enumerate(COLD_SWITCH_STEPS, start=1):
+            await self._operations.add_step(
+                OperationStep(
+                    operation_id=operation.id,
+                    sequence_no=seq,
+                    step_code=step_code,
+                    status=StepStatus.PENDING.value,
+                    attempt_no=1,
+                    detail_json={},
+                )
+            )
+
+        await self._operations.add_job(
+            OperationJob(
+                operation_id=operation.id,
+                status=JobStatus.QUEUED.value,
+                priority=100,
+                attempt_count=0,
+                max_attempts=max(1, max_attempts),
+                available_at=now,
+            )
+        )
+        return operation
+
+    @staticmethod
+    def _retry_metadata_from_original(original_meta: dict[str, Any]) -> dict[str, Any]:
+        """Copy only the execution-contract whitelist; never clone runtime state."""
+        metadata: dict[str, Any] = {
+            "strategy": SwitchStrategy.COLD.value,
+            "m5b_forward_cold_only": True,
+        }
+        for key in _RETRY_METADATA_TIMEOUT_KEYS:
+            if key in original_meta:
+                metadata[key] = int(original_meta[key])
+            else:
+                # Sensible defaults matching enqueue_cold_switch.
+                defaults = {
+                    "drain_timeout_seconds": 60,
+                    "health_timeout_seconds": 300,
+                    "vram_release_timeout_seconds": 30,
+                    "gateway_apply_timeout_seconds": 30,
+                }
+                metadata[key] = defaults[key]
+        if original_meta.get("reason"):
+            metadata["reason"] = original_meta["reason"]
+        return metadata
+
+    async def _validate_cold_switch_baseline(
+        self,
+        *,
+        endpoint_id: uuid.UUID,
+        target_deployment_id: uuid.UUID,
+        expected_source_deployment_id: uuid.UUID | None,
+        skip_active_operation_checks: bool = False,
+        conflict_on_unsafe: bool = False,
+    ) -> tuple[Any, Deployment, Deployment]:
+        """Shared safety baseline for enqueue and retry.
+
+        When ``expected_source_deployment_id`` is set (retry), the current ACTIVE
+        route must still point at that Source Deployment.
+        """
         alias = await self._endpoints.get_alias(endpoint_id)
         if alias is None:
             raise NotFoundError(
@@ -130,12 +457,19 @@ class SwitchService:
                 details={"endpoint_id": str(endpoint_id)},
             )
         if alias.traffic_state != TrafficState.SERVING.value:
+            details = {
+                "endpoint_id": str(endpoint_id),
+                "traffic_state": alias.traffic_state,
+            }
+            if conflict_on_unsafe:
+                raise ConflictError(
+                    "Endpoint traffic_state must be SERVING to retry a Cold Switch.",
+                    code="INVALID_OPERATION_STATE",
+                    details=details,
+                )
             raise ValidationError(
                 "Endpoint traffic_state must be SERVING to enqueue a Cold Switch.",
-                details={
-                    "endpoint_id": str(endpoint_id),
-                    "traffic_state": alias.traffic_state,
-                },
+                details=details,
             )
 
         active_route = await self._endpoints.get_active_route(endpoint_id)
@@ -145,6 +479,21 @@ class SwitchService:
                 details={"endpoint_id": str(endpoint_id)},
             )
         source_id = uuid.UUID(str(active_route.deployment_id))
+        if (
+            expected_source_deployment_id is not None
+            and source_id != expected_source_deployment_id
+        ):
+            raise ConflictError(
+                "Current ACTIVE route is not the original Source Deployment.",
+                code="INVALID_OPERATION_STATE",
+                details={
+                    "endpoint_id": str(endpoint_id),
+                    "expected_source_deployment_id": str(
+                        expected_source_deployment_id
+                    ),
+                    "active_deployment_id": str(source_id),
+                },
+            )
         if source_id == target_deployment_id:
             raise ValidationError(
                 "Source and Target Deployments must be different.",
@@ -219,89 +568,39 @@ class SwitchService:
 
         await self._validate_model_api_compatibility(alias.api_type, target)
 
-        busy_endpoint = await self._operations.find_active_switch_for_endpoint(
-            endpoint_id
-        )
-        if busy_endpoint is not None:
-            raise ConflictError(
-                "A SWITCH/ROLLBACK operation is already active for this Endpoint.",
-                code="SWITCH_ALREADY_IN_PROGRESS",
-                details={
-                    "endpoint_id": str(endpoint_id),
-                    "active_operation_id": str(busy_endpoint.id),
-                    "active_status": busy_endpoint.status,
-                },
+        if not skip_active_operation_checks:
+            busy_endpoint = await self._operations.find_active_switch_for_endpoint(
+                endpoint_id
             )
-
-        for dep, role in ((source, "Source"), (target, "Target")):
-            active = await self._operations.find_active_for_deployment(
-                uuid.UUID(str(dep.id))
-            )
-            if active is not None:
+            if busy_endpoint is not None:
                 raise ConflictError(
-                    f"An active operation already exists for the {role} Deployment.",
-                    code="ENDPOINT_BUSY",
+                    "A SWITCH/ROLLBACK operation is already active for this Endpoint.",
+                    code="SWITCH_ALREADY_IN_PROGRESS",
                     details={
-                        "deployment_id": str(dep.id),
-                        "role": role,
-                        "active_operation_id": str(active.id),
-                        "active_status": active.status,
-                        "active_operation_type": active.operation_type,
+                        "endpoint_id": str(endpoint_id),
+                        "active_operation_id": str(busy_endpoint.id),
+                        "active_status": busy_endpoint.status,
                     },
                 )
 
-        now = dt.datetime.now(tz=dt.UTC)
-        metadata: dict[str, Any] = {
-            "strategy": SwitchStrategy.COLD.value,
-            "drain_timeout_seconds": int(drain_timeout_seconds),
-            "health_timeout_seconds": int(health_timeout_seconds),
-            "vram_release_timeout_seconds": int(vram_release_timeout_seconds),
-            "gateway_apply_timeout_seconds": int(gateway_apply_timeout_seconds),
-            "m5b_forward_cold_only": True,
-            "m5c_rollback_not_implemented": True,
-        }
-        if reason:
-            metadata["reason"] = reason
-
-        operation = Operation(
-            operation_type=OperationType.SWITCH.value,
-            status=OperationStatus.QUEUED.value,
-            switch_strategy=SwitchStrategy.COLD.value,
-            endpoint_alias_id=alias.id,
-            source_deployment_id=source.id,
-            target_deployment_id=target.id,
-            requested_by=requested_by,
-            request_reason=reason,
-            idempotency_key=idempotency_key,
-            metadata_json=metadata,
-        )
-        await self._operations.add(operation)
-
-        for seq, step_code in enumerate(COLD_SWITCH_STEPS, start=1):
-            await self._operations.add_step(
-                OperationStep(
-                    operation_id=operation.id,
-                    sequence_no=seq,
-                    step_code=step_code,
-                    status=StepStatus.PENDING.value,
-                    attempt_no=1,
-                    detail_json={},
+            for dep, role in ((source, "Source"), (target, "Target")):
+                active = await self._operations.find_active_for_deployment(
+                    uuid.UUID(str(dep.id))
                 )
-            )
+                if active is not None:
+                    raise ConflictError(
+                        f"An active operation already exists for the {role} Deployment.",
+                        code="ENDPOINT_BUSY",
+                        details={
+                            "deployment_id": str(dep.id),
+                            "role": role,
+                            "active_operation_id": str(active.id),
+                            "active_status": active.status,
+                            "active_operation_type": active.operation_type,
+                        },
+                    )
 
-        await self._operations.add_job(
-            OperationJob(
-                operation_id=operation.id,
-                status=JobStatus.QUEUED.value,
-                priority=100,
-                attempt_count=0,
-                max_attempts=max(1, max_attempts),
-                available_at=now,
-            )
-        )
-
-        await self._session.commit()
-        return await self._switch_response(uuid.UUID(str(operation.id)))
+        return alias, source, target
 
     async def _switch_response(self, operation_id: uuid.UUID) -> dict[str, Any]:
         full = await self._operation_queries.get_operation(operation_id)
@@ -314,6 +613,8 @@ class SwitchService:
             "endpoint_alias_id": full["endpoint_alias_id"],
             "source_deployment_id": full["source_deployment_id"],
             "target_deployment_id": full["target_deployment_id"],
+            "retry_of_operation_id": full.get("retry_of_operation_id"),
+            "cancel_requested_at": full.get("cancel_requested_at"),
             "current_step": full["current_step"],
             "metadata": full["metadata"],
             "created_at": full["created_at"],

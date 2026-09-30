@@ -395,6 +395,9 @@ class Operation(Base):
     cancel_requested_at: Mapped[dt.datetime | None] = mapped_column(
         DateTime(timezone=True)
     )
+    retry_of_operation_id: Mapped[str | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("operation.id")
+    )
     metadata_json: Mapped[dict] = mapped_column(
         JSONB, nullable=False, server_default=text("'{}'::jsonb")
     )
@@ -427,6 +430,16 @@ class Operation(Base):
         Index("ix_operation_alias_status", "endpoint_alias_id", "status"),
         Index("ix_operation_source_status", "source_deployment_id", "status"),
         Index("ix_operation_target_status", "target_deployment_id", "status"),
+        Index("ix_operation_retry_of", "retry_of_operation_id"),
+        Index(
+            "uq_operation_active_retry_of",
+            "retry_of_operation_id",
+            unique=True,
+            postgresql_where=text(
+                "retry_of_operation_id IS NOT NULL "
+                "AND status IN ('QUEUED', 'RUNNING', 'ROLLING_BACK')"
+            ),
+        ),
     )
 
 

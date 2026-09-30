@@ -1,15 +1,16 @@
-"""Operation query and cancel routes."""
+"""Operation query, cancel, and retry routes."""
 
 from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, Response, status
+from fastapi import APIRouter, Depends, Header, Response, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_session
 from app.services.operations import OperationService
+from app.services.switch import SwitchService
 
 router = APIRouter(prefix="/api/v1", tags=["operations"])
 
@@ -24,6 +25,12 @@ def get_operation_service(
     session: AsyncSession = Depends(get_session),
 ) -> OperationService:
     return OperationService(session)
+
+
+def get_switch_service(
+    session: AsyncSession = Depends(get_session),
+) -> SwitchService:
+    return SwitchService(session)
 
 
 @router.get("/operations/{operation_id}")
@@ -61,6 +68,30 @@ async def cancel_operation(
     payload = await service.cancel_operation(
         operation_id,
         reason=body.reason,
+    )
+    response.status_code = status.HTTP_202_ACCEPTED
+    return payload
+
+
+@router.post(
+    "/operations/{operation_id}/retry",
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def retry_operation(
+    operation_id: uuid.UUID,
+    response: Response,
+    service: SwitchService = Depends(get_switch_service),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+) -> dict:
+    """Explicit retry of a terminal Cold SWITCH (M5-C2-B).
+
+    Creates a NEW Operation / Job / 14 PENDING steps. Never mutates the
+    original. Eligible only for FAILED / ROLLED_BACK Cold SWITCH that is
+    back at a safe baseline. MIR retry is out of scope until M5-C2-C.
+    """
+    payload = await service.retry_cold_switch(
+        operation_id,
+        idempotency_key=idempotency_key,
     )
     response.status_code = status.HTTP_202_ACCEPTED
     return payload

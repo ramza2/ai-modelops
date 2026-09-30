@@ -541,8 +541,9 @@ Enqueue는 Operation / OperationJob / OperationStep만 생성한다. Route,
 Worker는 실행 직전 **authoritative fresh Resource Preflight**를 다시 수행한다.
 Standalone `POST /preflights` preview는 실행 승인으로 사용하지 않는다.
 
-**M5-B scope:** forward COLD path only. Automatic rollback / cancel / retry /
-reconciliation은 M5-C. Destructive boundary(`STOP_SOURCE`) 이후 복구 불가
+**M5-B scope:** forward COLD path only. Automatic rollback is M5-C1; cancel is
+M5-C2-A; explicit retry is M5-C2-B; MIR reconciliation remains M5-C2-C.
+Destructive boundary(`STOP_SOURCE`) 이후 복구 불가
 실패는 `MANUAL_INTERVENTION_REQUIRED` + Endpoint `MAINTENANCE`로 종료한다.
 
 응답: `202 Accepted`
@@ -606,6 +607,7 @@ to
   "target_deployment_id": "uuid",
   "current_step": "WAIT_TARGET_HEALTH",
   "cancel_requested_at": null,
+  "retry_of_operation_id": null,
   "created_at": "...",
   "started_at": "...",
   "finished_at": null,
@@ -660,17 +662,38 @@ M5-C2-A Safe Cancel. Optional body:
 - Terminal:
   - `CANCELLED` 또는 cancel로 인한 `ROLLED_BACK`: 반복 cancel idempotent
   - 그 외 terminal: `409 INVALID_OPERATION_STATE`
-- Retry / reconciliation sweeper는 이 milestone에 포함되지 않는다.
 
 응답: `202 Accepted` + Operation projection (`cancel_requested_at` 포함)
 
 ### POST /operations/{operation_id}/retry
 
-`FAILED` 또는 정책상 재시도 가능한 상태에서만 허용.
+M5-C2-B Explicit Retry. **원본 Operation을 재개/리셋하지 않는다.**
 
-`MANUAL_INTERVENTION_REQUIRED`는 운영자가 실제 상태를 확인한 뒤 명시적으로 재시도해야 한다.
+허용:
 
-> M5-C2-A scope: cancel only. Retry API는 아직 구현하지 않는다.
+- `operation_type = SWITCH` + `switch_strategy = COLD`
+- terminal `FAILED` 또는 `ROLLED_BACK`
+- `FAILED`이면서 `destructive_boundary_entered=true` 이면 거부
+- 현재 상태가 Cold Switch 시작 안전 기준을 충족해야 함
+  (Endpoint enabled + `SERVING`, ACTIVE route = 원본 Source,
+  Source `RUNNING+HEALTHY`, Target 유효, 충돌 active op 없음)
+
+거부 (`409 INVALID_OPERATION_STATE`):
+
+- `QUEUED` / `RUNNING` / `ROLLING_BACK` / `SUCCEEDED` / `CANCELLED`
+- `MANUAL_INTERVENTION_REQUIRED` (M5-C2-C reconciliation 전까지)
+- non-SWITCH / non-COLD
+- 안전 기준 미충족 / 이미 active retry child 존재
+
+동작:
+
+- 새 Operation (`retry_of_operation_id = original.id`, `status=QUEUED`)
+- 새 Job + 14 forward Steps (`PENDING`)
+- metadata whitelist만 복사 (timeouts / strategy / reason)
+- 기존 Cold Switch enqueue/Worker 경로로 실행 (별도 retry SM 없음)
+- `Idempotency-Key` 지원
+
+응답: `202 Accepted` + **새** Operation projection (`retry_of_operation_id` 포함)
 
 ---
 

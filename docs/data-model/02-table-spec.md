@@ -352,6 +352,7 @@ Route commit 시 `version = version + 1`을 같은 transaction에 포함한다.
 | error_code | VARCHAR(100) | Y |  |
 | error_message | TEXT | Y |  |
 | cancel_requested_at | TIMESTAMPTZ | Y | M5-C2-A cancel intent; Worker observes this (not a separate status) |
+| retry_of_operation_id | UUID | Y | M5-C2-B FK → operation.id; lineage for explicit retry child |
 | metadata_json | JSONB | N | default `{}`; may include `destructive_boundary_entered`, optional `cancel_reason` |
 | created_at | TIMESTAMPTZ | N |  |
 | started_at | TIMESTAMPTZ | Y |  |
@@ -364,9 +365,15 @@ UNIQUE(idempotency_key) WHERE idempotency_key IS NOT NULL
 INDEX(status, created_at)
 INDEX(endpoint_alias_id, created_at DESC)
 INDEX(target_deployment_id, created_at DESC)
+INDEX(retry_of_operation_id)
+UNIQUE(retry_of_operation_id) WHERE retry_of_operation_id IS NOT NULL
+  AND status IN ('QUEUED', 'RUNNING', 'ROLLING_BACK')
 ```
 
 동일 Alias의 SWITCH/ROLLBACK 동시 실행은 transaction advisory lock 또는 Alias row `FOR UPDATE`로 직렬화한다.
+
+Retry (M5-C2-B)는 원본 Operation을 수정하지 않고 `retry_of_operation_id`로
+새 Operation을 만든다. 원본당 active retry child는 최대 1개다.
 
 ---
 

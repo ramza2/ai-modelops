@@ -24,7 +24,13 @@ Cold Switch는 GPU VRAM이 부족하여 기존 모델과 신규 모델을 동시
   Post-destructive cancel → durable M5-C1 rollback (`ROLLING_BACK` → `ROLLED_BACK`),
   never direct `CANCELLED`. STOP_SOURCE re-reads cancel intent immediately before
   committing `destructive_boundary_entered` / Source stop.
-- **M5-C2-B / M5-C2-C (not implemented):** Retry API, full reconciliation sweeper,
+- **M5-C2-B:** Explicit Retry (`POST /operations/{id}/retry`) — **implemented**.
+  Creates a **new** Cold SWITCH Operation / Job / 14 PENDING steps with
+  `retry_of_operation_id` lineage. Original Operation/Job/Steps remain immutable.
+  Eligible only for terminal `FAILED` / `ROLLED_BACK` Cold SWITCH after a safe
+  baseline revalidation. `MANUAL_INTERVENTION_REQUIRED` retry remains blocked
+  until M5-C2-C reconciliation. Fresh Worker Preflight is always authoritative.
+- **M5-C2-C (not implemented):** full reconciliation sweeper, MIR recovery/retry,
   HOT/AUTO/ALTERNATE_NODE, Admin UI.
 
 핵심 원칙은 다음과 같다.
@@ -901,6 +907,55 @@ Cancel request means rollback intent:
 - `ROLLED_BACK` caused after a cancel request: repeated cancel is idempotent
 - `SUCCEEDED` / `FAILED` / `MIR` / unrelated `ROLLED_BACK`: `409 INVALID_OPERATION_STATE`
 - Never reopen a terminal Operation
+
+---
+
+## 13b. Retry 정책 (M5-C2-B Explicit Retry — implemented)
+
+`POST /api/v1/operations/{operation_id}/retry` creates a **new** Cold SWITCH
+Operation. The original Operation / Job / Steps are **never** revived or reset.
+
+### Eligibility
+
+| Status | Retry? |
+|---|---|
+| `FAILED` (pre-destructive; `destructive_boundary_entered` unset) | Yes, after baseline |
+| `ROLLED_BACK` | Yes, after Source-restored baseline |
+| `QUEUED` / `RUNNING` / `ROLLING_BACK` | No — `409 INVALID_OPERATION_STATE` |
+| `SUCCEEDED` / `CANCELLED` | No — `409` |
+| `MANUAL_INTERVENTION_REQUIRED` | No — blocked until M5-C2-C |
+| non-SWITCH / non-COLD | No — `409` |
+
+### Lineage
+
+- New Operation: `retry_of_operation_id = original.id`
+- New UUID, `status = QUEUED`, `cancel_requested_at = NULL`
+- Fresh Job (`QUEUED`) + fresh 14 forward Steps (all `PENDING`)
+- Metadata whitelist only (timeouts / strategy / reason). Do **not** copy
+  `destructive_boundary_entered`, cancel flags, rollback/error/runtime state.
+
+### Safety baseline before enqueue
+
+Reuse Cold Switch validation. Require at least:
+
+- Endpoint exists and enabled, `traffic_state = SERVING`
+- ACTIVE route == original Source Deployment
+- Source `RUNNING + HEALTHY`; original Target still valid
+- same-node / GPU assignment / API type checks
+- no active SWITCH/ROLLBACK for Endpoint; no conflicting active ops on Source/Target
+- `FAILED` with `destructive_boundary_entered=true` → reject
+- Fresh Worker Preflight remains authoritative (never reuse old ResourcePreflight)
+
+### Concurrency
+
+Lock the original Operation for the retry decision. Concurrent retries of the
+same original must not create two active children
+(`uq_operation_active_retry_of`). Do not hold DB locks across external calls.
+Preserve `Idempotency-Key` when provided.
+
+### Worker
+
+No new retry state machine. The new Operation enters the normal Cold Switch queue.
 
 ---
 
