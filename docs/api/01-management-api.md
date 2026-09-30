@@ -632,19 +632,45 @@ MANUAL_INTERVENTION_REQUIRED
 
 ### POST /operations/{operation_id}/cancel
 
+M5-C2-A Safe Cancel. Optional body:
+
+```json
+{
+  "reason": "operator decided to abort"
+}
+```
+
 처리 규칙:
 
-- `STOP_SOURCE` 이전: 취소 → `CANCELLED`
-- `STOP_SOURCE` 이후: Rollback intent 설정 → `ROLLING_BACK`
-- Terminal 상태: `409 INVALID_OPERATION_STATE`
+- Management API는 cancel intent만 기록한다. Docker / Node Agent / Gateway
+  side effect를 수행하지 않는다. Worker가 runtime orchestration을 담당한다.
+- `QUEUED` (job not running): `cancel_requested_at` 설정 후 Operation
+  `CANCELLED` + Job `FAILED` + 남은 `PENDING` steps `SKIPPED` (원자적).
+  런타임 mutation 없음. 반복 cancel은 idempotent.
+- `RUNNING` and `destructive_boundary_entered` unset: `cancel_requested_at`만
+  설정. Worker가 safe checkpoint에서 관찰 → Source `RUNNING` 유지,
+  DRAINING/MAINTENANCE이면 `SERVING` 복구 → `CANCELLED`.
+- `STOP_SOURCE` race: MAINTENANCE Gateway apply 이후 /
+  `destructive_boundary_entered` commit·Source stop 직전에 cancel을 재조회.
+  cancel이면 Source stop을 호출하지 않고 `CANCELLED`.
+- `destructive_boundary_entered=true`: 직접 `CANCELLED` 금지. Rollback intent
+  → 기존 M5-C1 durable rollback → `ROLLING_BACK` → `ROLLED_BACK`.
+  `cancel_requested_at` 유지. code=`USER_CANCELLED`.
+- 이미 `ROLLING_BACK`: intent만 기록하고 기존 rollback 계속 (중단/재시작 금지).
+- Terminal:
+  - `CANCELLED` 또는 cancel로 인한 `ROLLED_BACK`: 반복 cancel idempotent
+  - 그 외 terminal: `409 INVALID_OPERATION_STATE`
+- Retry / reconciliation sweeper는 이 milestone에 포함되지 않는다.
 
-응답: `202 Accepted`
+응답: `202 Accepted` + Operation projection (`cancel_requested_at` 포함)
 
 ### POST /operations/{operation_id}/retry
 
 `FAILED` 또는 정책상 재시도 가능한 상태에서만 허용.
 
 `MANUAL_INTERVENTION_REQUIRED`는 운영자가 실제 상태를 확인한 뒤 명시적으로 재시도해야 한다.
+
+> M5-C2-A scope: cancel only. Retry API는 아직 구현하지 않는다.
 
 ---
 

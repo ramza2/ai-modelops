@@ -160,6 +160,64 @@ class OperationService:
         steps = await self._operations.list_steps(operation_id)
         return self._serialize_operation(operation, steps)
 
+    async def cancel_operation(
+        self,
+        operation_id: uuid.UUID,
+        *,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        """Record cancellation intent (M5-C2-A Cold SWITCH only).
+
+        Management API never performs Docker/Node Agent/Gateway side effects.
+        QUEUED Cold SWITCH is terminalized under Job+Operation row locks;
+        RUNNING/ROLLING_BACK only stamp ``cancel_requested_at``.
+        """
+        operation = await self._operations.get(operation_id)
+        if operation is None:
+            raise NotFoundError(
+                "Operation not found.",
+                details={"operation_id": str(operation_id)},
+            )
+
+        # M5-C2-A: Cold SWITCH only. Reject before any cancel mutation.
+        if not self._operations.is_cold_switch(operation):
+            raise ConflictError(
+                "Cancel is only supported for Cold SWITCH operations.",
+                code="INVALID_OPERATION_STATE",
+                details={
+                    "operation_id": str(operation_id),
+                    "operation_type": operation.operation_type,
+                    "switch_strategy": operation.switch_strategy,
+                },
+            )
+
+        try:
+            locked_op, decision = await self._operations.apply_cancel_decision(
+                operation_id,
+                reason=reason,
+            )
+        except LookupError:
+            raise NotFoundError(
+                "Operation not found.",
+                details={"operation_id": str(operation_id)},
+            ) from None
+        except RuntimeError as exc:
+            if str(exc) == "already_terminal":
+                op = await self._operations.get(operation_id)
+                raise ConflictError(
+                    "Operation is already terminal and cannot be cancelled.",
+                    code="INVALID_OPERATION_STATE",
+                    details={
+                        "operation_id": str(operation_id),
+                        "status": op.status if op is not None else None,
+                    },
+                ) from None
+            raise
+
+        await self._session.commit()
+        _ = decision
+        return await self.get_operation(uuid.UUID(str(locked_op.id)))
+
     async def _require_managed_deployment(
         self, deployment_id: uuid.UUID
     ) -> Deployment:

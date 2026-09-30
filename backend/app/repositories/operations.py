@@ -2,12 +2,20 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import uuid
+from typing import Any, Literal
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.enums import OperationStatus
+from app.core.enums import (
+    JobStatus,
+    OperationStatus,
+    OperationType,
+    StepStatus,
+    SwitchStrategy,
+)
 from app.domain.models import Operation, OperationJob, OperationStep
 
 ACTIVE_OPERATION_STATUSES = frozenset(
@@ -17,6 +25,18 @@ ACTIVE_OPERATION_STATUSES = frozenset(
         OperationStatus.ROLLING_BACK.value,
     }
 )
+
+TERMINAL_OPERATION_STATUSES = frozenset(
+    {
+        OperationStatus.SUCCEEDED.value,
+        OperationStatus.FAILED.value,
+        OperationStatus.CANCELLED.value,
+        OperationStatus.ROLLED_BACK.value,
+        OperationStatus.MANUAL_INTERVENTION_REQUIRED.value,
+    }
+)
+
+CancelDecision = Literal["cancelled", "intent_only", "idempotent"]
 
 
 class OperationRepository:
@@ -52,8 +72,6 @@ class OperationRepository:
         self, endpoint_id: uuid.UUID
     ) -> Operation | None:
         """Active SWITCH/ROLLBACK for an Endpoint Alias."""
-        from app.core.enums import OperationType
-
         stmt = (
             select(Operation)
             .where(
@@ -99,3 +117,165 @@ class OperationRepository:
     ) -> OperationJob | None:
         stmt = select(OperationJob).where(OperationJob.operation_id == operation_id)
         return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    @staticmethod
+    def is_cold_switch(operation: Operation) -> bool:
+        return (
+            operation.operation_type == OperationType.SWITCH.value
+            and operation.switch_strategy == SwitchStrategy.COLD.value
+        )
+
+    @staticmethod
+    def is_cancel_idempotent_terminal(operation: Operation) -> bool:
+        """CANCELLED, or ROLLED_BACK that was driven by a prior cancel request."""
+        if operation.status == OperationStatus.CANCELLED.value:
+            return True
+        if (
+            operation.status == OperationStatus.ROLLED_BACK.value
+            and operation.cancel_requested_at is not None
+        ):
+            return True
+        return False
+
+    @staticmethod
+    def is_terminal(operation: Operation) -> bool:
+        return operation.status in TERMINAL_OPERATION_STATUSES
+
+    @staticmethod
+    def _patch_metadata(
+        operation: Operation, patch: dict[str, Any]
+    ) -> None:
+        """Merge keys into metadata from the current ORM value (must be locked)."""
+        meta = dict(operation.metadata_json or {})
+        meta.update(patch)
+        operation.metadata_json = meta
+
+    async def apply_cancel_decision(
+        self,
+        operation_id: uuid.UUID,
+        *,
+        reason: str | None = None,
+    ) -> tuple[Operation, CancelDecision]:
+        """Lock Job then Operation and apply cancel (M5-C2-A).
+
+        Lock ordering matches Worker ``claim_next_job`` (Job first, then
+        Operation) so QUEUED cancel vs claim is deterministic:
+
+        - still QUEUED (+ job QUEUED/absent) → atomic CANCELLED
+        - already claimed / RUNNING / ROLLING_BACK → intent only
+
+        Never overwrites a concurrently RUNNING/post-destructive Operation with
+        direct CANCELLED. Metadata patches use the freshly locked JSONB value.
+        """
+        now = dt.datetime.now(tz=dt.UTC)
+
+        # Expire cached identities so FOR UPDATE reloads committed claim state.
+        cached_job = (
+            await self._session.execute(
+                select(OperationJob).where(
+                    OperationJob.operation_id == operation_id
+                )
+            )
+        ).scalar_one_or_none()
+        if cached_job is not None:
+            self._session.expire(cached_job)
+        cached_op = await self._session.get(Operation, operation_id)
+        if cached_op is not None:
+            self._session.expire(cached_op)
+
+        # Lock Job first (same order as claim). Wait — do not SKIP LOCKED —
+        # so we observe the post-claim state when Worker wins the race.
+        job = (
+            await self._session.execute(
+                select(OperationJob)
+                .where(OperationJob.operation_id == operation_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one_or_none()
+
+        operation = (
+            await self._session.execute(
+                select(Operation)
+                .where(Operation.id == operation_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one_or_none()
+        if operation is None:
+            raise LookupError("operation_missing")
+
+        if self.is_cancel_idempotent_terminal(operation):
+            if reason:
+                self._patch_metadata(operation, {"cancel_reason": reason})
+            await self._session.flush()
+            return operation, "idempotent"
+
+        if self.is_terminal(operation):
+            raise RuntimeError("already_terminal")
+
+        # Record cancel intent from fresh locked metadata.
+        if operation.cancel_requested_at is None:
+            operation.cancel_requested_at = now
+        if reason:
+            self._patch_metadata(operation, {"cancel_reason": reason})
+
+        job_still_queued = job is None or job.status == JobStatus.QUEUED.value
+        if (
+            operation.status == OperationStatus.QUEUED.value
+            and job_still_queued
+        ):
+            await self.finalize_operation_cancelled(
+                operation=operation,
+                job=job,
+                now=now,
+            )
+            await self._session.flush()
+            return operation, "cancelled"
+
+        # Worker already claimed / RUNNING / ROLLING_BACK — intent only.
+        await self._session.flush()
+        return operation, "intent_only"
+
+    async def finalize_operation_cancelled(
+        self,
+        *,
+        operation: Operation,
+        job: OperationJob | None,
+        code: str = "USER_CANCELLED",
+        message: str = "Operation cancelled by user.",
+        now: dt.datetime | None = None,
+    ) -> None:
+        """Atomically CANCELLED + Job FAILED + skip remaining PENDING/RUNNING steps."""
+        stamp = now or dt.datetime.now(tz=dt.UTC)
+        if operation.cancel_requested_at is None:
+            operation.cancel_requested_at = stamp
+        if operation.status != OperationStatus.CANCELLED.value:
+            operation.status = OperationStatus.CANCELLED.value
+            operation.finished_at = stamp
+            operation.error_code = code
+            operation.error_message = message
+
+        steps = await self.list_steps(uuid.UUID(str(operation.id)))
+        for step in steps:
+            if step.status in (
+                StepStatus.PENDING.value,
+                StepStatus.RUNNING.value,
+            ):
+                step.status = StepStatus.SKIPPED.value
+                step.finished_at = stamp
+                detail = dict(step.detail_json or {})
+                detail["skipped_reason"] = "USER_CANCELLED"
+                step.detail_json = detail
+
+        if job is not None and job.status not in (
+            JobStatus.FAILED.value,
+            JobStatus.DONE.value,
+        ):
+            job.status = JobStatus.FAILED.value
+            job.locked_by = None
+            job.locked_at = None
+            job.last_error = f"{code}: {message}"
+            job.updated_at = stamp
+
+        await self._session.flush()

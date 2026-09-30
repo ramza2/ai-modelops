@@ -94,7 +94,14 @@ class OperationJobRepository:
         job.updated_at = now
         job.last_error = None
 
-        operation = await self._session.get(Operation, job.operation_id)
+        # Lock Operation after Job (same order as Cancel API) before status bump.
+        operation = (
+            await self._session.execute(
+                select(Operation)
+                .where(Operation.id == job.operation_id)
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
         if operation is not None and operation.status == OperationStatus.QUEUED.value:
             operation.status = OperationStatus.RUNNING.value
             if operation.started_at is None:
@@ -438,6 +445,149 @@ class OperationJobRepository:
             job.last_error = f"{code}: {message}"
             job.updated_at = now
         await self._session.commit()
+
+    async def finalize_operation_cancelled(
+        self,
+        *,
+        operation_id: uuid.UUID,
+        job_id: uuid.UUID,
+        code: str = "USER_CANCELLED",
+        message: str = "Operation cancelled by user.",
+    ) -> None:
+        """Set Operation CANCELLED + Job FAILED + skip open forward steps."""
+        now = dt.datetime.now(tz=dt.UTC)
+        operation = await self._session.get(Operation, operation_id)
+        job = await self._session.get(OperationJob, job_id)
+        if operation is None:
+            return
+        # Never overwrite a stronger terminal outcome.
+        if operation.status in {
+            OperationStatus.SUCCEEDED.value,
+            OperationStatus.ROLLED_BACK.value,
+            OperationStatus.MANUAL_INTERVENTION_REQUIRED.value,
+            OperationStatus.FAILED.value,
+        }:
+            return
+        if operation.cancel_requested_at is None:
+            operation.cancel_requested_at = now
+        if operation.status != OperationStatus.CANCELLED.value:
+            operation.status = OperationStatus.CANCELLED.value
+            operation.finished_at = now
+            operation.error_code = code
+            operation.error_message = message
+
+        steps = await self.list_steps(operation_id)
+        for step in steps:
+            # Only skip non-rollback forward/open steps.
+            if step.step_code.startswith("ROLLBACK_"):
+                continue
+            if step.status in (
+                StepStatus.PENDING.value,
+                StepStatus.RUNNING.value,
+            ):
+                step.status = StepStatus.SKIPPED.value
+                step.finished_at = now
+                detail = dict(step.detail_json or {})
+                detail["skipped_reason"] = code
+                step.detail_json = detail
+
+        if job is not None and job.status not in {
+            JobStatus.FAILED.value,
+            JobStatus.DONE.value,
+        }:
+            job.status = JobStatus.FAILED.value
+            job.locked_by = None
+            job.locked_at = None
+            job.last_error = f"{code}: {message}"
+            job.updated_at = now
+        await self._session.commit()
+
+    async def refresh_cancel_requested_at(
+        self, operation_id: uuid.UUID
+    ) -> dt.datetime | None:
+        """Re-read cancel_requested_at from DB (authoritative cancel intent)."""
+        row = (
+            await self._session.execute(
+                select(Operation.cancel_requested_at).where(
+                    Operation.id == operation_id
+                )
+            )
+        ).one_or_none()
+        if row is None:
+            return None
+        return row[0]
+
+    async def decide_destructive_boundary(
+        self,
+        operation_id: uuid.UUID,
+        *,
+        step_id: uuid.UUID | None = None,
+        step_detail_patch: dict | None = None,
+    ) -> str:
+        """Atomically decide cancel vs destructive_boundary_entered under FOR UPDATE.
+
+        Short persistence transaction only — caller must not hold this lock across
+        Node Agent / Gateway HTTP. Returns ``\"cancelled\"`` or ``\"boundary_entered\"``.
+
+        Metadata is patched from the freshly locked JSONB so concurrent
+        ``cancel_reason`` / other keys are preserved.
+        """
+        # Expire any cached identity so FOR UPDATE reloads cancel_requested_at /
+        # metadata_json from the database (READ COMMITTED + populate_existing).
+        cached = await self._session.get(Operation, operation_id)
+        if cached is not None:
+            self._session.expire(cached)
+
+        operation = (
+            await self._session.execute(
+                select(Operation)
+                .where(Operation.id == operation_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one_or_none()
+        if operation is None:
+            return "cancelled"
+
+        if operation.cancel_requested_at is not None:
+            await self._session.commit()
+            return "cancelled"
+
+        meta = dict(operation.metadata_json or {})
+        meta["destructive_boundary_entered"] = True
+        operation.metadata_json = meta
+
+        if step_id is not None and step_detail_patch is not None:
+            step = await self._session.get(OperationStep, step_id)
+            if step is not None:
+                detail = dict(step.detail_json or {})
+                detail.update(step_detail_patch)
+                detail["destructive_boundary_entered"] = True
+                step.detail_json = detail
+
+        await self._session.commit()
+        return "boundary_entered"
+
+    async def patch_operation_metadata(
+        self,
+        operation_id: uuid.UUID,
+        patch: dict,
+    ) -> dict:
+        """Merge metadata keys under Operation FOR UPDATE; return fresh metadata."""
+        operation = (
+            await self._session.execute(
+                select(Operation)
+                .where(Operation.id == operation_id)
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if operation is None:
+            return {}
+        meta = dict(operation.metadata_json or {})
+        meta.update(patch)
+        operation.metadata_json = meta
+        await self._session.commit()
+        return meta
 
     async def reconcile_terminal_operation_job(
         self,

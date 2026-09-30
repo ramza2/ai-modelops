@@ -1,8 +1,12 @@
-"""Forward Cold Switch orchestration (Milestone 5-B).
+"""Forward Cold Switch orchestration (Milestone 5-B / M5-C2-A cancel).
 
-Runs SWITCH / COLD Operation steps. Does not implement rollback or cancel.
-Destructive boundary = after ``destructive_boundary_entered`` is committed,
-just before Source Node Agent stop.
+Runs SWITCH / COLD Operation steps. Automatic rollback lives in
+``cold_switch_rollback``. Destructive boundary = after
+``destructive_boundary_entered`` is committed, just before Source Node Agent stop.
+
+M5-C2-A: ``cancel_requested_at`` is authoritative cancel intent. Pre-destructive
+cancel → CANCELLED (restore SERVING). Post-destructive cancel → durable
+rollback (never CANCELLED).
 """
 
 from __future__ import annotations
@@ -73,6 +77,23 @@ from app.services.operation_executor import (
 )
 
 logger = logging.getLogger(__name__)
+
+USER_CANCELLED = "USER_CANCELLED"
+
+
+class CancelRequestedError(Exception):
+    """Raised when cancel_requested_at is observed at a safe checkpoint."""
+
+    def __init__(
+        self,
+        message: str = "Cancellation requested.",
+        *,
+        code: str = USER_CANCELLED,
+    ) -> None:
+        super().__init__(message)
+        self.message = message
+        self.code = code
+
 
 STEP_VALIDATE = "VALIDATE"
 STEP_PREFLIGHT = "PREFLIGHT"
@@ -449,6 +470,21 @@ class ColdSwitchExecutor(ColdSwitchRollbackMixin):
                 )
                 return
 
+            # Honor cancel intent recorded while Worker was down / between steps.
+            if await self._maybe_handle_cancel(
+                session,
+                repo,
+                client,
+                gateway,
+                operation,
+                job,
+                alias,
+                source,
+                target,
+                failed_step=None,
+            ):
+                return
+
             steps = await repo.list_steps(operation_id)
             pending = [
                 s
@@ -458,6 +494,19 @@ class ColdSwitchExecutor(ColdSwitchRollbackMixin):
             ]
 
             for step in pending:
+                if await self._maybe_handle_cancel(
+                    session,
+                    repo,
+                    client,
+                    gateway,
+                    operation,
+                    job,
+                    alias,
+                    source,
+                    target,
+                    failed_step=step,
+                ):
+                    return
                 try:
                     await self._execute_step(
                         session,
@@ -479,6 +528,19 @@ class ColdSwitchExecutor(ColdSwitchRollbackMixin):
                     step_ref = await session.get(OperationStep, step.id)
                     if step_ref is not None:
                         await session.refresh(step_ref)
+                except CancelRequestedError as exc:
+                    await self._finalize_pre_destructive_cancel(
+                        session,
+                        repo,
+                        gateway,
+                        operation,
+                        job,
+                        alias,
+                        source,
+                        code=exc.code,
+                        message=exc.message,
+                    )
+                    return
                 except RetryableStepError as exc:
                     await self._handle_retryable_switch(
                         repo,
@@ -854,6 +916,191 @@ class ColdSwitchExecutor(ColdSwitchRollbackMixin):
             job_id=uuid.UUID(str(job.id)),
             code=code,
             message=message,
+        )
+
+    async def _maybe_handle_cancel(
+        self,
+        session: AsyncSession,
+        repo: OperationJobRepository,
+        client: NodeAgentClient,
+        gateway: GatewayClient,
+        operation: Operation,
+        job: OperationJob,
+        alias: EndpointAlias,
+        source: Deployment,
+        target: Deployment,
+        *,
+        failed_step: OperationStep | None,
+    ) -> bool:
+        """If cancel_requested_at is set, finalize CANCELLED or enter rollback.
+
+        Returns True when cancel was handled and the caller must return.
+        """
+        await session.refresh(operation)
+        cancel_at = await repo.refresh_cancel_requested_at(
+            uuid.UUID(str(operation.id))
+        )
+        if cancel_at is None and operation.cancel_requested_at is None:
+            return False
+        if cancel_at is not None:
+            operation.cancel_requested_at = cancel_at
+        # Re-load metadata after refresh so destructive_boundary_entered is fresh.
+        await session.refresh(operation)
+
+        if _destructive_entered(operation):
+            # Post-destructive cancel = rollback intent; never CANCELLED.
+            reason = (operation.metadata_json or {}).get("cancel_reason")
+            message = (
+                f"Cancellation requested after destructive boundary"
+                f"{f': {reason}' if reason else ''}."
+            )
+            marker = failed_step
+            if marker is None:
+                class _CancelMarker:
+                    step_code = "USER_CANCEL"
+                    id = getattr(operation, "id", uuid.uuid4())
+
+                marker = _CancelMarker()  # type: ignore[assignment]
+            await self._enter_and_run_rollback(
+                session,
+                repo,
+                client,
+                gateway,
+                operation,
+                job,
+                alias,
+                source,
+                target,
+                failed_step=marker,  # type: ignore[arg-type]
+                code=USER_CANCELLED,
+                message=message,
+            )
+            return True
+
+        await self._finalize_pre_destructive_cancel(
+            session,
+            repo,
+            gateway,
+            operation,
+            job,
+            alias,
+            source,
+            code=USER_CANCELLED,
+            message="Cancellation requested before destructive boundary.",
+        )
+        return True
+
+    async def _finalize_pre_destructive_cancel(
+        self,
+        session: AsyncSession,
+        repo: OperationJobRepository,
+        gateway: GatewayClient,
+        operation: Operation,
+        job: OperationJob,
+        alias: EndpointAlias,
+        source: Deployment,
+        *,
+        code: str,
+        message: str,
+    ) -> None:
+        """Strict SERVING+Source-route restore, then CANCELLED — or MIR on failure.
+
+        Never uses the exception-swallowing best-effort traffic helper for a
+        successful cancel finalization.
+        """
+        await session.refresh(alias)
+        await session.refresh(source)
+        if source.runtime_status == RuntimeStatus.STOPPED.value:
+            # Ambiguous: do not invent runtime; escalate MIR.
+            await repo.finalize_operation_manual_intervention(
+                operation_id=uuid.UUID(str(operation.id)),
+                job_id=uuid.UUID(str(job.id)),
+                code="CANCEL_RESTORE_FAILED",
+                message=(
+                    "Pre-destructive cancel observed but Source is STOPPED; "
+                    "manual intervention required."
+                ),
+            )
+            return
+
+        try:
+            await self._strict_restore_serving_for_cancel(
+                alias=alias,
+                source=source,
+                gateway=gateway,
+                operation=operation,
+            )
+        except Exception as exc:  # noqa: BLE001 - map to MIR, never CANCELLED
+            underlying = getattr(exc, "code", None) or type(exc).__name__
+            underlying_msg = getattr(exc, "message", None) or str(exc)
+            logger.exception(
+                "Strict SERVING restore failed during cancel operation=%s",
+                operation.id,
+            )
+            await repo.finalize_operation_manual_intervention(
+                operation_id=uuid.UUID(str(operation.id)),
+                job_id=uuid.UUID(str(job.id)),
+                code="CANCEL_RESTORE_FAILED",
+                message=(
+                    f"Cancel requested but Gateway SERVING/Source-route apply "
+                    f"could not be confirmed ({underlying}: {underlying_msg})."
+                ),
+            )
+            return
+
+        await repo.finalize_operation_cancelled(
+            operation_id=uuid.UUID(str(operation.id)),
+            job_id=uuid.UUID(str(job.id)),
+            code=code,
+            message=message,
+        )
+
+    async def _strict_restore_serving_for_cancel(
+        self,
+        *,
+        alias: EndpointAlias,
+        source: Deployment,
+        gateway: GatewayClient,
+        operation: Operation,
+    ) -> None:
+        """Idempotently set DB SERVING and wait for Gateway confirmation.
+
+        Raises on Gateway/apply failure (does not swallow). Confirms:
+        applied_routing_version >= requested, traffic_state=SERVING,
+        active_deployment_id == Source.
+        """
+        meta = operation.metadata_json or {}
+        timeout = float(
+            meta.get("gateway_apply_timeout_seconds")
+            or self._settings.gateway_apply_timeout_seconds
+        )
+
+        async with self._session_factory() as tx:
+            row = (
+                await tx.execute(
+                    select(EndpointAlias)
+                    .where(EndpointAlias.id == alias.id)
+                    .with_for_update()
+                )
+            ).scalar_one()
+            if row.traffic_state != TrafficState.SERVING.value:
+                row.traffic_state = TrafficState.SERVING.value
+                version = await _bump_routing_version(tx)
+            else:
+                state = await tx.get(RoutingState, 1)
+                version = int(state.version) if state else 0
+            await tx.commit()
+
+        alias.traffic_state = TrafficState.SERVING.value
+        await self._wait_gateway(
+            gateway,
+            alias=str(alias.alias),
+            min_version=version,
+            traffic_state=TrafficState.SERVING.value,
+            active_deployment_id=str(source.id),
+            require_inflight_zero=False,
+            timeout_seconds=timeout,
+            error_code="GATEWAY_APPLY_TIMEOUT",
         )
 
     async def _best_effort_set_traffic(
@@ -1646,13 +1893,33 @@ class ColdSwitchExecutor(ColdSwitchRollbackMixin):
             error_code="GATEWAY_APPLY_TIMEOUT",
         )
 
-        # Persist destructive boundary BEFORE Node Agent stop; commit first.
+        # Atomic cancel vs destructive-boundary decision under Operation FOR UPDATE.
+        # Do not hold the lock across Node Agent HTTP — decide, commit, then stop.
+        decision = await repo.decide_destructive_boundary(
+            uuid.UUID(str(operation.id)),
+            step_id=uuid.UUID(str(step.id)),
+            step_detail_patch={
+                "maintenance_routing_version": version,
+                **{
+                    k: v
+                    for k, v in detail.items()
+                    if k != DESTRUCTIVE_FLAG
+                },
+            },
+        )
+        await session.refresh(operation)
+        if decision == "cancelled":
+            # Do NOT set destructive_boundary_entered; do NOT stop Source.
+            # Strict SERVING restore happens in _finalize_pre_destructive_cancel.
+            raise CancelRequestedError(
+                "Cancellation observed after MAINTENANCE apply and before "
+                "Source stop; Source left RUNNING.",
+                code=USER_CANCELLED,
+            )
+
         detail[DESTRUCTIVE_FLAG] = True
+        detail["maintenance_routing_version"] = version
         step.detail_json = {**(step.detail_json or {}), **detail}
-        op_meta = dict(operation.metadata_json or {})
-        op_meta[DESTRUCTIVE_FLAG] = True
-        operation.metadata_json = op_meta
-        await session.commit()
 
         graceful = int(
             (operation.metadata_json or {}).get("graceful_timeout_seconds") or 30
