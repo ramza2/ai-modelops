@@ -682,13 +682,25 @@ async def test_hot_target_already_running_no_duplicate_start(
         op_id, job_id = await _enqueue_hot_switch(session, fixture=fixture)
         await _mark_steps_status(session, op_id, succeeded_through="PREPARE_TARGET")
 
+    tgt_ctr = f"ctr-tgt-hot-{fixture['suffix']}"
     fake_node.containers[str(fixture["target_id"])] = {
         "deployment_id": str(fixture["target_id"]),
-        "container_id": "ctr-tgt",
-        "container_name": "tgt",
+        "container_id": tgt_ctr,
+        "container_name": f"tgt-{fixture['suffix']}",
         "runtime_status": "RUNNING",
         "health_status": "HEALTHY",
     }
+
+    async with sf() as session:
+        source = await session.get(Deployment, fixture["source_id"])
+        target = await session.get(Deployment, fixture["target_id"])
+        assert source and target
+        source.runtime_status = RuntimeStatus.RUNNING.value
+        source.health_status = HealthStatus.HEALTHY.value
+        target.runtime_status = RuntimeStatus.RUNNING.value
+        target.health_status = HealthStatus.HEALTHY.value
+        target.container_id = tgt_ctr
+        await session.commit()
 
     from app.clients.gateway import GatewayClient
 
@@ -723,7 +735,11 @@ async def test_hot_target_already_running_no_duplicate_start(
                 )
             )
         ).scalar_one()
-        assert op and op.status == OperationStatus.SUCCEEDED.value
+        assert op is not None
+        assert op.status == OperationStatus.SUCCEEDED.value, (
+            op.error_code,
+            op.error_message,
+        )
         assert (start_step.detail_json or {}).get("reconciled_already_running") is True
 
 
