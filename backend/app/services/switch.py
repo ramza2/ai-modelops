@@ -1,4 +1,4 @@
-"""Cold Switch enqueue and explicit retry (Management API — M5-B / M5-C2-B).
+"""Cold / Hot Switch enqueue and explicit Cold retry (Management API).
 
 Validates enough to create Operation/Job/Steps and returns immediately.
 Never mutates routes, traffic_state, or deployment desired_state.
@@ -6,7 +6,8 @@ Never calls Docker, Node Agent, or Gateway.
 
 Retry (M5-C2-B) never revives the original Operation: it creates a new
 Operation/Job/14 PENDING steps with ``retry_of_operation_id`` lineage and
-re-enters the normal Cold Switch queue.
+re-enters the normal Cold Switch queue. HOT explicit retry is out of scope
+until M5-D2.
 """
 
 from __future__ import annotations
@@ -55,7 +56,22 @@ COLD_SWITCH_STEPS: list[str] = [
     "FINALIZE",
 ]
 
-_EXECUTABLE_STRATEGIES = frozenset({SwitchStrategy.COLD.value})
+# Exact forward Hot Switch sequence (docs/state-machines/02-hot-switch.md).
+HOT_SWITCH_STEPS: list[str] = [
+    "VALIDATE",
+    "PREFLIGHT",
+    "PREPARE_TARGET",
+    "START_TARGET",
+    "WAIT_TARGET_HEALTH",
+    "PROBE_TARGET",
+    "ACTIVATE_TARGET_ROUTE",
+    "WAIT_ROUTE_APPLY",
+    "FINALIZE",
+]
+
+_EXECUTABLE_STRATEGIES = frozenset(
+    {SwitchStrategy.COLD.value, SwitchStrategy.HOT.value}
+)
 _KNOWN_STRATEGIES = frozenset(
     {
         SwitchStrategy.HOT.value,
@@ -115,6 +131,7 @@ class SwitchService:
         requested_by: str | None = None,
         max_attempts: int = 3,
     ) -> dict[str, Any]:
+        """Enqueue a Cold or Hot Switch Operation (M5-B / M5-D1)."""
         if idempotency_key:
             existing = await self._operations.get_by_idempotency_key(idempotency_key)
             if existing is not None:
@@ -128,8 +145,8 @@ class SwitchService:
             )
         if strategy_norm not in _EXECUTABLE_STRATEGIES:
             raise ValidationError(
-                "M5-B only executes strategy=COLD. "
-                "HOT / AUTO / ALTERNATE_NODE are not implemented yet.",
+                "Only strategy=COLD or strategy=HOT is executable. "
+                "AUTO / ALTERNATE_NODE are not implemented yet.",
                 details={
                     "strategy": strategy_norm,
                     "supported_strategies": sorted(_EXECUTABLE_STRATEGIES),
@@ -154,29 +171,55 @@ class SwitchService:
             expected_source_deployment_id=None,
         )
 
-        metadata: dict[str, Any] = {
-            "strategy": SwitchStrategy.COLD.value,
-            "drain_timeout_seconds": int(drain_timeout_seconds),
-            "health_timeout_seconds": int(health_timeout_seconds),
-            "vram_release_timeout_seconds": int(vram_release_timeout_seconds),
-            "gateway_apply_timeout_seconds": int(gateway_apply_timeout_seconds),
-            "m5b_forward_cold_only": True,
-            "m5c_rollback_not_implemented": True,
-        }
-        if reason:
-            metadata["reason"] = reason
-
-        operation = await self._create_cold_switch_operation(
-            alias_id=uuid.UUID(str(alias.id)),
-            source=source,
-            target=target,
-            reason=reason,
-            requested_by=requested_by,
-            idempotency_key=idempotency_key,
-            metadata=metadata,
-            max_attempts=max_attempts,
-            retry_of_operation_id=None,
-        )
+        if strategy_norm == SwitchStrategy.HOT.value:
+            metadata: dict[str, Any] = {
+                "strategy": SwitchStrategy.HOT.value,
+                "drain_timeout_seconds": int(drain_timeout_seconds),
+                "health_timeout_seconds": int(health_timeout_seconds),
+                "vram_release_timeout_seconds": int(vram_release_timeout_seconds),
+                "gateway_apply_timeout_seconds": int(gateway_apply_timeout_seconds),
+                "m5d1_hot_forward": True,
+            }
+            if reason:
+                metadata["reason"] = reason
+            operation = await self._create_switch_operation(
+                alias_id=uuid.UUID(str(alias.id)),
+                source=source,
+                target=target,
+                strategy=SwitchStrategy.HOT.value,
+                steps=HOT_SWITCH_STEPS,
+                reason=reason,
+                requested_by=requested_by,
+                idempotency_key=idempotency_key,
+                metadata=metadata,
+                max_attempts=max_attempts,
+                retry_of_operation_id=None,
+            )
+        else:
+            metadata = {
+                "strategy": SwitchStrategy.COLD.value,
+                "drain_timeout_seconds": int(drain_timeout_seconds),
+                "health_timeout_seconds": int(health_timeout_seconds),
+                "vram_release_timeout_seconds": int(vram_release_timeout_seconds),
+                "gateway_apply_timeout_seconds": int(gateway_apply_timeout_seconds),
+                "m5b_forward_cold_only": True,
+                "m5c_rollback_not_implemented": True,
+            }
+            if reason:
+                metadata["reason"] = reason
+            operation = await self._create_switch_operation(
+                alias_id=uuid.UUID(str(alias.id)),
+                source=source,
+                target=target,
+                strategy=SwitchStrategy.COLD.value,
+                steps=COLD_SWITCH_STEPS,
+                reason=reason,
+                requested_by=requested_by,
+                idempotency_key=idempotency_key,
+                metadata=metadata,
+                max_attempts=max_attempts,
+                retry_of_operation_id=None,
+            )
         await self._session.commit()
         return await self._switch_response(uuid.UUID(str(operation.id)))
 
@@ -356,10 +399,12 @@ class SwitchService:
         # Capture immutable snapshot fields before creating the child.
         original_id = uuid.UUID(str(original.id))
 
-        operation = await self._create_cold_switch_operation(
+        operation = await self._create_switch_operation(
             alias_id=uuid.UUID(str(alias.id)),
             source=source,
             target=target,
+            strategy=SwitchStrategy.COLD.value,
+            steps=COLD_SWITCH_STEPS,
             reason=reason,
             requested_by=requested_by or original.requested_by,
             idempotency_key=idempotency_key,
@@ -397,12 +442,14 @@ class SwitchService:
             },
         )
 
-    async def _create_cold_switch_operation(
+    async def _create_switch_operation(
         self,
         *,
         alias_id: uuid.UUID,
         source: Deployment,
         target: Deployment,
+        strategy: str,
+        steps: list[str],
         reason: str | None,
         requested_by: str | None,
         idempotency_key: str | None,
@@ -414,7 +461,7 @@ class SwitchService:
         operation = Operation(
             operation_type=OperationType.SWITCH.value,
             status=OperationStatus.QUEUED.value,
-            switch_strategy=SwitchStrategy.COLD.value,
+            switch_strategy=strategy,
             endpoint_alias_id=alias_id,
             source_deployment_id=source.id,
             target_deployment_id=target.id,
@@ -427,7 +474,7 @@ class SwitchService:
         )
         await self._operations.add(operation)
 
-        for seq, step_code in enumerate(COLD_SWITCH_STEPS, start=1):
+        for seq, step_code in enumerate(steps, start=1):
             await self._operations.add_step(
                 OperationStep(
                     operation_id=operation.id,

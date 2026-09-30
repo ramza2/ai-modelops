@@ -167,6 +167,13 @@ class OperationRepository:
         )
 
     @staticmethod
+    def is_hot_switch(operation: Operation) -> bool:
+        return (
+            operation.operation_type == OperationType.SWITCH.value
+            and operation.switch_strategy == SwitchStrategy.HOT.value
+        )
+
+    @staticmethod
     def is_cancel_idempotent_terminal(operation: Operation) -> bool:
         """CANCELLED, or ROLLED_BACK that was driven by a prior cancel request."""
         if operation.status == OperationStatus.CANCELLED.value:
