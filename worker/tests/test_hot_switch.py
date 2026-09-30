@@ -1119,6 +1119,15 @@ async def test_hot_pre_route_failure_stops_started_target(db, monkeypatch) -> No
         # Resume from PREPARE so START_TARGET actually runs and sets hot_target_started.
         await _mark_steps_status(session, op_id, succeeded_through="PREPARE_TARGET")
 
+    # Container must exist for START (PREPARE/ENSURE was skipped via step marks).
+    fake_node.containers[str(fixture["target_id"])] = {
+        "deployment_id": str(fixture["target_id"]),
+        "container_id": f"ctr-tgt-cleanup-{fixture['suffix']}",
+        "container_name": f"tgt-cleanup-{fixture['suffix']}",
+        "runtime_status": "CREATED",
+        "health_status": "UNKNOWN",
+    }
+
     from app.clients.gateway import GatewayClient
     from app.services.operation_executor import (
         OperationExecutor,
@@ -1203,6 +1212,14 @@ async def test_hot_pre_route_cleanup_failure_preserves_diagnostics(
         fake_node.containers[str(fixture["source_id"])]["health_status"] = "HEALTHY"
         op_id, job_id = await _enqueue_hot_switch(session, fixture=fixture)
         await _mark_steps_status(session, op_id, succeeded_through="PREPARE_TARGET")
+
+    fake_node.containers[str(fixture["target_id"])] = {
+        "deployment_id": str(fixture["target_id"]),
+        "container_id": f"ctr-tgt-cleanup-fail-{fixture['suffix']}",
+        "container_name": f"tgt-cleanup-fail-{fixture['suffix']}",
+        "runtime_status": "CREATED",
+        "health_status": "UNKNOWN",
+    }
 
     from app.clients.gateway import GatewayClient
     from app.clients.node_agent import NodeAgentClient, NodeAgentError
