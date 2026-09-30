@@ -10,6 +10,7 @@ import pytest
 from sqlalchemy import select
 
 from app.core.enums import (
+    DesiredState,
     HealthStatus,
     JobStatus,
     OperationStatus,
@@ -31,11 +32,16 @@ from app.services.cold_switch import (
     DESTRUCTIVE_FLAG,
     STEP_ACTIVATE_TARGET_ROUTE,
     STEP_FINALIZE,
+    STEP_PROBE_TARGET,
+    STEP_RESTORE_TRAFFIC,
     STEP_WAIT_ROUTE_APPLY,
     STEP_WAIT_TRAFFIC_APPLY,
 )
+from app.services.cold_switch_rollback import (
+    ROLLBACK_STEPS,
+    STEP_ROLLBACK_STOP_TARGET,
+)
 from app.services.cold_switch_reconcile import ColdSwitchReconciler
-from app.services.cold_switch_rollback import ROLLBACK_STEPS
 from tests.test_cold_switch import (
     ColdSwitchFakeNodeAgent,
     CombinedTransport,
@@ -356,9 +362,13 @@ async def test_mir_source_fully_restored_rolls_back(db) -> None:
     async with sf() as session:
         op = await session.get(Operation, op_id)
         job = await session.get(OperationJob, job_id)
-        assert op and job
+        source = await session.get(Deployment, fixture["source_id"])
+        target = await session.get(Deployment, fixture["target_id"])
+        assert op and job and source and target
         assert op.status == OperationStatus.ROLLED_BACK.value
         assert job.status == JobStatus.DONE.value
+        assert source.desired_state == DesiredState.RUNNING.value
+        assert target.desired_state == DesiredState.STOPPED.value
 
 
 @pytest.mark.asyncio
@@ -980,3 +990,378 @@ async def test_stale_running_job_recovery_still_works(db) -> None:
         assert recovered >= 1
         job = await session.get(OperationJob, job_id)
         assert job and job.status == JobStatus.QUEUED.value
+
+
+# --- Safety-review regression coverage (PR #16) ---
+
+
+@pytest.mark.asyncio
+async def test_probe_failed_target_serving_healthy_remains_mir(db) -> None:
+    """INFERENCE_PROBE_FAILED must not become SUCCEEDED from health alone."""
+    sf = db
+    fake_node = ColdSwitchFakeNodeAgent()
+    fake_gw = FakeGateway()
+    transport = CombinedTransport(fake_node, fake_gw)
+
+    async with sf() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        await _seed_standard_runtime(fake_node, fake_gw, fixture)
+        op_id, job_id = await _enqueue_cold_switch(session, fixture=fixture)
+        await _force_mir(
+            session,
+            op_id=op_id,
+            job_id=job_id,
+            code="INFERENCE_PROBE_FAILED",
+            message="probe semantic failure",
+            succeeded_through="WAIT_TARGET_HEALTH",
+            failed_step=STEP_PROBE_TARGET,
+        )
+        source = await session.get(Deployment, fixture["source_id"])
+        target = await session.get(Deployment, fixture["target_id"])
+        assert source and target
+        source.runtime_status = RuntimeStatus.STOPPED.value
+        target.runtime_status = RuntimeStatus.RUNNING.value
+        target.health_status = HealthStatus.HEALTHY.value
+        version = await _set_active_route(
+            session,
+            endpoint_id=fixture["endpoint_id"],
+            deployment_id=fixture["target_id"],
+            traffic=TrafficState.SERVING.value,
+        )
+
+    _set_containers(
+        fake_node,
+        source_id=str(fixture["source_id"]),
+        target_id=str(fixture["target_id"]),
+        source_runtime="STOPPED",
+        target_runtime="RUNNING",
+        target_health="HEALTHY",
+    )
+    fake_gw.active_deployment_id = str(fixture["target_id"])
+    fake_gw.traffic_state = TrafficState.SERVING.value
+    fake_gw.applied_routing_version = version
+
+    result = await _reconciler(sf, transport).reconcile_operation(op_id)
+    assert result.outcome == "UNRESOLVED"
+
+    async with sf() as session:
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        assert op.status == OperationStatus.MANUAL_INTERVENTION_REQUIRED.value
+        assert op.error_code == "INFERENCE_PROBE_FAILED"
+
+
+@pytest.mark.asyncio
+async def test_source_restored_target_still_running_not_rolled_back(db) -> None:
+    """ROLLED_BACK requires Target STOPPED; resume rollback when possible."""
+    sf = db
+    fake_node = ColdSwitchFakeNodeAgent()
+    fake_gw = FakeGateway()
+    transport = CombinedTransport(fake_node, fake_gw)
+
+    async with sf() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        await _seed_standard_runtime(fake_node, fake_gw, fixture)
+        op_id, job_id = await _enqueue_cold_switch(session, fixture=fixture)
+        await _force_mir(
+            session,
+            op_id=op_id,
+            job_id=job_id,
+            code="ROLLBACK_STOP_TARGET_FAILED",
+            message="stop target failed",
+        )
+        session.add(
+            OperationStep(
+                id=uuid.uuid4(),
+                operation_id=op_id,
+                sequence_no=100,
+                step_code=STEP_ROLLBACK_STOP_TARGET,
+                status=StepStatus.FAILED.value,
+                attempt_no=1,
+                detail_json={},
+                error_code="ROLLBACK_STOP_TARGET_FAILED",
+                error_message="stop target failed",
+                finished_at=dt.datetime.now(tz=dt.UTC),
+            )
+        )
+        source = await session.get(Deployment, fixture["source_id"])
+        target = await session.get(Deployment, fixture["target_id"])
+        assert source and target
+        source.runtime_status = RuntimeStatus.RUNNING.value
+        source.health_status = HealthStatus.HEALTHY.value
+        target.runtime_status = RuntimeStatus.RUNNING.value
+        target.health_status = HealthStatus.HEALTHY.value
+        version = await _set_active_route(
+            session,
+            endpoint_id=fixture["endpoint_id"],
+            deployment_id=fixture["source_id"],
+            traffic=TrafficState.SERVING.value,
+        )
+
+    _set_containers(
+        fake_node,
+        source_id=str(fixture["source_id"]),
+        target_id=str(fixture["target_id"]),
+        source_runtime="RUNNING",
+        target_runtime="RUNNING",
+    )
+    fake_gw.active_deployment_id = str(fixture["source_id"])
+    fake_gw.traffic_state = TrafficState.SERVING.value
+    fake_gw.applied_routing_version = version
+
+    result = await _reconciler(sf, transport).reconcile_operation(op_id)
+    assert result.outcome != "ROLLED_BACK"
+    assert result.outcome in {"RESUME_ROLLBACK", "UNRESOLVED"}
+
+    async with sf() as session:
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        assert op.status != OperationStatus.ROLLED_BACK.value
+        if result.outcome == "RESUME_ROLLBACK":
+            assert op.status == OperationStatus.ROLLING_BACK.value
+        else:
+            assert op.status == OperationStatus.MANUAL_INTERVENTION_REQUIRED.value
+
+
+@pytest.mark.asyncio
+async def test_source_fully_restored_target_stopped_rolls_back_desired(
+    db,
+) -> None:
+    """Fully restored Source + Target STOPPED → ROLLED_BACK + desired normalize."""
+    await test_mir_source_fully_restored_rolls_back(db)
+
+
+@pytest.mark.asyncio
+async def test_restore_traffic_without_probe_remains_mir(db) -> None:
+    """RESTORE_TRAFFIC resume requires PROBE_TARGET success + live invariants."""
+    sf = db
+    fake_node = ColdSwitchFakeNodeAgent()
+    fake_gw = FakeGateway()
+    transport = CombinedTransport(fake_node, fake_gw)
+
+    async with sf() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        await _seed_standard_runtime(fake_node, fake_gw, fixture)
+        op_id, job_id = await _enqueue_cold_switch(session, fixture=fixture)
+        await _force_mir(
+            session,
+            op_id=op_id,
+            job_id=job_id,
+            code="GATEWAY_TRAFFIC_APPLY_TIMEOUT",
+            message="timeout at restore",
+            succeeded_through=STEP_WAIT_ROUTE_APPLY,
+            failed_step=STEP_RESTORE_TRAFFIC,
+        )
+        # Invalidate probe evidence despite later steps marked succeeded.
+        probe = (
+            await session.execute(
+                select(OperationStep).where(
+                    OperationStep.operation_id == op_id,
+                    OperationStep.step_code == STEP_PROBE_TARGET,
+                )
+            )
+        ).scalar_one()
+        probe.status = StepStatus.FAILED.value
+        probe.error_code = "INFERENCE_PROBE_FAILED"
+        probe.error_message = "no probe evidence"
+        probe.finished_at = dt.datetime.now(tz=dt.UTC)
+
+        source = await session.get(Deployment, fixture["source_id"])
+        target = await session.get(Deployment, fixture["target_id"])
+        assert source and target
+        source.runtime_status = RuntimeStatus.STOPPED.value
+        target.runtime_status = RuntimeStatus.RUNNING.value
+        target.health_status = HealthStatus.UNHEALTHY.value
+        version_before = await _set_active_route(
+            session,
+            endpoint_id=fixture["endpoint_id"],
+            deployment_id=fixture["target_id"],
+            traffic=TrafficState.MAINTENANCE.value,
+        )
+
+    _set_containers(
+        fake_node,
+        source_id=str(fixture["source_id"]),
+        target_id=str(fixture["target_id"]),
+        source_runtime="STOPPED",
+        target_runtime="RUNNING",
+        target_health="UNHEALTHY",
+    )
+    fake_gw.active_deployment_id = str(fixture["target_id"])
+    fake_gw.traffic_state = TrafficState.MAINTENANCE.value
+    fake_gw.applied_routing_version = version_before
+
+    result = await _reconciler(sf, transport).reconcile_operation(op_id)
+    assert result.outcome == "UNRESOLVED"
+    assert result.resumed is False
+
+    async with sf() as session:
+        op = await session.get(Operation, op_id)
+        alias = await session.get(EndpointAlias, fixture["endpoint_id"])
+        state = await session.get(RoutingState, 1)
+        restore = (
+            await session.execute(
+                select(OperationStep).where(
+                    OperationStep.operation_id == op_id,
+                    OperationStep.step_code == STEP_RESTORE_TRAFFIC,
+                )
+            )
+        ).scalar_one()
+        assert op and alias and state
+        assert op.status == OperationStatus.MANUAL_INTERVENTION_REQUIRED.value
+        assert alias.traffic_state == TrafficState.MAINTENANCE.value
+        assert int(state.version) == version_before
+        assert restore.status == StepStatus.FAILED.value
+
+
+@pytest.mark.asyncio
+async def test_missing_node_agent_deployment_payload_remains_mir(db) -> None:
+    """404 / missing NA deployment must not fall back to stale DB runtime."""
+    sf = db
+    fake_node = ColdSwitchFakeNodeAgent()
+    fake_gw = FakeGateway()
+    transport = CombinedTransport(fake_node, fake_gw)
+
+    async with sf() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        await _seed_standard_runtime(fake_node, fake_gw, fixture)
+        op_id, job_id = await _enqueue_cold_switch(session, fixture=fixture)
+        await _force_mir(
+            session,
+            op_id=op_id,
+            job_id=job_id,
+            code="GATEWAY_TRAFFIC_APPLY_TIMEOUT",
+            message="timeout",
+            succeeded_through=STEP_WAIT_TRAFFIC_APPLY,
+            failed_step=STEP_FINALIZE,
+        )
+        source = await session.get(Deployment, fixture["source_id"])
+        target = await session.get(Deployment, fixture["target_id"])
+        assert source and target
+        # Stale DB looks like a fully-serving success case.
+        source.runtime_status = RuntimeStatus.STOPPED.value
+        target.runtime_status = RuntimeStatus.RUNNING.value
+        target.health_status = HealthStatus.HEALTHY.value
+        version = await _set_active_route(
+            session,
+            endpoint_id=fixture["endpoint_id"],
+            deployment_id=fixture["target_id"],
+            traffic=TrafficState.SERVING.value,
+        )
+
+    # Live NA has no Source/Target payload (404).
+    fake_node.containers.clear()
+    fake_gw.active_deployment_id = str(fixture["target_id"])
+    fake_gw.traffic_state = TrafficState.SERVING.value
+    fake_gw.applied_routing_version = version
+
+    result = await _reconciler(sf, transport).reconcile_operation(op_id)
+    assert result.outcome == "UNRESOLVED"
+    assert "payload missing" in result.reason.lower() or "node agent" in result.reason.lower()
+
+    async with sf() as session:
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        assert op.status == OperationStatus.MANUAL_INTERVENTION_REQUIRED.value
+
+
+@pytest.mark.asyncio
+async def test_reopen_mir_missing_job_leaves_state_unchanged(db) -> None:
+    sf = db
+    async with sf() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=f"GPU-{uuid.uuid4().hex[:12]}"
+        )
+        op_id, job_id = await _enqueue_cold_switch(session, fixture=fixture)
+        await _force_mir(
+            session,
+            op_id=op_id,
+            job_id=job_id,
+            code="GATEWAY_ROUTE_APPLY_TIMEOUT",
+            message="timeout",
+            succeeded_through=STEP_ACTIVATE_TARGET_ROUTE,
+            failed_step=STEP_WAIT_ROUTE_APPLY,
+        )
+        step = (
+            await session.execute(
+                select(OperationStep).where(
+                    OperationStep.operation_id == op_id,
+                    OperationStep.step_code == STEP_WAIT_ROUTE_APPLY,
+                )
+            )
+        ).scalar_one()
+        step_id = step.id
+        step_attempt = int(step.attempt_no)
+        step_status = step.status
+        await session.execute(
+            __import__("sqlalchemy").text(
+                "DELETE FROM operation_job WHERE id = :id"
+            ),
+            {"id": str(job_id)},
+        )
+        await session.commit()
+
+    async with sf() as session:
+        repo = OperationJobRepository(session)
+        ok = await repo.reopen_mir_for_resume(
+            operation_id=op_id,
+            job_id=job_id,
+            resume_status=OperationStatus.RUNNING.value,
+            step_id=step_id,
+            code="RECONCILE_RESUME",
+            message="should not mutate",
+        )
+        assert ok is False
+        op = await session.get(Operation, op_id)
+        step = await session.get(OperationStep, step_id)
+        assert op is not None and step is not None
+        assert op.status == OperationStatus.MANUAL_INTERVENTION_REQUIRED.value
+        assert step.status == step_status
+        assert int(step.attempt_no) == step_attempt
+
+
+@pytest.mark.asyncio
+async def test_reconcile_terminal_missing_job_leaves_state_unchanged(db) -> None:
+    sf = db
+    async with sf() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=f"GPU-{uuid.uuid4().hex[:12]}"
+        )
+        op_id, job_id = await _enqueue_cold_switch(session, fixture=fixture)
+        await _force_mir(
+            session,
+            op_id=op_id,
+            job_id=job_id,
+            code="GATEWAY_TRAFFIC_APPLY_TIMEOUT",
+            message="timeout",
+            succeeded_through=STEP_WAIT_TRAFFIC_APPLY,
+            failed_step=STEP_FINALIZE,
+        )
+        await session.execute(
+            __import__("sqlalchemy").text(
+                "DELETE FROM operation_job WHERE id = :id"
+            ),
+            {"id": str(job_id)},
+        )
+        await session.commit()
+
+    async with sf() as session:
+        repo = OperationJobRepository(session)
+        ok = await repo.reconcile_mir_to_terminal(
+            operation_id=op_id,
+            job_id=job_id,
+            status=OperationStatus.SUCCEEDED.value,
+        )
+        assert ok is False
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        assert op.status == OperationStatus.MANUAL_INTERVENTION_REQUIRED.value
+        assert op.error_code == "GATEWAY_TRAFFIC_APPLY_TIMEOUT"

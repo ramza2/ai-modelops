@@ -49,6 +49,7 @@ from app.repositories.operations import OperationJobRepository
 from app.services.cold_switch import (
     DESTRUCTIVE_FLAG,
     STEP_FINALIZE,
+    STEP_PROBE_TARGET,
     STEP_RESTORE_TRAFFIC,
     STEP_WAIT_ROUTE_APPLY,
     STEP_WAIT_TRAFFIC_APPLY,
@@ -283,13 +284,21 @@ class ColdSwitchReconciler:
             node = await session.get(Node, target.node_id) if target.node_id else None
 
             db_alias_traffic = str(alias.traffic_state)
-            db_active_id = str(active.deployment_id) if active is not None else None
-            db_source_runtime = str(source.runtime_status)
-            db_source_health = str(source.health_status)
-            db_target_runtime = str(target.runtime_status)
-            db_target_health = str(target.health_status)
+            db_active_id = (
+                str(active.deployment_id) if active is not None else None
+            )
+            # DB runtime/health retained only as diagnostics context; live NA
+            # observation is authoritative for decisions below.
+            _ = (
+                str(source.runtime_status),
+                str(source.health_status),
+                str(target.runtime_status),
+                str(target.health_status),
+            )
             alias_name = str(alias.alias)
-            agent_url = str(node.agent_base_url) if node and node.agent_base_url else None
+            agent_url = (
+                str(node.agent_base_url) if node and node.agent_base_url else None
+            )
 
         gateway_runtime, gateway_error = await self._observe_gateway(alias_name)
         na_source, na_target, na_error = await self._observe_node_agent(
@@ -342,10 +351,30 @@ class ColdSwitchReconciler:
                 reason=f"node agent unavailable: {na_error}",
             )
 
-        source_runtime = self._runtime_from_na(na_source) or db_source_runtime
-        source_health = self._health_from_na(na_source) or db_source_health
-        target_runtime = self._runtime_from_na(na_target) or db_target_runtime
-        target_health = self._health_from_na(na_target) or db_target_health
+        # Live Node Agent observation is mandatory — never fall back to DB runtime.
+        if na_source is None or na_target is None:
+            return await self._finish_unresolved(
+                operation_id,
+                attempt=attempt,
+                reason="node agent deployment payload missing for Source/Target",
+            )
+        source_runtime = self._runtime_from_na(na_source)
+        source_health = self._health_from_na(na_source)
+        target_runtime = self._runtime_from_na(na_target)
+        target_health = self._health_from_na(na_target)
+        if (
+            source_runtime is None
+            or source_health is None
+            or target_runtime is None
+            or target_health is None
+        ):
+            return await self._finish_unresolved(
+                operation_id,
+                attempt=attempt,
+                reason="node agent runtime/health fields absent",
+            )
+
+        probe_ok = self._probe_target_succeeded(steps_snapshot)
 
         if (
             source_runtime == RuntimeStatus.RUNNING.value
@@ -356,6 +385,14 @@ class ColdSwitchReconciler:
                 operation_id,
                 attempt=attempt,
                 reason="source and target both RUNNING with indeterminate gateway",
+            )
+
+        # Deterministic probe/semantic failures must not become SUCCEEDED from health alone.
+        if error_code in UNSAFE_DETERMINISTIC_CODES and not probe_ok:
+            return await self._finish_unresolved(
+                operation_id,
+                attempt=attempt,
+                reason=f"deterministic unsafe failure remains ({error_code})",
             )
 
         if self._target_fully_serving(
@@ -369,6 +406,7 @@ class ColdSwitchReconciler:
             target_runtime=target_runtime,
             target_health=target_health,
             source_runtime=source_runtime,
+            probe_succeeded=probe_ok,
         ):
             return await self._finish_succeeded(
                 operation_id=operation_id,
@@ -379,7 +417,7 @@ class ColdSwitchReconciler:
                 reason="target fully serving invariants proven",
             )
 
-        if self._source_fully_restored(
+        source_restored_for_cancel = self._source_fully_restored(
             db_active_id=db_active_id,
             db_traffic=db_alias_traffic,
             gw_active=gw_active_s,
@@ -389,23 +427,76 @@ class ColdSwitchReconciler:
             source_id=str(source_id),
             source_runtime=source_runtime,
             source_health=source_health,
+            target_runtime=target_runtime,
+            require_target_stopped=False,
             gw_serving_target=(
                 gw_active_s == str(target_id)
                 and gw_traffic == TrafficState.SERVING.value
             ),
-        ):
-            if cancel_requested and not destructive:
-                return await self._finish_cancelled(
-                    operation_id=operation_id,
-                    job_id=job_id,
-                    attempt=attempt,
-                    reason="pre-destructive cancel; source strictly restored",
-                )
-            return await self._finish_rolled_back(
+        )
+        source_restored_for_rollback = self._source_fully_restored(
+            db_active_id=db_active_id,
+            db_traffic=db_alias_traffic,
+            gw_active=gw_active_s,
+            gw_traffic=gw_traffic,
+            gw_version=gw_version,
+            routing_version=routing_version,
+            source_id=str(source_id),
+            source_runtime=source_runtime,
+            source_health=source_health,
+            target_runtime=target_runtime,
+            require_target_stopped=True,
+            gw_serving_target=(
+                gw_active_s == str(target_id)
+                and gw_traffic == TrafficState.SERVING.value
+            ),
+        )
+
+        if cancel_requested and not destructive and source_restored_for_cancel:
+            return await self._finish_cancelled(
                 operation_id=operation_id,
                 job_id=job_id,
                 attempt=attempt,
+                reason="pre-destructive cancel; source strictly restored",
+            )
+
+        if source_restored_for_rollback:
+            return await self._finish_rolled_back(
+                operation_id=operation_id,
+                job_id=job_id,
+                source_id=source_id,
+                target_id=target_id,
+                attempt=attempt,
                 reason="source fully restored after destructive/rollback path",
+            )
+
+        # Source route restored but Target still running — resume rollback if possible.
+        if (
+            destructive
+            and source_restored_for_cancel
+            and target_runtime != RuntimeStatus.STOPPED.value
+        ):
+            rb_step = self._failed_or_open_rollback_step(steps_snapshot)
+            if rb_step is not None:
+                ok = await self._resume_rollback(
+                    operation_id=operation_id,
+                    job_id=job_id,
+                    step_id=uuid.UUID(str(rb_step.id)),
+                    attempt=attempt,
+                )
+                if ok:
+                    return ReconcileResult(
+                        "RESUME_ROLLBACK",
+                        f"reopened {rb_step.step_code} (target still running)",
+                        resumed=True,
+                    )
+            return await self._finish_unresolved(
+                operation_id,
+                attempt=attempt,
+                reason=(
+                    "source restored but Target not STOPPED; "
+                    "cannot terminalize ROLLED_BACK"
+                ),
             )
 
         if error_code in UNSAFE_DETERMINISTIC_CODES:
@@ -454,6 +545,23 @@ class ColdSwitchReconciler:
             and db_active_id == str(target_id)
             and error_code in GATEWAY_TIMEOUT_CODES | {"WORKER_INTERNAL_ERROR", ""}
         ):
+            if not self._forward_resume_safe(
+                probe_succeeded=probe_ok,
+                db_active_id=db_active_id,
+                target_id=str(target_id),
+                target_runtime=target_runtime,
+                target_health=target_health,
+                source_runtime=source_runtime,
+            ):
+                return await self._finish_unresolved(
+                    operation_id,
+                    attempt=attempt,
+                    reason=(
+                        "forward resume unsafe: missing PROBE_TARGET success "
+                        "or live Target/Source runtime invariants"
+                    ),
+                )
+
             if fwd_step.step_code == STEP_FINALIZE and self._target_fully_serving(
                 db_active_id=db_active_id,
                 db_traffic=db_alias_traffic,
@@ -465,6 +573,7 @@ class ColdSwitchReconciler:
                 target_runtime=target_runtime,
                 target_health=target_health,
                 source_runtime=source_runtime,
+                probe_succeeded=probe_ok,
             ):
                 return await self._finish_succeeded(
                     operation_id=operation_id,
@@ -497,19 +606,18 @@ class ColdSwitchReconciler:
                 STEP_WAIT_TRAFFIC_APPLY,
                 STEP_FINALIZE,
             }:
-                if db_active_id == str(target_id):
-                    ok = await self._resume_forward(
-                        operation_id=operation_id,
-                        job_id=job_id,
-                        step_id=uuid.UUID(str(fwd_step.id)),
-                        attempt=attempt,
+                ok = await self._resume_forward(
+                    operation_id=operation_id,
+                    job_id=job_id,
+                    step_id=uuid.UUID(str(fwd_step.id)),
+                    attempt=attempt,
+                )
+                if ok:
+                    return ReconcileResult(
+                        "RESUME_FORWARD",
+                        f"reopened {fwd_step.step_code}",
+                        resumed=True,
                     )
-                    if ok:
-                        return ReconcileResult(
-                            "RESUME_FORWARD",
-                            f"reopened {fwd_step.step_code}",
-                            resumed=True,
-                        )
 
         if cancel_requested and not destructive:
             if source_runtime != RuntimeStatus.RUNNING.value:
@@ -533,6 +641,31 @@ class ColdSwitchReconciler:
         )
 
     @staticmethod
+    def _probe_target_succeeded(steps: list[OperationStep]) -> bool:
+        for step in steps:
+            if step.step_code == STEP_PROBE_TARGET:
+                return step.status == StepStatus.SUCCEEDED.value
+        return False
+
+    @staticmethod
+    def _forward_resume_safe(
+        *,
+        probe_succeeded: bool,
+        db_active_id: str | None,
+        target_id: str,
+        target_runtime: str,
+        target_health: str,
+        source_runtime: str,
+    ) -> bool:
+        return (
+            probe_succeeded
+            and db_active_id == target_id
+            and target_runtime == RuntimeStatus.RUNNING.value
+            and target_health == HealthStatus.HEALTHY.value
+            and source_runtime == RuntimeStatus.STOPPED.value
+        )
+
+    @staticmethod
     def _target_fully_serving(
         *,
         db_active_id: str | None,
@@ -545,9 +678,11 @@ class ColdSwitchReconciler:
         target_runtime: str,
         target_health: str,
         source_runtime: str,
+        probe_succeeded: bool,
     ) -> bool:
         return (
-            db_active_id == target_id
+            probe_succeeded
+            and db_active_id == target_id
             and db_traffic == TrafficState.SERVING.value
             and gw_active == target_id
             and gw_traffic == TrafficState.SERVING.value
@@ -569,9 +704,13 @@ class ColdSwitchReconciler:
         source_id: str,
         source_runtime: str,
         source_health: str,
+        target_runtime: str,
+        require_target_stopped: bool,
         gw_serving_target: bool,
     ) -> bool:
         if gw_serving_target:
+            return False
+        if require_target_stopped and target_runtime != RuntimeStatus.STOPPED.value:
             return False
         return (
             db_active_id == source_id
@@ -803,11 +942,23 @@ class ColdSwitchReconciler:
         *,
         operation_id: uuid.UUID,
         job_id: uuid.UUID,
+        source_id: uuid.UUID,
+        target_id: uuid.UUID,
         attempt: int,
         reason: str,
     ) -> ReconcileResult:
         async with self._session_factory() as session:
             repo = OperationJobRepository(session)
+            source = await session.get(Deployment, source_id)
+            target = await session.get(Deployment, target_id)
+            now = dt.datetime.now(tz=dt.UTC)
+            # Match ROLLBACK_FINALIZE desired-state invariants.
+            if source is not None:
+                source.desired_state = DesiredState.RUNNING.value
+                source.updated_at = now
+            if target is not None:
+                target.desired_state = DesiredState.STOPPED.value
+                target.updated_at = now
             ok = await repo.reconcile_mir_to_terminal(
                 operation_id=operation_id,
                 job_id=job_id,

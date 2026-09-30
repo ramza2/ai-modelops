@@ -814,8 +814,20 @@ class OperationJobRepository:
         message: str | None = None,
         skip_open_forward_steps: bool = False,
     ) -> bool:
-        """Transition MIR → SUCCEEDED / ROLLED_BACK / CANCELLED. Returns False if not MIR."""
+        """Transition MIR → SUCCEEDED / ROLLED_BACK / CANCELLED.
+
+        Returns False if not MIR or Job is missing. Missing Job must not
+        terminalize the Operation (no partial commit).
+        """
         now = dt.datetime.now(tz=dt.UTC)
+        allowed = {
+            OperationStatus.SUCCEEDED.value,
+            OperationStatus.ROLLED_BACK.value,
+            OperationStatus.CANCELLED.value,
+        }
+        if status not in allowed:
+            raise ValueError(f"unsupported reconcile terminal status: {status}")
+
         operation = (
             await self._session.execute(
                 select(Operation)
@@ -828,13 +840,17 @@ class OperationJobRepository:
         if operation.status != OperationStatus.MANUAL_INTERVENTION_REQUIRED.value:
             return False
 
-        allowed = {
-            OperationStatus.SUCCEEDED.value,
-            OperationStatus.ROLLED_BACK.value,
-            OperationStatus.CANCELLED.value,
-        }
-        if status not in allowed:
-            raise ValueError(f"unsupported reconcile terminal status: {status}")
+        job = (
+            await self._session.execute(
+                select(OperationJob)
+                .where(OperationJob.id == job_id)
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if job is None:
+            # Do not mutate Operation when Job is missing.
+            await self._session.rollback()
+            return False
 
         operation.status = status
         operation.finished_at = now
@@ -853,7 +869,6 @@ class OperationJobRepository:
                     StepStatus.RUNNING.value,
                     StepStatus.FAILED.value,
                 ):
-                    # For cancel: skip open steps. For success/rollback leave history.
                     if status == OperationStatus.CANCELLED.value and step.status in (
                         StepStatus.PENDING.value,
                         StepStatus.RUNNING.value,
@@ -864,22 +879,18 @@ class OperationJobRepository:
                         detail["skipped_reason"] = code or "RECONCILED_CANCELLED"
                         step.detail_json = detail
 
-        job = await self._session.get(OperationJob, job_id)
-        if job is not None:
-            if status == OperationStatus.SUCCEEDED.value:
-                job.status = JobStatus.DONE.value
-                job.last_error = None
-            elif status == OperationStatus.ROLLED_BACK.value:
-                job.status = JobStatus.DONE.value
-                job.last_error = None
-            else:
-                job.status = JobStatus.FAILED.value
-                job.last_error = (
-                    f"{code or 'RECONCILED'}: {message or status}"
-                )
-            job.locked_by = None
-            job.locked_at = None
-            job.updated_at = now
+        if status == OperationStatus.SUCCEEDED.value:
+            job.status = JobStatus.DONE.value
+            job.last_error = None
+        elif status == OperationStatus.ROLLED_BACK.value:
+            job.status = JobStatus.DONE.value
+            job.last_error = None
+        else:
+            job.status = JobStatus.FAILED.value
+            job.last_error = f"{code or 'RECONCILED'}: {message or status}"
+        job.locked_by = None
+        job.locked_at = None
+        job.updated_at = now
 
         await self._session.commit()
         return True
@@ -896,8 +907,8 @@ class OperationJobRepository:
     ) -> bool:
         """Reopen a MIR Cold Switch for forward (RUNNING) or rollback resume.
 
-        Reopens only ``step_id`` to PENDING (attempt bump) and requeues the Job.
-        Does not create new Operations or duplicate ROLLBACK_* steps.
+        Locks Operation + Job + Step first. If Job or Step is missing, returns
+        False without committing any mutation (Operation stays MIR).
         """
         now = dt.datetime.now(tz=dt.UTC)
         if resume_status not in {
@@ -918,8 +929,22 @@ class OperationJobRepository:
         if operation.status != OperationStatus.MANUAL_INTERVENTION_REQUIRED.value:
             return False
 
-        step = await self._session.get(OperationStep, step_id)
-        if step is None or str(step.operation_id) != str(operation_id):
+        job = (
+            await self._session.execute(
+                select(OperationJob)
+                .where(OperationJob.id == job_id)
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        step = (
+            await self._session.execute(
+                select(OperationStep)
+                .where(OperationStep.id == step_id)
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if job is None or step is None or str(step.operation_id) != str(operation_id):
+            await self._session.rollback()
             return False
 
         operation.status = resume_status
@@ -942,10 +967,6 @@ class OperationJobRepository:
             detail["reopened_by_reconciliation"] = True
             step.detail_json = detail
 
-        job = await self._session.get(OperationJob, job_id)
-        if job is None:
-            await self._session.commit()
-            return False
         job.status = JobStatus.QUEUED.value
         job.locked_by = None
         job.locked_at = None
