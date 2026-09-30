@@ -541,8 +541,9 @@ Enqueue는 Operation / OperationJob / OperationStep만 생성한다. Route,
 Worker는 실행 직전 **authoritative fresh Resource Preflight**를 다시 수행한다.
 Standalone `POST /preflights` preview는 실행 승인으로 사용하지 않는다.
 
-**M5-B scope:** forward COLD path only. Automatic rollback is M5-C1; cancel is
-M5-C2-A; explicit retry is M5-C2-B; MIR reconciliation remains M5-C2-C.
+**M5-B scope (forward path):** enqueue → 14 forward steps → FINALIZE for
+`strategy=COLD`. Automatic rollback is M5-C1; Safe Cancel is M5-C2-A;
+Explicit Retry is M5-C2-B; MIR Reconciliation is M5-C2-C (all implemented).
 Destructive boundary(`STOP_SOURCE`) 이후 복구 불가
 실패는 `MANUAL_INTERVENTION_REQUIRED` + Endpoint `MAINTENANCE`로 종료한다.
 
@@ -681,7 +682,9 @@ M5-C2-B Explicit Retry. **원본 Operation을 재개/리셋하지 않는다.**
 거부 (`409 INVALID_OPERATION_STATE`):
 
 - `QUEUED` / `RUNNING` / `ROLLING_BACK` / `SUCCEEDED` / `CANCELLED`
-- `MANUAL_INTERVENTION_REQUIRED` (M5-C2-C reconciliation 전까지)
+- `MANUAL_INTERVENTION_REQUIRED` (explicit blind retry never; M5-C2-C
+  reconciliation may first terminalize to a retryable state such as
+  `ROLLED_BACK`)
 - non-SWITCH / non-COLD
 - 안전 기준 미충족 / 이미 active retry child 존재
 
