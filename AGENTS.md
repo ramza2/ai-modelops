@@ -625,7 +625,7 @@ ${DATABASE_URL}
 
 1. Resource Preflight
 2. Gateway traffic state
-3. Hot Switch
+3. Hot Switch (M5-D1 core; Source retention / HOT cancel-retry-reconcile → M5-D2)
 4. Cold Switch
 5. Rollback
 6. reconciliation

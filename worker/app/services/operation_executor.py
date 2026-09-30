@@ -174,9 +174,15 @@ class OperationExecutor:
                 node_id = uuid.UUID(str(deployment.node_id))
 
         if is_switch:
+            from app.core.enums import SwitchStrategy
             from app.services.cold_switch import ColdSwitchExecutor
+            from app.services.hot_switch import HotSwitchExecutor
 
-            await ColdSwitchExecutor(self).execute(job_id)
+            strategy = str(operation.switch_strategy or "")
+            if strategy == SwitchStrategy.HOT.value:
+                await HotSwitchExecutor(self).execute(job_id)
+            else:
+                await ColdSwitchExecutor(self).execute(job_id)
             return
 
         assert deployment_id is not None and operation_id is not None and node_id is not None

@@ -526,25 +526,30 @@ COLD
 ALTERNATE_NODE
 ```
 
-**M5-B implementation note:** only `strategy=COLD` is executable. `HOT`,
-`AUTO`, and `ALTERNATE_NODE` are rejected with `VALIDATION_ERROR` until later
-milestones. The request shape remains forward-compatible.
+**M5-D1 implementation note:** `strategy=COLD` and `strategy=HOT` are
+executable. `AUTO` and `ALTERNATE_NODE` are rejected with `VALIDATION_ERROR`.
+The request shape remains forward-compatible.
 
 `AUTO`이면 Resource Preflight 결과에 따라 가능한 전략을 선택한다 (not yet
 implemented).
 
-Cold Switch 선택 시 `docs/state-machines/01-cold-switch.md`를 따른다.
+- Cold Switch: `docs/state-machines/01-cold-switch.md` (14 steps)
+- Hot Switch: `docs/state-machines/02-hot-switch.md` (9 steps; traffic stays
+  SERVING; Source remains RUNNING after D1 success)
 
 Enqueue는 Operation / OperationJob / OperationStep만 생성한다. Route,
 `traffic_state`, Deployment `desired_state`는 변경하지 않는다.
 
 Worker는 실행 직전 **authoritative fresh Resource Preflight**를 다시 수행한다.
 Standalone `POST /preflights` preview는 실행 승인으로 사용하지 않는다.
+HOT requires fresh `HOT_SWITCH_AVAILABLE` (never silently downgraded to COLD).
 
-**M5-B scope (forward path):** enqueue → 14 forward steps → FINALIZE for
-`strategy=COLD`. Automatic rollback is M5-C1; Safe Cancel is M5-C2-A;
-Explicit Retry is M5-C2-B; MIR Reconciliation is M5-C2-C (all implemented).
-Destructive boundary(`STOP_SOURCE`) 이후 복구 불가
+**M5-B / M5-D1 scope:**
+- COLD: enqueue → 14 forward steps → FINALIZE; rollback/cancel/retry/reconcile
+  as M5-C1 / M5-C2-*
+- HOT (M5-D1): enqueue → 9 forward steps → FINALIZE; Source retained RUNNING;
+  no HOT retry / full cancel / rollback / Source retirement yet (M5-D2)
+Destructive boundary(`STOP_SOURCE`) 이후 복구 불가 (COLD only)
 실패는 `MANUAL_INTERVENTION_REQUIRED` + Endpoint `MAINTENANCE`로 종료한다.
 
 응답: `202 Accepted`

@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from app.core.db import get_session
 from app.main import create_app
-from app.services.switch import COLD_SWITCH_STEPS
+from app.services.switch import COLD_SWITCH_STEPS, HOT_SWITCH_STEPS
 
 
 def _database_url() -> str:
@@ -364,11 +364,75 @@ async def test_idempotency_key_replay(client) -> None:
 
 
 @pytest.mark.asyncio
-async def test_reject_non_cold_strategies(client) -> None:
+async def test_enqueue_hot_switch_happy_path(client) -> None:
     sf = client["session_factory"]
     async with sf() as session:
         world = await _seed_world(session)
-    for strategy in ("HOT", "AUTO", "ALTERNATE_NODE"):
+
+    resp = await client["client"].post(
+        f"/api/v1/endpoints/{world['endpoint_id']}/switch",
+        json={
+            "target_deployment_id": world["target_deployment_id"],
+            "strategy": "HOT",
+            "reason": "hot-upgrade",
+            "health_timeout_seconds": 90,
+        },
+        headers={"Idempotency-Key": f"hot-{uuid.uuid4()}"},
+    )
+    assert resp.status_code == 202, resp.text
+    body = resp.json()
+    assert body["operation_type"] == "SWITCH"
+    assert body["switch_strategy"] == "HOT"
+    assert body["status"] == "QUEUED"
+    assert body["source_deployment_id"] == world["source_deployment_id"]
+    assert body["target_deployment_id"] == world["target_deployment_id"]
+    assert [s["step_code"] for s in body["steps"]] == HOT_SWITCH_STEPS
+    assert len(body["steps"]) == 9
+    assert all(s["status"] == "PENDING" for s in body["steps"])
+    assert body["metadata"]["strategy"] == "HOT"
+    assert body["metadata"]["m5d1_hot_forward"] is True
+    assert body["metadata"]["health_timeout_seconds"] == 90
+    # Cold-only steps must not appear.
+    codes = {s["step_code"] for s in body["steps"]}
+    assert "DRAIN_TRAFFIC" not in codes
+    assert "STOP_SOURCE" not in codes
+    assert "WAIT_VRAM_RELEASE" not in codes
+    assert "RESTORE_TRAFFIC" not in codes
+    assert "WAIT_TRAFFIC_APPLY" not in codes
+
+
+@pytest.mark.asyncio
+async def test_hot_idempotency_key_replay(client) -> None:
+    sf = client["session_factory"]
+    async with sf() as session:
+        world = await _seed_world(session)
+    key = f"hot-idem-{uuid.uuid4()}"
+    payload = {
+        "target_deployment_id": world["target_deployment_id"],
+        "strategy": "HOT",
+    }
+    first = await client["client"].post(
+        f"/api/v1/endpoints/{world['endpoint_id']}/switch",
+        json=payload,
+        headers={"Idempotency-Key": key},
+    )
+    second = await client["client"].post(
+        f"/api/v1/endpoints/{world['endpoint_id']}/switch",
+        json=payload,
+        headers={"Idempotency-Key": key},
+    )
+    assert first.status_code == 202
+    assert second.status_code == 202
+    assert first.json()["operation_id"] == second.json()["operation_id"]
+    assert first.json()["switch_strategy"] == "HOT"
+
+
+@pytest.mark.asyncio
+async def test_reject_unimplemented_strategies(client) -> None:
+    sf = client["session_factory"]
+    async with sf() as session:
+        world = await _seed_world(session)
+    for strategy in ("AUTO", "ALTERNATE_NODE"):
         resp = await client["client"].post(
             f"/api/v1/endpoints/{world['endpoint_id']}/switch",
             json={
@@ -378,6 +442,12 @@ async def test_reject_non_cold_strategies(client) -> None:
         )
         assert resp.status_code == 422, strategy
         assert resp.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
+@pytest.mark.asyncio
+async def test_reject_non_cold_strategies(client) -> None:
+    # Compatibility alias: unimplemented strategies only (HOT is executable).
+    await test_reject_unimplemented_strategies(client)
 
 
 @pytest.mark.asyncio

@@ -170,10 +170,11 @@ async def switch_endpoint(
     service: SwitchService = Depends(get_switch_service),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> dict:
-    """Enqueue a Cold Switch Operation (M5-B forward path only).
+    """Enqueue a Cold or Hot Switch Operation.
 
-    Only ``strategy=COLD`` is executable in M5-B. HOT/AUTO/ALTERNATE_NODE are
-    rejected. Does not mutate routes, traffic_state, or desired_state.
+    ``strategy=COLD`` (M5-B) and ``strategy=HOT`` (M5-D1) are executable.
+    AUTO/ALTERNATE_NODE are rejected. Does not mutate routes, traffic_state,
+    or desired_state.
     """
     payload = await service.enqueue_cold_switch(
         endpoint_id=endpoint_id,

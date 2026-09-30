@@ -166,11 +166,14 @@ class OperationService:
         *,
         reason: str | None = None,
     ) -> dict[str, Any]:
-        """Record cancellation intent (M5-C2-A Cold SWITCH only).
+        """Record cancellation intent (M5-C2-A Cold SWITCH; M5-D1 queued HOT).
 
         Management API never performs Docker/Node Agent/Gateway side effects.
-        QUEUED Cold SWITCH is terminalized under Job+Operation row locks;
-        RUNNING/ROLLING_BACK only stamp ``cancel_requested_at``.
+        QUEUED Cold/Hot SWITCH is terminalized under Job+Operation row locks;
+        RUNNING/ROLLING_BACK Cold only stamp ``cancel_requested_at``.
+        RUNNING HOT cancel is deferred to M5-D2 — enforced inside the locked
+        ``apply_cancel_decision(..., queued_only=True)`` critical section so a
+        Worker claim race cannot leave cancel intent on a RUNNING Hot Op.
         """
         operation = await self._operations.get(operation_id)
         if operation is None:
@@ -179,10 +182,11 @@ class OperationService:
                 details={"operation_id": str(operation_id)},
             )
 
-        # M5-C2-A: Cold SWITCH only. Reject before any cancel mutation.
-        if not self._operations.is_cold_switch(operation):
+        is_hot = self._operations.is_hot_switch(operation)
+        if not is_hot and not self._operations.is_cold_switch(operation):
             raise ConflictError(
-                "Cancel is only supported for Cold SWITCH operations.",
+                "Cancel is only supported for Cold SWITCH operations "
+                "(and queued Hot SWITCH).",
                 code="INVALID_OPERATION_STATE",
                 details={
                     "operation_id": str(operation_id),
@@ -195,6 +199,7 @@ class OperationService:
             locked_op, decision = await self._operations.apply_cancel_decision(
                 operation_id,
                 reason=reason,
+                queued_only=is_hot,
             )
         except LookupError:
             raise NotFoundError(
@@ -214,8 +219,20 @@ class OperationService:
                 ) from None
             raise
 
+        if decision == "rejected_not_queued":
+            raise ConflictError(
+                "RUNNING Hot Switch cancel is not implemented in M5-D1 "
+                "(deferred to M5-D2).",
+                code="INVALID_OPERATION_STATE",
+                details={
+                    "operation_id": str(operation_id),
+                    "operation_type": locked_op.operation_type,
+                    "switch_strategy": locked_op.switch_strategy,
+                    "status": locked_op.status,
+                },
+            )
+
         await self._session.commit()
-        _ = decision
         return await self.get_operation(uuid.UUID(str(locked_op.id)))
 
     async def _require_managed_deployment(
