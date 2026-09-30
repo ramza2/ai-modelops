@@ -53,6 +53,16 @@ class JobRunner:
                 None if session_factory is not None else get_engine()
             ),
         )
+        from app.services.cold_switch_reconcile import ColdSwitchReconciler
+
+        self._reconciler = ColdSwitchReconciler(
+            session_factory=self._session_factory,
+            settings=self._settings,
+            transport=self._transport,
+            engine=engine or (
+                None if session_factory is not None else get_engine()
+            ),
+        )
 
     def request_shutdown(self) -> None:
         self._stop_event.set()
@@ -79,12 +89,22 @@ class JobRunner:
         logger.info("Worker %s shut down.", self._settings.worker_id)
 
     async def poll_once(self) -> bool:
-        """Claim and execute at most one job. Returns True if work was claimed."""
+        """Claim and execute at most one job. Returns True if work was claimed.
+
+        Also runs a bounded Cold SWITCH MIR reconciliation sweep (M5-C2-C)
+        after stale-lease recovery. Sweeper work alone does not count as a
+        claimed job for poll backoff.
+        """
         async with self._session_factory() as session:
             repo = OperationJobRepository(session)
             await repo.recover_stale_jobs(
                 stale_seconds=self._settings.worker_stale_seconds
             )
+
+        try:
+            await self._reconciler.sweep_once()
+        except Exception:  # noqa: BLE001 - never stall the job poll loop
+            logger.exception("Cold SWITCH MIR reconciliation sweep failed.")
 
         async with self._session_factory() as session:
             repo = OperationJobRepository(session)
