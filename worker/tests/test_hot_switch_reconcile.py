@@ -1319,3 +1319,370 @@ async def test_hot_reconcile_wrong_source_route_active_not_rolled_back(db) -> No
         assert op is not None
         assert op.status != OperationStatus.ROLLED_BACK.value
         assert str(active.id) == str(wrong_id)
+
+@pytest.mark.asyncio
+async def test_b2_reconcile_source_stopped_to_succeeded(db) -> None:
+    """B2 MIR: Target proven + Source live STOPPED + retirement evidence → SUCCEEDED."""
+    from tests.test_hot_switch import _enqueue_b2_hot_switch
+
+    sf = db
+    fake_node = ColdSwitchFakeNodeAgent()
+    fake_gw = FakeGateway()
+    transport = CombinedTransport(fake_node, fake_gw)
+    _configure_hot_vram(fake_node)
+
+    async with sf() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        await _seed_standard_runtime(fake_node, fake_gw, fixture)
+        op_id, _job_id = await _enqueue_b2_hot_switch(session, fixture=fixture)
+        await _mark_steps_status(
+            session, op_id, succeeded_through="STOP_SOURCE"
+        )
+        version = await _set_active_route(
+            session, fixture["endpoint_id"], fixture["target_id"]
+        )
+        activate = (
+            await session.execute(
+                select(OperationStep).where(
+                    OperationStep.operation_id == op_id,
+                    OperationStep.step_code == "ACTIVATE_TARGET_ROUTE",
+                )
+            )
+        ).scalar_one()
+        activate.detail_json = {
+            "route_routing_version": version,
+            "source_route_id": str(fixture["route_id"]),
+        }
+        for code in ("VERIFY_SOURCE_STOPPED", "FINALIZE"):
+            step = (
+                await session.execute(
+                    select(OperationStep).where(
+                        OperationStep.operation_id == op_id,
+                        OperationStep.step_code == code,
+                    )
+                )
+            ).scalar_one()
+            step.status = StepStatus.FAILED.value
+        source = await session.get(Deployment, fixture["source_id"])
+        target = await session.get(Deployment, fixture["target_id"])
+        assert source and target
+        source.runtime_status = RuntimeStatus.STOPPED.value
+        source.desired_state = "STOPPED"
+        tgt = f"ctr-tgt-b2s-{fixture['suffix']}"
+        target.runtime_status = RuntimeStatus.RUNNING.value
+        target.health_status = HealthStatus.HEALTHY.value
+        target.container_id = tgt
+        await session.commit()
+        await _force_hot_mir(
+            session,
+            op_id,
+            boundary=True,
+            metadata_extra={"destructive_boundary_entered": True},
+        )
+
+    fake_node.containers[str(fixture["source_id"])]["runtime_status"] = "STOPPED"
+    fake_node.containers[str(fixture["source_id"])]["health_status"] = "UNKNOWN"
+    fake_node.containers[str(fixture["target_id"])] = {
+        "deployment_id": str(fixture["target_id"]),
+        "container_id": tgt,
+        "container_name": "tgt",
+        "runtime_status": "RUNNING",
+        "health_status": "HEALTHY",
+    }
+    fake_gw.active_deployment_id = str(fixture["target_id"])
+    fake_gw.traffic_state = TrafficState.SERVING.value
+    fake_gw.applied_routing_version = version
+    fake_gw.auto_apply = False
+
+    result = await _reconciler(sf, transport, sf.kw["bind"]).reconcile_operation(
+        op_id
+    )
+    assert result.outcome == "SUCCEEDED"
+
+    async with sf() as session:
+        op = await session.get(Operation, op_id)
+        source = await session.get(Deployment, fixture["source_id"])
+        assert op is not None and source is not None
+        assert op.status == OperationStatus.SUCCEEDED.value
+        assert source.desired_state == "STOPPED"
+
+
+@pytest.mark.asyncio
+async def test_b2_reconcile_retention_skip_to_succeeded(db) -> None:
+    """B2 MIR: retirement_skipped + Target proven + Source RUNNING → SUCCEEDED retained."""
+    from tests.test_hot_switch import _enqueue_b2_hot_switch
+
+    sf = db
+    fake_node = ColdSwitchFakeNodeAgent()
+    fake_gw = FakeGateway()
+    transport = CombinedTransport(fake_node, fake_gw)
+    _configure_hot_vram(fake_node)
+
+    async with sf() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        await _seed_standard_runtime(fake_node, fake_gw, fixture)
+        op_id, _job_id = await _enqueue_b2_hot_switch(session, fixture=fixture)
+        await _mark_steps_status(
+            session, op_id, succeeded_through="WAIT_SOURCE_DRAIN"
+        )
+        version = await _set_active_route(
+            session, fixture["endpoint_id"], fixture["target_id"]
+        )
+        activate = (
+            await session.execute(
+                select(OperationStep).where(
+                    OperationStep.operation_id == op_id,
+                    OperationStep.step_code == "ACTIVATE_TARGET_ROUTE",
+                )
+            )
+        ).scalar_one()
+        activate.detail_json = {
+            "route_routing_version": version,
+            "source_route_id": str(fixture["route_id"]),
+        }
+        drain = (
+            await session.execute(
+                select(OperationStep).where(
+                    OperationStep.operation_id == op_id,
+                    OperationStep.step_code == "WAIT_SOURCE_DRAIN",
+                )
+            )
+        ).scalar_one()
+        drain.detail_json = {
+            "retirement_skipped": True,
+            "retirement_skipped_reason": "SOURCE_ACTIVE_ON_OTHER_ALIAS",
+        }
+        for code in ("STOP_SOURCE", "VERIFY_SOURCE_STOPPED", "FINALIZE"):
+            step = (
+                await session.execute(
+                    select(OperationStep).where(
+                        OperationStep.operation_id == op_id,
+                        OperationStep.step_code == code,
+                    )
+                )
+            ).scalar_one()
+            step.status = StepStatus.FAILED.value
+        source = await session.get(Deployment, fixture["source_id"])
+        target = await session.get(Deployment, fixture["target_id"])
+        assert source and target
+        source.runtime_status = RuntimeStatus.RUNNING.value
+        source.health_status = HealthStatus.HEALTHY.value
+        tgt = f"ctr-tgt-b2r-{fixture['suffix']}"
+        target.runtime_status = RuntimeStatus.RUNNING.value
+        target.health_status = HealthStatus.HEALTHY.value
+        target.container_id = tgt
+        await session.commit()
+        await _force_hot_mir(
+            session,
+            op_id,
+            boundary=True,
+            metadata_extra={
+                "retirement_skipped": True,
+                "retirement_skipped_reason": "SOURCE_ACTIVE_ON_OTHER_ALIAS",
+            },
+        )
+
+    fake_node.containers[str(fixture["source_id"])]["runtime_status"] = "RUNNING"
+    fake_node.containers[str(fixture["source_id"])]["health_status"] = "HEALTHY"
+    fake_node.containers[str(fixture["target_id"])] = {
+        "deployment_id": str(fixture["target_id"]),
+        "container_id": tgt,
+        "container_name": "tgt",
+        "runtime_status": "RUNNING",
+        "health_status": "HEALTHY",
+    }
+    fake_gw.active_deployment_id = str(fixture["target_id"])
+    fake_gw.traffic_state = TrafficState.SERVING.value
+    fake_gw.applied_routing_version = version
+    fake_gw.auto_apply = False
+
+    result = await _reconciler(sf, transport, sf.kw["bind"]).reconcile_operation(
+        op_id
+    )
+    assert result.outcome == "SUCCEEDED"
+
+    async with sf() as session:
+        op = await session.get(Operation, op_id)
+        source = await session.get(Deployment, fixture["source_id"])
+        assert op is not None and source is not None
+        assert op.status == OperationStatus.SUCCEEDED.value
+        assert source.desired_state == "RUNNING"
+
+
+@pytest.mark.asyncio
+async def test_b2_reconcile_cancel_source_stopped_resumes_rollback(db) -> None:
+    """B2 MIR cancel + Source STOPPED → resume HOT rollback (START_SOURCE)."""
+    from tests.test_hot_switch import _enqueue_b2_hot_switch
+
+    sf = db
+    fake_node = ColdSwitchFakeNodeAgent()
+    fake_gw = FakeGateway()
+    transport = CombinedTransport(fake_node, fake_gw)
+    _configure_hot_vram(fake_node)
+
+    async with sf() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        await _seed_standard_runtime(fake_node, fake_gw, fixture)
+        op_id, _job_id = await _enqueue_b2_hot_switch(session, fixture=fixture)
+        await _mark_steps_status(
+            session, op_id, succeeded_through="STOP_SOURCE"
+        )
+        version = await _set_active_route(
+            session, fixture["endpoint_id"], fixture["target_id"]
+        )
+        activate = (
+            await session.execute(
+                select(OperationStep).where(
+                    OperationStep.operation_id == op_id,
+                    OperationStep.step_code == "ACTIVATE_TARGET_ROUTE",
+                )
+            )
+        ).scalar_one()
+        activate.detail_json = {
+            "route_routing_version": version,
+            "source_route_id": str(fixture["route_id"]),
+        }
+        source = await session.get(Deployment, fixture["source_id"])
+        target = await session.get(Deployment, fixture["target_id"])
+        assert source and target
+        source.runtime_status = RuntimeStatus.STOPPED.value
+        source.desired_state = "STOPPED"
+        tgt = f"ctr-tgt-b2c-{fixture['suffix']}"
+        target.runtime_status = RuntimeStatus.RUNNING.value
+        target.health_status = HealthStatus.HEALTHY.value
+        target.container_id = tgt
+        await session.commit()
+        await _force_hot_mir(
+            session,
+            op_id,
+            boundary=True,
+            cancel=True,
+            metadata_extra={"destructive_boundary_entered": True},
+        )
+
+    fake_node.containers[str(fixture["source_id"])]["runtime_status"] = "STOPPED"
+    fake_node.containers[str(fixture["source_id"])]["health_status"] = "UNKNOWN"
+    fake_node.containers[str(fixture["target_id"])] = {
+        "deployment_id": str(fixture["target_id"]),
+        "container_id": tgt,
+        "container_name": "tgt",
+        "runtime_status": "RUNNING",
+        "health_status": "HEALTHY",
+    }
+    fake_gw.active_deployment_id = str(fixture["target_id"])
+    fake_gw.traffic_state = TrafficState.SERVING.value
+    fake_gw.applied_routing_version = version
+    fake_gw.auto_apply = False
+
+    result = await _reconciler(sf, transport, sf.kw["bind"]).reconcile_operation(
+        op_id
+    )
+    assert result.outcome == "RESUME_ROLLBACK"
+    assert result.resumed is True
+
+    async with sf() as session:
+        op = await session.get(Operation, op_id)
+        rb_begin = (
+            await session.execute(
+                select(OperationStep).where(
+                    OperationStep.operation_id == op_id,
+                    OperationStep.step_code == "HOT_ROLLBACK_BEGIN",
+                )
+            )
+        ).scalar_one_or_none()
+        assert op is not None
+        assert op.status == OperationStatus.ROLLING_BACK.value
+        assert rb_begin is not None
+        assert rb_begin.status in (
+            StepStatus.PENDING.value,
+            StepStatus.RUNNING.value,
+        )
+
+
+@pytest.mark.asyncio
+async def test_b2_reconcile_pending_retirement_resumes_forward(db) -> None:
+    """B2 MIR: Target proven + Source RUNNING + no skip → resume retirement, not SUCCEEDED."""
+    from tests.test_hot_switch import _enqueue_b2_hot_switch
+
+    sf = db
+    fake_node = ColdSwitchFakeNodeAgent()
+    fake_gw = FakeGateway()
+    transport = CombinedTransport(fake_node, fake_gw)
+    _configure_hot_vram(fake_node)
+
+    async with sf() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        await _seed_standard_runtime(fake_node, fake_gw, fixture)
+        op_id, _job_id = await _enqueue_b2_hot_switch(session, fixture=fixture)
+        await _mark_steps_status(
+            session, op_id, succeeded_through="WAIT_ROUTE_APPLY"
+        )
+        version = await _set_active_route(
+            session, fixture["endpoint_id"], fixture["target_id"]
+        )
+        activate = (
+            await session.execute(
+                select(OperationStep).where(
+                    OperationStep.operation_id == op_id,
+                    OperationStep.step_code == "ACTIVATE_TARGET_ROUTE",
+                )
+            )
+        ).scalar_one()
+        activate.detail_json = {
+            "route_routing_version": version,
+            "source_route_id": str(fixture["route_id"]),
+        }
+        drain = (
+            await session.execute(
+                select(OperationStep).where(
+                    OperationStep.operation_id == op_id,
+                    OperationStep.step_code == "WAIT_SOURCE_DRAIN",
+                )
+            )
+        ).scalar_one()
+        drain.status = StepStatus.FAILED.value
+        source = await session.get(Deployment, fixture["source_id"])
+        target = await session.get(Deployment, fixture["target_id"])
+        assert source and target
+        source.runtime_status = RuntimeStatus.RUNNING.value
+        source.health_status = HealthStatus.HEALTHY.value
+        tgt = f"ctr-tgt-b2p-{fixture['suffix']}"
+        target.runtime_status = RuntimeStatus.RUNNING.value
+        target.health_status = HealthStatus.HEALTHY.value
+        target.container_id = tgt
+        await session.commit()
+        await _force_hot_mir(session, op_id, boundary=True)
+
+    fake_node.containers[str(fixture["source_id"])]["runtime_status"] = "RUNNING"
+    fake_node.containers[str(fixture["source_id"])]["health_status"] = "HEALTHY"
+    fake_node.containers[str(fixture["target_id"])] = {
+        "deployment_id": str(fixture["target_id"]),
+        "container_id": tgt,
+        "container_name": "tgt",
+        "runtime_status": "RUNNING",
+        "health_status": "HEALTHY",
+    }
+    fake_gw.active_deployment_id = str(fixture["target_id"])
+    fake_gw.traffic_state = TrafficState.SERVING.value
+    fake_gw.applied_routing_version = version
+    fake_gw.auto_apply = False
+
+    result = await _reconciler(sf, transport, sf.kw["bind"]).reconcile_operation(
+        op_id
+    )
+    assert result.outcome == "RESUME_FORWARD"
+    assert "WAIT_SOURCE_DRAIN" in result.reason
+
+    async with sf() as session:
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        assert op.status == OperationStatus.RUNNING.value
+        assert op.status != OperationStatus.SUCCEEDED.value

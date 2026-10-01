@@ -387,16 +387,18 @@ async def test_enqueue_hot_switch_happy_path(client) -> None:
     assert body["source_deployment_id"] == world["source_deployment_id"]
     assert body["target_deployment_id"] == world["target_deployment_id"]
     assert [s["step_code"] for s in body["steps"]] == HOT_SWITCH_STEPS
-    assert len(body["steps"]) == 9
+    assert len(body["steps"]) == 12
     assert all(s["status"] == "PENDING" for s in body["steps"])
     assert body["metadata"]["strategy"] == "HOT"
     assert body["metadata"]["m5d1_hot_forward"] is True
     assert body["metadata"]["m5d2b2_source_retirement"] is True
     assert body["metadata"]["health_timeout_seconds"] == 90
-    # Cold-only steps must not appear.
     codes = {s["step_code"] for s in body["steps"]}
+    assert "WAIT_SOURCE_DRAIN" in codes
+    assert "STOP_SOURCE" in codes
+    assert "VERIFY_SOURCE_STOPPED" in codes
+    # Cold-only steps must not appear.
     assert "DRAIN_TRAFFIC" not in codes
-    assert "STOP_SOURCE" not in codes
     assert "WAIT_VRAM_RELEASE" not in codes
     assert "RESTORE_TRAFFIC" not in codes
     assert "WAIT_TRAFFIC_APPLY" not in codes
