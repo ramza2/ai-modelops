@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import logging
 from typing import Any
@@ -156,8 +157,12 @@ async def _admit_resolve_bind(
         # resolve_route guarantees deployment_id is present on success.
         await inflight.bind(admission, str(entry.deployment_id))
         return entry, admission
+    except asyncio.CancelledError:
+        # Cancellation between admit and bind must not leak unbound inflight.
+        await asyncio.shield(inflight.release(admission))
+        raise
     except Exception:
-        await inflight.release(admission)
+        await asyncio.shield(inflight.release(admission))
         raise
 
 
@@ -195,7 +200,8 @@ async def _proxy_nonstream(
         error_code = exc.code
         raise
     finally:
-        await inflight.release(admission)
+        # Bound non-stream cancel must still clear Alias + Deployment counts.
+        await asyncio.shield(inflight.release(admission))
         finished = dt.datetime.now(tz=dt.UTC)
         _invocation_logs(request).schedule(
             build_invocation_record(

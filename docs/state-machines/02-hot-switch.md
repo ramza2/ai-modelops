@@ -184,6 +184,11 @@ observed_deployment_inflight_requests == 0
 `observed_deployment_idle` alone is not “safe to stop Source”.
 Alias-wide `inflight_requests` need not be zero (Target traffic is allowed).
 
+The observation above is **necessary but not sufficient** when one Deployment
+is shared by multiple Endpoint Aliases. Before stopping Source, B2 must also
+prove Source is no longer an ACTIVE routing target for any other Alias.
+That multi-alias ACTIVE check is deferred to B2 (not implemented here).
+
 **MVP constraint:** telemetry is valid only for the current single Gateway
 process/replica model. Do not treat counters as cluster-wide. No Redis /
 shared counters / multi-replica aggregation in B1.

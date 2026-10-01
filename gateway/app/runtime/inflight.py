@@ -61,26 +61,34 @@ class InflightTracker:
         return InflightAdmission(alias=key)
 
     async def bind(self, handle: InflightAdmission, deployment_id: str) -> None:
-        """Bind a reserved admission to a Deployment (no release/re-admit)."""
-        if handle._released:
-            return
+        """Bind a reserved admission to a Deployment (no release/re-admit).
+
+        All mutable admission-state decisions happen under ``_lock`` so a
+        concurrent ``release()`` cannot leave an orphan Deployment count.
+        """
         dep = str(deployment_id).strip()
         if not dep:
             raise ValueError("deployment_id is required to bind admission")
-        if handle.deployment_id is not None:
-            # Idempotent re-bind to the same Deployment only.
-            if handle.deployment_id == dep:
-                return
-            raise ValueError(
-                "admission already bound to a different deployment_id"
-            )
         key = handle.alias
         async with self._lock:
+            if handle._released:
+                # Release already won; never increment Deployment.
+                return
+            if handle.deployment_id is not None:
+                # Idempotent re-bind to the same Deployment only.
+                if handle.deployment_id == dep:
+                    return
+                raise ValueError(
+                    "admission already bound to a different deployment_id"
+                )
             unbound = self._alias_unbound.get(key, 0)
             if unbound <= 0:
-                # Should not happen; keep counters non-negative.
+                # Reservation missing; do not invent a Deployment count.
                 self._alias_unbound.pop(key, None)
-            elif unbound == 1:
+                raise ValueError(
+                    "admission has no unbound reservation to bind"
+                )
+            if unbound == 1:
                 self._alias_unbound.pop(key, None)
             else:
                 self._alias_unbound[key] = unbound - 1

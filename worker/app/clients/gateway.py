@@ -122,8 +122,9 @@ class GatewayClient:
                 retryable=True,
                 details={"missing": missing},
             )
-        # When Deployment observation is requested, require D2-B1 drain fields.
+        # When Deployment observation is requested, fail closed on drain fields.
         if params.get("deployment_id"):
+            requested_deployment_id = params["deployment_id"]
             drain_required = (
                 "unbound_requests",
                 "observed_deployment_id",
@@ -138,27 +139,58 @@ class GatewayClient:
                     retryable=True,
                     details={"missing": drain_missing},
                 )
-            if not isinstance(data["unbound_requests"], int):
-                raise GatewayError(
-                    "Gateway unbound_requests must be an int.",
-                    code="GATEWAY_INVALID_RESPONSE",
-                    status_code=response.status_code,
-                    retryable=True,
-                )
-            if not isinstance(data["observed_deployment_inflight_requests"], int):
-                raise GatewayError(
-                    "Gateway observed_deployment_inflight_requests must be an int.",
-                    code="GATEWAY_INVALID_RESPONSE",
-                    status_code=response.status_code,
-                    retryable=True,
-                )
-            if data["observed_deployment_id"] is None or not isinstance(
-                data["observed_deployment_id"], str
-            ):
+            self._require_nonneg_int(
+                data["unbound_requests"],
+                field_name="unbound_requests",
+                status_code=response.status_code,
+            )
+            self._require_nonneg_int(
+                data["observed_deployment_inflight_requests"],
+                field_name="observed_deployment_inflight_requests",
+                status_code=response.status_code,
+            )
+            observed = data["observed_deployment_id"]
+            if observed is None or not isinstance(observed, str):
                 raise GatewayError(
                     "Gateway observed_deployment_id must be a string.",
                     code="GATEWAY_INVALID_RESPONSE",
                     status_code=response.status_code,
                     retryable=True,
                 )
+            if str(observed) != str(requested_deployment_id):
+                raise GatewayError(
+                    "Gateway observed_deployment_id does not match requested deployment_id.",
+                    code="GATEWAY_INVALID_RESPONSE",
+                    status_code=response.status_code,
+                    retryable=True,
+                    details={
+                        "requested": str(requested_deployment_id),
+                        "observed": str(observed),
+                    },
+                )
         return data
+
+    @staticmethod
+    def _require_nonneg_int(
+        value: object,
+        *,
+        field_name: str,
+        status_code: int | None,
+    ) -> None:
+        # Reject bool: isinstance(True, int) is True in Python.
+        if type(value) is not int:
+            raise GatewayError(
+                f"Gateway {field_name} must be an int (not bool).",
+                code="GATEWAY_INVALID_RESPONSE",
+                status_code=status_code,
+                retryable=True,
+                details={"field": field_name, "type": type(value).__name__},
+            )
+        if value < 0:
+            raise GatewayError(
+                f"Gateway {field_name} must be >= 0.",
+                code="GATEWAY_INVALID_RESPONSE",
+                status_code=status_code,
+                retryable=True,
+                details={"field": field_name, "value": value},
+            )

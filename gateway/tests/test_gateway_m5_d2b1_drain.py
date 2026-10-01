@@ -1244,3 +1244,235 @@ async def test_cold_drain_complete_still_alias_scoped() -> None:
 
     await http_client.aclose()
     await engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# Safety: bind vs release race under contended tracker lock
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_bind_vs_release_race_release_wins_no_orphan_deployment() -> None:
+    """When release acquires the tracker lock before bind, no orphan count."""
+    t = InflightTracker()
+    handle = await t.admit("alias-race")
+    source = "dep-source"
+
+    hold_lock = asyncio.Event()
+    holder_ready = asyncio.Event()
+
+    async def _hold_tracker_lock() -> None:
+        async with t._lock:
+            holder_ready.set()
+            await hold_lock.wait()
+
+    holder = asyncio.create_task(_hold_tracker_lock())
+    await asyncio.wait_for(holder_ready.wait(), timeout=1.0)
+
+    # Queue release first so it wins when the holder releases (FIFO waiters).
+    release_task = asyncio.create_task(t.release(handle))
+    await asyncio.sleep(0)
+    bind_task = asyncio.create_task(t.bind(handle, source))
+    await asyncio.sleep(0)
+
+    hold_lock.set()
+    await release_task
+    await bind_task
+    await holder
+
+    assert handle.released is True
+    assert t.get_alias("alias-race") == 0
+    assert t.get_unbound("alias-race") == 0
+    assert t.get_deployment(source) == 0
+
+
+@pytest.mark.asyncio
+async def test_bind_vs_release_race_bind_wins_then_release_clears() -> None:
+    t = InflightTracker()
+    handle = await t.admit("alias-race2")
+    source = "dep-source"
+
+    hold_lock = asyncio.Event()
+    holder_ready = asyncio.Event()
+
+    async def _hold_tracker_lock() -> None:
+        async with t._lock:
+            holder_ready.set()
+            await hold_lock.wait()
+
+    holder = asyncio.create_task(_hold_tracker_lock())
+    await asyncio.wait_for(holder_ready.wait(), timeout=1.0)
+
+    bind_task = asyncio.create_task(t.bind(handle, source))
+    await asyncio.sleep(0)
+    release_task = asyncio.create_task(t.release(handle))
+    await asyncio.sleep(0)
+
+    hold_lock.set()
+    await bind_task
+    await release_task
+    await holder
+
+    assert handle.released is True
+    assert t.get_alias("alias-race2") == 0
+    assert t.get_unbound("alias-race2") == 0
+    assert t.get_deployment(source) == 0
+
+
+# ---------------------------------------------------------------------------
+# Safety: cancellation before bind / after bind (non-stream)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_cancellation_before_bind_releases_unbound() -> None:
+    engine = create_async_engine(_database_url(), future=True)
+    session_factory = async_sessionmaker(
+        engine, expire_on_commit=False, autoflush=False
+    )
+    store = RoutingStore(session_factory, poll_seconds=60.0)
+    seeded = await _seed_alias_route(session_factory)
+    dep = seeded["deployment_id"]
+    await _point_upstream(session_factory, dep, "http://upstream.test")
+    await store.reload(force=True)
+
+    inflight = InflightTracker()
+    bind_gate = asyncio.Event()
+    reserved = asyncio.Event()
+    original_bind = InflightTracker.bind
+
+    async def _gated_bind(
+        self: InflightTracker, handle: Any, deployment_id: str
+    ) -> None:
+        reserved.set()
+        await bind_gate.wait()
+        await original_bind(self, handle, deployment_id)
+
+    http_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda r: httpx.Response(
+                200,
+                json={
+                    "id": "c",
+                    "object": "chat.completion",
+                    "model": "m",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {"role": "assistant", "content": "ok"},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                },
+            )
+        ),
+        base_url="http://upstream.test",
+    )
+    app = create_app(
+        routing_store=store,
+        http_client=http_client,
+        inflight=inflight,
+        invocation_logs=InvocationLogWriter(None),
+    )
+    with patch.object(InflightTracker, "bind", _gated_bind):
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://gw.test"
+        ) as ac:
+            task = asyncio.create_task(
+                ac.post(
+                    "/v1/chat/completions",
+                    json={
+                        "model": seeded["alias"],
+                        "messages": [{"role": "user", "content": "hi"}],
+                    },
+                )
+            )
+            await asyncio.wait_for(reserved.wait(), timeout=2.0)
+            assert inflight.get_alias(seeded["alias"]) == 1
+            assert inflight.get_unbound(seeded["alias"]) == 1
+            assert inflight.get_deployment(dep) == 0
+
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+            # Allow any shielded release to finish.
+            for _ in range(50):
+                if (
+                    inflight.get_alias(seeded["alias"]) == 0
+                    and inflight.get_unbound(seeded["alias"]) == 0
+                    and inflight.get_deployment(dep) == 0
+                ):
+                    break
+                await asyncio.sleep(0.02)
+
+            # Unblock any late bind so the patched waiters do not hang.
+            bind_gate.set()
+            await asyncio.sleep(0.05)
+
+            assert inflight.get_alias(seeded["alias"]) == 0
+            assert inflight.get_unbound(seeded["alias"]) == 0
+            assert inflight.get_deployment(dep) == 0
+
+    await http_client.aclose()
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_cancellation_after_bind_nonstream_releases_deployment() -> None:
+    engine = create_async_engine(_database_url(), future=True)
+    session_factory = async_sessionmaker(
+        engine, expire_on_commit=False, autoflush=False
+    )
+    gate = asyncio.Event()
+    entered = asyncio.Event()
+    http_client = _held_json_upstream(gate, entered)
+    store = RoutingStore(session_factory, poll_seconds=60.0)
+    seeded = await _seed_alias_route(session_factory)
+    dep = seeded["deployment_id"]
+    await _point_upstream(session_factory, dep, "http://upstream.test")
+    await store.reload(force=True)
+    inflight = InflightTracker()
+    app = create_app(
+        routing_store=store,
+        http_client=http_client,
+        inflight=inflight,
+        invocation_logs=InvocationLogWriter(None),
+    )
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://gw.test"
+    ) as ac:
+        task = asyncio.create_task(
+            ac.post(
+                "/v1/chat/completions",
+                json={
+                    "model": seeded["alias"],
+                    "messages": [{"role": "user", "content": "hi"}],
+                },
+            )
+        )
+        await asyncio.wait_for(entered.wait(), timeout=2.0)
+        assert inflight.get_alias(seeded["alias"]) == 1
+        assert inflight.get_unbound(seeded["alias"]) == 0
+        assert inflight.get_deployment(dep) == 1
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        for _ in range(50):
+            if (
+                inflight.get_alias(seeded["alias"]) == 0
+                and inflight.get_unbound(seeded["alias"]) == 0
+                and inflight.get_deployment(dep) == 0
+            ):
+                break
+            await asyncio.sleep(0.02)
+
+        gate.set()
+        assert inflight.get_alias(seeded["alias"]) == 0
+        assert inflight.get_unbound(seeded["alias"]) == 0
+        assert inflight.get_deployment(dep) == 0
+
+    await http_client.aclose()
+    await engine.dispose()
