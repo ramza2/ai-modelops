@@ -128,6 +128,7 @@ GPU 서버에서 Host 수준 자원과 Docker Engine을 직접 다루는 유일�
 - Deployment Container 로그 조회
 - Container PID ↔ GPU Process 매핑
 - Deployment Health Probe 보조
+- Managed vLLM `/metrics` scrape + allowlist normalization (M6-A2; not an arbitrary HTTP proxy)
 
 Node Agent에는 임의 shell/exec API를 제공하지 않는다.
 
@@ -141,9 +142,15 @@ POST /internal/v1/deployments/{id}/stop
 POST /internal/v1/deployments/{id}/restart
 GET  /internal/v1/deployments/{id}/logs
 GET  /internal/v1/deployments/{id}/health
+GET  /internal/v1/deployments/{id}/runtime-metrics
 ```
 
 Node Agent는 Docker Container보다는 `systemd` Host Service를 우선 권장한다.
+
+Worker periodic collector (M6-A2) calls Node Agent for Managed+RUNNING+VLLM deployments
+and persists `deployment_runtime_metric_snapshot`. Backend observability GETs are DB-only.
+No Prometheus/Grafana server is introduced. Histogram scrapes are cumulative — not
+recent-window P95. IMPORTED runtime metrics are deferred.
 
 ### 3.5 AI Gateway
 

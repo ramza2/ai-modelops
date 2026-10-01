@@ -50,6 +50,12 @@ class Settings(BaseSettings):
     gateway_poll_interval_seconds: float = 0.5
     default_gpu_safety_margin_mb: int = 1024
 
+    # M6-A2: periodic Managed vLLM runtime metrics collector (observation-only).
+    runtime_metrics_enabled: bool = True
+    runtime_metrics_poll_seconds: float = 30.0
+    runtime_metrics_batch_size: int = 50
+    runtime_metrics_timeout_seconds: float = 10.0
+
 
 @lru_cache
 def get_settings() -> Settings:

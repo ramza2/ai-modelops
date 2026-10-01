@@ -36,6 +36,7 @@ EXPECTED_TABLES = {
     "node_resource_snapshot",
     "gpu_resource_snapshot",
     "deployment_resource_snapshot",
+    "deployment_runtime_metric_snapshot",
     "health_check",
     "client_app",
     "invocation_log",

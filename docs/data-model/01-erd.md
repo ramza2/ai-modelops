@@ -658,6 +658,24 @@ Deployment에 귀속시킨 실측 사용량.
 
 PID ↔ Container 매핑에 실패하면 `observed_vram_mb`는 NULL이다. 0으로 대체하지 않는다.
 
+### deployment_runtime_metric_snapshot
+
+M6-A2: Managed vLLM Deployment runtime capacity telemetry (Prometheus-normalized).
+
+Separate from `deployment_resource_snapshot` (VRAM/CPU/memory). Observation-only.
+
+- `deployment_id`
+- `sampled_at`
+- `availability` (`AVAILABLE` / `PARTIAL` / `UNAVAILABLE`)
+- `kv_cache_usage_ratio` (0–1 ratio; prefer `vllm:kv_cache_usage_perc`, legacy `vllm:gpu_cache_usage_perc`)
+- `num_requests_running` / `num_requests_waiting`
+- `prompt_tokens_total` / `generation_tokens_total` (cumulative counters)
+- `metrics_json` (cumulative histogram buckets, metric_sources, missing_metrics)
+- `error_code` / `error_message`
+
+Histogram values are cumulative since runtime process start. A single scrape is **not**
+a recent-window P95. IMPORTED runtime metrics are deferred.
+
 ### health_check
 
 - `deployment_id`

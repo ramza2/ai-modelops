@@ -462,6 +462,42 @@ DEGRADED
 UNHEALTHY
 ```
 
+### GET /internal/v1/deployments/{deployment_id}/runtime-metrics
+
+M6-A2: scrape Managed container fixed path `/metrics` and return normalized JSON.
+
+- Managed containers only (`ai.modelops.managed=true`).
+- Requires live Docker runtime status `RUNNING`.
+- Builds upstream URL via the same `_upstream_url()` mechanism as health/probe.
+- Path is fixed to `/metrics` — callers cannot supply URL/path.
+- Parses allowlisted vLLM Prometheus metrics via `prometheus-client` (parser only).
+- Never returns raw Prometheus exposition text.
+- Never mutates Deployment health/runtime status.
+- Bounded response size (default 2 MiB) and timeout (default 5s).
+
+Core gauges (all required for `AVAILABLE`):
+
+```text
+vllm:kv_cache_usage_perc          → kv_cache_usage_ratio (0–1; prefer)
+vllm:gpu_cache_usage_perc         → legacy KV fallback only
+vllm:num_requests_running
+vllm:num_requests_waiting
+```
+
+Counters: `vllm:prompt_tokens_total`, `vllm:generation_tokens_total`
+
+Histograms (cumulative): TTFT, queue, prefill, decode, e2e (+ optional inter-token /
+time-per-output-token).
+
+Multi-label aggregation: SUM running/waiting/counters/histogram series; MAX KV usage.
+
+Availability: `AVAILABLE` | `PARTIAL` | `UNAVAILABLE`
+
+Expected scrape failures return normalized UNAVAILABLE payloads (e.g.
+`RUNTIME_NOT_READY`, `METRICS_TIMEOUT`, `METRICS_TRANSPORT_ERROR`,
+`METRICS_HTTP_ERROR`, `METRICS_RESPONSE_TOO_LARGE`, `METRICS_PARSE_ERROR`,
+`METRICS_UNSUPPORTED`) rather than generic 500s.
+
 ---
 
 ## 16. Inference Probe

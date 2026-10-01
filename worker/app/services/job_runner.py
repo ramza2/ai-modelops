@@ -14,6 +14,7 @@ from app.core.db import get_engine, get_sessionmaker
 from app.domain.models import OperationJob
 from app.repositories.operations import OperationJobRepository
 from app.services.operation_executor import OperationExecutor
+from app.services.runtime_metrics_collector import RuntimeMetricsCollector
 
 logger = logging.getLogger(__name__)
 
@@ -40,18 +41,21 @@ class JobRunner:
         transport: Any | None = None,
         stop_event: asyncio.Event | None = None,
         engine: Any | None = None,
+        metrics_collector: RuntimeMetricsCollector | None = None,
     ) -> None:
         self._settings = settings or get_settings()
         self._session_factory = session_factory or get_sessionmaker()
         self._transport = transport
         self._stop_event = stop_event or asyncio.Event()
+        resolved_engine = engine or (
+            None if session_factory is not None else get_engine()
+        )
+        self._engine = resolved_engine
         self._executor = OperationExecutor(
             session_factory=self._session_factory,
             settings=self._settings,
             transport=self._transport,
-            engine=engine or (
-                None if session_factory is not None else get_engine()
-            ),
+            engine=resolved_engine,
         )
         from app.services.cold_switch_reconcile import ColdSwitchReconciler
         from app.services.hot_switch_reconcile import HotSwitchReconciler
@@ -60,21 +64,28 @@ class JobRunner:
             session_factory=self._session_factory,
             settings=self._settings,
             transport=self._transport,
-            engine=engine or (
-                None if session_factory is not None else get_engine()
-            ),
+            engine=resolved_engine,
         )
         self._hot_reconciler = HotSwitchReconciler(
             session_factory=self._session_factory,
             settings=self._settings,
             transport=self._transport,
-            engine=engine or (
-                None if session_factory is not None else get_engine()
-            ),
+            engine=resolved_engine,
         )
+        if metrics_collector is not None:
+            self._metrics_collector = metrics_collector
+        else:
+            self._metrics_collector = RuntimeMetricsCollector(
+                settings=self._settings,
+                session_factory=self._session_factory,
+                engine=resolved_engine or get_engine(),
+                transport=self._transport,
+                stop_event=self._stop_event,
+            )
 
     def request_shutdown(self) -> None:
         self._stop_event.set()
+        self._metrics_collector.request_shutdown()
 
     async def run_forever(self) -> None:
         logger.info(
@@ -85,17 +96,50 @@ class JobRunner:
             heartbeat_interval_seconds(self._settings.worker_stale_seconds),
             self._settings.worker_max_attempts,
         )
-        while not self._stop_event.is_set():
-            worked = await self.poll_once()
-            if not worked:
-                try:
-                    await asyncio.wait_for(
-                        self._stop_event.wait(),
-                        timeout=self._settings.worker_poll_seconds,
-                    )
-                except TimeoutError:
-                    pass
+        collector_task = asyncio.create_task(
+            self._run_metrics_collector(),
+            name="runtime-metrics-collector",
+        )
+        try:
+            while not self._stop_event.is_set():
+                worked = await self.poll_once()
+                if not worked:
+                    try:
+                        await asyncio.wait_for(
+                            self._stop_event.wait(),
+                            timeout=self._settings.worker_poll_seconds,
+                        )
+                    except TimeoutError:
+                        pass
+        finally:
+            self._metrics_collector.request_shutdown()
+            await self._stop_collector(collector_task)
         logger.info("Worker %s shut down.", self._settings.worker_id)
+
+    async def _run_metrics_collector(self) -> None:
+        try:
+            await self._metrics_collector.run_forever()
+        except Exception:  # noqa: BLE001 - never kill the operation loop
+            logger.exception(
+                "Runtime metrics collector task crashed; operation loop continues."
+            )
+
+    @staticmethod
+    async def _stop_collector(task: asyncio.Task[None]) -> None:
+        if task.done():
+            try:
+                task.result()
+            except Exception:  # noqa: BLE001
+                logger.exception("Runtime metrics collector ended with an error.")
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception:  # noqa: BLE001
+            logger.exception("Runtime metrics collector cancel raised.")
+
 
     async def poll_once(self) -> bool:
         """Claim and execute at most one job. Returns True if work was claimed.

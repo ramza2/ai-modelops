@@ -575,6 +575,43 @@ INDEX(gpu_device_id, sampled_at DESC)
 
 ---
 
+## 20b. deployment_runtime_metric_snapshot
+
+M6-A2 Managed vLLM runtime capacity snapshots. Not VRAM/CPU resource snapshots.
+
+| Column | Type | Null |
+|---|---|---:|
+| id | BIGINT (identity) | N |
+| deployment_id | UUID | N |
+| sampled_at | TIMESTAMPTZ | N |
+| availability | VARCHAR(32) | N |
+| kv_cache_usage_ratio | NUMERIC(7,6) | Y |
+| num_requests_running | INTEGER | Y |
+| num_requests_waiting | INTEGER | Y |
+| prompt_tokens_total | BIGINT | Y |
+| generation_tokens_total | BIGINT | Y |
+| metrics_json | JSONB | N |
+| error_code | VARCHAR(100) | Y |
+| error_message | TEXT | Y |
+
+### Indexes
+
+```text
+INDEX(deployment_id, sampled_at DESC)
+INDEX(availability, sampled_at DESC)
+INDEX(sampled_at DESC)
+```
+
+`metrics_json` holds cumulative histogram buckets (`ttft_seconds`, queue/prefill/decode/e2e,
+optional inter-token / time-per-output-token), `metric_sources`, and `missing_metrics`.
+Do not store raw Prometheus text, prompts, or high-cardinality labels.
+
+`availability`: `AVAILABLE` | `PARTIAL` | `UNAVAILABLE`
+
+Counters/histograms are cumulative; resets are expected on runtime restart.
+
+---
+
 ## 21. health_check
 
 | Column | Type | Null |
@@ -788,10 +825,11 @@ FK 의존성을 고려한 권장 생성 순서:
 17. node_resource_snapshot
 18. gpu_resource_snapshot
 19. deployment_resource_snapshot
-20. health_check
-21. client_app
-22. invocation_log
-23. audit_log
+20. deployment_runtime_metric_snapshot
+21. health_check
+22. client_app
+23. invocation_log
+24. audit_log
 ```
 
 `operation` ↔ `endpoint_route` 참조 관계는 migration 순서상 `endpoint_route.operation_id` FK를 후속 ALTER로 추가해도 된다.

@@ -210,6 +210,21 @@ def deployment_health(
     )
 
 
+@internal_router.get("/deployments/{deployment_id}/runtime-metrics")
+def deployment_runtime_metrics(
+    deployment_id: uuid.UUID,
+    service: DeploymentLifecycleService = Depends(get_deployment_service),
+    x_request_id: str | None = Header(default=None, alias="X-Request-ID"),
+) -> dict[str, Any]:
+    """M6-A2: scrape Managed container fixed ``/metrics`` (normalized JSON only).
+
+    Observation-only. Does not accept caller-provided URLs/paths. Never returns
+    raw Prometheus exposition text.
+    """
+    _ = x_request_id
+    return service.fetch_runtime_metrics(str(deployment_id))
+
+
 @internal_router.post("/deployments/{deployment_id}/probe")
 def deployment_probe(
     deployment_id: uuid.UUID,

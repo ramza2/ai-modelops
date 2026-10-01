@@ -394,3 +394,28 @@ class NodeAgentClient:
         )
         assert result is not None
         return result
+
+    async def get_runtime_metrics(
+        self,
+        deployment_id: str,
+        *,
+        timeout_seconds: float | None = None,
+    ) -> dict[str, Any]:
+        """GET /internal/v1/deployments/{id}/runtime-metrics (read-only, M6-A2).
+
+        Node Agent owns Prometheus scrape + allowlist normalization. Worker
+        must not parse raw exposition text.
+        """
+        http_timeout = (
+            float(timeout_seconds)
+            if timeout_seconds is not None
+            else max(float(self._timeout), 15.0)
+        )
+        result = await self._request(
+            "GET",
+            f"/internal/v1/deployments/{deployment_id}/runtime-metrics",
+            headers=self._auth_headers(),
+            timeout_seconds=http_timeout,
+        )
+        assert result is not None
+        return result
