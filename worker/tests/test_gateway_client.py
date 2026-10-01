@@ -104,3 +104,163 @@ async def test_get_route_runtime_missing_fields_is_retryable() -> None:
     assert err.code == "GATEWAY_INVALID_RESPONSE"
     assert err.retryable is True
     assert "missing" in err.details
+
+
+@pytest.mark.asyncio
+async def test_get_route_runtime_with_deployment_id_validates_drain_fields() -> None:
+    seen: dict[str, str] = {}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        seen["deployment_id"] = request.url.params.get("deployment_id", "")
+        return httpx.Response(
+            200,
+            json=_runtime_payload(
+                unbound_requests=0,
+                global_unbound_requests=0,
+                observed_deployment_id="dep-source",
+                observed_deployment_inflight_requests=1,
+                observed_deployment_idle=False,
+            ),
+        )
+
+    client = GatewayClient(
+        base_url="http://gateway.test",
+        timeout_seconds=1.0,
+        transport=httpx.MockTransport(_handler),
+    )
+    data = await client.get_route_runtime("company-llm", deployment_id="dep-source")
+    assert seen["deployment_id"] == "dep-source"
+    assert data["unbound_requests"] == 0
+    assert data["global_unbound_requests"] == 0
+    assert data["observed_deployment_inflight_requests"] == 1
+
+
+@pytest.mark.asyncio
+async def test_get_route_runtime_with_deployment_id_missing_drain_fields() -> None:
+    def _handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_runtime_payload())
+
+    client = GatewayClient(
+        base_url="http://gateway.test",
+        timeout_seconds=1.0,
+        transport=httpx.MockTransport(_handler),
+    )
+    with pytest.raises(GatewayError) as exc_info:
+        await client.get_route_runtime("company-llm", deployment_id="dep-source")
+    err = exc_info.value
+    assert err.code == "GATEWAY_INVALID_RESPONSE"
+    assert "missing" in err.details
+
+
+@pytest.mark.asyncio
+async def test_get_route_runtime_missing_global_unbound_rejected() -> None:
+    def _handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=_runtime_payload(
+                unbound_requests=0,
+                observed_deployment_id="dep-source",
+                observed_deployment_inflight_requests=0,
+            ),
+        )
+
+    client = GatewayClient(
+        base_url="http://gateway.test",
+        timeout_seconds=1.0,
+        transport=httpx.MockTransport(_handler),
+    )
+    with pytest.raises(GatewayError) as exc_info:
+        await client.get_route_runtime("company-llm", deployment_id="dep-source")
+    err = exc_info.value
+    assert err.code == "GATEWAY_INVALID_RESPONSE"
+    assert "global_unbound_requests" in err.details.get("missing", [])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {
+            "unbound_requests": False,
+            "global_unbound_requests": 0,
+            "observed_deployment_id": "dep-source",
+            "observed_deployment_inflight_requests": 0,
+        },
+        {
+            "unbound_requests": 0,
+            "global_unbound_requests": False,
+            "observed_deployment_id": "dep-source",
+            "observed_deployment_inflight_requests": 0,
+        },
+        {
+            "unbound_requests": 0,
+            "global_unbound_requests": 0,
+            "observed_deployment_id": "dep-source",
+            "observed_deployment_inflight_requests": False,
+        },
+        {
+            "unbound_requests": -1,
+            "global_unbound_requests": 0,
+            "observed_deployment_id": "dep-source",
+            "observed_deployment_inflight_requests": 0,
+        },
+        {
+            "unbound_requests": 0,
+            "global_unbound_requests": -1,
+            "observed_deployment_id": "dep-source",
+            "observed_deployment_inflight_requests": 0,
+        },
+        {
+            "unbound_requests": 0,
+            "global_unbound_requests": 0,
+            "observed_deployment_id": "dep-source",
+            "observed_deployment_inflight_requests": -3,
+        },
+        {
+            "unbound_requests": 0,
+            "global_unbound_requests": 0,
+            "observed_deployment_id": "dep-other",
+            "observed_deployment_inflight_requests": 0,
+        },
+    ],
+)
+async def test_get_route_runtime_strict_drain_validation_rejects(
+    overrides: dict,
+) -> None:
+    def _handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_runtime_payload(**overrides))
+
+    client = GatewayClient(
+        base_url="http://gateway.test",
+        timeout_seconds=1.0,
+        transport=httpx.MockTransport(_handler),
+    )
+    with pytest.raises(GatewayError) as exc_info:
+        await client.get_route_runtime("company-llm", deployment_id="dep-source")
+    assert exc_info.value.code == "GATEWAY_INVALID_RESPONSE"
+
+
+@pytest.mark.asyncio
+async def test_get_route_runtime_strict_drain_validation_accepts_zero_int() -> None:
+    def _handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=_runtime_payload(
+                unbound_requests=0,
+                global_unbound_requests=0,
+                observed_deployment_id="dep-source",
+                observed_deployment_inflight_requests=0,
+                observed_deployment_idle=True,
+            ),
+        )
+
+    client = GatewayClient(
+        base_url="http://gateway.test",
+        timeout_seconds=1.0,
+        transport=httpx.MockTransport(_handler),
+    )
+    data = await client.get_route_runtime("company-llm", deployment_id="dep-source")
+    assert data["unbound_requests"] == 0
+    assert data["global_unbound_requests"] == 0
+    assert data["observed_deployment_inflight_requests"] == 0
+    assert data["observed_deployment_id"] == "dep-source"

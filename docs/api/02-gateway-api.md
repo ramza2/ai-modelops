@@ -278,15 +278,36 @@ Cold Switch 전환 준비 상태.
 - upstream 전달 금지
 - `503 MODEL_MAINTENANCE`
 
-Gateway는 Alias별 inflight count를 유지한다.
+Gateway는 process-local inflight telemetry를 유지한다 (M5-D2-B1).
 
-Cold Switch Worker는 Internal Runtime API를 통해:
+### Alias inflight (Cold DRAINING)
+
+- `inflight_requests`: Alias 전체 활성 요청 수
+- 요청은 route resolve **이전**에 admit되어 Cold drain race를 닫는다
+- Cold Switch Worker는 `DRAINING` + `inflight_requests == 0` (`drain_complete`)으로
+  Source Stop 진행 여부를 판단한다
+
+### Unbound + Deployment inflight (HOT Source retirement 준비)
+
+Admission 상태:
 
 ```text
-inflight_requests == 0
+RESERVED(alias)  →  BOUND(alias, deployment_id)  →  RELEASED
 ```
 
-을 확인한 뒤 Source Stop 단계로 진행한다.
+- `unbound_requests`: **Alias-local** — 이 Alias에서 admit 후 Deployment bind 전
+- `global_unbound_requests`: **process-global** — Gateway process 전체 unbound 합
+  (다른 Alias에 숨은 RESERVED가 Source로 bind될 수 있으므로 B2 권위 신호)
+- Deployment inflight는 **Alias가 아니라 Deployment 전역** (process-local)
+  — 한 Deployment가 여러 Alias에 공유될 수 있음
+- Streaming SSE는 `StreamingResponse` 반환 시점이 아니라 실제 EOF /
+  upstream error / timeout / client disconnect 시에만 release
+
+`drain_complete`는 Cold Alias/DRAINING 의미만 유지한다.
+HOT Source 안전 정지를 Alias-local `unbound_requests`만으로 판단하지 않는다.
+
+현재 MVP Gateway는 단일 process/replica다. 이 telemetry는 cluster-wide가 아니며
+multi-process 집계는 후속이다.
 
 ---
 
@@ -434,6 +455,16 @@ Control Plane/Worker 전용이다.
 
 ### GET /internal/v1/routes/{alias}/runtime
 
+Query (optional):
+
+```text
+?deployment_id=<uuid>
+```
+
+- 생략 시: 현재 ACTIVE Deployment를 관찰
+- 지정 시: ACTIVE가 아니어도 해당 Deployment의 **process-global** inflight를 관찰
+  (HOT cutover 이후 Source drain 관측용)
+
 ```json
 {
   "alias": "company-llm",
@@ -441,11 +472,47 @@ Control Plane/Worker 전용이다.
   "traffic_state": "DRAINING",
   "active_deployment_id": "uuid",
   "applied_routing_version": 42,
-  "inflight_requests": 2
+  "inflight_requests": 2,
+  "unbound_requests": 0,
+  "global_unbound_requests": 0,
+  "drain_complete": false,
+  "observed_deployment_id": "uuid",
+  "observed_deployment_inflight_requests": 1,
+  "observed_deployment_idle": false
 }
 ```
 
+필드 의미:
+
+| Field | Meaning |
+|---|---|
+| `inflight_requests` | Alias-wide total (Cold drain) |
+| `unbound_requests` | Alias-local: admitted for this Alias but not yet Deployment-bound |
+| `global_unbound_requests` | Process-global unbound reservations across all Aliases |
+| `drain_complete` | Cold only: `DRAINING` and alias inflight == 0 |
+| `observed_deployment_id` | Query `deployment_id`, else ACTIVE Deployment |
+| `observed_deployment_inflight_requests` | Global process-local count for that Deployment |
+| `observed_deployment_idle` | `observed_deployment_inflight_requests == 0` (diagnostic only) |
+
 Cold Switch Worker가 Drain 완료와 Route 적용 여부를 검증하는 핵심 API다.
+
+HOT Source retirement (M5-D2-B2, 미구현)은 최소 한 번의 Gateway observation에서
+대략 다음을 함께 확인해야 한다 (고정 sleep 없음):
+
+```text
+active_deployment_id == Target
+applied_routing_version >= HOT cutover routing version
+traffic_state == SERVING
+global_unbound_requests == 0
+observed_deployment_id == Source
+observed_deployment_inflight_requests == 0
+```
+
+Alias-local `unbound_requests == 0` alone is **not** authoritative for Source stop
+(another Alias may still hold a hidden RESERVED admission that later binds Source).
+
+Additionally, Control Plane routing must prove Source is not ACTIVE for any
+other Alias when Deployments are shared.
 
 ### POST /internal/v1/routes/reload
 
