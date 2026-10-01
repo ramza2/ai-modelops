@@ -298,6 +298,9 @@ class RuntimeMetricsCollector:
             "missing_metrics": list(payload.get("missing_metrics") or []),
             "histograms": histograms_out,
         }
+        runtime_instance = _sanitize_runtime_instance(payload.get("runtime_instance"))
+        if runtime_instance is not None:
+            metrics_json["runtime_instance"] = runtime_instance
 
         kv = payload.get("kv_cache_usage_ratio")
         kv_dec: Decimal | None
@@ -329,3 +332,40 @@ class RuntimeMetricsCollector:
             error_code=str(error_code) if error_code else None,
             error_message=error_message,
         )
+
+
+def _sanitize_runtime_instance(raw: Any) -> dict[str, Any] | None:
+    """Persist only the A3 allowlisted identity fields."""
+    if not isinstance(raw, dict):
+        return None
+    container_id = raw.get("container_id")
+    started_at = raw.get("started_at")
+    restart_count = raw.get("restart_count")
+
+    out: dict[str, Any] = {}
+    if isinstance(container_id, str) and container_id.strip():
+        out["container_id"] = container_id.strip()
+    else:
+        out["container_id"] = None
+
+    if isinstance(started_at, str) and started_at.strip():
+        out["started_at"] = started_at.strip()
+    else:
+        out["started_at"] = None
+
+    if restart_count is None:
+        out["restart_count"] = None
+    else:
+        try:
+            out["restart_count"] = int(restart_count)
+        except (TypeError, ValueError):
+            out["restart_count"] = None
+
+    # Omit entirely when nothing useful is present.
+    if (
+        out["container_id"] is None
+        and out["started_at"] is None
+        and out["restart_count"] is None
+    ):
+        return None
+    return out

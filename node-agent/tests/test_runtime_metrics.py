@@ -350,6 +350,14 @@ async def test_endpoint_available_scrape() -> None:
     assert body["source"] == "VLLM_PROMETHEUS"
     assert "vllm:kv_cache_usage_perc" not in resp.text or body["kv_cache_usage_ratio"] == pytest.approx(0.63)
     assert "# HELP" not in resp.text  # never raw exposition
+    inst = body["runtime_instance"]
+    assert inst["container_id"]
+    assert inst["started_at"]
+    assert inst["restart_count"] is not None
+    # No arbitrary Docker metadata leakage.
+    assert "environment" not in body
+    assert "command" not in (inst or {})
+    assert "image" not in (inst or {})
 
 
 @pytest.mark.anyio
@@ -396,6 +404,10 @@ async def test_endpoint_timeout() -> None:
     body = resp.json()
     assert body["availability"] == "UNAVAILABLE"
     assert body["error_code"] == "METRICS_TIMEOUT"
+    # Stable expected scrape failure still carries identity metadata.
+    assert body["runtime_instance"] is not None
+    assert body["runtime_instance"]["container_id"]
+    assert body["runtime_instance"]["started_at"]
 
 
 @pytest.mark.anyio
@@ -468,3 +480,65 @@ async def test_unmanaged_container_rejected() -> None:
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         resp = await c.get(f"/internal/v1/deployments/{dep_id}/runtime-metrics")
     assert resp.status_code in {400, 403, 404, 409, 422}
+
+
+@pytest.mark.anyio
+async def test_restart_during_scrape_unavailable() -> None:
+    from app.adapters.docker_adapter import _copy_info
+
+    ids = _ids()
+    holder: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        docker = holder["docker"]
+        # Mutate started_at mid-scrape to simulate restart/replace.
+        for cid, info in list(docker._containers.items()):
+            docker._containers[cid] = _copy_info(
+                info,
+                started_at="2099-01-01T00:00:00Z",
+                restart_count=(info.restart_count or 0) + 1,
+            )
+        return httpx.Response(200, text=FULL_METRICS)
+
+    app, docker = _make_app(http_transport=httpx.MockTransport(handler))
+    holder["docker"] = docker
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        await c.post(
+            f"/internal/v1/deployments/{ids['deployment_id']}/create",
+            json=_create_body(ids),
+        )
+        await c.post(f"/internal/v1/deployments/{ids['deployment_id']}/start")
+        resp = await c.get(
+            f"/internal/v1/deployments/{ids['deployment_id']}/runtime-metrics"
+        )
+    body = resp.json()
+    assert body["availability"] == "UNAVAILABLE"
+    assert body["error_code"] == "RUNTIME_INSTANCE_CHANGED_DURING_SCRAPE"
+    assert body["kv_cache_usage_ratio"] is None
+    assert body["histograms"] == {}
+
+
+@pytest.mark.anyio
+async def test_missing_started_at_still_returns_metrics() -> None:
+    from app.adapters.docker_adapter import _copy_info
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=FULL_METRICS)
+
+    app, docker = _make_app(http_transport=httpx.MockTransport(handler))
+    ids = _ids()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        await c.post(
+            f"/internal/v1/deployments/{ids['deployment_id']}/create",
+            json=_create_body(ids),
+        )
+        await c.post(f"/internal/v1/deployments/{ids['deployment_id']}/start")
+        for cid, info in list(docker._containers.items()):
+            docker._containers[cid] = _copy_info(info, started_at=None)
+        resp = await c.get(
+            f"/internal/v1/deployments/{ids['deployment_id']}/runtime-metrics"
+        )
+    body = resp.json()
+    assert body["availability"] == "AVAILABLE"
+    assert body["runtime_instance"]["container_id"]
+    assert body["runtime_instance"]["started_at"] is None

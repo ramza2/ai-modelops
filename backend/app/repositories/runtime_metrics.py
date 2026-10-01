@@ -107,3 +107,44 @@ class RuntimeMetricsRepository:
             select(Deployment.id).where(Deployment.id == deployment_id).limit(1)
         )
         return result.first() is not None
+
+    async def deployment_name(self, deployment_id: uuid.UUID) -> str | None:
+        result = await self._session.execute(
+            select(Deployment.name).where(Deployment.id == deployment_id).limit(1)
+        )
+        row = result.first()
+        if row is None:
+            return None
+        return str(row[0])
+
+    async def analytics_window(
+        self,
+        deployment_id: uuid.UUID,
+        *,
+        since: dt.datetime,
+        until: dt.datetime,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        """In-window snapshots oldest→newest (no pre-window baseline)."""
+        stmt = (
+            select(
+                DeploymentRuntimeMetricSnapshot.deployment_id,
+                DeploymentRuntimeMetricSnapshot.sampled_at,
+                DeploymentRuntimeMetricSnapshot.availability,
+                DeploymentRuntimeMetricSnapshot.kv_cache_usage_ratio,
+                DeploymentRuntimeMetricSnapshot.num_requests_running,
+                DeploymentRuntimeMetricSnapshot.num_requests_waiting,
+                DeploymentRuntimeMetricSnapshot.prompt_tokens_total,
+                DeploymentRuntimeMetricSnapshot.generation_tokens_total,
+                DeploymentRuntimeMetricSnapshot.metrics_json,
+                DeploymentRuntimeMetricSnapshot.error_code,
+                DeploymentRuntimeMetricSnapshot.error_message,
+            )
+            .where(DeploymentRuntimeMetricSnapshot.deployment_id == deployment_id)
+            .where(DeploymentRuntimeMetricSnapshot.sampled_at >= since)
+            .where(DeploymentRuntimeMetricSnapshot.sampled_at <= until)
+            .order_by(DeploymentRuntimeMetricSnapshot.sampled_at.asc())
+            .limit(limit)
+        )
+        result = await self._session.execute(stmt)
+        return [dict(row._mapping) for row in result]

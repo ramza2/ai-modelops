@@ -265,6 +265,13 @@ async def test_available_snapshot_persisted(db) -> None:
         "metric_sources": {"kv_cache_usage_ratio": "vllm:kv_cache_usage_perc"},
         "missing_metrics": [],
         "source": "VLLM_PROMETHEUS",
+        "runtime_instance": {
+            "container_id": "ctr-abc",
+            "started_at": "2026-10-01T06:00:00Z",
+            "restart_count": 2,
+            "environment": {"SECRET": "nope"},
+            "command": ["should", "not", "persist"],
+        },
     }
     collector = RuntimeMetricsCollector(
         settings=_settings(),
@@ -292,11 +299,55 @@ async def test_available_snapshot_persisted(db) -> None:
         assert snap.prompt_tokens_total == 154230
         assert snap.metrics_json["histograms"]["ttft_seconds"]["count"] == 120
         assert snap.metrics_json["histograms"]["ttft_seconds"]["buckets"]["0.1"] == 20
+        assert snap.metrics_json["runtime_instance"] == {
+            "container_id": "ctr-abc",
+            "started_at": "2026-10-01T06:00:00Z",
+            "restart_count": 2,
+        }
+        assert "environment" not in snap.metrics_json["runtime_instance"]
+        assert "command" not in snap.metrics_json["runtime_instance"]
 
         dep = await session.get(Deployment, uuid.UUID(seeded["deployment_id"]))
         assert dep is not None
         assert dep.runtime_status == prior_runtime
         assert dep.health_status == prior_health
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_runtime_instance_malformed_omitted(db) -> None:
+    session_factory = db
+    async with session_factory() as session:
+        seeded = await _seed_candidate(session)
+    engine = create_async_engine(_database_url(), future=True)
+    collector = RuntimeMetricsCollector(
+        settings=_settings(),
+        session_factory=session_factory,
+        engine=engine,
+        client_factory=lambda url: _FakeClient(
+            {
+                "availability": "PARTIAL",
+                "num_requests_running": 1,
+                "missing_metrics": ["kv_cache_usage_ratio"],
+                "source": "VLLM_PROMETHEUS",
+                "runtime_instance": "not-a-dict",
+            }
+        ),
+    )
+    await collector.collect_once()
+    async with session_factory() as session:
+        snap = (
+            await session.execute(
+                select(DeploymentRuntimeMetricSnapshot)
+                .where(
+                    DeploymentRuntimeMetricSnapshot.deployment_id
+                    == uuid.UUID(seeded["deployment_id"])
+                )
+                .order_by(DeploymentRuntimeMetricSnapshot.sampled_at.desc())
+            )
+        ).scalars().first()
+        assert snap is not None
+        assert "runtime_instance" not in snap.metrics_json
     await engine.dispose()
 
 

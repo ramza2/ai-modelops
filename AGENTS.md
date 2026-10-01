@@ -646,6 +646,11 @@ ${DATABASE_URL}
      `GET /api/v1/observability/runtime/latest` + history.
      Observation-only; cumulative histograms (not recent-window P95);
      no Prometheus/Grafana server; IMPORTED deferred.
+   - **M6-A3 (done):** recent-window analytics from A2 snapshots using
+     runtime instance identity (`container_id` + `started_at`);
+     `GET /api/v1/observability/runtime/deployments/{id}/analytics`
+     (classic histogram P50/P95 bucket estimates; reset/unknown-identity
+     intervals excluded; DB-only).
 
 한 번에 모든 기능을 스캐폴딩만 하는 것보다 각 milestone을 end-to-end로 동작하게 완성하는 것을 우선한다.
 

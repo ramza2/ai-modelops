@@ -1,4 +1,4 @@
-"""Observability Management API routes (M6-A1 + M6-A2)."""
+"""Observability Management API routes (M6-A1 + M6-A2 + M6-A3)."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_session
 from app.services.observability import InvocationObservabilityService
+from app.services.runtime_analytics import RuntimeAnalyticsService
 from app.services.runtime_metrics import RuntimeMetricsObservabilityService
 
 router = APIRouter(prefix="/api/v1/observability", tags=["observability"])
@@ -24,6 +25,12 @@ def get_runtime_metrics_service(
     session: AsyncSession = Depends(get_session),
 ) -> RuntimeMetricsObservabilityService:
     return RuntimeMetricsObservabilityService(session)
+
+
+def get_runtime_analytics_service(
+    session: AsyncSession = Depends(get_session),
+) -> RuntimeAnalyticsService:
+    return RuntimeAnalyticsService(session)
 
 
 @router.get("/invocations/summary")
@@ -65,3 +72,19 @@ async def runtime_metrics_history(
     percentiles. Does not trigger a live Node Agent scrape.
     """
     return await service.history(deployment_id, hours=hours, limit=limit)
+
+
+@router.get("/runtime/deployments/{deployment_id}/analytics")
+async def runtime_metrics_analytics(
+    deployment_id: uuid.UUID,
+    hours: int = Query(default=24, ge=1, le=168),
+    service: RuntimeAnalyticsService = Depends(get_runtime_analytics_service),
+) -> dict:
+    """M6-A3 recent-window runtime analytics from DB snapshots only.
+
+    Uses runtime instance identity (container_id + started_at) to exclude reset
+    boundaries. Classic histogram P50/P95 are bucket estimates, not exact
+    raw-request percentiles. Does not scrape Node Agent or extrapolate to
+    window edges.
+    """
+    return await service.analytics(deployment_id, hours=hours)

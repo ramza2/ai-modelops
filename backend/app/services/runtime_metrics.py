@@ -109,11 +109,47 @@ class RuntimeMetricsObservabilityService:
             "error_code": row.get("error_code"),
             "error_message": row.get("error_message"),
             "source": metrics_json.get("source") or "VLLM_PROMETHEUS",
+            "runtime_instance": _sanitize_runtime_instance(
+                metrics_json.get("runtime_instance")
+            ),
         }
         if include_name:
             name = row.get("deployment_name")
             item["deployment_name"] = str(name) if name else None
         return item
+
+
+def _sanitize_runtime_instance(raw: Any) -> dict[str, Any] | None:
+    if not isinstance(raw, dict):
+        return None
+    container_id = raw.get("container_id")
+    started_at = raw.get("started_at")
+    restart_count = raw.get("restart_count")
+    out: dict[str, Any] = {
+        "container_id": (
+            str(container_id).strip()
+            if isinstance(container_id, str) and container_id.strip()
+            else None
+        ),
+        "started_at": (
+            str(started_at).strip()
+            if isinstance(started_at, str) and started_at.strip()
+            else None
+        ),
+        "restart_count": None,
+    }
+    if restart_count is not None:
+        try:
+            out["restart_count"] = int(restart_count)
+        except (TypeError, ValueError):
+            out["restart_count"] = None
+    if (
+        out["container_id"] is None
+        and out["started_at"] is None
+        and out["restart_count"] is None
+    ):
+        return None
+    return out
 
 
 def _iso(value: Any) -> str | None:

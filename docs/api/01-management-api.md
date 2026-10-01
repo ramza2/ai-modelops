@@ -877,11 +877,15 @@ missing_metrics
 error_code
 error_message
 source                    # VLLM_PROMETHEUS
+runtime_instance          # {container_id, started_at, restart_count} or null
 ```
 
 Does **not** trigger a live Node Agent scrape.
 
 Unknown `deployment_id` → 404.
+
+`runtime_instance` is absent/null on pre-A3 rows. Complete identity for A3 deltas is
+`container_id` + `started_at` (`restart_count` is diagnostic only).
 
 ### GET /observability/runtime/deployments/{deployment_id}/history
 
@@ -899,12 +903,39 @@ limit  default 500; bounded 1..1000
 Ordering: `oldest_to_newest` (chart-friendly). When `limit` truncates, the newest
 samples within the window are kept.
 
-DB-only. Does not scrape Node Agent.
+DB-only. Does not scrape Node Agent. Also exposes sanitized `runtime_instance` when present.
+
+### GET /observability/runtime/deployments/{deployment_id}/analytics
+
+M6-A3 recent-window runtime analytics from A2 snapshots (DB-only).
+
+```text
+GET /api/v1/observability/runtime/deployments/{deployment_id}/analytics?hours=24
+```
+
+Query:
+
+```text
+hours  default 24; bounded 1..168
+```
+
+Semantics:
+
+- Uses only in-window snapshots (`sampled_at >= window_start`); no pre-window baseline.
+- Cumulative counter/histogram deltas require complete same runtime identity
+  (`container_id` + `started_at`) on both sides of each adjacent pair.
+- Reset boundaries (identity change) and unknown-identity pairs are excluded.
+- Counter/histogram regressions fail closed (no negative deltas).
+- Classic histogram P50/P95 are **bucket estimates**, not exact raw-request percentiles.
+- Does **not** Prometheus-style extrapolate to window edges.
+- Gauge avg/max are sample averages (not time-weighted); no runtime identity required.
+- Safety cap: at most 25,000 snapshots; larger windows fail with validation error.
+- Old A2 rows without `runtime_instance` still contribute gauges; cumulative deltas excluded.
 
 Notes:
 
-- M6-A1 = invocation-side telemetry; M6-A2 = Deployment runtime-side capacity.
-- Histogram data is cumulative since runtime start — not TTFT/queue P95 over a window.
+- M6-A1 = invocation-side telemetry; M6-A2 = cumulative runtime snapshots;
+  M6-A3 = recent-window delta analytics.
 - IMPORTED Deployment runtime metrics are deferred.
 - No Prometheus server or Grafana is introduced.
 
