@@ -712,3 +712,505 @@ async def test_retry_idempotency_key_conflict_non_retry_operation(client) -> Non
     assert err["code"] == "IDEMPOTENCY_KEY_CONFLICT"
     assert err["details"]["idempotency_key_operation_id"] == bound_id
     assert err["details"]["idempotency_key_retry_of_operation_id"] is None
+
+
+# ---------------------------------------------------------------------------
+# M5-D2-C HOT Explicit Retry
+# ---------------------------------------------------------------------------
+
+
+async def _enqueue_hot(
+    client: dict[str, Any], world: dict[str, Any], **extra: Any
+) -> str:
+    from app.services.switch import HOT_SWITCH_STEPS
+
+    payload = {
+        "target_deployment_id": world["target_deployment_id"],
+        "strategy": "HOT",
+        "reason": "hot-upgrade",
+        "drain_timeout_seconds": 45,
+        "health_timeout_seconds": 90,
+        "vram_release_timeout_seconds": 15,
+        "gateway_apply_timeout_seconds": 20,
+    }
+    payload.update(extra)
+    enq = await client["client"].post(
+        f"/api/v1/endpoints/{world['endpoint_id']}/switch",
+        json=payload,
+        headers={"Idempotency-Key": f"hot-retry-enq-{uuid.uuid4()}"},
+    )
+    assert enq.status_code == 202, enq.text
+    body = enq.json()
+    assert body["switch_strategy"] == "HOT"
+    assert [s["step_code"] for s in body["steps"]] == HOT_SWITCH_STEPS
+    return body["id"]
+
+
+@pytest.mark.asyncio
+async def test_hot_retry_failed_happy_path(client) -> None:
+    from app.services.switch import HOT_SWITCH_STEPS
+
+    sf = client["session_factory"]
+    ac = client["client"]
+    async with sf() as session:
+        world = await _seed_world(session)
+    op_id = await _enqueue_hot(client, world)
+    pre = await _mark_terminal(sf, op_id, status=OperationStatus.FAILED.value)
+    pre_snap = await _snapshot_operation(sf, op_id)
+
+    resp = await ac.post(f"/api/v1/operations/{op_id}/retry")
+    assert resp.status_code == 202, resp.text
+    body = resp.json()
+    assert body["switch_strategy"] == "HOT"
+    assert body["retry_of_operation_id"] == op_id
+    assert body["id"] != op_id
+    assert body["status"] == OperationStatus.QUEUED.value
+    assert body["cancel_requested_at"] is None
+    assert [s["step_code"] for s in body["steps"]] == HOT_SWITCH_STEPS
+    assert len(body["steps"]) == 12
+    assert all(s["status"] == StepStatus.PENDING.value for s in body["steps"])
+    assert body["metadata"]["m5d1_hot_forward"] is True
+    assert body["metadata"]["m5d2b2_source_retirement"] is True
+    assert body["metadata"]["m5d2c_hot_retry"] is True
+    assert body["metadata"]["strategy"] == "HOT"
+    assert body["metadata"]["drain_timeout_seconds"] == 45
+    assert body["metadata"].get("hot_route_boundary_entered") is None
+    assert body["metadata"].get("destructive_boundary_entered") is None
+    assert body["metadata"].get("retirement_drain_proven") is None
+    assert body["metadata"].get("cancel_reason") is None
+
+    after = await _snapshot_operation(sf, op_id)
+    assert after["op"]["status"] == OperationStatus.FAILED.value
+    assert after["op"]["meta"] == pre_snap["op"]["meta"]
+    assert after["job"]["id"] == pre["job_before"]["id"]
+    _ = HOT_SWITCH_STEPS
+
+
+@pytest.mark.asyncio
+async def test_hot_retry_rolled_back(client) -> None:
+    from app.services.switch import HOT_SWITCH_STEPS
+
+    sf = client["session_factory"]
+    ac = client["client"]
+    async with sf() as session:
+        world = await _seed_world(session)
+    op_id = await _enqueue_hot(client, world)
+    # Target may already be DB RUNNING after rollback.
+    async with sf() as session:
+        await session.execute(
+            text(
+                """
+                UPDATE deployment
+                SET runtime_status = 'RUNNING', health_status = 'HEALTHY',
+                    desired_state = 'RUNNING'
+                WHERE id = CAST(:id AS uuid)
+                """
+            ),
+            {"id": world["target_deployment_id"]},
+        )
+        await session.commit()
+    await _mark_terminal(
+        sf,
+        op_id,
+        status=OperationStatus.ROLLED_BACK.value,
+        metadata_patch={
+            "destructive_boundary_entered": True,
+            "hot_route_boundary_entered": True,
+            "cancel_reason": "must-not-copy",
+            "hot_source_retired": False,
+        },
+    )
+
+    resp = await ac.post(f"/api/v1/operations/{op_id}/retry")
+    assert resp.status_code == 202, resp.text
+    body = resp.json()
+    assert body["switch_strategy"] == "HOT"
+    assert [s["step_code"] for s in body["steps"]] == HOT_SWITCH_STEPS
+    assert body["metadata"].get("destructive_boundary_entered") is None
+    assert body["metadata"].get("cancel_reason") is None
+    assert body["cancel_requested_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_hot_retry_after_mir_reconciled_rolled_back(client) -> None:
+    sf = client["session_factory"]
+    ac = client["client"]
+    async with sf() as session:
+        world = await _seed_world(session)
+    op_id = await _enqueue_hot(client, world)
+    await _mark_terminal(
+        sf,
+        op_id,
+        status=OperationStatus.ROLLED_BACK.value,
+        metadata_patch={
+            "reconciliation_outcome": "ROLLED_BACK",
+            "reconciliation_reason": "source restored",
+            "reconciliation_attempt_count": 2,
+        },
+    )
+
+    resp = await ac.post(f"/api/v1/operations/{op_id}/retry")
+    assert resp.status_code == 202, resp.text
+    body = resp.json()
+    assert body["metadata"].get("reconciliation_outcome") is None
+    assert body["metadata"].get("reconciliation_reason") is None
+    assert body["metadata"]["m5d2c_hot_retry"] is True
+
+
+@pytest.mark.asyncio
+async def test_hot_retry_rejects_destructive_failed(client) -> None:
+    sf = client["session_factory"]
+    ac = client["client"]
+    async with sf() as session:
+        world = await _seed_world(session)
+    op_id = await _enqueue_hot(client, world)
+    await _mark_terminal(
+        sf,
+        op_id,
+        status=OperationStatus.FAILED.value,
+        metadata_patch={"destructive_boundary_entered": True},
+    )
+    resp = await ac.post(f"/api/v1/operations/{op_id}/retry")
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["error"]["code"] == "INVALID_OPERATION_STATE"
+    assert resp.json()["error"]["details"].get("destructive_boundary_entered") is True
+
+
+@pytest.mark.asyncio
+async def test_hot_retry_allows_route_boundary_only_failed(client) -> None:
+    sf = client["session_factory"]
+    ac = client["client"]
+    async with sf() as session:
+        world = await _seed_world(session)
+    op_id = await _enqueue_hot(client, world)
+    await _mark_terminal(
+        sf,
+        op_id,
+        status=OperationStatus.FAILED.value,
+        metadata_patch={"hot_route_boundary_entered": True},
+    )
+    resp = await ac.post(f"/api/v1/operations/{op_id}/retry")
+    assert resp.status_code == 202, resp.text
+    assert resp.json()["switch_strategy"] == "HOT"
+
+
+@pytest.mark.asyncio
+async def test_hot_retry_rejects_active_route_changed(client) -> None:
+    sf = client["session_factory"]
+    ac = client["client"]
+    async with sf() as session:
+        world = await _seed_world(session)
+    op_id = await _enqueue_hot(client, world)
+    await _mark_terminal(sf, op_id, status=OperationStatus.FAILED.value)
+    async with sf() as session:
+        await session.execute(
+            text(
+                """
+                UPDATE endpoint_route
+                SET deployment_id = CAST(:tgt AS uuid)
+                WHERE endpoint_alias_id = CAST(:ep AS uuid) AND status = 'ACTIVE'
+                """
+            ),
+            {
+                "tgt": world["target_deployment_id"],
+                "ep": world["endpoint_id"],
+            },
+        )
+        await session.commit()
+    resp = await ac.post(f"/api/v1/operations/{op_id}/retry")
+    assert resp.status_code == 409
+    assert resp.json()["error"]["code"] == "INVALID_OPERATION_STATE"
+
+
+@pytest.mark.asyncio
+async def test_hot_retry_rejects_source_desired_stopped(client) -> None:
+    sf = client["session_factory"]
+    ac = client["client"]
+    async with sf() as session:
+        world = await _seed_world(session)
+    op_id = await _enqueue_hot(client, world)
+    await _mark_terminal(sf, op_id, status=OperationStatus.FAILED.value)
+    async with sf() as session:
+        await session.execute(
+            text(
+                "UPDATE deployment SET desired_state = 'STOPPED' WHERE id = CAST(:id AS uuid)"
+            ),
+            {"id": world["source_deployment_id"]},
+        )
+        await session.commit()
+    resp = await ac.post(f"/api/v1/operations/{op_id}/retry")
+    assert resp.status_code == 409
+    assert resp.json()["error"]["code"] == "INVALID_OPERATION_STATE"
+
+
+@pytest.mark.asyncio
+async def test_hot_retry_rejects_target_desired_stopped(client) -> None:
+    sf = client["session_factory"]
+    ac = client["client"]
+    async with sf() as session:
+        world = await _seed_world(session)
+    op_id = await _enqueue_hot(client, world)
+    await _mark_terminal(sf, op_id, status=OperationStatus.FAILED.value)
+    async with sf() as session:
+        await session.execute(
+            text(
+                "UPDATE deployment SET desired_state = 'STOPPED' WHERE id = CAST(:id AS uuid)"
+            ),
+            {"id": world["target_deployment_id"]},
+        )
+        await session.commit()
+    resp = await ac.post(f"/api/v1/operations/{op_id}/retry")
+    assert resp.status_code == 409
+    assert resp.json()["error"]["code"] == "INVALID_OPERATION_STATE"
+
+
+@pytest.mark.asyncio
+async def test_hot_retry_rejects_endpoint_not_serving(client) -> None:
+    sf = client["session_factory"]
+    ac = client["client"]
+    async with sf() as session:
+        world = await _seed_world(session)
+    op_id = await _enqueue_hot(client, world)
+    await _mark_terminal(sf, op_id, status=OperationStatus.FAILED.value)
+    async with sf() as session:
+        await session.execute(
+            text(
+                "UPDATE endpoint_alias SET traffic_state = 'DRAINING' WHERE id = CAST(:id AS uuid)"
+            ),
+            {"id": world["endpoint_id"]},
+        )
+        await session.commit()
+    resp = await ac.post(f"/api/v1/operations/{op_id}/retry")
+    assert resp.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_hot_retry_rejects_ineligible_statuses(client) -> None:
+    sf = client["session_factory"]
+    ac = client["client"]
+    async with sf() as session:
+        world = await _seed_world(session)
+
+    for status in (
+        OperationStatus.QUEUED.value,
+        OperationStatus.RUNNING.value,
+        OperationStatus.ROLLING_BACK.value,
+        OperationStatus.SUCCEEDED.value,
+        OperationStatus.CANCELLED.value,
+        OperationStatus.MANUAL_INTERVENTION_REQUIRED.value,
+    ):
+        op_id = await _enqueue_hot(client, world)
+        if status != OperationStatus.QUEUED.value:
+            async with sf() as session:
+                await session.execute(
+                    text(
+                        """
+                        UPDATE operation
+                        SET status = CAST(:status AS varchar),
+                            finished_at = CASE
+                              WHEN CAST(:status AS varchar) IN (
+                                'SUCCEEDED','CANCELLED',
+                                'MANUAL_INTERVENTION_REQUIRED',
+                                'FAILED','ROLLED_BACK'
+                              )
+                              THEN now() ELSE NULL END,
+                            started_at = COALESCE(started_at, now()),
+                            cancel_requested_at = CASE
+                              WHEN CAST(:status AS varchar) = 'CANCELLED'
+                              THEN now() ELSE cancel_requested_at END
+                        WHERE id = CAST(:id AS uuid)
+                        """
+                    ),
+                    {"id": op_id, "status": status},
+                )
+                if status == OperationStatus.RUNNING.value:
+                    await session.execute(
+                        text(
+                            """
+                            UPDATE operation_job
+                            SET status = 'RUNNING', locked_by = 'w1',
+                                locked_at = now()
+                            WHERE operation_id = CAST(:id AS uuid)
+                            """
+                        ),
+                        {"id": op_id},
+                    )
+                await session.commit()
+        resp = await ac.post(f"/api/v1/operations/{op_id}/retry")
+        assert resp.status_code == 409, (status, resp.text)
+        assert resp.json()["error"]["code"] == "INVALID_OPERATION_STATE"
+        # Terminalize leftover QUEUED so next enqueue is not blocked.
+        if status == OperationStatus.QUEUED.value:
+            await _mark_terminal(sf, op_id, status=OperationStatus.FAILED.value)
+        elif status in (
+            OperationStatus.RUNNING.value,
+            OperationStatus.ROLLING_BACK.value,
+        ):
+            await _mark_terminal(sf, op_id, status=OperationStatus.FAILED.value)
+
+
+@pytest.mark.asyncio
+async def test_hot_retry_idempotency_replay(client) -> None:
+    sf = client["session_factory"]
+    ac = client["client"]
+    async with sf() as session:
+        world = await _seed_world(session)
+    op_id = await _enqueue_hot(client, world)
+    await _mark_terminal(sf, op_id, status=OperationStatus.FAILED.value)
+    key = f"hot-retry-idem-{uuid.uuid4()}"
+    first = await ac.post(
+        f"/api/v1/operations/{op_id}/retry",
+        headers={"Idempotency-Key": key},
+    )
+    second = await ac.post(
+        f"/api/v1/operations/{op_id}/retry",
+        headers={"Idempotency-Key": key},
+    )
+    assert first.status_code == 202
+    assert second.status_code == 202
+    assert first.json()["id"] == second.json()["id"]
+
+
+@pytest.mark.asyncio
+async def test_hot_retry_idempotency_conflict(client) -> None:
+    sf = client["session_factory"]
+    ac = client["client"]
+    async with sf() as session:
+        world = await _seed_world(session)
+    op_a = await _enqueue_hot(client, world)
+    await _mark_terminal(sf, op_a, status=OperationStatus.FAILED.value)
+    op_b = await _enqueue_hot(client, world)
+    await _mark_terminal(sf, op_b, status=OperationStatus.FAILED.value)
+    key = f"hot-retry-conflict-{uuid.uuid4()}"
+    first = await ac.post(
+        f"/api/v1/operations/{op_a}/retry",
+        headers={"Idempotency-Key": key},
+    )
+    assert first.status_code == 202
+    second = await ac.post(
+        f"/api/v1/operations/{op_b}/retry",
+        headers={"Idempotency-Key": key},
+    )
+    assert second.status_code == 409
+    assert second.json()["error"]["code"] == "IDEMPOTENCY_KEY_CONFLICT"
+
+
+@pytest.mark.asyncio
+async def test_hot_concurrent_retry_single_child(client) -> None:
+    sf = client["session_factory"]
+    ac = client["client"]
+    async with sf() as session:
+        world = await _seed_world(session)
+    op_id = await _enqueue_hot(client, world)
+    await _mark_terminal(sf, op_id, status=OperationStatus.FAILED.value)
+
+    async def _retry() -> tuple[int, dict[str, Any]]:
+        resp = await ac.post(f"/api/v1/operations/{op_id}/retry")
+        return resp.status_code, resp.json()
+
+    results = await asyncio.gather(_retry(), _retry())
+    statuses = sorted(r[0] for r in results)
+    assert statuses in ([202, 409], [202, 202])
+    children = {r[1].get("id") for r in results if r[0] == 202}
+    assert len(children) == 1
+
+
+@pytest.mark.asyncio
+async def test_hot_retry_legacy_upgrades_to_b2_steps(client) -> None:
+    """Pre-B2 9-step HOT terminal → retry child is current 12-step B2."""
+    from app.services.switch import HOT_SWITCH_STEPS, HOT_SWITCH_STEPS_LEGACY_D2A
+
+    sf = client["session_factory"]
+    ac = client["client"]
+    async with sf() as session:
+        world = await _seed_world(session)
+        # Insert a legacy 9-step HOT Failed operation directly.
+        op_id = str(uuid.uuid4())
+        import json as _json
+
+        await session.execute(
+            text(
+                """
+                INSERT INTO operation (
+                  id, operation_type, status, switch_strategy,
+                  endpoint_alias_id, source_deployment_id, target_deployment_id,
+                  metadata_json, finished_at, started_at,
+                  error_code, error_message
+                ) VALUES (
+                  CAST(:id AS uuid), 'SWITCH', 'FAILED', 'HOT',
+                  CAST(:ep AS uuid), CAST(:src AS uuid), CAST(:tgt AS uuid),
+                  CAST(:meta AS jsonb),
+                  now(), now(), 'TEST', 'legacy fail'
+                )
+                """
+            ),
+            {
+                "id": op_id,
+                "ep": world["endpoint_id"],
+                "src": world["source_deployment_id"],
+                "tgt": world["target_deployment_id"],
+                "meta": _json.dumps(
+                    {"strategy": "HOT", "m5d1_hot_forward": True}
+                ),
+            },
+        )
+        for seq, code in enumerate(HOT_SWITCH_STEPS_LEGACY_D2A, start=1):
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO operation_step (
+                      id, operation_id, sequence_no, step_code, status, attempt_no
+                    ) VALUES (
+                      CAST(:id AS uuid), CAST(:oid AS uuid), :seq, :code, 'FAILED', 1
+                    )
+                    """
+                ),
+                {"id": str(uuid.uuid4()), "oid": op_id, "seq": seq, "code": code},
+            )
+        await session.execute(
+            text(
+                """
+                INSERT INTO operation_job (
+                  id, operation_id, status, priority, attempt_count,
+                  max_attempts, available_at
+                ) VALUES (
+                  CAST(:jid AS uuid), CAST(:oid AS uuid), 'FAILED',
+                  100, 1, 3, now()
+                )
+                """
+            ),
+            {"jid": str(uuid.uuid4()), "oid": op_id},
+        )
+        await session.commit()
+
+    resp = await ac.post(f"/api/v1/operations/{op_id}/retry")
+    assert resp.status_code == 202, resp.text
+    body = resp.json()
+    assert [s["step_code"] for s in body["steps"]] == HOT_SWITCH_STEPS
+    assert len(body["steps"]) == 12
+    assert body["metadata"]["m5d2b2_source_retirement"] is True
+    assert body["metadata"]["m5d2c_hot_retry"] is True
+
+
+@pytest.mark.asyncio
+async def test_hot_retry_rejects_conflicting_active(client) -> None:
+    sf = client["session_factory"]
+    ac = client["client"]
+    async with sf() as session:
+        world = await _seed_world(session)
+    failed_id = await _enqueue_hot(client, world)
+    await _mark_terminal(sf, failed_id, status=OperationStatus.FAILED.value)
+    active_id = await _enqueue_hot(client, world)
+    async with sf() as session:
+        await session.execute(
+            text(
+                """
+                UPDATE operation SET status = 'RUNNING', started_at = now()
+                WHERE id = CAST(:id AS uuid)
+                """
+            ),
+            {"id": active_id},
+        )
+        await session.commit()
+    resp = await ac.post(f"/api/v1/operations/{failed_id}/retry")
+    assert resp.status_code == 409

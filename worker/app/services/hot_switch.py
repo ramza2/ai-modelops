@@ -612,7 +612,7 @@ class HotSwitchExecutor(HotSwitchRollbackMixin, HotSwitchRetirementMixin):
             detail["hot_traffic_serving"] = True
         elif code == STEP_PREFLIGHT:
             detail = await self._step_preflight_hot(
-                session, client, operation, alias, source, target
+                session, client, operation, alias, source, target, mutation
             )
         elif code == STEP_PREPARE_TARGET:
             detail = await self._lifecycle._prepare_artifacts(
@@ -692,12 +692,10 @@ class HotSwitchExecutor(HotSwitchRollbackMixin, HotSwitchRetirementMixin):
         alias: EndpointAlias,
         source: Deployment,
         target: Deployment,
+        mutation: MutationHeaders,
     ) -> dict[str, Any]:
-        # Reuse Cold preflight computation, then require HOT_SWITCH_AVAILABLE.
-        # Cold's method raises when result != COLD_SWITCH_ONLY; call domain
-        # logic via temporary capture by duplicating the acceptance check.
         detail = await self._run_preflight_require_hot(
-            session, client, operation, alias, source, target
+            session, client, operation, alias, source, target, mutation
         )
         return detail
 
@@ -709,6 +707,7 @@ class HotSwitchExecutor(HotSwitchRollbackMixin, HotSwitchRetirementMixin):
         alias: EndpointAlias,
         source: Deployment,
         target: Deployment,
+        mutation: MutationHeaders,
     ) -> dict[str, Any]:
         from app.domain.models import (
             DeploymentGPUAssignment,
@@ -786,6 +785,49 @@ class HotSwitchExecutor(HotSwitchRollbackMixin, HotSwitchRetirementMixin):
         if meta.get("safety_margin_mb") is not None:
             safety_margin = int(meta["safety_margin_mb"])
 
+        # Live Target observation is authoritative for retained-Target path.
+        try:
+            live_target = await client.get_deployment(
+                str(target.id), mutation=mutation
+            )
+        except NodeAgentError as exc:
+            if exc.retryable:
+                raise RetryableStepError(
+                    exc.message, code=exc.code, details=exc.details
+                ) from exc
+            raise PermanentStepError(
+                exc.message, code=exc.code, details=exc.details
+            ) from exc
+
+        live_runtime = (
+            str(live_target.get("runtime_status") or "")
+            if live_target is not None
+            else ""
+        )
+        live_health = (
+            str(live_target.get("health_status") or "")
+            if live_target is not None
+            else ""
+        )
+        target_live_running = live_runtime == RuntimeStatus.RUNNING.value
+        # Zero-incremental reuse requires proven HEALTHY, not merely RUNNING
+        # (loading/allocating GPU memory is not yet a stable retained Target).
+        target_already_running_ready = (
+            target_live_running and live_health == HealthStatus.HEALTHY.value
+        )
+        if target_live_running and not target_already_running_ready:
+            raise PermanentStepError(
+                "Retained Hot Switch Target is RUNNING but not HEALTHY; "
+                "zero-incremental preflight is not proven.",
+                code="HOT_RETAINED_TARGET_NOT_READY",
+                details={
+                    "target_deployment_id": str(target.id),
+                    "live_target_runtime_status": live_runtime,
+                    "live_target_health_status": live_health or None,
+                    "required_health_status": HealthStatus.HEALTHY.value,
+                },
+            )
+
         try:
             resources = await client.fetch_resources()
         except NodeAgentError as exc:
@@ -807,6 +849,88 @@ class HotSwitchExecutor(HotSwitchRollbackMixin, HotSwitchRetirementMixin):
         if not source_vram_reliable:
             reclaimable_map = {str(g.id): 0 for g in gpu_devices}
 
+        checked_at = __import__("datetime").datetime.now(
+            tz=__import__("datetime").UTC
+        )
+        configured_required = {
+            str(g.id): required_by_device[str(g.id)] for g in gpu_devices
+        }
+
+        if target_already_running_ready:
+            # Zero incremental capacity: Target already holds its VRAM.
+            detail_json: dict[str, Any] = {
+                "purpose": "SWITCH",
+                "strategy": SwitchStrategy.HOT.value,
+                "endpoint_id": str(alias.id),
+                "source_deployment_id": str(source.id),
+                "target_deployment_id": str(target.id),
+                "target_model_version_id": str(version.id),
+                "node_id": str(target.node_id),
+                "same_node_as_source": True,
+                "source_vram_reliable": source_vram_reliable,
+                "configured_safety_margin_mb": safety_margin,
+                "configured_target_required_vram_mb": configured_required,
+                "worker_revalidated": True,
+                "preview_only": False,
+                "preflight_basis": "TARGET_ALREADY_RUNNING",
+                "target_already_running": True,
+                "incremental_start_required": False,
+                "incremental_required_vram_mb": 0,
+                "live_target_runtime_status": RuntimeStatus.RUNNING.value,
+                "live_target_health_status": HealthStatus.HEALTHY.value,
+            }
+            parent = ResourcePreflight(
+                operation_id=operation.id,
+                node_id=target.node_id,
+                target_model_version_id=version.id,
+                source_deployment_id=source.id,
+                result=PreflightResult.HOT_SWITCH_AVAILABLE.value,
+                required_peak_vram_mb=0,
+                available_hot_vram_mb=min(
+                    (free_by_device[str(g.id)] for g in gpu_devices), default=0
+                ),
+                reclaimable_vram_mb=0,
+                available_after_reclaim_mb=min(
+                    (free_by_device[str(g.id)] for g in gpu_devices), default=0
+                ),
+                safety_margin_mb=0,
+                detail_json=detail_json,
+                checked_at=checked_at,
+            )
+            session.add(parent)
+            await session.flush()
+            for gpu in gpu_devices:
+                free = free_by_device[str(gpu.id)]
+                session.add(
+                    ResourcePreflightGPU(
+                        resource_preflight_id=parent.id,
+                        gpu_device_id=gpu.id,
+                        free_vram_mb=free,
+                        reclaimable_vram_mb=0,
+                        safety_margin_mb=0,
+                        required_vram_mb=0,
+                        available_hot_vram_mb=free,
+                        available_after_reclaim_mb=free,
+                        result=PreflightResult.HOT_SWITCH_AVAILABLE.value,
+                    )
+                )
+            await session.flush()
+            return {
+                "resource_preflight_id": str(parent.id),
+                "result": PreflightResult.HOT_SWITCH_AVAILABLE.value,
+                "preflight_basis": "TARGET_ALREADY_RUNNING",
+                "target_already_running": True,
+                "incremental_start_required": False,
+                "incremental_required_vram_mb": 0,
+                "required_peak_vram_mb": 0,
+                "available_hot_vram_mb": parent.available_hot_vram_mb,
+                "reclaimable_vram_mb": 0,
+                "available_after_reclaim_mb": parent.available_after_reclaim_mb,
+                "safety_margin_mb": 0,
+                "configured_target_required_vram_mb": configured_required,
+            }
+
+        # Normal full-start HOT preflight (Target not live RUNNING).
         gpu_inputs = [
             GPUPreflightInput(
                 gpu_device_id=str(gpu.id),
@@ -818,11 +942,8 @@ class HotSwitchExecutor(HotSwitchRollbackMixin, HotSwitchRetirementMixin):
             for gpu in gpu_devices
         ]
         decision = aggregate_preflight(gpu_inputs)
-        checked_at = __import__("datetime").datetime.now(
-            tz=__import__("datetime").UTC
-        )
 
-        detail_json: dict[str, Any] = {
+        detail_json = {
             "purpose": "SWITCH",
             "strategy": SwitchStrategy.HOT.value,
             "endpoint_id": str(alias.id),
@@ -835,6 +956,11 @@ class HotSwitchExecutor(HotSwitchRollbackMixin, HotSwitchRetirementMixin):
             "safety_margin_mb": safety_margin,
             "worker_revalidated": True,
             "preview_only": False,
+            "preflight_basis": "FULL_TARGET_START",
+            "target_already_running": False,
+            "incremental_start_required": True,
+            "live_target_runtime_status": live_runtime or None,
+            "live_target_health_status": live_health or None,
         }
 
         parent = ResourcePreflight(
@@ -885,6 +1011,9 @@ class HotSwitchExecutor(HotSwitchRollbackMixin, HotSwitchRetirementMixin):
         return {
             "resource_preflight_id": str(parent.id),
             "result": decision.result,
+            "preflight_basis": "FULL_TARGET_START",
+            "target_already_running": False,
+            "incremental_start_required": True,
             "required_peak_vram_mb": decision.required_peak_vram_mb,
             "available_hot_vram_mb": decision.available_hot_vram_mb,
             "reclaimable_vram_mb": decision.reclaimable_vram_mb,
@@ -924,6 +1053,37 @@ class HotSwitchExecutor(HotSwitchRollbackMixin, HotSwitchRetirementMixin):
         meta = dict(operation.metadata_json or {})
         return bool(meta.get("hot_target_start_owned_by_operation"))
 
+    async def _load_hot_preflight_step_detail(
+        self, session: AsyncSession, operation: Operation
+    ) -> dict[str, Any]:
+        """Read this child's successful PREFLIGHT step detail (never parent Op)."""
+        step = (
+            await session.execute(
+                select(OperationStep).where(
+                    OperationStep.operation_id == operation.id,
+                    OperationStep.step_code == STEP_PREFLIGHT,
+                    OperationStep.status == StepStatus.SUCCEEDED.value,
+                )
+            )
+        ).scalar_one_or_none()
+        if step is None:
+            return {}
+        detail = step.detail_json or {}
+        return dict(detail) if isinstance(detail, dict) else {}
+
+    def _preflight_was_retained_target_zero_incremental(
+        self, preflight_detail: dict[str, Any]
+    ) -> bool:
+        basis = preflight_detail.get("preflight_basis")
+        if basis == "FULL_TARGET_START":
+            return False
+        if basis == "TARGET_ALREADY_RUNNING":
+            return True
+        # Fail closed on explicit zero-incremental markers without FULL basis.
+        if preflight_detail.get("incremental_start_required") is False:
+            return True
+        return False
+
     async def _step_start_target_hot(
         self,
         session: AsyncSession,
@@ -938,6 +1098,10 @@ class HotSwitchExecutor(HotSwitchRollbackMixin, HotSwitchRetirementMixin):
         Ownership is claimed only when this Operation authorizes an external
         start of a non-RUNNING Target, and is committed before the Node Agent
         mutation so crash/timeout cannot lose cleanup eligibility.
+
+        If PREFLIGHT approved zero-incremental ``TARGET_ALREADY_RUNNING`` and
+        this child never owned a start, a non-RUNNING Target must fail closed
+        (``HOT_RETAINED_TARGET_STATE_CHANGED``) — never start on a stale proof.
         """
         inspected = await client.get_deployment(str(target.id), mutation=mutation)
         already_running = inspected is not None and str(
@@ -957,7 +1121,35 @@ class HotSwitchExecutor(HotSwitchRollbackMixin, HotSwitchRetirementMixin):
                 "hot_target_start_owned_by_operation": owned,
             }
 
-        # Not RUNNING: authorize/start. Claim ownership before external mutation.
+        # Not RUNNING: if PREFLIGHT was zero-incremental retained path and this
+        # child never owned a start, refuse to start on a stale capacity proof.
+        if not owned:
+            preflight_detail = await self._load_hot_preflight_step_detail(
+                session, operation
+            )
+            if self._preflight_was_retained_target_zero_incremental(preflight_detail):
+                live_runtime = (
+                    str(inspected.get("runtime_status") or "")
+                    if inspected is not None
+                    else None
+                )
+                raise PermanentStepError(
+                    "Retained Hot Switch Target is no longer RUNNING after "
+                    "zero-incremental PREFLIGHT; refusing start without fresh "
+                    "full-capacity preflight.",
+                    code="HOT_RETAINED_TARGET_STATE_CHANGED",
+                    details={
+                        "target_deployment_id": str(target.id),
+                        "preflight_basis": preflight_detail.get("preflight_basis"),
+                        "incremental_start_required": preflight_detail.get(
+                            "incremental_start_required"
+                        ),
+                        "live_target_runtime_status": live_runtime,
+                        "hot_target_start_owned_by_operation": False,
+                    },
+                )
+
+        # FULL_TARGET_START (or owned crash resume): authorize/start.
         if not owned:
             await self._claim_hot_target_start_ownership(session, repo, operation)
             owned = True

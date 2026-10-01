@@ -1,13 +1,13 @@
-"""Cold / Hot Switch enqueue and explicit Cold retry (Management API).
+"""Cold / Hot Switch enqueue and explicit retry (Management API).
 
 Validates enough to create Operation/Job/Steps and returns immediately.
 Never mutates routes, traffic_state, or deployment desired_state.
 Never calls Docker, Node Agent, or Gateway.
 
-Retry (M5-C2-B) never revives the original Operation: it creates a new
-Operation/Job/14 PENDING steps with ``retry_of_operation_id`` lineage and
-re-enters the normal Cold Switch queue. HOT explicit retry is out of scope
-until M5-D2.
+Retry (M5-C2-B / M5-D2-C) never revives the original Operation: it creates a
+new Operation/Job/PENDING steps with ``retry_of_operation_id`` lineage and
+re-enters the normal Switch queue for the original strategy (COLD or HOT).
+HOT retry children always use the current 12-step B2 contract.
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.enums import (
     ApiType,
     DeploymentType,
+    DesiredState,
     HealthStatus,
     JobStatus,
     ModelType,
@@ -241,31 +242,24 @@ class SwitchService:
         await self._session.commit()
         return await self._switch_response(uuid.UUID(str(operation.id)))
 
-    async def retry_cold_switch(
+    async def retry_switch(
         self,
         operation_id: uuid.UUID,
         *,
         idempotency_key: str | None = None,
         requested_by: str | None = None,
     ) -> dict[str, Any]:
-        """Create a NEW Cold Switch Operation that retries a terminal one (M5-C2-B).
+        """Create a NEW SWITCH Operation that retries a terminal one (M5-C2-B / D2-C).
 
-        Never mutates the original Operation / Job / Steps.
-        MIR retry is out of scope until M5-C2-C reconciliation.
-
-        Idempotency-Key (retry-scoped only):
-        - same key + same original → return the existing retry child
-        - same key + different original / non-retry Operation → 409
-          ``IDEMPOTENCY_KEY_CONFLICT``
+        Strategy-aware: COLD keeps existing semantics; HOT uses D2-C baseline +
+        current 12-step B2 child contract. Never mutates the original.
         """
-        # Fast path before lock; must still validate key belongs to this original.
         if idempotency_key:
             existing = await self._operations.get_by_idempotency_key(idempotency_key)
             replay = self._retry_idempotency_replay(existing, operation_id)
             if replay is not None:
                 return await self._switch_response(uuid.UUID(str(replay.id)))
 
-        # Short lock around original + retry decision. No external calls under lock.
         original = await self._operations.lock_operation_for_update(operation_id)
         if original is None:
             raise NotFoundError(
@@ -273,8 +267,6 @@ class SwitchService:
                 details={"operation_id": str(operation_id)},
             )
 
-        # Re-check after FOR UPDATE so concurrent identical retries return the
-        # same child instead of racing into active-child conflict.
         if idempotency_key:
             existing = await self._operations.get_by_idempotency_key(idempotency_key)
             replay = self._retry_idempotency_replay(existing, operation_id)
@@ -282,9 +274,11 @@ class SwitchService:
                 await self._session.commit()
                 return await self._switch_response(uuid.UUID(str(replay.id)))
 
-        if not self._operations.is_cold_switch(original):
+        is_cold = self._operations.is_cold_switch(original)
+        is_hot = self._operations.is_hot_switch(original)
+        if not is_cold and not is_hot:
             raise ConflictError(
-                "Retry is only supported for Cold SWITCH operations.",
+                "Retry is only supported for Cold or Hot SWITCH operations.",
                 code="INVALID_OPERATION_STATE",
                 details={
                     "operation_id": str(operation_id),
@@ -314,24 +308,23 @@ class SwitchService:
                 },
             )
 
-        # FAILED that crossed the destructive boundary is unsafe to blind-retry.
         original_meta = dict(original.metadata_json or {})
         if (
             original.status == OperationStatus.FAILED.value
             and original_meta.get("destructive_boundary_entered") is True
         ):
             raise ConflictError(
-                "FAILED Cold Switch that crossed the destructive boundary "
-                "cannot be retried without reconciliation (M5-C2-C).",
+                "FAILED Switch that crossed the destructive boundary "
+                "cannot be retried without reconciliation.",
                 code="INVALID_OPERATION_STATE",
                 details={
                     "operation_id": str(operation_id),
                     "status": original.status,
                     "destructive_boundary_entered": True,
+                    "switch_strategy": original.switch_strategy,
                 },
             )
 
-        # Concurrent retry: at most one active child of this original.
         active_child = await self._operations.find_active_retry_of(operation_id)
         if active_child is not None:
             raise ConflictError(
@@ -361,7 +354,6 @@ class SwitchService:
         source_id = uuid.UUID(str(original.source_deployment_id))
         target_id = uuid.UUID(str(original.target_deployment_id))
 
-        # Re-check active conflicts after acquiring the original lock.
         busy_endpoint = await self._operations.find_active_switch_for_endpoint(
             endpoint_id
         )
@@ -376,16 +368,27 @@ class SwitchService:
                 },
             )
 
-        alias, source, target = await self._validate_cold_switch_baseline(
-            endpoint_id=endpoint_id,
-            target_deployment_id=target_id,
-            expected_source_deployment_id=source_id,
-            skip_active_operation_checks=True,
-            conflict_on_unsafe=True,
-        )
+        try:
+            alias, source, target = await self._validate_cold_switch_baseline(
+                endpoint_id=endpoint_id,
+                target_deployment_id=target_id,
+                expected_source_deployment_id=source_id,
+                skip_active_operation_checks=True,
+                conflict_on_unsafe=True,
+            )
+        except ValidationError as exc:
+            # HOT retry unsafe baseline must be 409, not 422.
+            if is_hot:
+                raise ConflictError(
+                    exc.message,
+                    code="INVALID_OPERATION_STATE",
+                    details=dict(exc.details or {}),
+                ) from exc
+            raise
 
-        # Re-check deployment conflicts after lock (baseline skipped them above
-        # only for the skip flag path; still enforce here for clarity).
+        if is_hot:
+            self._require_hot_retry_desired_states(source, target)
+
         for dep, role in ((source, "Source"), (target, "Target")):
             active = await self._operations.find_active_for_deployment(
                 uuid.UUID(str(dep.id))
@@ -402,7 +405,12 @@ class SwitchService:
                     },
                 )
 
-        metadata = self._retry_metadata_from_original(original_meta)
+        strategy = (
+            SwitchStrategy.HOT.value if is_hot else SwitchStrategy.COLD.value
+        )
+        metadata = self._retry_metadata_from_original(
+            original_meta, strategy=strategy
+        )
         reason = original.request_reason
         if reason and "reason" not in metadata:
             metadata["reason"] = reason
@@ -414,15 +422,15 @@ class SwitchService:
             else 3
         )
 
-        # Capture immutable snapshot fields before creating the child.
         original_id = uuid.UUID(str(original.id))
+        steps = HOT_SWITCH_STEPS if is_hot else COLD_SWITCH_STEPS
 
         operation = await self._create_switch_operation(
             alias_id=uuid.UUID(str(alias.id)),
             source=source,
             target=target,
-            strategy=SwitchStrategy.COLD.value,
-            steps=COLD_SWITCH_STEPS,
+            strategy=strategy,
+            steps=steps,
             reason=reason,
             requested_by=requested_by or original.requested_by,
             idempotency_key=idempotency_key,
@@ -432,6 +440,44 @@ class SwitchService:
         )
         await self._session.commit()
         return await self._switch_response(uuid.UUID(str(operation.id)))
+
+    async def retry_cold_switch(
+        self,
+        operation_id: uuid.UUID,
+        *,
+        idempotency_key: str | None = None,
+        requested_by: str | None = None,
+    ) -> dict[str, Any]:
+        """Compatibility alias for :meth:`retry_switch`."""
+        return await self.retry_switch(
+            operation_id,
+            idempotency_key=idempotency_key,
+            requested_by=requested_by,
+        )
+
+    @staticmethod
+    def _require_hot_retry_desired_states(
+        source: Deployment, target: Deployment
+    ) -> None:
+        """HOT retry requires Source/Target desired_state RUNNING (409)."""
+        if str(source.desired_state) != DesiredState.RUNNING.value:
+            raise ConflictError(
+                "Source Deployment desired_state must be RUNNING to retry a Hot Switch.",
+                code="INVALID_OPERATION_STATE",
+                details={
+                    "source_deployment_id": str(source.id),
+                    "desired_state": source.desired_state,
+                },
+            )
+        if str(target.desired_state) != DesiredState.RUNNING.value:
+            raise ConflictError(
+                "Target Deployment desired_state must be RUNNING to retry a Hot Switch.",
+                code="INVALID_OPERATION_STATE",
+                details={
+                    "target_deployment_id": str(target.id),
+                    "desired_state": target.desired_state,
+                },
+            )
 
     @staticmethod
     def _retry_idempotency_replay(
@@ -517,23 +563,34 @@ class SwitchService:
         return operation
 
     @staticmethod
-    def _retry_metadata_from_original(original_meta: dict[str, Any]) -> dict[str, Any]:
+    def _retry_metadata_from_original(
+        original_meta: dict[str, Any],
+        *,
+        strategy: str,
+    ) -> dict[str, Any]:
         """Copy only the execution-contract whitelist; never clone runtime state."""
-        metadata: dict[str, Any] = {
-            "strategy": SwitchStrategy.COLD.value,
-            "m5b_forward_cold_only": True,
+        if strategy == SwitchStrategy.HOT.value:
+            metadata: dict[str, Any] = {
+                "strategy": SwitchStrategy.HOT.value,
+                "m5d1_hot_forward": True,
+                "m5d2b2_source_retirement": True,
+                "m5d2c_hot_retry": True,
+            }
+        else:
+            metadata = {
+                "strategy": SwitchStrategy.COLD.value,
+                "m5b_forward_cold_only": True,
+            }
+        defaults = {
+            "drain_timeout_seconds": 60,
+            "health_timeout_seconds": 300,
+            "vram_release_timeout_seconds": 30,
+            "gateway_apply_timeout_seconds": 30,
         }
         for key in _RETRY_METADATA_TIMEOUT_KEYS:
             if key in original_meta:
                 metadata[key] = int(original_meta[key])
             else:
-                # Sensible defaults matching enqueue_cold_switch.
-                defaults = {
-                    "drain_timeout_seconds": 60,
-                    "health_timeout_seconds": 300,
-                    "vram_release_timeout_seconds": 30,
-                    "gateway_apply_timeout_seconds": 30,
-                }
                 metadata[key] = defaults[key]
         if original_meta.get("reason"):
             metadata["reason"] = original_meta["reason"]
@@ -571,7 +628,7 @@ class SwitchService:
             }
             if conflict_on_unsafe:
                 raise ConflictError(
-                    "Endpoint traffic_state must be SERVING to retry a Cold Switch.",
+                    "Endpoint traffic_state must be SERVING to retry a Switch.",
                     code="INVALID_OPERATION_STATE",
                     details=details,
                 )
