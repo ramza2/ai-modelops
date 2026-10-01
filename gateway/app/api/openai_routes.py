@@ -16,7 +16,7 @@ from app.proxy.upstream import proxy_json_post, proxy_sse_post
 from app.routing.resolve import resolve_route
 from app.routing.snapshot import RouteEntry
 from app.routing.store import RoutingStore
-from app.runtime.inflight import InflightTracker
+from app.runtime.inflight import InflightAdmission, InflightTracker
 from app.runtime.invocation_log import (
     InvocationLogWriter,
     build_invocation_record,
@@ -86,20 +86,22 @@ async def chat_completions(request: Request) -> Response:
             http_status=422,
             param="model",
         )
-    entry = await _admit_and_resolve(
+    entry, admission = await _admit_resolve_bind(
         request, alias=model, expected_api_type=ApiType.CHAT
     )
     upstream_body = dict(body)
     upstream_body["model"] = entry.upstream_model_name
     if streaming:
-        return await _proxy_streaming_chat(request, entry, upstream_body)
+        return await _proxy_streaming_chat(
+            request, entry, upstream_body, admission=admission
+        )
     return await _proxy_nonstream(
         request,
         entry=entry,
         api_path="/v1/chat/completions",
         body=upstream_body,
         is_streaming=False,
-        already_admitted=True,
+        admission=admission,
     )
 
 
@@ -114,7 +116,7 @@ async def embeddings(request: Request) -> Response:
             http_status=422,
             param="model",
         )
-    entry = await _admit_and_resolve(
+    entry, admission = await _admit_resolve_bind(
         request, alias=model, expected_api_type=ApiType.EMBEDDING
     )
     upstream_body = dict(body)
@@ -125,33 +127,37 @@ async def embeddings(request: Request) -> Response:
         api_path="/v1/embeddings",
         body=upstream_body,
         is_streaming=False,
-        already_admitted=True,
+        admission=admission,
     )
 
 
-async def _admit_and_resolve(
+async def _admit_resolve_bind(
     request: Request,
     *,
     alias: str,
     expected_api_type: ApiType,
-) -> RouteEntry:
-    """Admit inflight *before* snapshot resolve to close the drain race.
+) -> tuple[RouteEntry, InflightAdmission]:
+    """Admit before resolve, then bind to the resolved Deployment.
 
-    Order:
-    1. increment inflight for the requested alias
+    Order (Cold drain race + HOT Source retirement telemetry):
+    1. admit(alias) — alias total + unbound
     2. resolve against the current snapshot
-    3. on any reject path, decrement immediately
+    3. bind(deployment_id) — unbound → deployment; alias total unchanged
+    4. on any reject before bind completes, release the still-unbound admission
     """
     inflight = _inflight(request)
-    await inflight.increment(alias)
+    admission = await inflight.admit(alias)
     try:
-        return resolve_route(
+        entry = resolve_route(
             _store(request).snapshot,
             alias=alias,
             expected_api_type=expected_api_type,
         )
+        # resolve_route guarantees deployment_id is present on success.
+        await inflight.bind(admission, str(entry.deployment_id))
+        return entry, admission
     except Exception:
-        await inflight.decrement(alias)
+        await inflight.release(admission)
         raise
 
 
@@ -162,13 +168,11 @@ async def _proxy_nonstream(
     api_path: str,
     body: dict[str, Any],
     is_streaming: bool,
-    already_admitted: bool = False,
+    admission: InflightAdmission,
 ) -> Response:
     started = dt.datetime.now(tz=dt.UTC)
     request_id = _request_id(request)
     inflight = _inflight(request)
-    if not already_admitted:
-        await inflight.increment(entry.alias)
     http_status = 500
     error_code: str | None = None
     response_bytes: int | None = None
@@ -191,7 +195,7 @@ async def _proxy_nonstream(
         error_code = exc.code
         raise
     finally:
-        await inflight.decrement(entry.alias)
+        await inflight.release(admission)
         finished = dt.datetime.now(tz=dt.UTC)
         _invocation_logs(request).schedule(
             build_invocation_record(
@@ -213,8 +217,14 @@ async def _proxy_streaming_chat(
     request: Request,
     entry: RouteEntry,
     body: dict[str, Any],
+    *,
+    admission: InflightAdmission,
 ) -> Response:
-    """Stream chat completions. Inflight was already admitted before resolve."""
+    """Stream chat completions. Admission is already bound to Deployment.
+
+    Deployment inflight stays > 0 for the entire SSE lifetime and is released
+    only from the stream completion callback (EOF / error / timeout / cancel).
+    """
     started = dt.datetime.now(tz=dt.UTC)
     request_id = _request_id(request)
     inflight = _inflight(request)
@@ -227,7 +237,7 @@ async def _proxy_streaming_chat(
         if completed:
             return
         completed = True
-        await inflight.decrement(entry.alias)
+        await inflight.release(admission)
         finished = dt.datetime.now(tz=dt.UTC)
         _invocation_logs(request).schedule(
             build_invocation_record(

@@ -1,4 +1,4 @@
-# Hot Switch State Machine (M5-D1 / M5-D2-A)
+# Hot Switch State Machine (M5-D1 / M5-D2-A / M5-D2-B1)
 
 ## 1. Purpose
 
@@ -18,8 +18,12 @@ execution approval.
   crash/resume idempotency for forward steps + Target start ownership.
 - **M5-D2-A (this document):** RUNNING HOT cancel, route-boundary race,
   HOT rollback to Source, MIR reconciliation / sweeper.
-- **Deferred to M5-D2-B/C:**
-  - automatic Source retirement / drain after cutover
+- **M5-D2-B1:** Gateway Deployment-scoped drain telemetry
+  (`admit` → `bind` → `release`, unbound + global Deployment inflight,
+  `/internal/v1/routes/{alias}/runtime?deployment_id=`).
+  Source stop/retirement is **not** executed in B1.
+- **Deferred to M5-D2-B2/C:**
+  - automatic Source retirement / drain after cutover (uses B1 proof inputs)
   - post-route Target shutdown
   - HOT explicit retry
   - `AUTO` / `ALTERNATE_NODE`
@@ -147,3 +151,39 @@ advisory locks, multi-worker safe.
 
 Same namespace as Cold Switch: Endpoint → Node → Source → Target.
 No external HTTP while DB row locks are held.
+
+## 12. Gateway Deployment drain telemetry (M5-D2-B1)
+
+After HOT cutover Alias stays `SERVING` and new traffic goes to Target, so
+Alias-wide `inflight_requests` may never reach zero under live load.
+Cold `DRAINING` alias drain is therefore insufficient for Source retirement.
+
+Gateway process-local admission:
+
+```text
+admit(alias)           # alias total +1, unbound +1  (before resolve)
+bind(deployment_id)    # unbound -1, deployment +1   (after resolve)
+release()              # exactly once on request/stream completion
+```
+
+Streaming holds Deployment inflight for the full SSE lifetime (EOF, upstream
+error, timeout, client disconnect).
+
+A later Source-retirement Worker (D2-B2) may treat Source drain as proven only
+when one observation shows at least:
+
+```text
+active_deployment_id == Target
+applied_routing_version >= HOT cutover routing version
+traffic_state == SERVING
+unbound_requests == 0
+observed_deployment_id == Source
+observed_deployment_inflight_requests == 0
+```
+
+`observed_deployment_idle` alone is not “safe to stop Source”.
+Alias-wide `inflight_requests` need not be zero (Target traffic is allowed).
+
+**MVP constraint:** telemetry is valid only for the current single Gateway
+process/replica model. Do not treat counters as cluster-wide. No Redis /
+shared counters / multi-replica aggregation in B1.

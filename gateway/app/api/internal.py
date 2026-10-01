@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Query, Request
 
 from app.core.enums import TrafficState
 from app.core.errors import ErrorCode, GatewayError
@@ -45,7 +45,18 @@ async def runtime(request: Request) -> dict[str, Any]:
 
 
 @router.get("/routes/{alias}/runtime")
-async def route_runtime(alias: str, request: Request) -> dict[str, Any]:
+async def route_runtime(
+    alias: str,
+    request: Request,
+    deployment_id: str | None = Query(
+        default=None,
+        description=(
+            "Optional Deployment to observe. When omitted, observes the "
+            "current ACTIVE Deployment for this Alias. Inflight count is "
+            "process-global for that Deployment (not alias-scoped)."
+        ),
+    ),
+) -> dict[str, Any]:
     store = request.app.state.routing_store
     snap = store.snapshot
     if snap is None:
@@ -64,8 +75,22 @@ async def route_runtime(alias: str, request: Request) -> dict[str, Any]:
             param="model",
             details={"alias": alias},
         )
-    inflight = int(request.app.state.inflight.get(entry.alias))
+    tracker = request.app.state.inflight
+    inflight = int(tracker.get(entry.alias))
+    unbound = int(tracker.get_unbound(entry.alias))
     draining = entry.traffic_state == TrafficState.DRAINING.value
+
+    observed_raw = (deployment_id or "").strip() or None
+    if observed_raw is not None:
+        observed_deployment_id = observed_raw
+    else:
+        observed_deployment_id = entry.deployment_id
+
+    if observed_deployment_id is None:
+        observed_inflight = 0
+    else:
+        observed_inflight = int(tracker.get_deployment(observed_deployment_id))
+
     return {
         "alias": entry.alias,
         "endpoint_id": entry.endpoint_id,
@@ -78,7 +103,11 @@ async def route_runtime(alias: str, request: Request) -> dict[str, Any]:
         "health_status": entry.health_status,
         "upstream_base_url": entry.upstream_base_url,
         "inflight_requests": inflight,
+        "unbound_requests": unbound,
         "drain_complete": bool(draining and inflight == 0),
+        "observed_deployment_id": observed_deployment_id,
+        "observed_deployment_inflight_requests": observed_inflight,
+        "observed_deployment_idle": bool(observed_inflight == 0),
     }
 
 

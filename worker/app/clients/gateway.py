@@ -37,13 +37,27 @@ class GatewayClient:
         self._timeout = float(timeout_seconds)
         self._transport = transport
 
-    async def get_route_runtime(self, alias: str) -> dict[str, Any]:
+    async def get_route_runtime(
+        self,
+        alias: str,
+        *,
+        deployment_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Fetch Alias runtime telemetry.
+
+        When ``deployment_id`` is set, Gateway reports process-global inflight
+        for that Deployment even if it is no longer ACTIVE (HOT Source drain
+        observation). Required drain fields are validated in that case.
+        """
         url = f"{self._base_url}/internal/v1/routes/{alias}/runtime"
+        params: dict[str, str] = {}
+        if deployment_id is not None and str(deployment_id).strip():
+            params["deployment_id"] = str(deployment_id).strip()
         try:
             async with httpx.AsyncClient(
                 timeout=self._timeout, transport=self._transport
             ) as client:
-                response = await client.get(url)
+                response = await client.get(url, params=params or None)
         except httpx.TimeoutException as exc:
             raise GatewayError(
                 "Gateway request timed out.",
@@ -108,4 +122,43 @@ class GatewayClient:
                 retryable=True,
                 details={"missing": missing},
             )
+        # When Deployment observation is requested, require D2-B1 drain fields.
+        if params.get("deployment_id"):
+            drain_required = (
+                "unbound_requests",
+                "observed_deployment_id",
+                "observed_deployment_inflight_requests",
+            )
+            drain_missing = [k for k in drain_required if k not in data]
+            if drain_missing:
+                raise GatewayError(
+                    "Gateway route runtime response missing deployment drain fields.",
+                    code="GATEWAY_INVALID_RESPONSE",
+                    status_code=response.status_code,
+                    retryable=True,
+                    details={"missing": drain_missing},
+                )
+            if not isinstance(data["unbound_requests"], int):
+                raise GatewayError(
+                    "Gateway unbound_requests must be an int.",
+                    code="GATEWAY_INVALID_RESPONSE",
+                    status_code=response.status_code,
+                    retryable=True,
+                )
+            if not isinstance(data["observed_deployment_inflight_requests"], int):
+                raise GatewayError(
+                    "Gateway observed_deployment_inflight_requests must be an int.",
+                    code="GATEWAY_INVALID_RESPONSE",
+                    status_code=response.status_code,
+                    retryable=True,
+                )
+            if data["observed_deployment_id"] is None or not isinstance(
+                data["observed_deployment_id"], str
+            ):
+                raise GatewayError(
+                    "Gateway observed_deployment_id must be a string.",
+                    code="GATEWAY_INVALID_RESPONSE",
+                    status_code=response.status_code,
+                    retryable=True,
+                )
         return data
