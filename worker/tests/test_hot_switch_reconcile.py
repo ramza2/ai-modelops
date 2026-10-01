@@ -1690,7 +1690,7 @@ async def test_b2_reconcile_pending_retirement_resumes_forward(db) -> None:
 
 @pytest.mark.asyncio
 async def test_b2_reconcile_stopped_without_ownership_remains_mir(db) -> None:
-    """Target serving + live Source STOPPED without ownership must not SUCCEEDED."""
+    """desired STOPPED + live STOPPED without Op ownership must remain MIR."""
     from tests.test_hot_switch import _enqueue_b2_hot_switch
 
     sf = db
@@ -1747,7 +1747,7 @@ async def test_b2_reconcile_stopped_without_ownership_remains_mir(db) -> None:
         target = await session.get(Deployment, fixture["target_id"])
         assert source and target
         source.runtime_status = RuntimeStatus.STOPPED.value
-        source.desired_state = "RUNNING"
+        source.desired_state = "STOPPED"
         tgt = f"ctr-tgt-noe-{fixture['suffix']}"
         target.runtime_status = RuntimeStatus.RUNNING.value
         target.health_status = HealthStatus.HEALTHY.value
@@ -1760,6 +1760,7 @@ async def test_b2_reconcile_stopped_without_ownership_remains_mir(db) -> None:
             metadata_extra={
                 "retirement_drain_proven": True,
                 # Explicitly no destructive_boundary_entered.
+                # desired_state STOPPED alone must not count as ownership.
             },
         )
 

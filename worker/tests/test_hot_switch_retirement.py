@@ -1451,3 +1451,224 @@ async def test_destructive_boundary_job_op_lock_order_vs_cancel(db) -> None:
         assert op.cancel_requested_at is not None
         assert (op.metadata_json or {}).get("cancel_reason") == "after-boundary"
         assert (step.detail_json or {}).get("hot_source_stop_boundary") is True
+
+
+@pytest.mark.asyncio
+async def test_b2_desired_stopped_alone_is_not_ownership(db, monkeypatch) -> None:
+    """Lifecycle/manual desired STOPPED without B2 boundary → MIR, not retired."""
+    from app.services.hot_switch_retirement import CODE_SOURCE_STOPPED_WITHOUT_EVIDENCE
+
+    sf = db
+    fake_node = ColdSwitchFakeNodeAgent()
+    fake_gw = FakeGateway()
+    transport = CombinedTransport(fake_node, fake_gw)
+    _configure_hot_vram(fake_node)
+
+    async with sf() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        await _seed_standard_runtime(fake_node, fake_gw, fixture)
+        op_id, job_id = await _enqueue_b2_hot_switch(session, fixture=fixture)
+        await _mark_steps_status(
+            session, op_id, succeeded_through="WAIT_SOURCE_DRAIN"
+        )
+        version = await _activate_target_route(session, fixture)
+        version_before = version
+        activate = (
+            await session.execute(
+                select(OperationStep).where(
+                    OperationStep.operation_id == op_id,
+                    OperationStep.step_code == "ACTIVATE_TARGET_ROUTE",
+                )
+            )
+        ).scalar_one()
+        activate.detail_json = {
+            "route_routing_version": version,
+            "source_route_id": str(fixture["route_id"]),
+        }
+        drain = (
+            await session.execute(
+                select(OperationStep).where(
+                    OperationStep.operation_id == op_id,
+                    OperationStep.step_code == "WAIT_SOURCE_DRAIN",
+                )
+            )
+        ).scalar_one()
+        drain.detail_json = {
+            "retirement_drain_proven": True,
+            "retirement_proof_routing_version": version,
+        }
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        meta = dict(op.metadata_json or {})
+        meta["hot_route_boundary_entered"] = True
+        meta["retirement_drain_proven"] = True
+        # Simulate unrelated lifecycle STOP after Worker crash pre-boundary.
+        assert meta.get("destructive_boundary_entered") is not True
+        assert meta.get("source_stop_verified") is not True
+        op.metadata_json = meta
+        stop_step = (
+            await session.execute(
+                select(OperationStep).where(
+                    OperationStep.operation_id == op_id,
+                    OperationStep.step_code == "STOP_SOURCE",
+                )
+            )
+        ).scalar_one()
+        stop_step.detail_json = {}
+        source = await session.get(Deployment, fixture["source_id"])
+        target = await session.get(Deployment, fixture["target_id"])
+        assert source and target
+        source.runtime_status = RuntimeStatus.RUNNING.value
+        source.desired_state = DesiredState.STOPPED.value
+        source.health_status = HealthStatus.HEALTHY.value
+        tgt = f"ctr-tgt-dso-{fixture['suffix']}"
+        target.runtime_status = RuntimeStatus.RUNNING.value
+        target.health_status = HealthStatus.HEALTHY.value
+        target.container_id = tgt
+        await session.commit()
+
+    fake_node.containers[str(fixture["source_id"])]["runtime_status"] = "STOPPED"
+    fake_node.containers[str(fixture["source_id"])]["health_status"] = "UNKNOWN"
+    fake_node.containers[str(fixture["target_id"])] = {
+        "deployment_id": str(fixture["target_id"]),
+        "container_id": tgt,
+        "container_name": "tgt",
+        "runtime_status": "RUNNING",
+        "health_status": "HEALTHY",
+    }
+
+    monkeypatch.setattr(
+        GatewayClient,
+        "get_route_runtime",
+        _make_synced_runtime(sf, fixture["endpoint_id"]),
+    )
+
+    stop_before = sum(
+        1 for c in fake_node.calls if str(c.get("path", "")).endswith("/stop")
+    )
+    await _claim_and_execute(
+        sf,
+        job_id=job_id,
+        settings=_settings(),
+        transport=transport,
+        engine=sf.kw["bind"],
+    )
+    stop_after = sum(
+        1 for c in fake_node.calls if str(c.get("path", "")).endswith("/stop")
+    )
+    assert stop_after == stop_before
+
+    async with sf() as session:
+        op = await session.get(Operation, op_id)
+        source = await session.get(Deployment, fixture["source_id"])
+        state = await session.get(RoutingState, 1)
+        assert op and source and state
+        assert op.status == OperationStatus.MANUAL_INTERVENTION_REQUIRED.value
+        assert op.error_code == CODE_SOURCE_STOPPED_WITHOUT_EVIDENCE
+        assert op.status != OperationStatus.SUCCEEDED.value
+        assert (op.metadata_json or {}).get("hot_source_retired") is not True
+        assert int(state.version) == version_before
+
+
+@pytest.mark.asyncio
+async def test_b2_step_detail_boundary_owns_stopped_crash_resume(
+    db, monkeypatch
+) -> None:
+    """STOP_SOURCE.detail.hot_source_stop_boundary alone permits idempotent resume."""
+    sf = db
+    fake_node = ColdSwitchFakeNodeAgent()
+    fake_gw = FakeGateway()
+    transport = CombinedTransport(fake_node, fake_gw)
+    _configure_hot_vram(fake_node)
+
+    async with sf() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        await _seed_standard_runtime(fake_node, fake_gw, fixture)
+        op_id, job_id = await _enqueue_b2_hot_switch(session, fixture=fixture)
+        await _mark_steps_status(
+            session, op_id, succeeded_through="WAIT_SOURCE_DRAIN"
+        )
+        version = await _activate_target_route(session, fixture)
+        activate = (
+            await session.execute(
+                select(OperationStep).where(
+                    OperationStep.operation_id == op_id,
+                    OperationStep.step_code == "ACTIVATE_TARGET_ROUTE",
+                )
+            )
+        ).scalar_one()
+        activate.detail_json = {
+            "route_routing_version": version,
+            "source_route_id": str(fixture["route_id"]),
+        }
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        meta = dict(op.metadata_json or {})
+        meta["hot_route_boundary_entered"] = True
+        meta["retirement_drain_proven"] = True
+        # Operation metadata incomplete/stale — ownership only on step detail.
+        meta.pop("destructive_boundary_entered", None)
+        op.metadata_json = meta
+        stop_step = (
+            await session.execute(
+                select(OperationStep).where(
+                    OperationStep.operation_id == op_id,
+                    OperationStep.step_code == "STOP_SOURCE",
+                )
+            )
+        ).scalar_one()
+        stop_step.detail_json = {"hot_source_stop_boundary": True}
+        source = await session.get(Deployment, fixture["source_id"])
+        target = await session.get(Deployment, fixture["target_id"])
+        assert source and target
+        source.runtime_status = RuntimeStatus.RUNNING.value
+        source.desired_state = DesiredState.STOPPED.value
+        tgt = f"ctr-tgt-sdo-{fixture['suffix']}"
+        target.runtime_status = RuntimeStatus.RUNNING.value
+        target.health_status = HealthStatus.HEALTHY.value
+        target.container_id = tgt
+        await session.commit()
+
+    fake_node.containers[str(fixture["source_id"])]["runtime_status"] = "STOPPED"
+    fake_node.containers[str(fixture["source_id"])]["health_status"] = "UNKNOWN"
+    fake_node.containers[str(fixture["target_id"])] = {
+        "deployment_id": str(fixture["target_id"]),
+        "container_id": tgt,
+        "container_name": "tgt",
+        "runtime_status": "RUNNING",
+        "health_status": "HEALTHY",
+    }
+
+    monkeypatch.setattr(
+        GatewayClient,
+        "get_route_runtime",
+        _make_synced_runtime(sf, fixture["endpoint_id"]),
+    )
+
+    stop_before = sum(
+        1 for c in fake_node.calls if str(c.get("path", "")).endswith("/stop")
+    )
+    await _claim_and_execute(
+        sf,
+        job_id=job_id,
+        settings=_settings(),
+        transport=transport,
+        engine=sf.kw["bind"],
+    )
+    stop_after = sum(
+        1 for c in fake_node.calls if str(c.get("path", "")).endswith("/stop")
+    )
+    assert stop_after == stop_before
+
+    async with sf() as session:
+        op = await session.get(Operation, op_id)
+        source = await session.get(Deployment, fixture["source_id"])
+        assert op and source
+        assert op.status == OperationStatus.SUCCEEDED.value
+        assert source.runtime_status == RuntimeStatus.STOPPED.value
+        assert source.desired_state == DesiredState.STOPPED.value
+        assert (op.metadata_json or {}).get("hot_source_retired") is True

@@ -87,31 +87,26 @@ def retirement_was_skipped(operation: Operation, steps: list[OperationStep] | No
 def has_owned_source_stop_evidence(
     operation: Any,
     *,
-    source: Any | None = None,
     steps: list[OperationStep] | None = None,
 ) -> bool:
-    """True when durable evidence proves this Operation entered Source-stop.
+    """True when durable Operation-owned evidence proves B2 Source-stop began.
 
-    Live Source STOPPED alone is insufficient — Source may be stopped by
-    operators or unrelated lifecycle paths.
+    Deployment desired_state alone is NOT ownership — a separate lifecycle STOP
+    can set ``desired_state=STOPPED`` after this Operation crashed before its
+    destructive boundary.
     """
     meta = getattr(operation, "metadata_json", None) or {}
-    if bool(meta.get("destructive_boundary_entered")):
+    if meta.get("destructive_boundary_entered") is True:
         return True
-    if bool(meta.get(SOURCE_STOP_VERIFIED)):
-        return True
-    if source is not None and str(
-        getattr(source, "desired_state", None) or ""
-    ) == DesiredState.STOPPED.value:
-        # desired_state STOPPED is written by this Operation only after the
-        # destructive boundary decision (crash window C/D).
+    if meta.get(SOURCE_STOP_VERIFIED) is True:
         return True
     for step in steps or ():
         if step.step_code != STEP_STOP_SOURCE:
             continue
         detail = step.detail_json or {}
-        if bool(detail.get(HOT_SOURCE_STOP_BOUNDARY)) or bool(
-            detail.get("destructive_boundary_entered")
+        if (
+            detail.get(HOT_SOURCE_STOP_BOUNDARY) is True
+            or detail.get("destructive_boundary_entered") is True
         ):
             return True
     return False
@@ -485,9 +480,7 @@ class HotSwitchRetirementMixin:
             steps = await repo.list_steps(uuid.UUID(str(operation.id)))
             await session.refresh(source)
             await session.refresh(operation)
-            if not has_owned_source_stop_evidence(
-                operation, source=source, steps=steps
-            ):
+            if not has_owned_source_stop_evidence(operation, steps=steps):
                 raise PermanentStepError(
                     "Source is STOPPED/absent without durable B2 stop ownership.",
                     code=CODE_SOURCE_STOPPED_WITHOUT_EVIDENCE,
