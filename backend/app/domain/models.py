@@ -747,6 +747,50 @@ class DeploymentResourceSnapshot(Base):
     )
 
 
+class DeploymentRuntimeMetricSnapshot(Base):
+    """M6-A2 vLLM runtime capacity snapshots (Prometheus-normalized)."""
+
+    __tablename__ = "deployment_runtime_metric_snapshot"
+
+    id: Mapped[int] = mapped_column(
+        BigInteger, primary_key=True, autoincrement=True
+    )
+    deployment_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("deployment.id"), nullable=False
+    )
+    sampled_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    availability: Mapped[str] = mapped_column(String(32), nullable=False)
+    kv_cache_usage_ratio: Mapped[float | None] = mapped_column(Numeric(7, 6))
+    num_requests_running: Mapped[int | None] = mapped_column(Integer)
+    num_requests_waiting: Mapped[int | None] = mapped_column(Integer)
+    prompt_tokens_total: Mapped[int | None] = mapped_column(BigInteger)
+    generation_tokens_total: Mapped[int | None] = mapped_column(BigInteger)
+    metrics_json: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    error_code: Mapped[str | None] = mapped_column(String(100))
+    error_message: Mapped[str | None] = mapped_column(Text)
+
+    __table_args__ = (
+        Index(
+            "ix_drm_snapshot_deployment_sampled",
+            "deployment_id",
+            text("sampled_at DESC"),
+        ),
+        Index(
+            "ix_drm_snapshot_availability_sampled",
+            "availability",
+            text("sampled_at DESC"),
+        ),
+        Index(
+            "ix_drm_snapshot_sampled",
+            text("sampled_at DESC"),
+        ),
+    )
+
+
 class HealthCheck(Base):
     __tablename__ = "health_check"
 

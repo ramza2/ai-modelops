@@ -10,6 +10,7 @@ from sqlalchemy import (
     Boolean,
     DateTime,
     Integer,
+    Numeric,
     String,
     Text,
     func,
@@ -319,3 +320,26 @@ class OperationStep(Base):
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=NOW
     )
+
+
+class DeploymentRuntimeMetricSnapshot(Base):
+    """M6-A2 normalized vLLM runtime metrics (Worker-persisted)."""
+
+    __tablename__ = "deployment_runtime_metric_snapshot"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    deployment_id: Mapped[str] = mapped_column(UUID(as_uuid=True), nullable=False)
+    sampled_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    availability: Mapped[str] = mapped_column(String(32), nullable=False)
+    kv_cache_usage_ratio: Mapped[float | None] = mapped_column(Numeric(7, 6))
+    num_requests_running: Mapped[int | None] = mapped_column(Integer)
+    num_requests_waiting: Mapped[int | None] = mapped_column(Integer)
+    prompt_tokens_total: Mapped[int | None] = mapped_column(BigInteger)
+    generation_tokens_total: Mapped[int | None] = mapped_column(BigInteger)
+    metrics_json: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    error_code: Mapped[str | None] = mapped_column(String(100))
+    error_message: Mapped[str | None] = mapped_column(Text)

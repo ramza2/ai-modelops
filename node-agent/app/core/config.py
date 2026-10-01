@@ -31,6 +31,9 @@ class Settings(BaseSettings):
     docker_image_pull_timeout_seconds: float = 300.0
     # Root filesystem path used for disk metrics (Linux/macOS/Windows via psutil).
     disk_path: str = Field(default="/")
+    # M6-A2: bounded Managed vLLM /metrics scrape (parser-only; no Prometheus server).
+    runtime_metrics_max_response_bytes: int = 2_097_152  # 2 MiB
+    runtime_metrics_timeout_seconds: float = 5.0
 
 
 @lru_cache

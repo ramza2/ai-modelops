@@ -486,6 +486,137 @@ class DeploymentLifecycleService:
             "error_message": None,
         }
 
+    def fetch_runtime_metrics(
+        self,
+        deployment_id: str,
+        *,
+        timeout_seconds: float | None = None,
+        max_response_bytes: int | None = None,
+    ) -> dict[str, Any]:
+        """Scrape Managed container fixed ``/metrics`` and normalize allowlist.
+
+        Observation-only: never mutates Deployment health/runtime status.
+        Caller-provided paths/URLs are not accepted.
+        """
+        from app.services.vllm_metrics import normalize_vllm_metrics
+
+        settings = get_settings()
+        timeout = (
+            float(timeout_seconds)
+            if timeout_seconds is not None
+            else float(settings.runtime_metrics_timeout_seconds)
+        )
+        max_bytes = (
+            int(max_response_bytes)
+            if max_response_bytes is not None
+            else int(settings.runtime_metrics_max_response_bytes)
+        )
+        sampled_at = datetime.now(tz=UTC).isoformat().replace("+00:00", "Z")
+
+        def _unavailable(
+            *,
+            runtime_status: str | None,
+            error_code: str,
+            error_message: str,
+        ) -> dict[str, Any]:
+            return {
+                "deployment_id": deployment_id,
+                "sampled_at": sampled_at,
+                "runtime_status": runtime_status,
+                "source": "VLLM_PROMETHEUS",
+                "availability": "UNAVAILABLE",
+                "kv_cache_usage_ratio": None,
+                "num_requests_running": None,
+                "num_requests_waiting": None,
+                "prompt_tokens_total": None,
+                "generation_tokens_total": None,
+                "histograms": {},
+                "metric_sources": {},
+                "missing_metrics": [
+                    "kv_cache_usage_ratio",
+                    "num_requests_running",
+                    "num_requests_waiting",
+                ],
+                "error_code": error_code,
+                "error_message": error_message[:500],
+            }
+
+        self._require_docker()
+        container = self._require_managed_container(deployment_id)
+        runtime_status = map_docker_status_to_runtime(container.status)
+        if runtime_status != "RUNNING":
+            return _unavailable(
+                runtime_status=runtime_status,
+                error_code="RUNTIME_NOT_READY",
+                error_message="Container is not RUNNING.",
+            )
+
+        url = self._upstream_url(container, "/metrics")
+        try:
+            with httpx.Client(
+                timeout=timeout, transport=self._http_transport
+            ) as client:
+                with client.stream("GET", url) as response:
+                    if response.status_code >= 400:
+                        return _unavailable(
+                            runtime_status=runtime_status,
+                            error_code="METRICS_HTTP_ERROR",
+                            error_message=f"Metrics HTTP {response.status_code}.",
+                        )
+                    chunks: list[bytes] = []
+                    total = 0
+                    too_large = False
+                    for chunk in response.iter_bytes():
+                        if not chunk:
+                            continue
+                        total += len(chunk)
+                        if total > max_bytes:
+                            too_large = True
+                            break
+                        chunks.append(chunk)
+                    if too_large:
+                        # Drain remaining without accumulating (do not log body).
+                        try:
+                            response.close()
+                        except Exception:  # noqa: BLE001
+                            pass
+                        return _unavailable(
+                            runtime_status=runtime_status,
+                            error_code="METRICS_RESPONSE_TOO_LARGE",
+                            error_message=(
+                                f"Metrics response exceeded {max_bytes} bytes."
+                            ),
+                        )
+                    body_bytes = b"".join(chunks)
+        except httpx.TimeoutException:
+            return _unavailable(
+                runtime_status=runtime_status,
+                error_code="METRICS_TIMEOUT",
+                error_message="Metrics request timed out.",
+            )
+        except httpx.HTTPError:
+            return _unavailable(
+                runtime_status=runtime_status,
+                error_code="METRICS_TRANSPORT_ERROR",
+                error_message="Metrics transport failed.",
+            )
+
+        try:
+            text = body_bytes.decode("utf-8", errors="replace")
+        except Exception:  # noqa: BLE001
+            return _unavailable(
+                runtime_status=runtime_status,
+                error_code="METRICS_PARSE_ERROR",
+                error_message="Metrics body could not be decoded as text.",
+            )
+
+        normalized = normalize_vllm_metrics(text)
+        payload = normalized.to_dict()
+        payload["deployment_id"] = deployment_id
+        payload["sampled_at"] = sampled_at
+        payload["runtime_status"] = runtime_status
+        return payload
+
     # ---------------------------------------------------------------- helpers
 
     def _verify_artifact(self, raw: dict[str, Any]) -> dict[str, Any]:

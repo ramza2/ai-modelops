@@ -1,12 +1,15 @@
-"""Observability Management API routes (M6-A1)."""
+"""Observability Management API routes (M6-A1 + M6-A2)."""
 
 from __future__ import annotations
+
+import uuid
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_session
 from app.services.observability import InvocationObservabilityService
+from app.services.runtime_metrics import RuntimeMetricsObservabilityService
 
 router = APIRouter(prefix="/api/v1/observability", tags=["observability"])
 
@@ -15,6 +18,12 @@ def get_observability_service(
     session: AsyncSession = Depends(get_session),
 ) -> InvocationObservabilityService:
     return InvocationObservabilityService(session)
+
+
+def get_runtime_metrics_service(
+    session: AsyncSession = Depends(get_session),
+) -> RuntimeMetricsObservabilityService:
+    return RuntimeMetricsObservabilityService(session)
 
 
 @router.get("/invocations/summary")
@@ -29,3 +38,30 @@ async def invocation_capacity_summary(
     excluded from token percentiles. Prompt/response contents are never stored.
     """
     return await service.invocation_capacity_summary(hours=hours, group_by=group_by)
+
+
+@router.get("/runtime/latest")
+async def runtime_metrics_latest(
+    deployment_id: uuid.UUID | None = Query(default=None),
+    service: RuntimeMetricsObservabilityService = Depends(get_runtime_metrics_service),
+) -> dict:
+    """Latest Deployment runtime metric snapshot(s) from DB (M6-A2).
+
+    Does not trigger a live Node Agent scrape.
+    """
+    return await service.latest(deployment_id=deployment_id)
+
+
+@router.get("/runtime/deployments/{deployment_id}/history")
+async def runtime_metrics_history(
+    deployment_id: uuid.UUID,
+    hours: int = Query(default=24, ge=1, le=168),
+    limit: int = Query(default=500, ge=1, le=1000),
+    service: RuntimeMetricsObservabilityService = Depends(get_runtime_metrics_service),
+) -> dict:
+    """Historical runtime metric snapshots (oldest→newest) from DB (M6-A2).
+
+    Histogram data is cumulative since runtime process start — not recent-window
+    percentiles. Does not trigger a live Node Agent scrape.
+    """
+    return await service.history(deployment_id, hours=hours, limit=limit)

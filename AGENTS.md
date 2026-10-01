@@ -641,9 +641,11 @@ ${DATABASE_URL}
 7. Invocation/Audit views
    - **M6-A1 (done):** upstream usage → InvocationLog tokens + ClientApp
      attribution + `GET /api/v1/observability/invocations/summary`
-   - **M6-A2 (deferred):** vLLM `/metrics` → deployment-scoped runtime
-     capacity (`kv_cache_usage_perc`, running/waiting, TTFT/queue/prefill/
-     decode histograms). Not implemented in A1.
+   - **M6-A2 (done):** Managed vLLM `/metrics` via Node Agent normalize →
+     Worker periodic collector → `deployment_runtime_metric_snapshot` →
+     `GET /api/v1/observability/runtime/latest` + history.
+     Observation-only; cumulative histograms (not recent-window P95);
+     no Prometheus/Grafana server; IMPORTED deferred.
 
 한 번에 모든 기능을 스캐폴딩만 하는 것보다 각 milestone을 end-to-end로 동작하게 완성하는 것을 우선한다.
 

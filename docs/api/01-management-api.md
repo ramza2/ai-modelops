@@ -846,7 +846,67 @@ Notes:
 - Client grouping prefers `client_app.client_key`, else `raw_client_key`, else `unknown`.
 - Alias grouping uses Endpoint Alias name; deployment grouping returns id + name.
 - No context-overflow classifier; no prompt/response storage.
-- Does **not** scrape vLLM `/metrics` (M6-A2).
+- Does **not** scrape vLLM `/metrics` (see M6-A2 runtime endpoints below).
+
+### GET /observability/runtime/latest
+
+M6-A2 Deployment runtime capacity telemetry — latest snapshot(s) from DB only.
+
+```text
+GET /api/v1/observability/runtime/latest
+GET /api/v1/observability/runtime/latest?deployment_id=<uuid>
+```
+
+Without `deployment_id`: latest row per Deployment that has history.
+
+Item fields:
+
+```text
+deployment_id
+deployment_name
+sampled_at
+availability              # AVAILABLE | PARTIAL | UNAVAILABLE
+kv_cache_usage_ratio      # 0–1 ratio (not 0–100)
+num_requests_running
+num_requests_waiting
+prompt_tokens_total       # cumulative
+generation_tokens_total   # cumulative
+histograms                # cumulative buckets (not recent-window P95)
+metric_sources
+missing_metrics
+error_code
+error_message
+source                    # VLLM_PROMETHEUS
+```
+
+Does **not** trigger a live Node Agent scrape.
+
+Unknown `deployment_id` → 404.
+
+### GET /observability/runtime/deployments/{deployment_id}/history
+
+```text
+GET /api/v1/observability/runtime/deployments/{deployment_id}/history?hours=24&limit=500
+```
+
+Query:
+
+```text
+hours  default 24; bounded 1..168
+limit  default 500; bounded 1..1000
+```
+
+Ordering: `oldest_to_newest` (chart-friendly). When `limit` truncates, the newest
+samples within the window are kept.
+
+DB-only. Does not scrape Node Agent.
+
+Notes:
+
+- M6-A1 = invocation-side telemetry; M6-A2 = Deployment runtime-side capacity.
+- Histogram data is cumulative since runtime start — not TTFT/queue P95 over a window.
+- IMPORTED Deployment runtime metrics are deferred.
+- No Prometheus server or Grafana is introduced.
 
 ### GET /invocations/stats
 
