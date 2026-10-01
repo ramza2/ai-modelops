@@ -61,10 +61,39 @@ def test_quantile_in_inf_uses_highest_finite() -> None:
 
 
 def test_lowest_bucket_assumes_zero_lower_bound() -> None:
-    buckets = {"0.5": 50, "+Inf": 100}
-    # P25 rank=25 lands in first bucket lower=0 upper=0.5
-    assert classic_histogram_quantile(0.25, buckets=buckets, count=100) == pytest.approx(
+    buckets = {"0.5": 100, "+Inf": 100}
+    # Real first positive bucket: P50 lower=0 upper=0.5 → 0.25
+    assert classic_histogram_quantile(0.50, buckets=buckets, count=100) == pytest.approx(
         0.25
+    )
+    # P25 also interpolates from zero in the first finite bucket.
+    assert classic_histogram_quantile(0.25, buckets=buckets, count=100) == pytest.approx(
+        0.125
+    )
+
+
+def test_empty_lower_bucket_p50_uses_previous_upper() -> None:
+    """Empty preceding finite bucket must not reset lower bound to 0."""
+    buckets = {"0.1": 0, "0.5": 100, "+Inf": 100}
+    # rank=50 lands in (0.1, 0.5]; lower=0.1 → 0.1 + 0.4*0.5 = 0.3
+    assert classic_histogram_quantile(0.50, buckets=buckets, count=100) == pytest.approx(
+        0.30
+    )
+
+
+def test_empty_lower_bucket_p95() -> None:
+    buckets = {"0.1": 0, "0.5": 100, "+Inf": 100}
+    # rank=95 → 0.1 + 0.4*0.95 = 0.48
+    assert classic_histogram_quantile(0.95, buckets=buckets, count=100) == pytest.approx(
+        0.48
+    )
+
+
+def test_multiple_empty_lower_buckets_p50() -> None:
+    buckets = {"0.05": 0, "0.1": 0, "0.5": 100, "+Inf": 100}
+    # Interpolate inside (0.1, 0.5], not (0, 0.5]
+    assert classic_histogram_quantile(0.50, buckets=buckets, count=100) == pytest.approx(
+        0.30
     )
 
 

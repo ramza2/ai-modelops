@@ -82,27 +82,35 @@ def classic_histogram_quantile(
     prev_upper = 0.0
     prev_count = 0
     highest_finite: float | None = None
+    finite_index = 0
 
     for le in ordered:
         upper = parse_le(le)
         if upper is None:
             return None
         cum = int(buckets[le])
-        if math.isfinite(upper):
+        is_finite = math.isfinite(upper)
+        if is_finite:
             highest_finite = float(upper)
         if cum < rank:
-            prev_upper = float(upper) if math.isfinite(upper) else prev_upper
+            if is_finite:
+                prev_upper = float(upper)
+                finite_index += 1
             prev_count = cum
             continue
         # Quantile lands in this bucket.
-        if not math.isfinite(upper):
+        if not is_finite:
             # +Inf bucket: use highest finite bound when available.
             return highest_finite
         bucket_count = cum - prev_count
         if bucket_count <= 0:
             return float(upper)
-        # Lowest positive bucket assumes lower bound 0.
-        lower = 0.0 if prev_count == 0 else float(prev_upper)
+        # Only the lowest finite positive bucket assumes lower bound 0.
+        # Empty preceding finite buckets still contribute their upper bound.
+        if finite_index == 0:
+            lower = 0.0
+        else:
+            lower = float(prev_upper)
         frac = (rank - float(prev_count)) / float(bucket_count)
         return lower + (float(upper) - lower) * frac
 
