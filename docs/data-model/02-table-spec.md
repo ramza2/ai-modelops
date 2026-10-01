@@ -603,12 +603,26 @@ INDEX(sampled_at DESC)
 ```
 
 `metrics_json` holds cumulative histogram buckets (`ttft_seconds`, queue/prefill/decode/e2e,
-optional inter-token / time-per-output-token), `metric_sources`, and `missing_metrics`.
-Do not store raw Prometheus text, prompts, or high-cardinality labels.
+optional inter-token / time-per-output-token), `metric_sources`, `missing_metrics`,
+and (M6-A3) sanitized `runtime_instance`:
+
+```json
+{
+  "container_id": "...",
+  "started_at": "...",
+  "restart_count": 2
+}
+```
+
+Do not store raw Prometheus text, prompts, high-cardinality labels, or arbitrary
+Docker inspect/environment/command metadata.
 
 `availability`: `AVAILABLE` | `PARTIAL` | `UNAVAILABLE`
 
 Counters/histograms are cumulative; resets are expected on runtime restart.
+M6-A3 recent-window analytics derive pairwise deltas only across complete same
+`runtime_instance` identity; pre-A3 rows without identity still support gauges
+but not trusted cumulative deltas.
 
 ---
 
@@ -708,9 +722,13 @@ exact request body length, and `client_app_id` via async lookup on
 `raw_client_key`. Token values are never estimated by the Gateway.
 Streaming usage may remain NULL when upstream does not emit usage events.
 
-M6-A2 (deferred): vLLM `/metrics` deployment-scoped runtime capacity
+M6-A2: vLLM `/metrics` deployment-scoped runtime capacity snapshots
 (`kv_cache_usage_perc`, `num_requests_running` / `waiting`, TTFT / queue /
-prefill / decode histograms) is out of scope for A1.
+prefill / decode histograms) via Node Agent + Worker collector.
+
+M6-A3: recent-window analytics over those snapshots using runtime instance
+identity (`container_id` + `started_at`); classic histogram P50/P95 are bucket
+estimates. No Prometheus/Grafana server.
 
 ---
 

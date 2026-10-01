@@ -496,7 +496,41 @@ Availability: `AVAILABLE` | `PARTIAL` | `UNAVAILABLE`
 Expected scrape failures return normalized UNAVAILABLE payloads (e.g.
 `RUNTIME_NOT_READY`, `METRICS_TIMEOUT`, `METRICS_TRANSPORT_ERROR`,
 `METRICS_HTTP_ERROR`, `METRICS_RESPONSE_TOO_LARGE`, `METRICS_PARSE_ERROR`,
-`METRICS_UNSUPPORTED`) rather than generic 500s.
+`METRICS_UNSUPPORTED`, `RUNTIME_INSTANCE_CHANGED_DURING_SCRAPE`) rather than
+generic 500s.
+
+### Runtime instance identity (M6-A3)
+
+Each scrape captures sanitized:
+
+```json
+{
+  "runtime_instance": {
+    "container_id": "...",
+    "started_at": "...",
+    "restart_count": 2
+  }
+}
+```
+
+Complete cumulative-delta identity = `container_id` + `started_at`.
+`restart_count` is diagnostic only.
+
+Node Agent inspects before and after `/metrics`. If the instance changes during
+the scrape (`container_id` or `started_at` differs, container disappears, or
+runtime leaves RUNNING), the result is:
+
+```text
+availability = UNAVAILABLE
+error_code = RUNTIME_INSTANCE_CHANGED_DURING_SCRAPE
+```
+
+and metrics from that scrape are not usable.
+
+For expected scrape failures (timeout/HTTP/too-large/unsupported) where the
+instance remained stable, `runtime_instance` is still included when known.
+Incomplete identity (missing `started_at`) may still yield AVAILABLE/PARTIAL
+metrics, but A3 excludes cumulative deltas across incomplete pairs.
 
 ---
 

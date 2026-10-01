@@ -497,6 +497,9 @@ class DeploymentLifecycleService:
 
         Observation-only: never mutates Deployment health/runtime status.
         Caller-provided paths/URLs are not accepted.
+
+        Captures runtime instance identity (container_id + started_at) before and
+        after the scrape so cumulative A3 deltas can detect reset boundaries.
         """
         from app.services.vllm_metrics import normalize_vllm_metrics
 
@@ -518,8 +521,9 @@ class DeploymentLifecycleService:
             runtime_status: str | None,
             error_code: str,
             error_message: str,
+            runtime_instance: dict[str, Any] | None = None,
         ) -> dict[str, Any]:
-            return {
+            payload: dict[str, Any] = {
                 "deployment_id": deployment_id,
                 "sampled_at": sampled_at,
                 "runtime_status": runtime_status,
@@ -539,83 +543,172 @@ class DeploymentLifecycleService:
                 ],
                 "error_code": error_code,
                 "error_message": error_message[:500],
+                "runtime_instance": runtime_instance,
             }
+            return payload
 
         self._require_docker()
         container = self._require_managed_container(deployment_id)
         runtime_status = map_docker_status_to_runtime(container.status)
+        before_instance = self._runtime_instance_from_container(container)
         if runtime_status != "RUNNING":
             return _unavailable(
                 runtime_status=runtime_status,
                 error_code="RUNTIME_NOT_READY",
                 error_message="Container is not RUNNING.",
+                runtime_instance=before_instance,
             )
 
         url = self._upstream_url(container, "/metrics")
+        scrape_error: dict[str, Any] | None = None
+        body_bytes: bytes | None = None
         try:
             with httpx.Client(
                 timeout=timeout, transport=self._http_transport
             ) as client:
                 with client.stream("GET", url) as response:
                     if response.status_code >= 400:
-                        return _unavailable(
-                            runtime_status=runtime_status,
-                            error_code="METRICS_HTTP_ERROR",
-                            error_message=f"Metrics HTTP {response.status_code}.",
-                        )
-                    chunks: list[bytes] = []
-                    total = 0
-                    too_large = False
-                    for chunk in response.iter_bytes():
-                        if not chunk:
-                            continue
-                        total += len(chunk)
-                        if total > max_bytes:
-                            too_large = True
-                            break
-                        chunks.append(chunk)
-                    if too_large:
-                        # Drain remaining without accumulating (do not log body).
-                        try:
-                            response.close()
-                        except Exception:  # noqa: BLE001
-                            pass
-                        return _unavailable(
-                            runtime_status=runtime_status,
-                            error_code="METRICS_RESPONSE_TOO_LARGE",
-                            error_message=(
-                                f"Metrics response exceeded {max_bytes} bytes."
-                            ),
-                        )
-                    body_bytes = b"".join(chunks)
+                        scrape_error = {
+                            "error_code": "METRICS_HTTP_ERROR",
+                            "error_message": f"Metrics HTTP {response.status_code}.",
+                        }
+                    else:
+                        chunks: list[bytes] = []
+                        total = 0
+                        too_large = False
+                        for chunk in response.iter_bytes():
+                            if not chunk:
+                                continue
+                            total += len(chunk)
+                            if total > max_bytes:
+                                too_large = True
+                                break
+                            chunks.append(chunk)
+                        if too_large:
+                            try:
+                                response.close()
+                            except Exception:  # noqa: BLE001
+                                pass
+                            scrape_error = {
+                                "error_code": "METRICS_RESPONSE_TOO_LARGE",
+                                "error_message": (
+                                    f"Metrics response exceeded {max_bytes} bytes."
+                                ),
+                            }
+                        else:
+                            body_bytes = b"".join(chunks)
         except httpx.TimeoutException:
-            return _unavailable(
-                runtime_status=runtime_status,
-                error_code="METRICS_TIMEOUT",
-                error_message="Metrics request timed out.",
-            )
+            scrape_error = {
+                "error_code": "METRICS_TIMEOUT",
+                "error_message": "Metrics request timed out.",
+            }
         except httpx.HTTPError:
+            scrape_error = {
+                "error_code": "METRICS_TRANSPORT_ERROR",
+                "error_message": "Metrics transport failed.",
+            }
+
+        # Re-inspect so metrics and identity refer to one stable process instance.
+        after_instance: dict[str, Any] | None = None
+        after_status: str | None = runtime_status
+        try:
+            after = self._require_managed_container(deployment_id)
+            after_status = map_docker_status_to_runtime(after.status)
+            after_instance = self._runtime_instance_from_container(after)
+        except ContainerNotFoundError:
+            after_instance = None
+            after_status = None
+        except ManagedLabelRequiredError:
+            after_instance = None
+            after_status = None
+
+        if not self._runtime_instances_stable(before_instance, after_instance):
             return _unavailable(
-                runtime_status=runtime_status,
-                error_code="METRICS_TRANSPORT_ERROR",
-                error_message="Metrics transport failed.",
+                runtime_status=after_status or runtime_status,
+                error_code="RUNTIME_INSTANCE_CHANGED_DURING_SCRAPE",
+                error_message=(
+                    "Managed runtime instance changed during metrics scrape."
+                ),
+                runtime_instance=None,
+            )
+        if after_status != "RUNNING":
+            return _unavailable(
+                runtime_status=after_status,
+                error_code="RUNTIME_INSTANCE_CHANGED_DURING_SCRAPE",
+                error_message="Managed runtime is no longer RUNNING after scrape.",
+                runtime_instance=None,
             )
 
+        stable_instance = after_instance or before_instance
+
+        if scrape_error is not None:
+            return _unavailable(
+                runtime_status=after_status,
+                error_code=str(scrape_error["error_code"]),
+                error_message=str(scrape_error["error_message"]),
+                runtime_instance=stable_instance,
+            )
+
+        assert body_bytes is not None
         try:
             text = body_bytes.decode("utf-8", errors="replace")
         except Exception:  # noqa: BLE001
             return _unavailable(
-                runtime_status=runtime_status,
+                runtime_status=after_status,
                 error_code="METRICS_PARSE_ERROR",
                 error_message="Metrics body could not be decoded as text.",
+                runtime_instance=stable_instance,
             )
 
         normalized = normalize_vllm_metrics(text)
         payload = normalized.to_dict()
         payload["deployment_id"] = deployment_id
         payload["sampled_at"] = sampled_at
-        payload["runtime_status"] = runtime_status
+        payload["runtime_status"] = after_status
+        payload["runtime_instance"] = stable_instance
         return payload
+
+    @staticmethod
+    def _runtime_instance_from_container(
+        container: ContainerInfo,
+    ) -> dict[str, Any] | None:
+        """Sanitized runtime identity for A3 cumulative deltas.
+
+        Complete identity = container_id + started_at. restart_count is diagnostic.
+        Incomplete identity (missing either required field) is still returned when
+        partial fields are known so callers can see the gap.
+        """
+        container_id = (container.id or "").strip() or None
+        started_at = (container.started_at or "").strip() or None
+        if container_id is None and started_at is None and container.restart_count is None:
+            return None
+        return {
+            "container_id": container_id,
+            "started_at": started_at,
+            "restart_count": container.restart_count,
+        }
+
+    @staticmethod
+    def _runtime_instances_stable(
+        before: dict[str, Any] | None,
+        after: dict[str, Any] | None,
+    ) -> bool:
+        """True when before/after share the same complete container_id+started_at."""
+        if before is None or after is None:
+            return False
+        before_id = before.get("container_id")
+        before_started = before.get("started_at")
+        after_id = after.get("container_id")
+        after_started = after.get("started_at")
+        if not before_id or not before_started or not after_id or not after_started:
+            # Incomplete identity cannot prove stability across the scrape.
+            # Allow the scrape through only when both sides are identically incomplete
+            # with the same container_id (started_at still missing both sides) —
+            # metrics may be AVAILABLE/PARTIAL but A3 will exclude cumulative deltas.
+            if before_id and after_id and before_id == after_id:
+                return before_started == after_started
+            return False
+        return before_id == after_id and before_started == after_started
 
     # ---------------------------------------------------------------- helpers
 

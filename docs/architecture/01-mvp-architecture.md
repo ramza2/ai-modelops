@@ -148,9 +148,13 @@ GET  /internal/v1/deployments/{id}/runtime-metrics
 Node Agent는 Docker Container보다는 `systemd` Host Service를 우선 권장한다.
 
 Worker periodic collector (M6-A2) calls Node Agent for Managed+RUNNING+VLLM deployments
-and persists `deployment_runtime_metric_snapshot`. Backend observability GETs are DB-only.
-No Prometheus/Grafana server is introduced. Histogram scrapes are cumulative — not
-recent-window P95. IMPORTED runtime metrics are deferred.
+and persists `deployment_runtime_metric_snapshot` (including sanitized
+`runtime_instance`). Backend observability GETs are DB-only.
+M6-A3 computes recent-window gauge/token/histogram analytics on read from those
+snapshots using runtime instance identity to exclude reset boundaries.
+No Prometheus/Grafana server is introduced. A2 histogram scrapes are cumulative;
+A3 P50/P95 are classic bucket estimates over valid same-instance deltas only.
+IMPORTED runtime metrics are deferred.
 
 ### 3.5 AI Gateway
 
