@@ -522,6 +522,7 @@ class DeploymentLifecycleService:
             error_code: str,
             error_message: str,
             runtime_instance: dict[str, Any] | None = None,
+            runtime_config: dict[str, Any] | None = None,
         ) -> dict[str, Any]:
             payload: dict[str, Any] = {
                 "deployment_id": deployment_id,
@@ -545,6 +546,9 @@ class DeploymentLifecycleService:
                 "error_message": error_message[:500],
                 "runtime_instance": runtime_instance,
             }
+            # Attach sanitized argv config only after stable-instance proof.
+            if runtime_config is not None:
+                payload["runtime_config"] = runtime_config
             return payload
 
         self._require_docker()
@@ -611,16 +615,19 @@ class DeploymentLifecycleService:
         # Re-inspect so metrics and identity refer to one stable process instance.
         after_instance: dict[str, Any] | None = None
         after_status: str | None = runtime_status
+        after_container = None
         try:
-            after = self._require_managed_container(deployment_id)
-            after_status = map_docker_status_to_runtime(after.status)
-            after_instance = self._runtime_instance_from_container(after)
+            after_container = self._require_managed_container(deployment_id)
+            after_status = map_docker_status_to_runtime(after_container.status)
+            after_instance = self._runtime_instance_from_container(after_container)
         except ContainerNotFoundError:
             after_instance = None
             after_status = None
+            after_container = None
         except ManagedLabelRequiredError:
             after_instance = None
             after_status = None
+            after_container = None
 
         if not self._runtime_instances_stable(before_instance, after_instance):
             return _unavailable(
@@ -640,6 +647,11 @@ class DeploymentLifecycleService:
             )
 
         stable_instance = after_instance or before_instance
+        # M6-A4: argv observation only after A3 stable-instance proof.
+        from app.services.vllm_runtime_config import parse_vllm_runtime_config
+
+        command = after_container.command if after_container is not None else None
+        runtime_config = parse_vllm_runtime_config(command)
 
         if scrape_error is not None:
             return _unavailable(
@@ -647,6 +659,7 @@ class DeploymentLifecycleService:
                 error_code=str(scrape_error["error_code"]),
                 error_message=str(scrape_error["error_message"]),
                 runtime_instance=stable_instance,
+                runtime_config=runtime_config,
             )
 
         assert body_bytes is not None
@@ -658,6 +671,7 @@ class DeploymentLifecycleService:
                 error_code="METRICS_PARSE_ERROR",
                 error_message="Metrics body could not be decoded as text.",
                 runtime_instance=stable_instance,
+                runtime_config=runtime_config,
             )
 
         normalized = normalize_vllm_metrics(text)
@@ -666,6 +680,7 @@ class DeploymentLifecycleService:
         payload["sampled_at"] = sampled_at
         payload["runtime_status"] = after_status
         payload["runtime_instance"] = stable_instance
+        payload["runtime_config"] = runtime_config
         return payload
 
     @staticmethod

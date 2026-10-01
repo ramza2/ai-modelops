@@ -100,3 +100,58 @@ class InvocationRepository:
         """
         rows = (await self._session.execute(text(sql), {"since": since})).mappings().all()
         return [dict(r) for r in rows]
+
+    async def capacity_summary_for_deployment(
+        self,
+        *,
+        deployment_id: Any,
+        since: dt.datetime,
+    ) -> dict[str, Any] | None:
+        """Aggregate InvocationLog for a single Deployment (M6-A4).
+
+        Same A1 percentile/average definitions; filtered in SQL by deployment_id.
+        Returns a single aggregate row dict (zeros when no invocations).
+        """
+        sql = """
+            SELECT
+              COUNT(*)::bigint AS request_count,
+              COUNT(*) FILTER (
+                WHERE il.http_status >= 200 AND il.http_status < 400
+              )::bigint AS success_count,
+              COUNT(*) FILTER (
+                WHERE il.http_status < 200 OR il.http_status >= 400
+              )::bigint AS error_count,
+              COUNT(*) FILTER (
+                WHERE il.input_tokens IS NOT NULL
+                   OR il.output_tokens IS NOT NULL
+                   OR il.total_tokens IS NOT NULL
+              )::bigint AS tokenized_request_count,
+              AVG(il.input_tokens)::float8 AS input_tokens_avg,
+              percentile_cont(0.5) WITHIN GROUP (
+                ORDER BY il.input_tokens
+              ) AS input_tokens_p50,
+              percentile_cont(0.95) WITHIN GROUP (
+                ORDER BY il.input_tokens
+              ) AS input_tokens_p95,
+              MAX(il.input_tokens) AS input_tokens_max,
+              AVG(il.output_tokens)::float8 AS output_tokens_avg,
+              AVG(il.total_tokens)::float8 AS total_tokens_avg,
+              AVG(il.latency_ms)::float8 AS latency_ms_avg,
+              percentile_cont(0.5) WITHIN GROUP (
+                ORDER BY il.latency_ms
+              ) AS latency_ms_p50,
+              percentile_cont(0.95) WITHIN GROUP (
+                ORDER BY il.latency_ms
+              ) AS latency_ms_p95,
+              MAX(il.latency_ms) AS latency_ms_max
+            FROM invocation_log il
+            WHERE il.deployment_id = :deployment_id
+              AND il.requested_at >= :since
+        """
+        row = (
+            await self._session.execute(
+                text(sql),
+                {"deployment_id": str(deployment_id), "since": since},
+            )
+        ).mappings().one()
+        return dict(row)

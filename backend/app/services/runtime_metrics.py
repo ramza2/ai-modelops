@@ -112,6 +112,9 @@ class RuntimeMetricsObservabilityService:
             "runtime_instance": _sanitize_runtime_instance(
                 metrics_json.get("runtime_instance")
             ),
+            "runtime_config": _sanitize_runtime_config(
+                metrics_json.get("runtime_config")
+            ),
         }
         if include_name:
             name = row.get("deployment_name")
@@ -150,6 +153,89 @@ def _sanitize_runtime_instance(raw: Any) -> dict[str, Any] | None:
     ):
         return None
     return out
+
+
+_RUNTIME_CONFIG_FIELDS = (
+    "max_model_len",
+    "max_num_seqs",
+    "tensor_parallel_size",
+    "gpu_memory_utilization",
+    "dtype",
+    "quantization",
+)
+_RUNTIME_CONFIG_ENTRYPOINTS = frozenset({"VLLM", "UNRECOGNIZED"})
+
+
+def _sanitize_runtime_config(raw: Any) -> dict[str, Any] | None:
+    """Expose only allowlisted A4 runtime_config. Pre-A4 → null."""
+    if not isinstance(raw, dict):
+        return None
+    if raw.get("source") != "CONTAINER_ARGV":
+        return None
+
+    entrypoint_raw = raw.get("entrypoint")
+    entrypoint = (
+        str(entrypoint_raw)
+        if entrypoint_raw in _RUNTIME_CONFIG_ENTRYPOINTS
+        else "UNRECOGNIZED"
+    )
+
+    values_in = raw.get("values")
+    values_out: dict[str, Any] = {}
+    if isinstance(values_in, dict):
+        for field in _RUNTIME_CONFIG_FIELDS:
+            if field not in values_in:
+                continue
+            values_out[field] = _sanitize_config_value(field, values_in.get(field))
+
+    explicit_fields: list[str] = []
+    explicit_raw = raw.get("explicit_fields")
+    if isinstance(explicit_raw, list):
+        for item in explicit_raw:
+            name = str(item)
+            if name in _RUNTIME_CONFIG_FIELDS and name not in explicit_fields:
+                explicit_fields.append(name)
+
+    invalid_fields: list[str] = []
+    invalid_raw = raw.get("invalid_fields")
+    if isinstance(invalid_raw, list):
+        for item in invalid_raw:
+            name = str(item)
+            if name in _RUNTIME_CONFIG_FIELDS and name not in invalid_fields:
+                invalid_fields.append(name)
+
+    return {
+        "source": "CONTAINER_ARGV",
+        "entrypoint": entrypoint,
+        "values": values_out,
+        "explicit_fields": explicit_fields,
+        "invalid_fields": invalid_fields,
+    }
+
+
+def _sanitize_config_value(field: str, value: Any) -> int | float | str | None:
+    if value is None:
+        return None
+    if field in {"max_model_len", "max_num_seqs", "tensor_parallel_size"}:
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            return None
+        return number if number > 0 else None
+    if field == "gpu_memory_utilization":
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        if number != number or number in (float("inf"), float("-inf")):
+            return None
+        if number <= 0.0 or number > 1.0:
+            return None
+        return number
+    if field in {"dtype", "quantization"}:
+        text = str(value).strip()
+        return text if text else None
+    return None
 
 
 def _iso(value: Any) -> str | None:

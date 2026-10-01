@@ -1,4 +1,4 @@
-"""Observability Management API routes (M6-A1 + M6-A2 + M6-A3)."""
+"""Observability Management API routes (M6-A1 + M6-A2 + M6-A3 + M6-A4)."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_session
+from app.services.capacity_profile import CapacityProfileService
 from app.services.observability import InvocationObservabilityService
 from app.services.runtime_analytics import RuntimeAnalyticsService
 from app.services.runtime_metrics import RuntimeMetricsObservabilityService
@@ -31,6 +32,12 @@ def get_runtime_analytics_service(
     session: AsyncSession = Depends(get_session),
 ) -> RuntimeAnalyticsService:
     return RuntimeAnalyticsService(session)
+
+
+def get_capacity_profile_service(
+    session: AsyncSession = Depends(get_session),
+) -> CapacityProfileService:
+    return CapacityProfileService(session)
 
 
 @router.get("/invocations/summary")
@@ -88,3 +95,18 @@ async def runtime_metrics_analytics(
     window edges.
     """
     return await service.analytics(deployment_id, hours=hours)
+
+
+@router.get("/runtime/deployments/{deployment_id}/capacity-profile")
+async def runtime_capacity_profile(
+    deployment_id: uuid.UUID,
+    hours: int = Query(default=24, ge=1, le=168),
+    service: CapacityProfileService = Depends(get_capacity_profile_service),
+) -> dict:
+    """M6-A4 Capacity Profile: requested vs observed_explicit + A1/A3 composition.
+
+    DB-only. Does not scrape Node Agent, mutate runtime, or recommend tuning.
+    ``observed_explicit`` is allowlisted Managed container argv only — not the
+    full effective vLLM configuration. Absent flags are not filled with defaults.
+    """
+    return await service.capacity_profile(deployment_id, hours=hours)

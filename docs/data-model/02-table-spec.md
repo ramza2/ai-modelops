@@ -614,6 +614,31 @@ and (M6-A3) sanitized `runtime_instance`:
 }
 ```
 
+and (M6-A4) sanitized `runtime_config` when argv was observed after stable-instance
+proof:
+
+```json
+{
+  "source": "CONTAINER_ARGV",
+  "entrypoint": "VLLM",
+  "values": {
+    "max_model_len": 8192,
+    "max_num_seqs": null,
+    "tensor_parallel_size": 2,
+    "gpu_memory_utilization": 0.8,
+    "dtype": "auto",
+    "quantization": "AWQ"
+  },
+  "explicit_fields": ["max_model_len", "tensor_parallel_size", "gpu_memory_utilization", "dtype", "quantization"],
+  "invalid_fields": []
+}
+```
+
+`runtime_config` is allowlisted capacity flags only. It is **observed_explicit**
+argv — not the full effective vLLM configuration. Absent flags stay null; no
+runtime defaults are synthesized. Pre-A4 rows omit `runtime_config` (treat as
+observation unavailable / comparison `UNKNOWN`).
+
 Do not store raw Prometheus text, prompts, high-cardinality labels, or arbitrary
 Docker inspect/environment/command metadata.
 
@@ -623,6 +648,9 @@ Counters/histograms are cumulative; resets are expected on runtime restart.
 M6-A3 recent-window analytics derive pairwise deltas only across complete same
 `runtime_instance` identity; pre-A3 rows without identity still support gauges
 but not trusted cumulative deltas.
+
+M6-A4 Capacity Profile composes requested DB config vs observed_explicit argv,
+plus A1 invocation demand and A3 runtime analytics. No migration — nested JSON only.
 
 ---
 
@@ -729,6 +757,10 @@ prefill / decode histograms) via Node Agent + Worker collector.
 M6-A3: recent-window analytics over those snapshots using runtime instance
 identity (`container_id` + `started_at`); classic histogram P50/P95 are bucket
 estimates. No Prometheus/Grafana server.
+
+M6-A4: Capacity Profile composes requested ModelOps capacity config vs
+observed_explicit Managed container argv (`metrics_json.runtime_config`), plus
+A1 invocation demand and A3 analytics. Observation-only; no schema migration.
 
 ---
 
