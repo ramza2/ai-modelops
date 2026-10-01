@@ -512,3 +512,308 @@ async def test_d2c_e2e_retry_child_retires_source(db, monkeypatch) -> None:
         ).scalars().all()
         assert [s.step_code for s in steps] == list(HOT_SWITCH_STEPS)
         assert all(s.status == StepStatus.SUCCEEDED.value for s in steps)
+
+
+@pytest.mark.asyncio
+async def test_d2c_retained_target_running_not_healthy_fails(db, monkeypatch) -> None:
+    """RUNNING + STARTING must not get zero-incremental TARGET_ALREADY_RUNNING."""
+    sf = db
+    fake_node = ColdSwitchFakeNodeAgent()
+    fake_gw = FakeGateway()
+    transport = CombinedTransport(fake_node, fake_gw)
+    # Low free VRAM: if zero-incremental wrongly applied, switch could proceed.
+    fake_node.vram_free_mb = 500
+    fake_node.source_used_vram_mb = 0
+    for gpu_uuid in getattr(fake_node, "gpu_uuids", []) or [fake_node.gpu_uuid]:
+        fake_node.vram_free_by_uuid[gpu_uuid] = 500
+
+    async with sf() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        await _seed_standard_runtime(fake_node, fake_gw, fixture)
+        fake_node.containers[str(fixture["source_id"])]["health_status"] = "HEALTHY"
+        tgt = f"ctr-tgt-nh-{fixture['suffix']}"
+        fake_node.containers[str(fixture["target_id"])] = {
+            "deployment_id": str(fixture["target_id"]),
+            "container_id": tgt,
+            "container_name": "tgt",
+            "runtime_status": "RUNNING",
+            "health_status": "STARTING",
+        }
+        target = await session.get(Deployment, fixture["target_id"])
+        assert target is not None
+        target.runtime_status = RuntimeStatus.RUNNING.value
+        target.health_status = HealthStatus.STARTING.value
+        target.desired_state = DesiredState.RUNNING.value
+        target.container_id = tgt
+        await session.commit()
+        op_id, job_id = await _enqueue_hot_retry_child(session, fixture=fixture)
+
+    monkeypatch.setattr(
+        GatewayClient,
+        "get_route_runtime",
+        _make_synced_runtime(sf, fixture["endpoint_id"]),
+    )
+
+    start_before = sum(
+        1 for c in fake_node.calls if str(c.get("path", "")).endswith("/start")
+    )
+    await _claim_and_execute(
+        sf,
+        job_id=job_id,
+        settings=_settings(),
+        transport=transport,
+        engine=sf.kw["bind"],
+    )
+    start_after = sum(
+        1 for c in fake_node.calls if str(c.get("path", "")).endswith("/start")
+    )
+    assert start_after == start_before
+
+    async with sf() as session:
+        from app.domain.models import EndpointAlias, EndpointRoute
+
+        op = await session.get(Operation, op_id)
+        alias = await session.get(EndpointAlias, fixture["endpoint_id"])
+        assert op is not None and alias is not None
+        assert op.status == OperationStatus.FAILED.value
+        assert op.error_code == "HOT_RETAINED_TARGET_NOT_READY"
+        assert (op.metadata_json or {}).get(
+            "hot_target_start_owned_by_operation"
+        ) is not True
+        assert alias.traffic_state == "SERVING"
+        active = (
+            await session.execute(
+                select(EndpointRoute).where(
+                    EndpointRoute.endpoint_alias_id == fixture["endpoint_id"],
+                    EndpointRoute.status == "ACTIVE",
+                )
+            )
+        ).scalar_one()
+        assert str(active.deployment_id) == str(fixture["source_id"])
+        preflight = (
+            await session.execute(
+                select(OperationStep).where(
+                    OperationStep.operation_id == op_id,
+                    OperationStep.step_code == "PREFLIGHT",
+                )
+            )
+        ).scalar_one()
+        assert preflight.status == StepStatus.FAILED.value
+        assert (preflight.detail_json or {}).get("preflight_basis") != (
+            "TARGET_ALREADY_RUNNING"
+        )
+        activate = (
+            await session.execute(
+                select(OperationStep).where(
+                    OperationStep.operation_id == op_id,
+                    OperationStep.step_code == "ACTIVATE_TARGET_ROUTE",
+                )
+            )
+        ).scalar_one()
+        assert activate.status == StepStatus.PENDING.value
+
+
+@pytest.mark.asyncio
+async def test_d2c_retained_target_stops_after_zero_incremental_preflight(
+    db, monkeypatch
+) -> None:
+    """After TARGET_ALREADY_RUNNING PREFLIGHT, STOPPED Target must not start."""
+    sf = db
+    fake_node = ColdSwitchFakeNodeAgent()
+    fake_gw = FakeGateway()
+    transport = CombinedTransport(fake_node, fake_gw)
+    fake_node.vram_free_mb = 500
+    fake_node.source_used_vram_mb = 0
+    for gpu_uuid in getattr(fake_node, "gpu_uuids", []) or [fake_node.gpu_uuid]:
+        fake_node.vram_free_by_uuid[gpu_uuid] = 500
+
+    async with sf() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        await _seed_standard_runtime(fake_node, fake_gw, fixture)
+        fake_node.containers[str(fixture["source_id"])]["health_status"] = "HEALTHY"
+        tgt = f"ctr-tgt-chg-{fixture['suffix']}"
+        fake_node.containers[str(fixture["target_id"])] = {
+            "deployment_id": str(fixture["target_id"]),
+            "container_id": tgt,
+            "container_name": "tgt",
+            "runtime_status": "RUNNING",
+            "health_status": "HEALTHY",
+        }
+        target = await session.get(Deployment, fixture["target_id"])
+        assert target is not None
+        target.runtime_status = RuntimeStatus.RUNNING.value
+        target.health_status = HealthStatus.HEALTHY.value
+        target.desired_state = DesiredState.RUNNING.value
+        target.container_id = tgt
+        await session.commit()
+        op_id, job_id = await _enqueue_hot_retry_child(session, fixture=fixture)
+        await _mark_steps_status(session, op_id, succeeded_through="PREPARE_TARGET")
+        preflight = (
+            await session.execute(
+                select(OperationStep).where(
+                    OperationStep.operation_id == op_id,
+                    OperationStep.step_code == "PREFLIGHT",
+                )
+            )
+        ).scalar_one()
+        preflight.detail_json = {
+            "preflight_basis": "TARGET_ALREADY_RUNNING",
+            "target_already_running": True,
+            "incremental_start_required": False,
+            "incremental_required_vram_mb": 0,
+            "result": "HOT_SWITCH_AVAILABLE",
+            "live_target_runtime_status": "RUNNING",
+            "live_target_health_status": "HEALTHY",
+        }
+        # Target crashes/stops after zero-incremental PREFLIGHT approval.
+        fake_node.containers[str(fixture["target_id"])]["runtime_status"] = "STOPPED"
+        fake_node.containers[str(fixture["target_id"])]["health_status"] = "UNKNOWN"
+        target = await session.get(Deployment, fixture["target_id"])
+        assert target is not None
+        target.runtime_status = RuntimeStatus.STOPPED.value
+        target.health_status = HealthStatus.UNKNOWN.value
+        await session.commit()
+
+    monkeypatch.setattr(
+        GatewayClient,
+        "get_route_runtime",
+        _make_synced_runtime(sf, fixture["endpoint_id"]),
+    )
+
+    start_before = sum(
+        1 for c in fake_node.calls if str(c.get("path", "")).endswith("/start")
+    )
+    await _claim_and_execute(
+        sf,
+        job_id=job_id,
+        settings=_settings(),
+        transport=transport,
+        engine=sf.kw["bind"],
+    )
+    start_after = sum(
+        1 for c in fake_node.calls if str(c.get("path", "")).endswith("/start")
+    )
+    assert start_after == start_before
+
+    async with sf() as session:
+        from app.domain.models import EndpointAlias, EndpointRoute
+
+        op = await session.get(Operation, op_id)
+        target = await session.get(Deployment, fixture["target_id"])
+        alias = await session.get(EndpointAlias, fixture["endpoint_id"])
+        assert op and target and alias
+        assert op.status == OperationStatus.FAILED.value
+        assert op.error_code == "HOT_RETAINED_TARGET_STATE_CHANGED"
+        assert (op.metadata_json or {}).get(
+            "hot_target_start_owned_by_operation"
+        ) is not True
+        assert target.runtime_status == RuntimeStatus.STOPPED.value
+        assert alias.traffic_state == "SERVING"
+        active = (
+            await session.execute(
+                select(EndpointRoute).where(
+                    EndpointRoute.endpoint_alias_id == fixture["endpoint_id"],
+                    EndpointRoute.status == "ACTIVE",
+                )
+            )
+        ).scalar_one()
+        assert str(active.deployment_id) == str(fixture["source_id"])
+        start_step = (
+            await session.execute(
+                select(OperationStep).where(
+                    OperationStep.operation_id == op_id,
+                    OperationStep.step_code == "START_TARGET",
+                )
+            )
+        ).scalar_one()
+        assert start_step.status == StepStatus.FAILED.value
+        activate = (
+            await session.execute(
+                select(OperationStep).where(
+                    OperationStep.operation_id == op_id,
+                    OperationStep.step_code == "ACTIVATE_TARGET_ROUTE",
+                )
+            )
+        ).scalar_one()
+        assert activate.status == StepStatus.PENDING.value
+
+
+@pytest.mark.asyncio
+async def test_d2c_fresh_retry_after_state_change_uses_full_preflight(
+    db, monkeypatch
+) -> None:
+    """New retry child after state-change failure does full-start preflight."""
+    sf = db
+    fake_node = ColdSwitchFakeNodeAgent()
+    fake_gw = FakeGateway()
+    transport = CombinedTransport(fake_node, fake_gw)
+    _configure_hot_vram(fake_node)
+
+    async with sf() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        await _seed_standard_runtime(fake_node, fake_gw, fixture)
+        fake_node.containers[str(fixture["source_id"])]["health_status"] = "HEALTHY"
+        # Prior child failed with Target STOPPED after zero-incremental proof.
+        tgt = f"ctr-tgt-fr-{fixture['suffix']}"
+        fake_node.containers[str(fixture["target_id"])] = {
+            "deployment_id": str(fixture["target_id"]),
+            "container_id": tgt,
+            "container_name": "tgt",
+            "runtime_status": "STOPPED",
+            "health_status": "UNKNOWN",
+        }
+        target = await session.get(Deployment, fixture["target_id"])
+        assert target is not None
+        target.runtime_status = RuntimeStatus.STOPPED.value
+        target.health_status = HealthStatus.UNKNOWN.value
+        target.desired_state = DesiredState.RUNNING.value
+        target.container_id = tgt
+        await session.commit()
+        op_id, job_id = await _enqueue_hot_retry_child(session, fixture=fixture)
+
+    monkeypatch.setattr(
+        GatewayClient,
+        "get_route_runtime",
+        _make_synced_runtime(sf, fixture["endpoint_id"]),
+    )
+
+    start_before = sum(
+        1 for c in fake_node.calls if str(c.get("path", "")).endswith("/start")
+    )
+    await _claim_and_execute(
+        sf,
+        job_id=job_id,
+        settings=_settings(),
+        transport=transport,
+        engine=sf.kw["bind"],
+    )
+    start_after = sum(
+        1 for c in fake_node.calls if str(c.get("path", "")).endswith("/start")
+    )
+    assert start_after == start_before + 1
+
+    async with sf() as session:
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        assert op.status == OperationStatus.SUCCEEDED.value
+        assert (op.metadata_json or {}).get(
+            "hot_target_start_owned_by_operation"
+        ) is True
+        preflight = (
+            await session.execute(
+                select(OperationStep).where(
+                    OperationStep.operation_id == op_id,
+                    OperationStep.step_code == "PREFLIGHT",
+                )
+            )
+        ).scalar_one()
+        detail = preflight.detail_json or {}
+        assert detail.get("preflight_basis") == "FULL_TARGET_START"
+        assert detail.get("incremental_start_required") is True
+        assert detail.get("result") == "HOT_SWITCH_AVAILABLE"

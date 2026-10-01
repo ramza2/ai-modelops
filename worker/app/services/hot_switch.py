@@ -799,9 +799,34 @@ class HotSwitchExecutor(HotSwitchRollbackMixin, HotSwitchRetirementMixin):
                 exc.message, code=exc.code, details=exc.details
             ) from exc
 
-        target_already_running = live_target is not None and str(
-            live_target.get("runtime_status") or ""
-        ) == RuntimeStatus.RUNNING.value
+        live_runtime = (
+            str(live_target.get("runtime_status") or "")
+            if live_target is not None
+            else ""
+        )
+        live_health = (
+            str(live_target.get("health_status") or "")
+            if live_target is not None
+            else ""
+        )
+        target_live_running = live_runtime == RuntimeStatus.RUNNING.value
+        # Zero-incremental reuse requires proven HEALTHY, not merely RUNNING
+        # (loading/allocating GPU memory is not yet a stable retained Target).
+        target_already_running_ready = (
+            target_live_running and live_health == HealthStatus.HEALTHY.value
+        )
+        if target_live_running and not target_already_running_ready:
+            raise PermanentStepError(
+                "Retained Hot Switch Target is RUNNING but not HEALTHY; "
+                "zero-incremental preflight is not proven.",
+                code="HOT_RETAINED_TARGET_NOT_READY",
+                details={
+                    "target_deployment_id": str(target.id),
+                    "live_target_runtime_status": live_runtime,
+                    "live_target_health_status": live_health or None,
+                    "required_health_status": HealthStatus.HEALTHY.value,
+                },
+            )
 
         try:
             resources = await client.fetch_resources()
@@ -831,7 +856,7 @@ class HotSwitchExecutor(HotSwitchRollbackMixin, HotSwitchRetirementMixin):
             str(g.id): required_by_device[str(g.id)] for g in gpu_devices
         }
 
-        if target_already_running:
+        if target_already_running_ready:
             # Zero incremental capacity: Target already holds its VRAM.
             detail_json: dict[str, Any] = {
                 "purpose": "SWITCH",
@@ -852,6 +877,7 @@ class HotSwitchExecutor(HotSwitchRollbackMixin, HotSwitchRetirementMixin):
                 "incremental_start_required": False,
                 "incremental_required_vram_mb": 0,
                 "live_target_runtime_status": RuntimeStatus.RUNNING.value,
+                "live_target_health_status": HealthStatus.HEALTHY.value,
             }
             parent = ResourcePreflight(
                 operation_id=operation.id,
@@ -933,11 +959,8 @@ class HotSwitchExecutor(HotSwitchRollbackMixin, HotSwitchRetirementMixin):
             "preflight_basis": "FULL_TARGET_START",
             "target_already_running": False,
             "incremental_start_required": True,
-            "live_target_runtime_status": (
-                str(live_target.get("runtime_status"))
-                if live_target is not None
-                else None
-            ),
+            "live_target_runtime_status": live_runtime or None,
+            "live_target_health_status": live_health or None,
         }
 
         parent = ResourcePreflight(
@@ -1030,6 +1053,37 @@ class HotSwitchExecutor(HotSwitchRollbackMixin, HotSwitchRetirementMixin):
         meta = dict(operation.metadata_json or {})
         return bool(meta.get("hot_target_start_owned_by_operation"))
 
+    async def _load_hot_preflight_step_detail(
+        self, session: AsyncSession, operation: Operation
+    ) -> dict[str, Any]:
+        """Read this child's successful PREFLIGHT step detail (never parent Op)."""
+        step = (
+            await session.execute(
+                select(OperationStep).where(
+                    OperationStep.operation_id == operation.id,
+                    OperationStep.step_code == STEP_PREFLIGHT,
+                    OperationStep.status == StepStatus.SUCCEEDED.value,
+                )
+            )
+        ).scalar_one_or_none()
+        if step is None:
+            return {}
+        detail = step.detail_json or {}
+        return dict(detail) if isinstance(detail, dict) else {}
+
+    def _preflight_was_retained_target_zero_incremental(
+        self, preflight_detail: dict[str, Any]
+    ) -> bool:
+        basis = preflight_detail.get("preflight_basis")
+        if basis == "FULL_TARGET_START":
+            return False
+        if basis == "TARGET_ALREADY_RUNNING":
+            return True
+        # Fail closed on explicit zero-incremental markers without FULL basis.
+        if preflight_detail.get("incremental_start_required") is False:
+            return True
+        return False
+
     async def _step_start_target_hot(
         self,
         session: AsyncSession,
@@ -1044,6 +1098,10 @@ class HotSwitchExecutor(HotSwitchRollbackMixin, HotSwitchRetirementMixin):
         Ownership is claimed only when this Operation authorizes an external
         start of a non-RUNNING Target, and is committed before the Node Agent
         mutation so crash/timeout cannot lose cleanup eligibility.
+
+        If PREFLIGHT approved zero-incremental ``TARGET_ALREADY_RUNNING`` and
+        this child never owned a start, a non-RUNNING Target must fail closed
+        (``HOT_RETAINED_TARGET_STATE_CHANGED``) — never start on a stale proof.
         """
         inspected = await client.get_deployment(str(target.id), mutation=mutation)
         already_running = inspected is not None and str(
@@ -1063,7 +1121,35 @@ class HotSwitchExecutor(HotSwitchRollbackMixin, HotSwitchRetirementMixin):
                 "hot_target_start_owned_by_operation": owned,
             }
 
-        # Not RUNNING: authorize/start. Claim ownership before external mutation.
+        # Not RUNNING: if PREFLIGHT was zero-incremental retained path and this
+        # child never owned a start, refuse to start on a stale capacity proof.
+        if not owned:
+            preflight_detail = await self._load_hot_preflight_step_detail(
+                session, operation
+            )
+            if self._preflight_was_retained_target_zero_incremental(preflight_detail):
+                live_runtime = (
+                    str(inspected.get("runtime_status") or "")
+                    if inspected is not None
+                    else None
+                )
+                raise PermanentStepError(
+                    "Retained Hot Switch Target is no longer RUNNING after "
+                    "zero-incremental PREFLIGHT; refusing start without fresh "
+                    "full-capacity preflight.",
+                    code="HOT_RETAINED_TARGET_STATE_CHANGED",
+                    details={
+                        "target_deployment_id": str(target.id),
+                        "preflight_basis": preflight_detail.get("preflight_basis"),
+                        "incremental_start_required": preflight_detail.get(
+                            "incremental_start_required"
+                        ),
+                        "live_target_runtime_status": live_runtime,
+                        "hot_target_start_owned_by_operation": False,
+                    },
+                )
+
+        # FULL_TARGET_START (or owned crash resume): authorize/start.
         if not owned:
             await self._claim_hot_target_start_ownership(session, repo, operation)
             owned = True

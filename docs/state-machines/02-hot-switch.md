@@ -191,9 +191,12 @@ cancel_requested_at=null; no transient runtime/rollback/reconcile flags
 During Worker PREFLIGHT, inspect **live** Target via Node Agent
 (`MutationHeaders`). Do not trust DB `runtime_status` alone for this path.
 
+- Live Target RUNNING but not HEALTHY → fail closed
+  (`HOT_RETAINED_TARGET_NOT_READY`); never zero-incremental approval while
+  still loading/allocating.
 - Live Target not RUNNING → normal HOT resource preflight; require
   `HOT_SWITCH_AVAILABLE` (never silent HOT→COLD downgrade).
-- Live Target already RUNNING → zero-incremental capacity:
+- Live Target RUNNING + HEALTHY → zero-incremental capacity:
   `preflight_basis=TARGET_ALREADY_RUNNING`,
   `incremental_required_vram_mb=0`, ResourcePreflight numeric fields use
   incremental values (`required_*=0`, `result=HOT_SWITCH_AVAILABLE`) while
@@ -201,8 +204,14 @@ During Worker PREFLIGHT, inspect **live** Target via Node Agent
 
 Continue PREPARE/START/HEALTH/PROBE. Existing START_TARGET: live RUNNING →
 no duplicate start and **do not** claim
-`hot_target_start_owned_by_operation`. Ownership is Operation-specific;
-pre-route failure must not cleanup-stop a Target the child did not start.
+`hot_target_start_owned_by_operation`.
+
+If this child's PREFLIGHT detail was `TARGET_ALREADY_RUNNING` /
+`incremental_start_required=false` and START_TARGET observes Target no
+longer RUNNING, fail closed with `HOT_RETAINED_TARGET_STATE_CHANGED`
+(no start, no ownership). A later explicit retry child performs a fresh
+full-capacity preflight. Ownership crash-resume of a child-owned start is
+unchanged.
 
 Retry ACTIVATE captures the child's current Source `route_id`; do not reuse
 the original Operation's persisted ACTIVATE detail.
