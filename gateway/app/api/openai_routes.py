@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import json
 import logging
 from typing import Any
 
@@ -13,6 +14,7 @@ from fastapi import APIRouter, Request, Response
 from app.core.config import get_settings
 from app.core.enums import ApiType
 from app.core.errors import ErrorCode, GatewayError
+from app.proxy.stats import ProxyCompletionStats
 from app.proxy.upstream import proxy_json_post, proxy_sse_post
 from app.routing.resolve import resolve_route
 from app.routing.snapshot import RouteEntry
@@ -22,6 +24,7 @@ from app.runtime.invocation_log import (
     InvocationLogWriter,
     build_invocation_record,
 )
+from app.runtime.usage import extract_token_usage_from_json_bytes
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["openai"])
@@ -77,7 +80,7 @@ async def list_models(request: Request) -> dict[str, Any]:
 
 @router.post("/v1/chat/completions")
 async def chat_completions(request: Request) -> Response:
-    body = await _read_json_body(request)
+    body, request_bytes = await _read_json_body(request)
     streaming = body.get("stream") is True
     model = str(body.get("model") or "").strip()
     if not model:
@@ -94,7 +97,11 @@ async def chat_completions(request: Request) -> Response:
     upstream_body["model"] = entry.upstream_model_name
     if streaming:
         return await _proxy_streaming_chat(
-            request, entry, upstream_body, admission=admission
+            request,
+            entry,
+            upstream_body,
+            admission=admission,
+            request_bytes=request_bytes,
         )
     return await _proxy_nonstream(
         request,
@@ -103,12 +110,13 @@ async def chat_completions(request: Request) -> Response:
         body=upstream_body,
         is_streaming=False,
         admission=admission,
+        request_bytes=request_bytes,
     )
 
 
 @router.post("/v1/embeddings")
 async def embeddings(request: Request) -> Response:
-    body = await _read_json_body(request)
+    body, request_bytes = await _read_json_body(request)
     model = str(body.get("model") or "").strip()
     if not model:
         raise GatewayError(
@@ -129,6 +137,7 @@ async def embeddings(request: Request) -> Response:
         body=upstream_body,
         is_streaming=False,
         admission=admission,
+        request_bytes=request_bytes,
     )
 
 
@@ -174,6 +183,7 @@ async def _proxy_nonstream(
     body: dict[str, Any],
     is_streaming: bool,
     admission: InflightAdmission,
+    request_bytes: int | None,
 ) -> Response:
     started = dt.datetime.now(tz=dt.UTC)
     request_id = _request_id(request)
@@ -181,6 +191,9 @@ async def _proxy_nonstream(
     http_status = 500
     error_code: str | None = None
     response_bytes: int | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    total_tokens: int | None = None
     try:
         response = await proxy_json_post(
             _http_client(request),
@@ -194,6 +207,11 @@ async def _proxy_nonstream(
         body_bytes = getattr(response, "body", None)
         if isinstance(body_bytes, (bytes, bytearray)):
             response_bytes = len(body_bytes)
+            usage = extract_token_usage_from_json_bytes(body_bytes)
+            if usage is not None:
+                input_tokens = usage.input_tokens
+                output_tokens = usage.output_tokens
+                total_tokens = usage.total_tokens
         return response
     except GatewayError as exc:
         http_status = int(exc.http_status)
@@ -214,7 +232,11 @@ async def _proxy_nonstream(
                 is_streaming=is_streaming,
                 error_code=error_code,
                 raw_client_key=_client_key(request),
+                request_bytes=request_bytes,
                 response_bytes=response_bytes,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                total_tokens=total_tokens,
             )
         )
 
@@ -225,6 +247,7 @@ async def _proxy_streaming_chat(
     body: dict[str, Any],
     *,
     admission: InflightAdmission,
+    request_bytes: int | None,
 ) -> Response:
     """Stream chat completions. Admission is already bound to Deployment.
 
@@ -236,9 +259,7 @@ async def _proxy_streaming_chat(
     inflight = _inflight(request)
     completed = False
 
-    async def _on_complete(
-        http_status: int, response_bytes: int | None, error_code: str | None
-    ) -> None:
+    async def _on_complete(stats: ProxyCompletionStats) -> None:
         nonlocal completed
         if completed:
             return
@@ -252,11 +273,15 @@ async def _proxy_streaming_chat(
                 finished_at=finished,
                 entry=entry,
                 api_path="/v1/chat/completions",
-                http_status=http_status,
+                http_status=stats.http_status,
                 is_streaming=True,
-                error_code=error_code,
+                error_code=stats.error_code,
                 raw_client_key=_client_key(request),
-                response_bytes=response_bytes,
+                request_bytes=request_bytes,
+                response_bytes=stats.response_bytes,
+                input_tokens=stats.input_tokens,
+                output_tokens=stats.output_tokens,
+                total_tokens=stats.total_tokens,
             )
         )
 
@@ -272,17 +297,40 @@ async def _proxy_streaming_chat(
         )
     except GatewayError as exc:
         if not completed:
-            await _on_complete(int(exc.http_status), None, exc.code)
+            await _on_complete(
+                ProxyCompletionStats(
+                    http_status=int(exc.http_status),
+                    response_bytes=None,
+                    error_code=exc.code,
+                )
+            )
         raise
     except Exception:
         if not completed:
-            await _on_complete(500, None, ErrorCode.INTERNAL_ERROR)
+            await _on_complete(
+                ProxyCompletionStats(
+                    http_status=500,
+                    response_bytes=None,
+                    error_code=ErrorCode.INTERNAL_ERROR,
+                )
+            )
         raise
 
 
-async def _read_json_body(request: Request) -> dict[str, Any]:
+async def _read_json_body(request: Request) -> tuple[dict[str, Any], int]:
+    """Parse JSON object body and return (payload, exact request byte length)."""
     try:
-        payload = await request.json()
+        raw = await request.body()
+    except Exception as exc:  # noqa: BLE001
+        raise GatewayError(
+            "Request body must be valid JSON.",
+            code=ErrorCode.VALIDATION_ERROR,
+            http_status=422,
+            param=None,
+        ) from exc
+    request_bytes = len(raw)
+    try:
+        payload = json.loads(raw.decode("utf-8") if raw else "null")
     except Exception as exc:  # noqa: BLE001
         raise GatewayError(
             "Request body must be valid JSON.",
@@ -297,4 +345,4 @@ async def _read_json_body(request: Request) -> dict[str, Any]:
             http_status=422,
             param=None,
         )
-    return payload
+    return payload, request_bytes

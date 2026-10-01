@@ -665,6 +665,16 @@ INDEX(http_status, requested_at DESC)
 
 Prompt/Response 원문 컬럼은 기본 Schema에 포함하지 않는다.
 
+M6-A1: Gateway populates `input_tokens` / `output_tokens` / `total_tokens`
+from upstream OpenAI-compatible `usage` when present, `request_bytes` from the
+exact request body length, and `client_app_id` via async lookup on
+`raw_client_key`. Token values are never estimated by the Gateway.
+Streaming usage may remain NULL when upstream does not emit usage events.
+
+M6-A2 (deferred): vLLM `/metrics` deployment-scoped runtime capacity
+(`kv_cache_usage_perc`, `num_requests_running` / `waiting`, TTFT / queue /
+prefill / decode histograms) is out of scope for A1.
+
 ---
 
 ## 24. audit_log

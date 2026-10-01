@@ -815,6 +815,7 @@ async def test_streaming_source_inflight_survives_cutover() -> None:
 
 @pytest.mark.asyncio
 async def test_streaming_client_disconnect_releases_deployment() -> None:
+    from app.proxy.stats import ProxyCompletionStats
     from app.proxy.upstream import proxy_sse_post
 
     completed = asyncio.Event()
@@ -849,9 +850,7 @@ async def test_streaming_client_disconnect_releases_deployment() -> None:
 
     http_client = httpx.AsyncClient(transport=_CancelTransport())
 
-    async def on_complete(
-        http_status: int, response_bytes: int | None, error_code: str | None
-    ) -> None:
+    async def on_complete(stats: ProxyCompletionStats) -> None:
         await tracker.release(admission)
         completed.set()
 
@@ -881,6 +880,7 @@ async def test_streaming_client_disconnect_releases_deployment() -> None:
 
 @pytest.mark.asyncio
 async def test_streaming_upstream_error_releases_deployment() -> None:
+    from app.proxy.stats import ProxyCompletionStats
     from app.proxy.upstream import proxy_sse_post
 
     completed = asyncio.Event()
@@ -914,9 +914,7 @@ async def test_streaming_upstream_error_releases_deployment() -> None:
 
     http_client = httpx.AsyncClient(transport=_FailTransport())
 
-    async def on_complete(
-        http_status: int, response_bytes: int | None, error_code: str | None
-    ) -> None:
+    async def on_complete(stats: ProxyCompletionStats) -> None:
         await tracker.release(admission)
         completed.set()
 

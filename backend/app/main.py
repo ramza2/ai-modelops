@@ -19,6 +19,7 @@ from app.api.endpoints import router as endpoints_router
 from app.api.health import router as health_router
 from app.api.models import router as models_router
 from app.api.nodes import router as nodes_router
+from app.api.observability import router as observability_router
 from app.api.operations import router as operations_router
 from app.api.preflights import router as preflights_router
 from app.core.config import get_settings
@@ -74,6 +75,7 @@ def create_app() -> FastAPI:
     app.include_router(operations_router)
     app.include_router(endpoints_router)
     app.include_router(preflights_router)
+    app.include_router(observability_router)
     return app
 
 
