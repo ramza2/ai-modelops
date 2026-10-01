@@ -36,6 +36,7 @@ ModelOps 데이터 모델은 다음 요구사항을 우선한다.
 - `deployment`
 - `deployment_gpu_assignment`
 - `deployment_resource_snapshot`
+- `deployment_runtime_metric_snapshot`
 - `health_check`
 
 ### Routing

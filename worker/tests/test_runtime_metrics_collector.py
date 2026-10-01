@@ -205,7 +205,8 @@ async def test_candidate_filtering(db) -> None:
         await _seed_candidate(session, runtime_status="STOPPED")
         await _seed_candidate(session, retired=True)
         await _seed_candidate(session, runtime_type="GENERIC_OPENAI")
-        await _seed_candidate(session, with_node=False)
+        # MANAGED requires node_id at DB level (ck_deployment_managed_node);
+        # collector still filters node_id IS NOT NULL defensively.
         # unhealthy RUNNING VLLM still eligible
         unhealthy = await _seed_candidate(session, health_status="UNHEALTHY")
 
@@ -233,6 +234,7 @@ async def test_candidate_filtering(db) -> None:
     ids = {c["deployment_id"] for c in candidates}
     assert eligible["deployment_id"] in ids
     assert unhealthy["deployment_id"] in ids
+    # Excluded types/statuses must not appear among newly seeded ids.
     assert len(ids) >= 2
     await engine.dispose()
 
