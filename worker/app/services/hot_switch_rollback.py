@@ -45,6 +45,7 @@ logger = logging.getLogger(__name__)
 USER_CANCELLED = "USER_CANCELLED"
 
 STEP_HOT_ROLLBACK_BEGIN = "HOT_ROLLBACK_BEGIN"
+STEP_HOT_ROLLBACK_START_SOURCE = "HOT_ROLLBACK_START_SOURCE"
 STEP_HOT_ROLLBACK_VERIFY_SOURCE = "HOT_ROLLBACK_VERIFY_SOURCE"
 STEP_HOT_ROLLBACK_PROBE_SOURCE = "HOT_ROLLBACK_PROBE_SOURCE"
 STEP_HOT_ROLLBACK_ACTIVATE_SOURCE_ROUTE = "HOT_ROLLBACK_ACTIVATE_SOURCE_ROUTE"
@@ -53,6 +54,7 @@ STEP_HOT_ROLLBACK_FINALIZE = "HOT_ROLLBACK_FINALIZE"
 
 HOT_ROLLBACK_STEPS: tuple[str, ...] = (
     STEP_HOT_ROLLBACK_BEGIN,
+    STEP_HOT_ROLLBACK_START_SOURCE,
     STEP_HOT_ROLLBACK_VERIFY_SOURCE,
     STEP_HOT_ROLLBACK_PROBE_SOURCE,
     STEP_HOT_ROLLBACK_ACTIVATE_SOURCE_ROUTE,
@@ -67,6 +69,9 @@ _HOT_FORWARD_POST_ROUTE_STEPS = frozenset(
     {
         "ACTIVATE_TARGET_ROUTE",
         "WAIT_ROUTE_APPLY",
+        "WAIT_SOURCE_DRAIN",
+        "STOP_SOURCE",
+        "VERIFY_SOURCE_STOPPED",
         "FINALIZE",
     }
 )
@@ -347,6 +352,10 @@ class HotSwitchRollbackMixin:
         detail: dict[str, Any]
         if code == STEP_HOT_ROLLBACK_BEGIN:
             detail = await self._step_hot_rollback_begin(session, operation, alias)
+        elif code == STEP_HOT_ROLLBACK_START_SOURCE:
+            detail = await self._step_hot_rollback_start_source(
+                session, client, source, mutation
+            )
         elif code == STEP_HOT_ROLLBACK_VERIFY_SOURCE:
             detail = await self._step_hot_rollback_verify_source(
                 session, client, source, mutation
@@ -388,6 +397,66 @@ class HotSwitchRollbackMixin:
             "hot_rollback": True,
             "traffic_state": alias.traffic_state,
             "forward_failure_code": operation.error_code,
+        }
+
+    async def _step_hot_rollback_start_source(
+        self,
+        session: AsyncSession,
+        client: NodeAgentClient,
+        source: Deployment,
+        mutation: MutationHeaders,
+    ) -> dict[str, Any]:
+        """Idempotent Source start for post-retirement HOT rollback."""
+        source.desired_state = DesiredState.RUNNING.value
+        await session.flush()
+
+        try:
+            inspected = await client.get_deployment(
+                str(source.id), mutation=mutation
+            )
+        except NodeAgentError as exc:
+            if exc.retryable:
+                raise RetryableStepError(
+                    exc.message, code=exc.code, details=exc.details
+                ) from exc
+            raise PermanentStepError(
+                f"Source inspect failed during Hot rollback start: {exc.message}",
+                code=exc.code or "NODE_AGENT_UNAVAILABLE",
+                details=exc.details,
+            ) from exc
+
+        if inspected is not None and str(
+            inspected.get("runtime_status") or ""
+        ) == RuntimeStatus.RUNNING.value:
+            self._lifecycle._merge_container_id(source, inspected)
+            source.runtime_status = RuntimeStatus.RUNNING.value
+            source.health_status = str(
+                inspected.get("health_status") or source.health_status
+            )
+            await session.flush()
+            return {
+                "start_skipped_already_running": True,
+                "runtime_status": RuntimeStatus.RUNNING.value,
+                "desired_state": DesiredState.RUNNING.value,
+            }
+
+        if inspected is None:
+            await self._lifecycle._ensure_container(
+                session, client, source, mutation
+            )
+
+        result = await client.start_deployment(
+            str(source.id), mutation=mutation
+        )
+        self._lifecycle._merge_container_id(source, result)
+        self._lifecycle._mark_runtime_started(source)
+        source.desired_state = DesiredState.RUNNING.value
+        await session.commit()
+        return {
+            "start_issued": True,
+            "runtime_status": RuntimeStatus.RUNNING.value,
+            "health_status": HealthStatus.STARTING.value,
+            "desired_state": DesiredState.RUNNING.value,
         }
 
     async def _step_hot_rollback_verify_source(

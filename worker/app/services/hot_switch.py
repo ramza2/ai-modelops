@@ -1,10 +1,8 @@
-"""M5-D1/D2-A Hot Switch forward executor.
+"""M5-D1/D2-A/D2-B2 Hot Switch forward executor.
 
 Keeps Source SERVING while Target is prepared, started, probed, then
-cut over via route activation. Does not stop Source after success (D1).
-
-M5-D2-A adds RUNNING cancel, route-boundary race handling, and HOT rollback
-to Source without stopping Target after cutover.
+cut over via route activation. M5-D2-B2 optionally drains and stops Source
+after Target is ACTIVE when process-local drain proof succeeds.
 """
 
 from __future__ import annotations
@@ -62,6 +60,20 @@ from app.services.cold_switch import (
     ColdSwitchExecutor,
     _bump_routing_version,
 )
+from app.services.hot_switch_retirement import (
+    B2_RETIREMENT_FLAG,
+    HOT_SOURCE_RETAINED,
+    HOT_SOURCE_RETIRED,
+    RETIREMENT_SKIPPED,
+    RETIREMENT_SKIPPED_REASON,
+    SOURCE_STOP_VERIFIED,
+    STEP_STOP_SOURCE,
+    STEP_VERIFY_SOURCE_STOPPED,
+    STEP_WAIT_SOURCE_DRAIN,
+    HotSwitchRetirementMixin,
+    operation_has_b2_retirement,
+    retirement_was_skipped,
+)
 from app.services.hot_switch_rollback import (
     HOT_ROUTE_BOUNDARY_FLAG,
     HOT_ROLLBACK_STEPS,
@@ -87,14 +99,32 @@ HOT_SWITCH_STEPS: tuple[str, ...] = (
     STEP_PROBE_TARGET,
     STEP_ACTIVATE_TARGET_ROUTE,
     STEP_WAIT_ROUTE_APPLY,
+    STEP_WAIT_SOURCE_DRAIN,
+    STEP_STOP_SOURCE,
+    STEP_VERIFY_SOURCE_STOPPED,
     STEP_FINALIZE,
 )
 
-# Steps after which route mutation may have occurred.
+HOT_SWITCH_STEPS_LEGACY_D2A: tuple[str, ...] = (
+    STEP_VALIDATE,
+    STEP_PREFLIGHT,
+    STEP_PREPARE_TARGET,
+    STEP_START_TARGET,
+    STEP_WAIT_TARGET_HEALTH,
+    STEP_PROBE_TARGET,
+    STEP_ACTIVATE_TARGET_ROUTE,
+    STEP_WAIT_ROUTE_APPLY,
+    STEP_FINALIZE,
+)
+
+# Steps after which route mutation may have occurred / Source stop may begin.
 _POST_ROUTE_STEPS = frozenset(
     {
         STEP_ACTIVATE_TARGET_ROUTE,
         STEP_WAIT_ROUTE_APPLY,
+        STEP_WAIT_SOURCE_DRAIN,
+        STEP_STOP_SOURCE,
+        STEP_VERIFY_SOURCE_STOPPED,
         STEP_FINALIZE,
     }
 )
@@ -104,8 +134,8 @@ class CancelRequestedError(Exception):
     """Raised when cancel_requested_at is observed at a safe checkpoint."""
 
 
-class HotSwitchExecutor(HotSwitchRollbackMixin):
-    """Execute a claimed SWITCH/HOT Operation forward path (M5-D1/D2-A)."""
+class HotSwitchExecutor(HotSwitchRollbackMixin, HotSwitchRetirementMixin):
+    """Execute a claimed SWITCH/HOT Operation forward path (M5-D1/D2-A/B2)."""
 
     def __init__(self, lifecycle: OperationExecutor) -> None:
         self._lifecycle = lifecycle
@@ -527,10 +557,21 @@ class HotSwitchExecutor(HotSwitchRollbackMixin):
                     )
                     return
 
-            # All forward steps done.
+            # All forward steps done — FINALIZE is authoritative for desired_state.
             await session.refresh(source)
             await session.refresh(target)
-            source.desired_state = DesiredState.RUNNING.value
+            await session.refresh(operation)
+            steps_done = await repo.list_steps(operation_id)
+            b2 = operation_has_b2_retirement(operation, steps_done)
+            skipped = retirement_was_skipped(operation, steps_done)
+            if b2 and not skipped and source.desired_state == DesiredState.STOPPED.value:
+                # Keep Source STOPPED after successful retirement.
+                pass
+            elif b2 and skipped:
+                source.desired_state = DesiredState.RUNNING.value
+            else:
+                # Legacy D2-A / retained path.
+                source.desired_state = DesiredState.RUNNING.value
             target.desired_state = DesiredState.RUNNING.value
             await session.flush()
             await repo.mark_operation_succeeded(operation_id)
@@ -610,8 +651,31 @@ class HotSwitchExecutor(HotSwitchRollbackMixin):
             detail = await self._step_wait_route_apply(
                 session, gateway, operation, alias, target, step
             )
+        elif code == STEP_WAIT_SOURCE_DRAIN:
+            detail = await self._step_wait_source_drain(
+                session, repo, gateway, operation, alias, source, target, step
+            )
+        elif code == STEP_STOP_SOURCE:
+            detail = await self._step_stop_source_hot(
+                session,
+                repo,
+                client,
+                gateway,
+                operation,
+                alias,
+                source,
+                target,
+                step,
+                mutation,
+            )
+        elif code == STEP_VERIFY_SOURCE_STOPPED:
+            detail = await self._step_verify_source_stopped(
+                session, repo, client, operation, source, mutation
+            )
         elif code == STEP_FINALIZE:
-            detail = await self._step_finalize(session, alias, source, target)
+            detail = await self._step_finalize(
+                session, repo, operation, alias, source, target
+            )
         else:
             raise PermanentStepError(
                 f"Unknown Hot Switch step_code: {code}",
@@ -1148,6 +1212,8 @@ class HotSwitchExecutor(HotSwitchRollbackMixin):
     async def _step_finalize(
         self,
         session: AsyncSession,
+        repo: OperationJobRepository,
+        operation: Operation,
         alias: EndpointAlias,
         source: Deployment,
         target: Deployment,
@@ -1155,6 +1221,7 @@ class HotSwitchExecutor(HotSwitchRollbackMixin):
         await session.refresh(alias)
         await session.refresh(source)
         await session.refresh(target)
+        await session.refresh(operation)
 
         if alias.traffic_state != TrafficState.SERVING.value:
             raise PermanentStepError(
@@ -1194,21 +1261,78 @@ class HotSwitchExecutor(HotSwitchRollbackMixin):
                 code="FINALIZE_INVARIANT",
                 details={"health_status": target.health_status},
             )
-        # D1: Source must remain RUNNING (warm fallback; no auto-stop).
+
+        steps = await repo.list_steps(uuid.UUID(str(operation.id)))
+        b2 = operation_has_b2_retirement(operation, steps)
+        skipped = retirement_was_skipped(operation, steps)
+        meta = operation.metadata_json or {}
+
+        if b2 and not skipped:
+            # Retired success path.
+            if source.runtime_status != RuntimeStatus.STOPPED.value:
+                raise PermanentStepError(
+                    "Hot FINALIZE retirement path requires Source STOPPED.",
+                    code="FINALIZE_INVARIANT",
+                    details={"runtime_status": source.runtime_status},
+                )
+            if source.desired_state != DesiredState.STOPPED.value:
+                source.desired_state = DesiredState.STOPPED.value
+            if not bool(meta.get(SOURCE_STOP_VERIFIED)):
+                # VERIFY step should have set this; tolerate step detail.
+                verify = next(
+                    (s for s in steps if s.step_code == STEP_VERIFY_SOURCE_STOPPED),
+                    None,
+                )
+                if verify is None or not bool(
+                    (verify.detail_json or {}).get(SOURCE_STOP_VERIFIED)
+                ):
+                    raise PermanentStepError(
+                        "Hot FINALIZE retirement path requires VERIFY_SOURCE_STOPPED.",
+                        code="FINALIZE_INVARIANT",
+                    )
+            patch = {
+                HOT_SOURCE_RETIRED: True,
+                HOT_SOURCE_RETAINED: False,
+            }
+            await self._persist_operation_meta_patch(session, operation, patch)
+            return {
+                "source_desired_state": DesiredState.STOPPED.value,
+                "target_desired_state": DesiredState.RUNNING.value,
+                "source_runtime_status": RuntimeStatus.STOPPED.value,
+                "active_deployment_id": str(target.id),
+                "traffic_state": TrafficState.SERVING.value,
+                HOT_SOURCE_RETIRED: True,
+                HOT_SOURCE_RETAINED: False,
+            }
+
+        # Retained / legacy D2-A path.
         if source.runtime_status != RuntimeStatus.RUNNING.value:
             raise PermanentStepError(
-                "Hot FINALIZE requires Source runtime still RUNNING.",
+                "Hot FINALIZE retained path requires Source runtime RUNNING.",
                 code="FINALIZE_INVARIANT",
                 details={"runtime_status": source.runtime_status},
             )
-
+        source.desired_state = DesiredState.RUNNING.value
+        reason = meta.get(RETIREMENT_SKIPPED_REASON)
+        patch = {
+            HOT_SOURCE_RETIRED: False,
+            HOT_SOURCE_RETAINED: True,
+        }
+        if skipped:
+            patch[RETIREMENT_SKIPPED] = True
+            if reason:
+                patch[RETIREMENT_SKIPPED_REASON] = reason
+        await self._persist_operation_meta_patch(session, operation, patch)
         return {
             "source_desired_state": DesiredState.RUNNING.value,
             "target_desired_state": DesiredState.RUNNING.value,
             "source_runtime_status": RuntimeStatus.RUNNING.value,
             "active_deployment_id": str(target.id),
             "traffic_state": TrafficState.SERVING.value,
-            "hot_source_retained": True,
+            HOT_SOURCE_RETIRED: False,
+            HOT_SOURCE_RETAINED: True,
+            RETIREMENT_SKIPPED: bool(skipped),
+            RETIREMENT_SKIPPED_REASON: reason,
         }
 
     async def _handle_terminal_failure(
@@ -1680,8 +1804,14 @@ class HotSwitchExecutor(HotSwitchRollbackMixin):
         ).scalar_one_or_none()
         required_version = self._required_route_routing_version(activate, wait)
 
-        # Prove Target fully serving with probe + applied version + Source RUNNING.
-        if (
+        meta = operation.metadata_json or {}
+        destructive = bool(meta.get("destructive_boundary_entered"))
+        b2 = bool(meta.get(B2_RETIREMENT_FLAG)) or operation_has_b2_retirement(
+            operation
+        )
+        skipped = bool(meta.get(RETIREMENT_SKIPPED))
+
+        target_proven = (
             probe is not None
             and probe.status == StepStatus.SUCCEEDED.value
             and db_active == str(target.id)
@@ -1693,8 +1823,46 @@ class HotSwitchExecutor(HotSwitchRollbackMixin):
             and gw_applied >= required_version
             and target.runtime_status == RuntimeStatus.RUNNING.value
             and target.health_status == HealthStatus.HEALTHY.value
-            and source.runtime_status == RuntimeStatus.RUNNING.value
+        )
+
+        # B2 retired success: Target proven + Source STOPPED after destructive boundary.
+        if (
+            b2
+            and target_proven
+            and destructive
+            and source.runtime_status == RuntimeStatus.STOPPED.value
         ):
+            source.desired_state = DesiredState.STOPPED.value
+            target.desired_state = DesiredState.RUNNING.value
+            await self._reconcile_post_route_steps_succeeded(session, operation)
+            await session.flush()
+            await repo.mark_operation_succeeded(uuid.UUID(str(operation.id)))
+            await repo.mark_job_done(uuid.UUID(str(job.id)))
+            return
+
+        # After Source-stop boundary with ambiguous Source → MIR (never guess).
+        if b2 and destructive and source.runtime_status != RuntimeStatus.STOPPED.value:
+            await repo.finalize_operation_manual_intervention(
+                operation_id=uuid.UUID(str(operation.id)),
+                job_id=uuid.UUID(str(job.id)),
+                code=code,
+                message=message,
+            )
+            return
+
+        # Prove Target fully serving with Source still RUNNING (legacy / retained).
+        if target_proven and source.runtime_status == RuntimeStatus.RUNNING.value:
+            # B2 without skip and without stop must not terminalize SUCCEEDED here
+            # merely because Target is serving — resume drain/stop instead via MIR
+            # only when retirement was not skipped and stop not done.
+            if b2 and not skipped and not destructive:
+                await repo.finalize_operation_manual_intervention(
+                    operation_id=uuid.UUID(str(operation.id)),
+                    job_id=uuid.UUID(str(job.id)),
+                    code=code,
+                    message=message,
+                )
+                return
             source.desired_state = DesiredState.RUNNING.value
             target.desired_state = DesiredState.RUNNING.value
             await self._reconcile_post_route_steps_succeeded(session, operation)

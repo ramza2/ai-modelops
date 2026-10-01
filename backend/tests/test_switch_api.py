@@ -391,6 +391,7 @@ async def test_enqueue_hot_switch_happy_path(client) -> None:
     assert all(s["status"] == "PENDING" for s in body["steps"])
     assert body["metadata"]["strategy"] == "HOT"
     assert body["metadata"]["m5d1_hot_forward"] is True
+    assert body["metadata"]["m5d2b2_source_retirement"] is True
     assert body["metadata"]["health_timeout_seconds"] == 90
     # Cold-only steps must not appear.
     codes = {s["step_code"] for s in body["steps"]}

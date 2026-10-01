@@ -1,12 +1,13 @@
-# Hot Switch State Machine (M5-D1 / M5-D2-A / M5-D2-B1)
+# Hot Switch State Machine (M5-D1 / M5-D2-A / M5-D2-B1 / M5-D2-B2)
 
 ## 1. Purpose
 
 Hot Switch prepares and starts Target while Source continues to serve traffic,
 then cut over the ACTIVE route after a successful inference probe.
 
-Unlike Cold Switch, Hot Switch does **not** drain traffic, stop Source, or wait
-for VRAM reclaim before Target start.
+Unlike Cold Switch, Hot Switch does **not** drain Endpoint traffic or wait for
+VRAM reclaim before Target start. After cutover, M5-D2-B2 may retire Source
+when process-local drain proof succeeds.
 
 Authoritative Worker Preflight must return `HOT_SWITCH_AVAILABLE`.
 Management API enqueue never treats standalone `POST /preflights` preview as
@@ -16,19 +17,17 @@ execution approval.
 
 - **M5-D1:** executable `strategy=HOT` happy path + pre-route failure path +
   crash/resume idempotency for forward steps + Target start ownership.
-- **M5-D2-A (this document):** RUNNING HOT cancel, route-boundary race,
-  HOT rollback to Source, MIR reconciliation / sweeper.
-- **M5-D2-B1:** Gateway Deployment-scoped drain telemetry
-  (`admit` → `bind` → `release`, unbound + global Deployment inflight,
-  `/internal/v1/routes/{alias}/runtime?deployment_id=`).
-  Source stop/retirement is **not** executed in B1.
-- **Deferred to M5-D2-B2/C:**
-  - automatic Source retirement / drain after cutover (uses B1 proof inputs)
+- **M5-D2-A:** RUNNING HOT cancel, route-boundary race, HOT rollback to Source,
+  MIR reconciliation / sweeper.
+- **M5-D2-B1:** Gateway Deployment-scoped drain telemetry.
+- **M5-D2-B2 (this document):** HOT Source drain → safe retirement/stop after
+  cutover, with intentional retention when shared/drain-timeout.
+- **Deferred:**
   - post-route Target shutdown
   - HOT explicit retry
   - `AUTO` / `ALTERNATE_NODE`
 
-## 3. Forward steps (9)
+## 3. Forward steps (12 for new B2 Operations)
 
 ```text
 VALIDATE
@@ -39,178 +38,120 @@ WAIT_TARGET_HEALTH
 PROBE_TARGET
 ACTIVATE_TARGET_ROUTE
 WAIT_ROUTE_APPLY
+WAIT_SOURCE_DRAIN
+STOP_SOURCE
+VERIFY_SOURCE_STOPPED
 FINALIZE
+```
+
+New Operations set metadata `m5d2b2_source_retirement=true`.
+
+Legacy Operations without the marker / without B2 steps keep D2-A behavior:
+
+```text
+Target ACTIVE + SERVING
+Source retained RUNNING
+SUCCEEDED
 ```
 
 ## 4. Traffic and Source policy
 
-- Endpoint `traffic_state` remains `SERVING` throughout HOT forward and D2-A rollback.
-- Source remains `RUNNING` during preparation, after D1 success, and during D2-A rollback.
-- Do **not** stop Source after route cutover in D2-A.
-- Do **not** automatically stop Target after it may have served as ACTIVE (D2-A).
+- Endpoint `traffic_state` remains `SERVING` throughout HOT forward and rollback.
+- Source remains `RUNNING` until B2 Source-stop destructive boundary succeeds.
+- Successful B2 outcomes:
+  - `SUCCEEDED` + Source retired `STOPPED` (`hot_source_retired=true`)
+  - `SUCCEEDED` + Source safely retained `RUNNING` (`hot_source_retained=true`,
+    `retirement_skipped=true`)
+- Do **not** automatically stop Target after it may have served as ACTIVE.
 
-## 5. Preflight
+## 5. Source drain proof (WAIT_SOURCE_DRAIN)
 
-Worker `PREFLIGHT` requires fresh `HOT_SWITCH_AVAILABLE`. Never silently downgrade to COLD.
+Control Plane (under Endpoint+Source+Target advisory locks):
 
-## 6. Route cutover + cancel boundary
+- If Source is still ACTIVE for any Alias → skip retirement
+  (`SOURCE_ACTIVE_ON_OTHER_ALIAS`), keep Source RUNNING, finalize success.
 
-Durable metadata marker:
-
-```text
-hot_route_boundary_entered=true
-```
-
-Immediately before `ACTIVATE_TARGET_ROUTE`, under Job → Operation row locks:
-
-- if `cancel_requested_at` set → do **not** enter boundary; pre-route cancel
-- else → persist `hot_route_boundary_entered=true`, commit, release locks, then activate
-
-Never hold DB row locks across Gateway / Node Agent HTTP.
-
-Cancel after the boundary marker is **post-route rollback intent** only
-(never direct `CANCELLED`).
-
-`ACTIVATE_TARGET_ROUTE == RUNNING` alone (post-`begin_step`, pre-boundary
-decision) is **not** route-mutation evidence. Durable evidence requires
-`hot_route_boundary_entered`, DB ACTIVE=Target, persisted
-`route_routing_version`, ACTIVATE `SUCCEEDED`, or WAIT/FINALIZE progress.
-
-Generic Worker `mark_operation_failed` backstop: SWITCH +
-(`destructive_boundary_entered` **or** `hot_route_boundary_entered`) → MIR.
-
-## 7. RUNNING HOT cancel
-
-| Phase | Outcome |
-|---|---|
-| QUEUED | `CANCELLED` (D1) |
-| RUNNING, before route boundary | `CANCELLED` after Source proven ACTIVE+SERVING (DB+Gateway) + live Source RUNNING; owned Target may be best-effort stopped |
-| RUNNING, boundary entered | `ROLLING_BACK` → HOT rollback → `ROLLED_BACK` |
-| Already `ROLLING_BACK` | idempotent intent; continue existing rollback once |
-| Terminal `CANCELLED` / cancel-caused `ROLLED_BACK` | idempotent |
-
-Target ownership for pre-route cleanup:
+Otherwise read global `RoutingState.version` as
+`retirement_proof_routing_version`, then poll Gateway:
 
 ```text
-hot_target_start_owned_by_operation=true
+GET /internal/v1/routes/{alias}/runtime?deployment_id=<source>
 ```
 
-Never stop a Target that was already RUNNING before this Operation.
-Target cleanup failure alone does not convert a proven-safe cancel into MIR.
-
-## 8. HOT rollback steps
-
-```text
-HOT_ROLLBACK_BEGIN
-HOT_ROLLBACK_VERIFY_SOURCE   # live Node Agent RUNNING+HEALTHY
-HOT_ROLLBACK_PROBE_SOURCE    # inference probe required
-HOT_ROLLBACK_ACTIVATE_SOURCE_ROUTE  # traffic stays SERVING; version +1 once
-HOT_ROLLBACK_WAIT_ROUTE_APPLY
-HOT_ROLLBACK_FINALIZE        # Target retained RUNNING if it may have served
-```
-
-HOT rollback reactivates the **exact persisted original Source route**
-identified by durable `source_route_id` written during forward
-`ACTIVATE_TARGET_ROUTE` (same transaction as the route cutover). It
-preserves that row's `rewrite_model_name`. Missing / mismatched Source
-route identity ends in `MANUAL_INTERVENTION_REQUIRED` rather than
-selecting another historical Source route or reconstructing routing
-configuration.
-
-Successful finalize → `ROLLED_BACK` + Job `DONE` +
-`hot_target_retained_after_rollback=true`.
-
-## 9. MIR reconciliation
-
-Dedicated `HotSwitchReconciler` (not Cold branches) for HOT MIR only:
-
-- Target fully proven + no cancel → `SUCCEEDED`
-- safe forward lag → resume `WAIT_ROUTE_APPLY` / `FINALIZE`
-- pre-route cancel proven → `CANCELLED`
-- post-route cancel → resume `ROLLING_BACK` (steps created once)
-- Source restore proven → `ROLLED_BACK`
-- ambiguous / GW or NA unavailable → remain MIR
-
-Sweeper: bounded batch, `FOR UPDATE SKIP LOCKED`, cooldown/backoff metadata,
-advisory locks, multi-worker safe.
-
-## 10. Non-negotiable invariants
-
-1. HOT D2-A never changes Endpoint traffic away from `SERVING`.
-2. Target ACTIVE only after persisted Target probe success.
-3. Source restored ACTIVE only after live health + Source inference probe.
-4. At most one ACTIVE route; each real route change bumps version once.
-5. Resume/reconcile never double-bumps a committed route change.
-6. Gateway applied version required for terminal route proof.
-7. Source never stopped by D2-A.
-8. After route boundary, D2-A never automatically stops Target.
-9. Cancel/route race has one winner via Job → Operation lock ordering.
-10. Never infer success from DB alone.
-
-## 11. Advisory locks
-
-Same namespace as Cold Switch: Endpoint → Node → Source → Target.
-No external HTTP while DB row locks are held.
-
-## 12. Gateway Deployment drain telemetry (M5-D2-B1)
-
-After HOT cutover Alias stays `SERVING` and new traffic goes to Target, so
-Alias-wide `inflight_requests` may never reach zero under live load.
-Cold `DRAINING` alias drain is therefore insufficient for Source retirement.
-
-Gateway process-local admission:
-
-```text
-admit(alias)           # alias total +1, unbound +1  (before resolve)
-bind(deployment_id)    # unbound -1, deployment +1   (after resolve)
-release()              # exactly once on request/stream completion
-```
-
-Streaming holds Deployment inflight for the full SSE lifetime (EOF, upstream
-error, timeout, client disconnect).
-
-Distinguish three counters:
-
-```text
-unbound_requests              # Alias-local diagnostic only
-global_unbound_requests       # process-global unbound (authoritative for B2)
-observed_deployment_inflight  # process-global Deployment bound count
-```
-
-A later Source-retirement Worker (D2-B2) may treat Source drain as proven only
-when one Gateway observation shows at least:
+Safe observation requires all of:
 
 ```text
 active_deployment_id == Target
-applied_routing_version >= HOT cutover routing version
 traffic_state == SERVING
+applied_routing_version >= retirement_proof_routing_version
 global_unbound_requests == 0
 observed_deployment_id == Source
 observed_deployment_inflight_requests == 0
 ```
 
-Alias-local `unbound_requests == 0` is **not** sufficient: another Alias may still
-hold a RESERVED admission that later binds the old Source after cutover.
+Alias-local `unbound_requests` / `inflight_requests` are diagnostics only.
 
-`observed_deployment_idle` alone is not “safe to stop Source”.
-Alias-wide `inflight_requests` need not be zero (Target traffic is allowed).
+Drain timeout / temporary telemetry gaps → skip retirement (retain Source),
+not Switch failure. Routing contradictions remain fail-closed/MIR.
 
-Complete future B2 concept (telemetry + routing; not implemented here):
+Cancel during WAIT_SOURCE_DRAIN (before stop boundary) → HOT rollback;
+Source still RUNNING.
+
+## 6. STOP_SOURCE / VERIFY_SOURCE_STOPPED
+
+STOP_SOURCE re-proves shared routes + fresh Gateway drain under reacquired
+locks (stale WAIT detail alone is never enough).
+
+Then Job→Operation `decide_destructive_boundary()`:
+
+- cancel wins → no stop → HOT rollback
+- boundary wins → persist `Source.desired_state=STOPPED` → Node Agent stop
+
+Already live STOPPED / missing container → reconcile without duplicate stop.
+
+VERIFY uses live Node Agent observation (not DB-only).
+
+## 7. Route mutation serialization
+
+Management `EndpointService.set_route()` acquires the same advisory keys as
+Worker (`endpoint:<id>`, `<deployment_id>`) via
+`pg_try_advisory_xact_lock(hashtext(:key))`.
+
+Busy → `409 ROUTE_MUTATION_BUSY` (fail closed, no long wait).
+
+Manual activate requires `desired_state=RUNNING` + live RUNNING/HEALTHY +
+not retired.
+
+## 8. HOT rollback (post Source retirement)
 
 ```text
-Gateway:
-  Target active
-  cutover version applied
-  traffic SERVING
-  process-global unbound == 0
-  Source deployment inflight == 0
-
-Control Plane routing:
-  Source not ACTIVE for any other Alias
+HOT_ROLLBACK_BEGIN
+HOT_ROLLBACK_START_SOURCE
+HOT_ROLLBACK_VERIFY_SOURCE
+HOT_ROLLBACK_PROBE_SOURCE
+HOT_ROLLBACK_ACTIVATE_SOURCE_ROUTE
+HOT_ROLLBACK_WAIT_ROUTE_APPLY
+HOT_ROLLBACK_FINALIZE
 ```
 
-No fixed sleep.
+`HOT_ROLLBACK_START_SOURCE` is idempotent (no-op when Source already RUNNING).
+Target is never stopped by HOT rollback.
 
-**MVP constraint:** telemetry is valid only for the current single Gateway
-process/replica model. Do not treat counters as cluster-wide. No Redis /
-shared counters / multi-replica aggregation in B1.
+## 9. Cancel boundary (unchanged routing rule)
+
+| Phase | Outcome |
+|---|---|
+| Pre route boundary | `CANCELLED` after Source proven ACTIVE+SERVING |
+| Post route boundary | `ROLLING_BACK` → HOT rollback → `ROLLED_BACK` |
+| After Source-stop boundary | rollback starts Source, then exact Source route restore |
+
+## 10. Non-negotiable invariants
+
+1. HOT never changes Endpoint traffic away from `SERVING`.
+2. Target ACTIVE only after persisted Target probe success.
+3. Source stop only after fresh B1 drain + no ACTIVE Source routes.
+4. At most one ACTIVE route; each real route change bumps version once.
+5. Never hold DB row locks across Gateway / Node Agent HTTP / drain wait.
+6. Single Gateway process/replica MVP for drain telemetry.
+7. Shared Source + Management `set_route` cannot race stop via advisory locks.
+8. Never infer B2 success from DB-only Source runtime.

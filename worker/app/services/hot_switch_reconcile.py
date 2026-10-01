@@ -52,12 +52,23 @@ from app.services.cold_switch import (
     STEP_PROBE_TARGET,
     STEP_WAIT_ROUTE_APPLY,
 )
+from app.services.hot_switch_retirement import (
+    B2_RETIREMENT_FLAG,
+    RETIREMENT_SKIPPED,
+    SOURCE_STOP_VERIFIED,
+    STEP_STOP_SOURCE,
+    STEP_VERIFY_SOURCE_STOPPED,
+    STEP_WAIT_SOURCE_DRAIN,
+    operation_has_b2_retirement,
+    retirement_was_skipped,
+)
 from app.services.hot_switch_rollback import (
     HOT_ROUTE_BOUNDARY_FLAG,
     HOT_ROLLBACK_STEPS,
     STEP_HOT_ROLLBACK_ACTIVATE_SOURCE_ROUTE,
     STEP_HOT_ROLLBACK_BEGIN,
     STEP_HOT_ROLLBACK_PROBE_SOURCE,
+    STEP_HOT_ROLLBACK_START_SOURCE,
     STEP_HOT_ROLLBACK_WAIT_ROUTE_APPLY,
     durable_hot_route_mutation_from_steps,
 )
@@ -65,10 +76,24 @@ from app.services.hot_switch_rollback import (
 logger = logging.getLogger(__name__)
 
 _POST_ROUTE_STEPS = frozenset(
-    {STEP_ACTIVATE_TARGET_ROUTE, STEP_WAIT_ROUTE_APPLY, STEP_FINALIZE}
+    {
+        STEP_ACTIVATE_TARGET_ROUTE,
+        STEP_WAIT_ROUTE_APPLY,
+        STEP_WAIT_SOURCE_DRAIN,
+        STEP_STOP_SOURCE,
+        STEP_VERIFY_SOURCE_STOPPED,
+        STEP_FINALIZE,
+    }
 )
 _SUCCESS_RECONCILE_STEPS = frozenset(
-    {STEP_ACTIVATE_TARGET_ROUTE, STEP_WAIT_ROUTE_APPLY, STEP_FINALIZE}
+    {
+        STEP_ACTIVATE_TARGET_ROUTE,
+        STEP_WAIT_ROUTE_APPLY,
+        STEP_WAIT_SOURCE_DRAIN,
+        STEP_STOP_SOURCE,
+        STEP_VERIFY_SOURCE_STOPPED,
+        STEP_FINALIZE,
+    }
 )
 
 
@@ -261,6 +286,10 @@ class HotSwitchReconciler:
             db_active = str(active.deployment_id) if active is not None else None
             active_route_id = str(active.id) if active is not None else None
             alias_name = str(alias.alias)
+            op_meta = dict(operation.metadata_json or {})
+            b2_retirement = operation_has_b2_retirement(operation, steps_snapshot)
+            retirement_skipped = retirement_was_skipped(operation, steps_snapshot)
+            destructive = bool(op_meta.get("destructive_boundary_entered"))
             agent_url = (
                 str(node.agent_base_url) if node and node.agent_base_url else None
             )
@@ -345,8 +374,7 @@ class HotSwitchReconciler:
         rb_version = self._rollback_activate_version(steps_snapshot)
         expected_source_route_id = self._forward_source_route_id(steps_snapshot)
 
-        # 1) No cancel + Target fully proven → SUCCEEDED.
-        if not cancel_requested and self._target_fully_serving(
+        target_serving = self._target_route_proven(
             db_active=db_active,
             db_traffic=db_traffic,
             gw_active=gw_active_s,
@@ -356,8 +384,56 @@ class HotSwitchReconciler:
             target_id=str(target_id),
             target_runtime=tgt_rt,
             target_health=tgt_hp,
-            source_runtime=src_rt,
             probe_succeeded=probe_ok,
+        )
+
+        # 1a) B2 no cancel + Target proven + Source STOPPED + retirement evidence → SUCCEEDED.
+        if (
+            not cancel_requested
+            and b2_retirement
+            and target_serving
+            and src_rt == RuntimeStatus.STOPPED.value
+            and (
+                destructive
+                or bool(op_meta.get(SOURCE_STOP_VERIFIED))
+                or self._step_succeeded(steps_snapshot, STEP_VERIFY_SOURCE_STOPPED)
+                or self._step_succeeded(steps_snapshot, STEP_STOP_SOURCE)
+            )
+        ):
+            return await self._finish_succeeded(
+                operation_id=operation_id,
+                job_id=job_id,
+                source_id=source_id,
+                target_id=target_id,
+                attempt=attempt,
+                reason="b2 target serving + source stopped retirement proven",
+                source_desired=DesiredState.STOPPED.value,
+            )
+
+        # 1b) B2 retention skip + Target proven + Source RUNNING → SUCCEEDED retained.
+        if (
+            not cancel_requested
+            and b2_retirement
+            and retirement_skipped
+            and target_serving
+            and src_rt == RuntimeStatus.RUNNING.value
+        ):
+            return await self._finish_succeeded(
+                operation_id=operation_id,
+                job_id=job_id,
+                source_id=source_id,
+                target_id=target_id,
+                attempt=attempt,
+                reason="b2 target serving + source retained (retirement skipped)",
+                source_desired=DesiredState.RUNNING.value,
+            )
+
+        # 1c) Legacy D2-A: No cancel + Target fully proven + Source RUNNING → SUCCEEDED.
+        if (
+            not cancel_requested
+            and not b2_retirement
+            and target_serving
+            and src_rt == RuntimeStatus.RUNNING.value
         ):
             return await self._finish_succeeded(
                 operation_id=operation_id,
@@ -366,7 +442,60 @@ class HotSwitchReconciler:
                 target_id=target_id,
                 attempt=attempt,
                 reason="target fully serving invariants proven",
+                source_desired=DesiredState.RUNNING.value,
             )
+
+        # B2 no cancel + Target proven + Source RUNNING + retirement not skipped
+        # → resume WAIT_SOURCE_DRAIN / STOP / VERIFY rather than SUCCEEDED.
+        if (
+            not cancel_requested
+            and b2_retirement
+            and not retirement_skipped
+            and target_serving
+            and src_rt == RuntimeStatus.RUNNING.value
+            and not destructive
+        ):
+            for code, label in (
+                (STEP_WAIT_SOURCE_DRAIN, "reopened WAIT_SOURCE_DRAIN"),
+                (STEP_STOP_SOURCE, "reopened STOP_SOURCE"),
+                (STEP_VERIFY_SOURCE_STOPPED, "reopened VERIFY_SOURCE_STOPPED"),
+                (STEP_FINALIZE, "reopened FINALIZE"),
+            ):
+                fwd = self._step_by_code(steps_snapshot, code)
+                if fwd is None:
+                    continue
+                if fwd.status == StepStatus.SUCCEEDED.value:
+                    continue
+                ok = await self._reopen(
+                    operation_id,
+                    job_id,
+                    uuid.UUID(str(fwd.id)),
+                    OperationStatus.RUNNING.value,
+                    "RECONCILE_RESUME_FORWARD",
+                    "Safe Hot B2 retirement resume after MIR reconciliation.",
+                    "RESUME_FORWARD",
+                    attempt,
+                )
+                if ok:
+                    return ReconcileResult("RESUME_FORWARD", label, resumed=True)
+                break
+
+        # B2 cancel + Source STOPPED → resume rollback (START_SOURCE).
+        if (
+            cancel_requested
+            and b2_retirement
+            and (boundary_entered or route_mutation or destructive)
+            and src_rt == RuntimeStatus.STOPPED.value
+        ):
+            resumed = await self._resume_or_create_rollback(
+                operation_id=operation_id,
+                job_id=job_id,
+                steps_snapshot=steps_snapshot,
+                attempt=attempt,
+            )
+            if resumed is not None:
+                return resumed
+
 
         # 5) Source fully restored after post-route rollback → ROLLED_BACK.
         # Exact Source route identity is required — deployment_id alone is insufficient.
@@ -618,6 +747,34 @@ class HotSwitchReconciler:
         )
 
     @staticmethod
+    def _target_route_proven(
+        *,
+        db_active: str | None,
+        db_traffic: str,
+        gw_active: str | None,
+        gw_traffic: str,
+        gw_version: int,
+        activate_version: int | None,
+        target_id: str,
+        target_runtime: str,
+        target_health: str,
+        probe_succeeded: bool,
+    ) -> bool:
+        """Target ACTIVE+SERVING+healthy without requiring Source RUNNING."""
+        if activate_version is None:
+            return False
+        return (
+            probe_succeeded
+            and db_active == target_id
+            and db_traffic == TrafficState.SERVING.value
+            and gw_active == target_id
+            and gw_traffic == TrafficState.SERVING.value
+            and gw_version >= activate_version
+            and target_runtime == RuntimeStatus.RUNNING.value
+            and target_health == HealthStatus.HEALTHY.value
+        )
+
+    @staticmethod
     def _source_proven_serving(
         *,
         db_active: str | None,
@@ -823,6 +980,7 @@ class HotSwitchReconciler:
         target_id: uuid.UUID,
         attempt: int,
         reason: str,
+        source_desired: str = DesiredState.RUNNING.value,
     ) -> ReconcileResult:
         async with self._session_factory() as session:
             repo = OperationJobRepository(session)
@@ -830,7 +988,7 @@ class HotSwitchReconciler:
             source = await session.get(Deployment, source_id)
             target = await session.get(Deployment, target_id)
             if source is not None:
-                source.desired_state = DesiredState.RUNNING.value
+                source.desired_state = source_desired
                 source.updated_at = now
             if target is not None:
                 target.desired_state = DesiredState.RUNNING.value

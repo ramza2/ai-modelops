@@ -480,6 +480,23 @@ Route 이력 조회.
 
 단, VRAM 영향을 동반하는 모델 교체는 `/switch`를 사용한다.
 
+Target Deployment는 최소 다음을 만족해야 한다:
+
+```text
+desired_state == RUNNING
+runtime_status == RUNNING
+health_status == HEALTHY
+retired_at is null
+```
+
+Switch Worker가 동일 Endpoint/Deployment advisory lock을 보유 중이면:
+
+```text
+409 ROUTE_MUTATION_BUSY
+```
+
+(비차단; HTTP 요청 안에서 Switch 완료를 기다리지 않는다.)
+
 ```json
 {
   "deployment_id": "uuid",

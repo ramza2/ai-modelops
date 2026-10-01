@@ -7,11 +7,13 @@ import re
 import uuid
 from typing import Any
 
+from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.enums import (
     ApiType,
+    DesiredState,
     HealthStatus,
     ModelType,
     RouteStatus,
@@ -25,6 +27,16 @@ from app.repositories.endpoints import EndpointRepository
 
 _ALIAS_RE = re.compile(r"^[a-z0-9]([a-z0-9._-]{0,118}[a-z0-9])?$")
 _UNSET = object()
+
+
+def endpoint_lock_key(endpoint_id: uuid.UUID | str) -> str:
+    """Same key namespace as Worker ``SessionAdvisoryLockSet``."""
+    return f"endpoint:{endpoint_id}"
+
+
+def deployment_lock_key(deployment_id: uuid.UUID | str) -> str:
+    """Same key namespace as Worker ``SessionAdvisoryLockSet``."""
+    return str(deployment_id)
 
 
 class EndpointService:
@@ -151,6 +163,11 @@ class EndpointService:
         rewrite_model_name: str | None = None,
         reason: str | None = None,
     ) -> dict[str, Any]:
+        # Share Worker Switch advisory key namespace (xact-scoped, fail-closed).
+        await self._acquire_route_mutation_locks(
+            endpoint_id=endpoint_id,
+            deployment_id=deployment_id,
+        )
         alias = await self._repo.lock_alias_for_update(endpoint_id)
         if alias is None:
             raise NotFoundError(
@@ -195,6 +212,32 @@ class EndpointService:
             "routing_version": new_version,
         }
 
+    async def _acquire_route_mutation_locks(
+        self,
+        *,
+        endpoint_id: uuid.UUID,
+        deployment_id: uuid.UUID,
+    ) -> None:
+        """Non-blocking xact locks matching Worker endpoint/deployment keys."""
+        keys = sorted(
+            {
+                endpoint_lock_key(endpoint_id),
+                deployment_lock_key(deployment_id),
+            }
+        )
+        for key in keys:
+            result = await self._session.execute(
+                text("SELECT pg_try_advisory_xact_lock(hashtext(:key))"),
+                {"key": key},
+            )
+            if not bool(result.scalar_one()):
+                await self._session.rollback()
+                raise ConflictError(
+                    "Route mutation is busy; a Switch Worker holds advisory locks.",
+                    code="ROUTE_MUTATION_BUSY",
+                    details={"lock_key": key},
+                )
+
     def _validate_route_target(
         self,
         alias: EndpointAlias,
@@ -205,6 +248,14 @@ class EndpointService:
             raise ValidationError(
                 "Target deployment is retired.",
                 details={"deployment_id": str(deployment.id)},
+            )
+        if getattr(deployment, "desired_state", None) != DesiredState.RUNNING.value:
+            raise ValidationError(
+                "Target deployment desired_state must be RUNNING.",
+                details={
+                    "deployment_id": str(deployment.id),
+                    "desired_state": getattr(deployment, "desired_state", None),
+                },
             )
         if deployment.runtime_status != RuntimeStatus.RUNNING.value:
             raise ValidationError(
