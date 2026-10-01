@@ -13,7 +13,7 @@ import uuid
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.clients.node_agent import NodeAgentClient, NodeAgentError
@@ -119,8 +119,26 @@ class RuntimeMetricsCollector:
             await lock.release()
 
     async def _list_candidates(self) -> list[dict[str, Any]]:
+        """Eligible deployments ordered by least-recently sampled (NULLS FIRST).
+
+        Never-sampled deployments are highest priority; then oldest sampled_at;
+        Deployment.id is a deterministic tie-breaker. UNAVAILABLE snapshots count
+        as sampled so broken runtimes do not starve others.
+        """
         limit = max(1, int(self._settings.runtime_metrics_batch_size))
         async with self._session_factory() as session:
+            latest_subq = (
+                select(
+                    DeploymentRuntimeMetricSnapshot.deployment_id.label(
+                        "deployment_id"
+                    ),
+                    func.max(DeploymentRuntimeMetricSnapshot.sampled_at).label(
+                        "latest_sampled_at"
+                    ),
+                )
+                .group_by(DeploymentRuntimeMetricSnapshot.deployment_id)
+                .subquery()
+            )
             stmt = (
                 select(
                     Deployment.id,
@@ -130,12 +148,19 @@ class RuntimeMetricsCollector:
                 )
                 .join(ModelVersion, ModelVersion.id == Deployment.model_version_id)
                 .join(Node, Node.id == Deployment.node_id)
+                .outerjoin(
+                    latest_subq,
+                    latest_subq.c.deployment_id == Deployment.id,
+                )
                 .where(Deployment.deployment_type == "MANAGED")
                 .where(Deployment.runtime_status == "RUNNING")
                 .where(Deployment.retired_at.is_(None))
                 .where(Deployment.node_id.is_not(None))
                 .where(text("upper(model_version.runtime_type) = 'VLLM'"))
-                .order_by(Deployment.id.asc())
+                .order_by(
+                    latest_subq.c.latest_sampled_at.asc().nulls_first(),
+                    Deployment.id.asc(),
+                )
                 .limit(limit)
             )
             result = await session.execute(stmt)

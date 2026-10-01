@@ -122,8 +122,8 @@ def normalize_vllm_metrics(text: str) -> NormalizedRuntimeMetrics:
     gen_sum = 0
     gen_seen = False
     # histogram_key -> {buckets: {le: count}, count, sum}
+    # Only populated when at least one valid component was accepted.
     histograms: dict[str, dict[str, Any]] = {}
-    seen_allowlisted = False
 
     for family in families:
         name = str(family.name)
@@ -139,11 +139,6 @@ def normalize_vllm_metrics(text: str) -> NormalizedRuntimeMetrics:
                 if sample_name.startswith(full) or name == full:
                     histo_key = key
                     break
-
-            if sample_name in ALLOWLISTED_NAMES or name in ALLOWLISTED_NAMES:
-                seen_allowlisted = True
-            if histo_key is not None:
-                seen_allowlisted = True
 
             if sample_name.endswith("_created"):
                 continue
@@ -189,26 +184,37 @@ def normalize_vllm_metrics(text: str) -> NormalizedRuntimeMetrics:
 
             if histo_key is None:
                 continue
-            entry = histograms.setdefault(
-                histo_key, {"count": 0, "sum": 0.0, "buckets": {}}
-            )
+
+            # Accept only valid histogram components; do not create an entry from
+            # a name match alone (invalid-only families must not yield PARTIAL).
             if sample_name.endswith("_bucket"):
                 le = str(labels.get("le", ""))
                 count = _nonneg_int(value)
                 if count is None or not le:
                     continue
+                entry = histograms.setdefault(
+                    histo_key, {"count": 0, "sum": 0.0, "buckets": {}}
+                )
                 buckets: dict[str, int] = entry["buckets"]
                 buckets[le] = int(buckets.get(le, 0)) + count
             elif sample_name.endswith("_count"):
                 count = _nonneg_int(value)
-                if count is not None:
-                    entry["count"] = int(entry["count"]) + count
+                if count is None:
+                    continue
+                entry = histograms.setdefault(
+                    histo_key, {"count": 0, "sum": 0.0, "buckets": {}}
+                )
+                entry["count"] = int(entry["count"]) + count
             elif sample_name.endswith("_sum"):
                 number = _finite(value)
-                if number is not None and number >= 0:
-                    entry["sum"] = float(entry["sum"]) + number
+                if number is None or number < 0:
+                    continue
+                entry = histograms.setdefault(
+                    histo_key, {"count": 0, "sum": 0.0, "buckets": {}}
+                )
+                entry["sum"] = float(entry["sum"]) + number
 
-    if not seen_allowlisted and not (
+    has_valid_telemetry = bool(
         kv_current
         or kv_legacy
         or running_seen
@@ -216,11 +222,12 @@ def normalize_vllm_metrics(text: str) -> NormalizedRuntimeMetrics:
         or prompt_seen
         or gen_seen
         or histograms
-    ):
+    )
+    if not has_valid_telemetry:
         return NormalizedRuntimeMetrics(
             availability="UNAVAILABLE",
             error_code="METRICS_UNSUPPORTED",
-            error_message="No allowlisted vLLM metrics found.",
+            error_message="No valid allowlisted vLLM metrics found.",
             missing_metrics=list(CORE_GAUGE_KEYS),
         )
 
@@ -269,7 +276,7 @@ def normalize_vllm_metrics(text: str) -> NormalizedRuntimeMetrics:
     histo_out: dict[str, Any] = {}
     for key, entry in histograms.items():
         buckets_map: dict[str, int] = entry["buckets"]
-        # Sort numeric les then +Inf
+
         def _le_key(item: str) -> tuple[int, float]:
             if item == "+Inf":
                 return (1, 0.0)

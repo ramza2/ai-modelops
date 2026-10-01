@@ -234,6 +234,75 @@ go_goroutines 42
     result = normalize_vllm_metrics(text)
     assert result.availability == "UNAVAILABLE"
     assert result.error_code == "METRICS_UNSUPPORTED"
+    assert result.missing_metrics == [
+        "kv_cache_usage_ratio",
+        "num_requests_running",
+        "num_requests_waiting",
+    ]
+
+
+def test_normalize_all_invalid_vllm_metrics_unavailable() -> None:
+    """Recognized vLLM names with only invalid values → UNAVAILABLE, not PARTIAL."""
+    text = """
+# TYPE vllm:kv_cache_usage_perc gauge
+vllm:kv_cache_usage_perc{engine="nan"} NaN
+vllm:kv_cache_usage_perc{engine="hi"} 1.5
+# TYPE vllm:num_requests_running gauge
+vllm:num_requests_running -1
+# TYPE vllm:num_requests_waiting gauge
+vllm:num_requests_waiting 1.5
+# TYPE vllm:prompt_tokens_total counter
+vllm:prompt_tokens_total +Inf
+# TYPE vllm:generation_tokens_total counter
+vllm:generation_tokens_total -5
+# TYPE vllm:time_to_first_token_seconds histogram
+vllm:time_to_first_token_seconds_bucket{le="0.1"} NaN
+vllm:time_to_first_token_seconds_bucket{le="+Inf"} -1
+vllm:time_to_first_token_seconds_sum +Inf
+vllm:time_to_first_token_seconds_count -1
+"""
+    result = normalize_vllm_metrics(text)
+    assert result.availability == "UNAVAILABLE"
+    assert result.error_code == "METRICS_UNSUPPORTED"
+    assert "valid" in (result.error_message or "").lower()
+    assert result.kv_cache_usage_ratio is None
+    assert result.num_requests_running is None
+    assert result.num_requests_waiting is None
+    assert result.prompt_tokens_total is None
+    assert result.generation_tokens_total is None
+    assert result.histograms == {}
+    assert result.missing_metrics == [
+        "kv_cache_usage_ratio",
+        "num_requests_running",
+        "num_requests_waiting",
+    ]
+
+
+def test_normalize_histogram_invalid_only_unavailable() -> None:
+    text = """
+# TYPE vllm:e2e_request_latency_seconds histogram
+vllm:e2e_request_latency_seconds_bucket{le="+Inf"} NaN
+vllm:e2e_request_latency_seconds_sum Inf
+vllm:e2e_request_latency_seconds_count -3
+"""
+    result = normalize_vllm_metrics(text)
+    assert result.availability == "UNAVAILABLE"
+    assert result.error_code == "METRICS_UNSUPPORTED"
+    assert result.histograms == {}
+
+
+def test_normalize_histogram_zero_is_valid_partial() -> None:
+    """Zero histogram components are valid and yield PARTIAL when gauges missing."""
+    text = """
+# TYPE vllm:time_to_first_token_seconds histogram
+vllm:time_to_first_token_seconds_bucket{le="+Inf"} 0
+vllm:time_to_first_token_seconds_sum 0
+vllm:time_to_first_token_seconds_count 0
+"""
+    result = normalize_vllm_metrics(text)
+    assert result.availability == "PARTIAL"
+    assert result.histograms["ttft_seconds"]["count"] == 0
+    assert result.histograms["ttft_seconds"]["sum"] == 0.0
 
 
 def test_normalize_invalid_values_ignored() -> None:

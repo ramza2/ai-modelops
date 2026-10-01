@@ -487,6 +487,33 @@ async def test_isolation_continues_after_one_failure(db) -> None:
 @pytest.mark.asyncio
 async def test_collector_crash_does_not_kill_job_loop(db) -> None:
     session_factory = db
+    async with session_factory() as session:
+        # Prevent leftover QUEUED/RUNNING jobs from stalling shutdown.
+        await session.execute(
+            text(
+                """
+                UPDATE operation_job
+                SET status = 'DONE',
+                    locked_by = NULL,
+                    locked_at = NULL,
+                    available_at = now() + interval '1 day',
+                    updated_at = now()
+                WHERE status IN ('QUEUED', 'RUNNING')
+                """
+            )
+        )
+        await session.execute(
+            text(
+                """
+                UPDATE operation
+                SET status = 'CANCELLED',
+                    finished_at = COALESCE(finished_at, now())
+                WHERE status IN ('QUEUED', 'RUNNING', 'ROLLING_BACK')
+                """
+            )
+        )
+        await session.commit()
+
     engine = create_async_engine(_database_url(), future=True)
     stop = asyncio.Event()
 
@@ -536,4 +563,167 @@ async def test_collector_shutdown_clean(db) -> None:
     collector.request_shutdown()
     await asyncio.wait_for(task, timeout=2.0)
     assert task.done()
+    await engine.dispose()
+
+
+async def _isolate_eligible(session: AsyncSession) -> None:
+    """Stop prior eligible Managed VLLM runtimes so fairness tests see only new seeds."""
+    await session.execute(
+        text(
+            """
+            UPDATE deployment
+            SET runtime_status = 'STOPPED'
+            WHERE deployment_type = 'MANAGED'
+              AND runtime_status = 'RUNNING'
+              AND retired_at IS NULL
+            """
+        )
+    )
+    await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_fair_candidate_ordering_two_sweeps_cover_all(db) -> None:
+    """batch_size=2 with 4 eligible: second sweep prefers never-sampled pair."""
+    session_factory = db
+    async with session_factory() as session:
+        await _isolate_eligible(session)
+        seeded = [await _seed_candidate(session) for _ in range(4)]
+    all_ids = {s["deployment_id"] for s in seeded}
+
+    engine = create_async_engine(_database_url(), future=True)
+    available_payload = {
+        "availability": "AVAILABLE",
+        "kv_cache_usage_ratio": 0.1,
+        "num_requests_running": 0,
+        "num_requests_waiting": 0,
+        "prompt_tokens_total": 1,
+        "generation_tokens_total": 1,
+        "histograms": {},
+        "metric_sources": {},
+        "missing_metrics": [],
+        "source": "VLLM_PROMETHEUS",
+    }
+    collector = RuntimeMetricsCollector(
+        settings=_settings(runtime_metrics_batch_size=2),
+        session_factory=session_factory,
+        engine=engine,
+        client_factory=lambda url: _FakeClient(available_payload),
+    )
+
+    first = await collector.collect_once()
+    assert first.get("skipped") is False
+    assert first.get("scraped") == 2
+
+    async with session_factory() as session:
+        rows1 = (
+            await session.execute(
+                select(DeploymentRuntimeMetricSnapshot.deployment_id).where(
+                    DeploymentRuntimeMetricSnapshot.deployment_id.in_(
+                        [uuid.UUID(i) for i in all_ids]
+                    )
+                )
+            )
+        ).all()
+        first_ids = {str(r[0]) for r in rows1}
+    assert len(first_ids) == 2
+    assert first_ids.issubset(all_ids)
+
+    second = await collector.collect_once()
+    assert second.get("skipped") is False
+    assert second.get("scraped") == 2
+
+    async with session_factory() as session:
+        rows2 = (
+            await session.execute(
+                select(DeploymentRuntimeMetricSnapshot.deployment_id).where(
+                    DeploymentRuntimeMetricSnapshot.deployment_id.in_(
+                        [uuid.UUID(i) for i in all_ids]
+                    )
+                )
+            )
+        ).all()
+        covered = {str(r[0]) for r in rows2}
+    assert covered == all_ids
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_unavailable_snapshot_advances_fairness(db) -> None:
+    """UNAVAILABLE scrape still counts as sampled; next sweep prefers never-sampled."""
+    session_factory = db
+    async with session_factory() as session:
+        await _isolate_eligible(session)
+        a = await _seed_candidate(session)
+        b = await _seed_candidate(session)
+
+    engine = create_async_engine(_database_url(), future=True)
+    order = sorted([a["deployment_id"], b["deployment_id"]])
+    # Deterministic first pick when both unsampled: lower UUID first.
+    first_id, second_id = order[0], order[1]
+
+    def factory(url: str) -> Any:
+        class _C:
+            async def get_runtime_metrics(self, deployment_id, *, timeout_seconds=None):
+                if deployment_id == first_id:
+                    raise NodeAgentError("timeout", code="METRICS_TIMEOUT")
+                return {
+                    "availability": "AVAILABLE",
+                    "kv_cache_usage_ratio": 0.2,
+                    "num_requests_running": 0,
+                    "num_requests_waiting": 0,
+                    "prompt_tokens_total": 1,
+                    "generation_tokens_total": 1,
+                    "histograms": {},
+                    "metric_sources": {},
+                    "missing_metrics": [],
+                    "source": "VLLM_PROMETHEUS",
+                }
+
+        return _C()
+
+    collector = RuntimeMetricsCollector(
+        settings=_settings(runtime_metrics_batch_size=1),
+        session_factory=session_factory,
+        engine=engine,
+        client_factory=factory,
+    )
+
+    r1 = await collector.collect_once()
+    assert r1.get("scraped") == 1
+    async with session_factory() as session:
+        snap_a = (
+            await session.execute(
+                select(DeploymentRuntimeMetricSnapshot).where(
+                    DeploymentRuntimeMetricSnapshot.deployment_id
+                    == uuid.UUID(first_id)
+                )
+            )
+        ).scalars().all()
+        assert len(snap_a) == 1
+        assert snap_a[0].availability == "UNAVAILABLE"
+
+    r2 = await collector.collect_once()
+    assert r2.get("scraped") == 1
+    async with session_factory() as session:
+        snap_b = (
+            await session.execute(
+                select(DeploymentRuntimeMetricSnapshot).where(
+                    DeploymentRuntimeMetricSnapshot.deployment_id
+                    == uuid.UUID(second_id)
+                )
+            )
+        ).scalars().all()
+        assert len(snap_b) >= 1
+        assert snap_b[-1].availability == "AVAILABLE"
+        # first_id must not have been scraped again before second_id got its first sample
+        count_a = (
+            await session.execute(
+                select(DeploymentRuntimeMetricSnapshot).where(
+                    DeploymentRuntimeMetricSnapshot.deployment_id
+                    == uuid.UUID(first_id)
+                )
+            )
+        ).scalars().all()
+        assert len(count_a) == 1
     await engine.dispose()
