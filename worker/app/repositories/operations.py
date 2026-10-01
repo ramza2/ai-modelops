@@ -201,18 +201,18 @@ class OperationJobRepository:
         operation = await self._session.get(Operation, operation_id)
         if operation is None:
             return
-        # Never downgrade MANUAL_INTERVENTION_REQUIRED to ordinary FAILED.
-        if (
-            operation.status
-            == OperationStatus.MANUAL_INTERVENTION_REQUIRED.value
-        ):
+        # Never overwrite proven/terminal success or existing MIR.
+        if operation.status in {
+            OperationStatus.MANUAL_INTERVENTION_REQUIRED.value,
+            OperationStatus.SUCCEEDED.value,
+        }:
             return
-        # M5-B SWITCH backstop: after the destructive boundary, never land on
-        # ordinary FAILED even if a generic JobRunner/failure path calls this.
+        # SWITCH backstop: after Cold destructive OR Hot route boundary, never
+        # land on ordinary FAILED even if a generic JobRunner path calls this.
         meta = operation.metadata_json or {}
-        if (
-            operation.operation_type == OperationType.SWITCH.value
-            and bool(meta.get("destructive_boundary_entered"))
+        if operation.operation_type == OperationType.SWITCH.value and (
+            bool(meta.get("destructive_boundary_entered"))
+            or bool(meta.get("hot_route_boundary_entered"))
         ):
             operation.status = (
                 OperationStatus.MANUAL_INTERVENTION_REQUIRED.value
@@ -424,9 +424,9 @@ class OperationJobRepository:
             return
         if operation.status != OperationStatus.MANUAL_INTERVENTION_REQUIRED.value:
             meta = operation.metadata_json or {}
-            if (
-                operation.operation_type == OperationType.SWITCH.value
-                and bool(meta.get("destructive_boundary_entered"))
+            if operation.operation_type == OperationType.SWITCH.value and (
+                bool(meta.get("destructive_boundary_entered"))
+                or bool(meta.get("hot_route_boundary_entered"))
             ):
                 operation.status = (
                     OperationStatus.MANUAL_INTERVENTION_REQUIRED.value
@@ -573,6 +573,127 @@ class OperationJobRepository:
 
         await self._session.commit()
         return "boundary_entered"
+
+    async def decide_hot_route_boundary(
+        self,
+        operation_id: uuid.UUID,
+        *,
+        step_id: uuid.UUID | None = None,
+        step_detail_patch: dict | None = None,
+    ) -> str:
+        """Atomically decide cancel vs hot_route_boundary_entered (Job→Op locks).
+
+        Short persistence transaction only — caller must not hold locks across
+        Gateway / Node Agent HTTP. Returns ``\"cancelled\"`` or
+        ``\"boundary_entered\"``.
+        """
+        cached_job = (
+            await self._session.execute(
+                select(OperationJob).where(
+                    OperationJob.operation_id == operation_id
+                )
+            )
+        ).scalar_one_or_none()
+        if cached_job is not None:
+            self._session.expire(cached_job)
+        cached_op = await self._session.get(Operation, operation_id)
+        if cached_op is not None:
+            self._session.expire(cached_op)
+
+        # Lock Job first (same order as claim / cancel).
+        await self._session.execute(
+            select(OperationJob)
+            .where(OperationJob.operation_id == operation_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+
+        operation = (
+            await self._session.execute(
+                select(Operation)
+                .where(Operation.id == operation_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one_or_none()
+        if operation is None:
+            return "cancelled"
+
+        if operation.cancel_requested_at is not None:
+            await self._session.commit()
+            return "cancelled"
+
+        meta = dict(operation.metadata_json or {})
+        meta["hot_route_boundary_entered"] = True
+        operation.metadata_json = meta
+
+        if step_id is not None and step_detail_patch is not None:
+            step = await self._session.get(OperationStep, step_id)
+            if step is not None:
+                detail = dict(step.detail_json or {})
+                detail.update(step_detail_patch)
+                detail["hot_route_boundary_entered"] = True
+                step.detail_json = detail
+
+        await self._session.commit()
+        return "boundary_entered"
+
+    async def claim_mir_hot_switch_ids(
+        self,
+        *,
+        worker_id: str,
+        limit: int,
+        max_attempts: int,
+        now: dt.datetime | None = None,
+    ) -> list[uuid.UUID]:
+        """Claim a bounded batch of Hot SWITCH MIR Operations (SKIP LOCKED)."""
+        stamp = now or dt.datetime.now(tz=dt.UTC)
+        result = await self._session.execute(
+            text(
+                """
+                SELECT id
+                FROM operation
+                WHERE status = 'MANUAL_INTERVENTION_REQUIRED'
+                  AND operation_type = 'SWITCH'
+                  AND switch_strategy = 'HOT'
+                  AND COALESCE(
+                        (metadata_json->>'reconciliation_attempt_count')::int, 0
+                      ) < :max_attempts
+                  AND (
+                        metadata_json->>'reconciliation_next_attempt_at' IS NULL
+                        OR (metadata_json->>'reconciliation_next_attempt_at'
+                           )::timestamptz <= :now
+                      )
+                ORDER BY finished_at ASC NULLS FIRST, created_at ASC
+                FOR UPDATE SKIP LOCKED
+                LIMIT :lim
+                """
+            ),
+            {
+                "max_attempts": int(max_attempts),
+                "now": stamp,
+                "lim": max(1, int(limit)),
+            },
+        )
+        ids = [uuid.UUID(str(row[0])) for row in result.all()]
+        if not ids:
+            await self._session.rollback()
+            return []
+
+        claimed: list[uuid.UUID] = []
+        claim_lease = stamp + dt.timedelta(seconds=120)
+        for operation_id in ids:
+            operation = await self._session.get(Operation, operation_id)
+            if operation is None:
+                continue
+            meta = dict(operation.metadata_json or {})
+            meta["reconciliation_claimed_by"] = worker_id
+            meta["reconciliation_claimed_at"] = stamp.isoformat()
+            meta["reconciliation_next_attempt_at"] = claim_lease.isoformat()
+            operation.metadata_json = meta
+            claimed.append(operation_id)
+        await self._session.commit()
+        return claimed
 
     async def patch_operation_metadata(
         self,

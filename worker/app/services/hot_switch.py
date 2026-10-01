@@ -1,8 +1,10 @@
-"""M5-D1 Hot Switch forward executor.
+"""M5-D1/D2-A Hot Switch forward executor.
 
 Keeps Source SERVING while Target is prepared, started, probed, then
 cut over via route activation. Does not stop Source after success (D1).
-Does not implement HOT cancel, retry, rollback, or reconciliation.
+
+M5-D2-A adds RUNNING cancel, route-boundary race handling, and HOT rollback
+to Source without stopping Target after cutover.
 """
 
 from __future__ import annotations
@@ -60,6 +62,14 @@ from app.services.cold_switch import (
     ColdSwitchExecutor,
     _bump_routing_version,
 )
+from app.services.hot_switch_rollback import (
+    HOT_ROUTE_BOUNDARY_FLAG,
+    HOT_ROLLBACK_STEPS,
+    USER_CANCELLED,
+    HotSwitchRollbackMixin,
+    _hot_route_boundary_entered,
+    durable_hot_route_mutation_from_steps,
+)
 from app.services.operation_executor import (
     OperationExecutor,
     PermanentStepError,
@@ -90,8 +100,12 @@ _POST_ROUTE_STEPS = frozenset(
 )
 
 
-class HotSwitchExecutor:
-    """Execute a claimed SWITCH/HOT Operation forward path (M5-D1)."""
+class CancelRequestedError(Exception):
+    """Raised when cancel_requested_at is observed at a safe checkpoint."""
+
+
+class HotSwitchExecutor(HotSwitchRollbackMixin):
+    """Execute a claimed SWITCH/HOT Operation forward path (M5-D1/D2-A)."""
 
     def __init__(self, lifecycle: OperationExecutor) -> None:
         self._lifecycle = lifecycle
@@ -270,6 +284,34 @@ class HotSwitchExecutor:
             )
             gateway = self._gateway_client()
 
+            if operation.status == OperationStatus.ROLLING_BACK.value:
+                await self._resume_hot_rolling_back(
+                    session,
+                    repo,
+                    client,
+                    gateway,
+                    operation,
+                    job,
+                    alias,
+                    source,
+                    target,
+                )
+                return
+
+            if await self._maybe_handle_cancel(
+                session,
+                repo,
+                client,
+                gateway,
+                operation,
+                job,
+                alias,
+                source,
+                target,
+                failed_step=None,
+            ):
+                return
+
             steps = await repo.list_steps(operation_id)
             pending = [
                 s
@@ -279,6 +321,19 @@ class HotSwitchExecutor:
             ]
 
             for step in pending:
+                if await self._maybe_handle_cancel(
+                    session,
+                    repo,
+                    client,
+                    gateway,
+                    operation,
+                    job,
+                    alias,
+                    source,
+                    target,
+                    failed_step=step,
+                ):
+                    return
                 try:
                     await self._execute_step(
                         session,
@@ -296,6 +351,22 @@ class HotSwitchExecutor:
                     await session.refresh(source)
                     await session.refresh(target)
                     await session.refresh(alias)
+                except CancelRequestedError:
+                    if await self._maybe_handle_cancel(
+                        session,
+                        repo,
+                        client,
+                        gateway,
+                        operation,
+                        job,
+                        alias,
+                        source,
+                        target,
+                        failed_step=step,
+                    ):
+                        return
+                    # Cancel won boundary race but finalize already handled.
+                    return
                 except RetryableStepError as exc:
                     max_attempts = int(job.max_attempts)
                     if int(job.attempt_count) >= max_attempts:
@@ -523,6 +594,15 @@ class HotSwitchExecutor:
                 session, client, operation, target, mutation
             )
         elif code == STEP_ACTIVATE_TARGET_ROUTE:
+            # Critical cancel vs route-boundary race (Job → Operation locks).
+            decision = await repo.decide_hot_route_boundary(
+                uuid.UUID(str(operation.id)),
+                step_id=uuid.UUID(str(step.id)),
+                step_detail_patch={"pre_activate_boundary": True},
+            )
+            await session.refresh(operation)
+            if decision == "cancelled":
+                raise CancelRequestedError()
             detail = await self._step_activate_target_route(
                 session, operation, alias, source, target, step
             )
@@ -842,8 +922,16 @@ class HotSwitchExecutor:
         target: Deployment,
         step: OperationStep,
     ) -> dict[str, Any]:
+        """Activate Target route and persist exact Source route identity.
+
+        ``source_route_id`` / ``route_routing_version`` are written into the
+        ACTIVATE OperationStep detail in the **same** DB transaction as the
+        route mutation so crash after commit cannot lose Source identity.
+        """
         detail = dict(step.detail_json or {})
         existing_version = detail.get("route_routing_version")
+        existing_source_route_id = detail.get("source_route_id")
+        existing_source_rewrite = detail.get("source_rewrite_model_name")
 
         async with self._session_factory() as tx:
             locked = (
@@ -865,6 +953,27 @@ class HotSwitchExecutor:
                     details={"traffic_state": locked.traffic_state},
                 )
 
+            locked_step = (
+                await tx.execute(
+                    select(OperationStep)
+                    .where(OperationStep.id == step.id)
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+            step_detail = dict(
+                (locked_step.detail_json if locked_step is not None else None)
+                or detail
+            )
+            persisted_source_route_id = step_detail.get("source_route_id") or (
+                existing_source_route_id
+            )
+            persisted_version = step_detail.get("route_routing_version")
+            if persisted_version is None:
+                persisted_version = existing_version
+            persisted_rewrite = step_detail.get("source_rewrite_model_name")
+            if persisted_rewrite is None:
+                persisted_rewrite = existing_source_rewrite
+
             active = (
                 await tx.execute(
                     select(EndpointRoute).where(
@@ -874,16 +983,24 @@ class HotSwitchExecutor:
                 )
             ).scalar_one_or_none()
 
+            # Resume: Target already ACTIVE — require durable Source identity.
             if active is not None and str(active.deployment_id) == str(target.id):
-                if existing_version is not None:
-                    version = int(existing_version)
-                else:
-                    state = await tx.get(RoutingState, 1)
-                    version = int(state.version) if state else 0
+                if persisted_source_route_id is None or persisted_version is None:
+                    raise PermanentStepError(
+                        "Hot Switch resume with Target ACTIVE requires persisted "
+                        "source_route_id and route_routing_version on ACTIVATE.",
+                        code="SOURCE_ROUTE_ID_MISSING",
+                        details={
+                            "source_route_id": persisted_source_route_id,
+                            "route_routing_version": persisted_version,
+                        },
+                    )
                 await tx.commit()
                 return {
-                    "route_routing_version": version,
+                    "route_routing_version": int(persisted_version),
                     "active_deployment_id": str(target.id),
+                    "source_route_id": str(persisted_source_route_id),
+                    "source_rewrite_model_name": persisted_rewrite,
                     "already_active": True,
                     "traffic_state": TrafficState.SERVING.value,
                 }
@@ -902,13 +1019,26 @@ class HotSwitchExecutor:
                     },
                 )
 
-            now = __import__("datetime").datetime.now(
-                tz=__import__("datetime").UTC
-            )
-            if active is not None:
-                active.status = RouteStatus.INACTIVE.value
-                active.deactivated_at = now
-                await tx.flush()
+            # Initial cutover requires ACTIVE = Source (exact row identity).
+            if active is None or str(active.deployment_id) != str(source.id):
+                raise PermanentStepError(
+                    "Hot Switch ACTIVATE requires the ACTIVE route to be Source.",
+                    code="SOURCE_ROUTE_NOT_ACTIVE",
+                    details={
+                        "active_deployment_id": (
+                            str(active.deployment_id) if active is not None else None
+                        ),
+                        "source_deployment_id": str(source.id),
+                    },
+                )
+
+            now = dt.datetime.now(tz=dt.UTC)
+            source_route_id = str(active.id)
+            source_rewrite = active.rewrite_model_name
+
+            active.status = RouteStatus.INACTIVE.value
+            active.deactivated_at = now
+            await tx.flush()
 
             inactive_target = (
                 await tx.execute(
@@ -946,12 +1076,23 @@ class HotSwitchExecutor:
 
             # Traffic remains SERVING for Hot Switch.
             version = await _bump_routing_version(tx)
+
+            # Durable Source identity + version in the same route-cutover TX.
+            if locked_step is not None:
+                merged = dict(locked_step.detail_json or {})
+                merged["source_route_id"] = source_route_id
+                merged["source_rewrite_model_name"] = source_rewrite
+                merged["route_routing_version"] = version
+                locked_step.detail_json = merged
+
             await tx.commit()
 
         return {
             "route_routing_version": version,
             "active_deployment_id": str(target.id),
             "route_id": route_id,
+            "source_route_id": source_route_id,
+            "source_rewrite_model_name": source_rewrite,
             "traffic_state": TrafficState.SERVING.value,
         }
 
@@ -1086,7 +1227,45 @@ class HotSwitchExecutor:
         code: str,
         message: str,
     ) -> None:
-        if step.step_code in _POST_ROUTE_STEPS:
+        await session.refresh(operation)
+        cancel_at = await repo.refresh_cancel_requested_at(
+            uuid.UUID(str(operation.id))
+        )
+        if cancel_at is not None:
+            operation.cancel_requested_at = cancel_at
+
+        # Post-route cancel → rollback (never direct CANCELLED).
+        if (
+            step.step_code in _POST_ROUTE_STEPS
+            or _hot_route_boundary_entered(operation)
+        ) and operation.cancel_requested_at is not None:
+            await self._enter_and_run_hot_rollback(
+                session,
+                repo,
+                client,
+                gateway,
+                operation,
+                job,
+                alias,
+                source,
+                target,
+                failed_step=step,
+                code=USER_CANCELLED,
+                message=(
+                    "Cancellation requested after Hot route boundary"
+                    + (
+                        f": {(operation.metadata_json or {}).get('cancel_reason')}"
+                        if (operation.metadata_json or {}).get("cancel_reason")
+                        else ""
+                    )
+                    + "."
+                ),
+            )
+            return
+
+        if step.step_code in _POST_ROUTE_STEPS or _hot_route_boundary_entered(
+            operation
+        ):
             await self._classify_post_route_and_terminalize(
                 session,
                 repo,
@@ -1109,6 +1288,224 @@ class HotSwitchExecutor:
             repo, job, operation, code=code, message=message
         )
 
+    async def _maybe_handle_cancel(
+        self,
+        session: AsyncSession,
+        repo: OperationJobRepository,
+        client: NodeAgentClient,
+        gateway: GatewayClient,
+        operation: Operation,
+        job: OperationJob,
+        alias: EndpointAlias,
+        source: Deployment,
+        target: Deployment,
+        *,
+        failed_step: OperationStep | None,
+    ) -> bool:
+        """If cancel_requested_at is set, finalize CANCELLED or enter Hot rollback."""
+        await session.refresh(operation)
+        cancel_at = await repo.refresh_cancel_requested_at(
+            uuid.UUID(str(operation.id))
+        )
+        if cancel_at is None and operation.cancel_requested_at is None:
+            return False
+        if cancel_at is not None:
+            operation.cancel_requested_at = cancel_at
+        await session.refresh(operation)
+
+        # Boundary flag OR evidence that route mutation may have occurred
+        # → post-route cancel = rollback intent (never direct CANCELLED).
+        if _hot_route_boundary_entered(
+            operation
+        ) or await self._route_activation_may_have_occurred(
+            session, operation, alias, target
+        ):
+            reason = (operation.metadata_json or {}).get("cancel_reason")
+            message = (
+                "Cancellation requested after Hot route boundary"
+                f"{f': {reason}' if reason else ''}."
+            )
+            await self._enter_and_run_hot_rollback(
+                session,
+                repo,
+                client,
+                gateway,
+                operation,
+                job,
+                alias,
+                source,
+                target,
+                failed_step=failed_step,
+                code=USER_CANCELLED,
+                message=message,
+            )
+            return True
+
+        await self._finalize_pre_route_cancel(
+            session,
+            repo,
+            client,
+            gateway,
+            operation,
+            job,
+            alias,
+            source,
+            target,
+            code=USER_CANCELLED,
+            message="Cancellation requested before Hot route boundary.",
+        )
+        return True
+
+    async def _finalize_pre_route_cancel(
+        self,
+        session: AsyncSession,
+        repo: OperationJobRepository,
+        client: NodeAgentClient,
+        gateway: GatewayClient,
+        operation: Operation,
+        job: OperationJob,
+        alias: EndpointAlias,
+        source: Deployment,
+        target: Deployment,
+        *,
+        code: str,
+        message: str,
+    ) -> None:
+        """Prove Source still serving, cleanup owned Target, then CANCELLED (or MIR)."""
+        await session.refresh(alias)
+        await session.refresh(source)
+        await session.refresh(target)
+        await session.refresh(operation)
+
+        if _hot_route_boundary_entered(operation):
+            await self._enter_and_run_hot_rollback(
+                session,
+                repo,
+                client,
+                gateway,
+                operation,
+                job,
+                alias,
+                source,
+                target,
+                failed_step=None,
+                code=code,
+                message=message,
+            )
+            return
+
+        active = (
+            await session.execute(
+                select(EndpointRoute).where(
+                    EndpointRoute.endpoint_alias_id == alias.id,
+                    EndpointRoute.status == RouteStatus.ACTIVE.value,
+                )
+            )
+        ).scalar_one_or_none()
+        db_active = str(active.deployment_id) if active is not None else None
+        db_traffic = str(alias.traffic_state)
+
+        gw: dict[str, Any] | None = None
+        try:
+            gw = await gateway.get_route_runtime(str(alias.alias))
+        except Exception:  # noqa: BLE001
+            gw = None
+
+        if gw is None:
+            await repo.finalize_operation_manual_intervention(
+                operation_id=uuid.UUID(str(operation.id)),
+                job_id=uuid.UUID(str(job.id)),
+                code="CANCEL_GATEWAY_UNAVAILABLE",
+                message=(
+                    "Pre-route cancel cannot prove Source serving; "
+                    "Gateway unavailable."
+                ),
+            )
+            return
+
+        gw_active = (
+            str(gw.get("active_deployment_id"))
+            if gw.get("active_deployment_id") is not None
+            else None
+        )
+        gw_traffic = str(gw.get("traffic_state") or "")
+
+        source_proven = (
+            db_active == str(source.id)
+            and db_traffic == TrafficState.SERVING.value
+            and gw_active == str(source.id)
+            and gw_traffic == TrafficState.SERVING.value
+        )
+        if not source_proven:
+            await repo.finalize_operation_manual_intervention(
+                operation_id=uuid.UUID(str(operation.id)),
+                job_id=uuid.UUID(str(job.id)),
+                code="CANCEL_SOURCE_NOT_PROVEN",
+                message=(
+                    "Pre-route cancel cannot strictly prove Source ACTIVE+SERVING."
+                ),
+            )
+            return
+
+        # Live Source RUNNING is mandatory; never fall back to DB runtime.
+        try:
+            mutation = MutationHeaders(
+                operation_id=str(operation.id),
+                step_id=str(uuid.uuid4()),
+                request_id=str(uuid.uuid4()),
+            )
+            inspected = await client.get_deployment(
+                str(source.id), mutation=mutation
+            )
+        except NodeAgentError:
+            await repo.finalize_operation_manual_intervention(
+                operation_id=uuid.UUID(str(operation.id)),
+                job_id=uuid.UUID(str(job.id)),
+                code="CANCEL_NODE_AGENT_UNAVAILABLE",
+                message="Pre-route cancel cannot observe Source runtime.",
+            )
+            return
+
+        if inspected is None:
+            await repo.finalize_operation_manual_intervention(
+                operation_id=uuid.UUID(str(operation.id)),
+                job_id=uuid.UUID(str(job.id)),
+                code="CANCEL_SOURCE_NOT_OBSERVED",
+                message=(
+                    "Pre-route cancel requires a live Node Agent Source "
+                    "observation; payload was empty."
+                ),
+            )
+            return
+
+        raw_runtime = inspected.get("runtime_status")
+        live_runtime = (
+            str(raw_runtime).strip() if raw_runtime is not None else ""
+        )
+        if live_runtime != RuntimeStatus.RUNNING.value:
+            await repo.finalize_operation_manual_intervention(
+                operation_id=uuid.UUID(str(operation.id)),
+                job_id=uuid.UUID(str(job.id)),
+                code="CANCEL_SOURCE_NOT_RUNNING",
+                message=(
+                    "Pre-route cancel requires live Source runtime_status="
+                    f"RUNNING (observed={raw_runtime!r})."
+                ),
+            )
+            return
+
+        # Best-effort Target cleanup when this Op owns the start.
+        await self._best_effort_stop_target_if_started(
+            session, repo, client, operation, target
+        )
+
+        await repo.finalize_operation_cancelled(
+            operation_id=uuid.UUID(str(operation.id)),
+            job_id=uuid.UUID(str(job.id)),
+            code=code,
+            message=message,
+        )
+
     async def _route_activation_may_have_occurred(
         self,
         session: AsyncSession,
@@ -1116,7 +1513,11 @@ class HotSwitchExecutor:
         alias: EndpointAlias,
         target: Deployment,
     ) -> bool:
-        """True when persisted step/route state may already reflect ACTIVATE."""
+        """True when durable evidence shows route mutation may have occurred.
+
+        ``ACTIVATE_TARGET_ROUTE == RUNNING`` alone is NOT evidence — that is the
+        normal state after ``begin_step`` and before the cancel/boundary race.
+        """
         steps = (
             await session.execute(
                 select(OperationStep).where(
@@ -1125,9 +1526,8 @@ class HotSwitchExecutor:
                 )
             )
         ).scalars().all()
-        for step in steps:
-            if step.status != StepStatus.PENDING.value:
-                return True
+        if durable_hot_route_mutation_from_steps(steps):
+            return True
 
         active = (
             await session.execute(

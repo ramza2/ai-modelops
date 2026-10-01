@@ -661,8 +661,8 @@ async def test_cancel_queued_hot_is_idempotent(client) -> None:
 
 
 @pytest.mark.asyncio
-async def test_cancel_hot_vs_claim_race_rejects_without_intent(client) -> None:
-    """Worker wins claim → API 409 INVALID_OPERATION_STATE; cancel_requested_at NULL."""
+async def test_cancel_hot_vs_claim_race_records_intent_only(client) -> None:
+    """Worker wins claim → cancel stamps intent only (D2-A RUNNING HOT)."""
     import asyncio
 
     from sqlalchemy import select
@@ -726,7 +726,7 @@ async def test_cancel_hot_vs_claim_race_rejects_without_intent(client) -> None:
                 _op, decision = await repo.apply_cancel_decision(
                     uuid.UUID(op_id),
                     reason="hot-race",
-                    queued_only=True,
+                    queued_only=False,
                 )
                 await s.commit()
                 return decision
@@ -737,38 +737,16 @@ async def test_cancel_hot_vs_claim_race_rejects_without_intent(client) -> None:
         decisions.append(await task)
 
     await asyncio.gather(claim_holds_job_lock(), cancel_waits_then_decides())
-    assert decisions == ["rejected_not_queued"]
+    assert decisions == ["intent_only"]
 
-    # HTTP path must also reject without stamping cancel intent.
-    resp = await ac.post(
-        f"/api/v1/operations/{op_id}/cancel",
-        json={"reason": "late"},
-    )
-    assert resp.status_code == 409, resp.text
-    assert resp.json()["error"]["code"] == "INVALID_OPERATION_STATE"
+    resp = await ac.get(f"/api/v1/operations/{op_id}")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == OperationStatus.RUNNING.value
+    assert body["cancel_requested_at"] is not None
+    assert body["metadata"].get("cancel_reason") == "hot-race"
 
     async with sf() as session:
-        row = (
-            await session.execute(
-                text(
-                    "SELECT status, cancel_requested_at "
-                    "FROM operation WHERE id = CAST(:id AS uuid)"
-                ),
-                {"id": op_id},
-            )
-        ).one()
-        assert row.status == OperationStatus.RUNNING.value
-        assert row.cancel_requested_at is None
-        meta = (
-            await session.execute(
-                text(
-                    "SELECT metadata_json::text FROM operation "
-                    "WHERE id = CAST(:id AS uuid)"
-                ),
-                {"id": op_id},
-            )
-        ).scalar_one()
-        assert "cancel_reason" not in (meta or "")
         job = (
             await session.execute(
                 text(
@@ -782,7 +760,7 @@ async def test_cancel_hot_vs_claim_race_rejects_without_intent(client) -> None:
 
 
 @pytest.mark.asyncio
-async def test_cancel_running_hot_rejects_without_mutation(client) -> None:
+async def test_cancel_running_hot_records_intent(client) -> None:
     sf = client["session_factory"]
     ac = client["client"]
     async with sf() as session:
@@ -821,19 +799,13 @@ async def test_cancel_running_hot_rejects_without_mutation(client) -> None:
         )
         await session.commit()
 
-    resp = await ac.post(f"/api/v1/operations/{op_id}/cancel")
-    assert resp.status_code == 409, resp.text
-    assert resp.json()["error"]["code"] == "INVALID_OPERATION_STATE"
-
-    async with sf() as session:
-        row = (
-            await session.execute(
-                text(
-                    "SELECT status, cancel_requested_at "
-                    "FROM operation WHERE id = CAST(:id AS uuid)"
-                ),
-                {"id": op_id},
-            )
-        ).one()
-        assert row.status == OperationStatus.RUNNING.value
-        assert row.cancel_requested_at is None
+    resp = await ac.post(
+        f"/api/v1/operations/{op_id}/cancel",
+        json={"reason": "stop hot soon"},
+    )
+    assert resp.status_code == 202, resp.text
+    body = resp.json()
+    assert body["status"] == OperationStatus.RUNNING.value
+    assert body["cancel_requested_at"] is not None
+    assert body["metadata"].get("cancel_reason") == "stop hot soon"
+    assert body["switch_strategy"] == "HOT"
