@@ -1504,14 +1504,12 @@ async def test_cross_alias_hidden_bind_requires_global_unbound() -> None:
         node_id=fks["node_id"],
         model_version_id=fks["model_version_id"],
         upstream="http://upstream.test",
-        name_suffix="ta",
     )
     target_b = await _add_deployment(
         session_factory,
         node_id=fks["node_id"],
         model_version_id=fks["model_version_id"],
         upstream="http://upstream.test",
-        name_suffix="tb",
     )
     await store.reload(force=True)
 
@@ -1527,6 +1525,8 @@ async def test_cross_alias_hidden_bind_requires_global_unbound() -> None:
     inflight = InflightTracker()
     bind_gate = asyncio.Event()
     reserved = asyncio.Event()
+    upstream_gate = asyncio.Event()
+    upstream_entered = asyncio.Event()
     original_bind = InflightTracker.bind
 
     async def _gated_bind(
@@ -1536,22 +1536,31 @@ async def test_cross_alias_hidden_bind_requires_global_unbound() -> None:
         await bind_gate.wait()
         await original_bind(self, handle, deployment_id)
 
+    async def chat_endpoint(request: StarletteRequest) -> JSONResponse:
+        upstream_entered.set()
+        await upstream_gate.wait()
+        body = await request.json()
+        return JSONResponse(
+            {
+                "id": "c",
+                "object": "chat.completion",
+                "model": body.get("model"),
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop",
+                    }
+                ],
+            }
+        )
+
     http_client = httpx.AsyncClient(
-        transport=httpx.MockTransport(
-            lambda r: httpx.Response(
-                200,
-                json={
-                    "id": "c",
-                    "object": "chat.completion",
-                    "model": "m",
-                    "choices": [
-                        {
-                            "index": 0,
-                            "message": {"role": "assistant", "content": "ok"},
-                            "finish_reason": "stop",
-                        }
-                    ],
-                },
+        transport=ASGITransport(
+            app=Starlette(
+                routes=[
+                    Route("/v1/chat/completions", chat_endpoint, methods=["POST"])
+                ]
             )
         ),
         base_url="http://upstream.test",
@@ -1605,15 +1614,9 @@ async def test_cross_alias_hidden_bind_requires_global_unbound() -> None:
             assert body["observed_deployment_inflight_requests"] == 0
             assert body["global_unbound_requests"] == 1
 
-            # Allow B to bind the already-resolved Source entry
+            # Allow B to bind the already-resolved Source entry; hold upstream open
             bind_gate.set()
-            for _ in range(50):
-                if (
-                    inflight.get_unbound_total() == 0
-                    and inflight.get_deployment(source_id) == 1
-                ):
-                    break
-                await asyncio.sleep(0.02)
+            await asyncio.wait_for(upstream_entered.wait(), timeout=2.0)
             assert inflight.get_unbound_total() == 0
             assert inflight.get_deployment(source_id) == 1
 
@@ -1625,6 +1628,7 @@ async def test_cross_alias_hidden_bind_requires_global_unbound() -> None:
             assert body2["global_unbound_requests"] == 0
             assert body2["observed_deployment_inflight_requests"] == 1
 
+            upstream_gate.set()
             resp = await task_b
             assert resp.status_code == 200
             assert inflight.get_deployment(source_id) == 0
