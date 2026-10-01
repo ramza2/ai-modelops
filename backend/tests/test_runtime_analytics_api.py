@@ -369,11 +369,11 @@ async def test_window_boundary_excludes_pre_window() -> None:
     dep = seeded["deployment_id"]
     now = dt.datetime.now(tz=dt.UTC)
     inst = _inst("ctr-1", "2026-10-01T00:00:00Z")
-    # Pre-window with huge counter jump that must NOT contribute.
+    # Outside a 6h window with a huge counter jump that must NOT contribute.
     await _insert_snap(
         sf,
         deployment_id=dep,
-        sampled_at=now - dt.timedelta(hours=30),
+        sampled_at=now - dt.timedelta(hours=10),
         prompt=0,
         generation=0,
         instance=inst,
@@ -381,7 +381,7 @@ async def test_window_boundary_excludes_pre_window() -> None:
     await _insert_snap(
         sf,
         deployment_id=dep,
-        sampled_at=now - dt.timedelta(hours=20),
+        sampled_at=now - dt.timedelta(hours=4),
         prompt=1_000_000,
         generation=500_000,
         instance=inst,
@@ -389,7 +389,7 @@ async def test_window_boundary_excludes_pre_window() -> None:
     await _insert_snap(
         sf,
         deployment_id=dep,
-        sampled_at=now - dt.timedelta(hours=10),
+        sampled_at=now - dt.timedelta(hours=2),
         prompt=1_000_050,
         generation=500_010,
         instance=inst,
@@ -398,7 +398,7 @@ async def test_window_boundary_excludes_pre_window() -> None:
     async with client as c:
         resp = await c.get(
             f"/api/v1/observability/runtime/deployments/{dep}/analytics",
-            params={"hours": 24},
+            params={"hours": 6},
         )
     body = resp.json()
     assert body["snapshot_count"] == 2
