@@ -386,7 +386,10 @@ async def test_hot_boundary_wins_cancel_enters_rollback(db, monkeypatch) -> None
                 )
             )
         ).scalar_one()
-        activate.detail_json = {"route_routing_version": route_version}
+        activate.detail_json = {
+            "route_routing_version": route_version,
+            "source_route_id": str(fixture["route_id"]),
+        }
         op = await session.get(Operation, op_id)
         assert op is not None
         meta = dict(op.metadata_json or {})
@@ -608,7 +611,10 @@ async def test_hot_rollback_source_health_failure_mir(db, monkeypatch) -> None:
                 )
             )
         ).scalar_one()
-        activate.detail_json = {"route_routing_version": route_version}
+        activate.detail_json = {
+            "route_routing_version": route_version,
+            "source_route_id": str(fixture["route_id"]),
+        }
         op = await session.get(Operation, op_id)
         assert op is not None
         meta = dict(op.metadata_json or {})
@@ -728,7 +734,10 @@ async def test_hot_rollback_route_version_once_and_no_double_bump(
                 )
             )
         ).scalar_one()
-        activate.detail_json = {"route_routing_version": target_route_version}
+        activate.detail_json = {
+            "route_routing_version": target_route_version,
+            "source_route_id": str(fixture["route_id"]),
+        }
         op = await session.get(Operation, op_id)
         assert op is not None
         meta = dict(op.metadata_json or {})
@@ -890,7 +899,10 @@ async def test_hot_repeated_cancel_during_rollback_one_sequence(
                 )
             )
         ).scalar_one()
-        activate.detail_json = {"route_routing_version": int(state.version)}
+        activate.detail_json = {
+            "route_routing_version": int(state.version),
+            "source_route_id": str(fixture["route_id"]),
+        }
         op = await session.get(Operation, op_id)
         assert op is not None
         meta = dict(op.metadata_json or {})
@@ -1051,7 +1063,10 @@ async def test_hot_third_party_active_route_during_rollback_mir(
                 )
             )
         ).scalar_one()
-        activate.detail_json = {"route_routing_version": int(state.version)}
+        activate.detail_json = {
+            "route_routing_version": int(state.version),
+            "source_route_id": str(fixture["route_id"]),
+        }
         op = await session.get(Operation, op_id)
         assert op is not None
         meta = dict(op.metadata_json or {})
@@ -1539,7 +1554,10 @@ async def test_hot_rollback_missing_source_route_remains_mir(
                 )
             )
         ).scalar_one()
-        activate.detail_json = {"route_routing_version": version_before}
+        activate.detail_json = {
+            "route_routing_version": version_before,
+            "source_route_id": str(fixture["route_id"]),
+        }
         op = await session.get(Operation, op_id)
         assert op is not None
         meta = dict(op.metadata_json or {})
@@ -1617,3 +1635,605 @@ async def test_hot_rollback_missing_source_route_remains_mir(
         assert source_routes == []
         assert int(state.version) == version_before
         assert target.runtime_status == RuntimeStatus.RUNNING.value
+
+
+@pytest.mark.asyncio
+async def test_hot_rollback_restores_exact_source_route_not_historical(
+    db, monkeypatch
+) -> None:
+    """Multiple Source INACTIVE rows: restore exact Route A, not newer historical B."""
+    sf = db
+    fake_node = ColdSwitchFakeNodeAgent()
+    fake_gw = FakeGateway()
+    transport = CombinedTransport(fake_node, fake_gw)
+    _configure_hot_vram(fake_node)
+
+    async with sf() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        await _seed_standard_runtime(fake_node, fake_gw, fixture)
+        fake_node.containers[str(fixture["source_id"])]["health_status"] = "HEALTHY"
+
+        route_a_id = fixture["route_id"]
+        route_a = await session.get(EndpointRoute, route_a_id)
+        assert route_a is not None
+        route_a.rewrite_model_name = "source-original-name"
+        route_a.status = "ACTIVE"
+
+        # Historical Source route B — newer created_at so DESC would prefer it.
+        route_b_id = uuid.uuid4()
+        newer = dt.datetime.now(tz=dt.UTC) + dt.timedelta(days=1)
+        session.add(
+            EndpointRoute(
+                id=route_b_id,
+                endpoint_alias_id=fixture["endpoint_id"],
+                deployment_id=fixture["source_id"],
+                status="INACTIVE",
+                rewrite_model_name="historical-wrong-name",
+                activated_at=newer - dt.timedelta(hours=1),
+                deactivated_at=newer,
+                created_at=newer,
+            )
+        )
+
+        op_id, job_id = await _enqueue_hot_switch(session, fixture=fixture)
+        await _mark_steps_status(
+            session, op_id, succeeded_through="ACTIVATE_TARGET_ROUTE"
+        )
+        now = dt.datetime.now(tz=dt.UTC)
+        # Simulate cutover: Route A INACTIVE, Target ACTIVE.
+        route_a.status = "INACTIVE"
+        route_a.deactivated_at = now
+        session.add(
+            EndpointRoute(
+                id=uuid.uuid4(),
+                endpoint_alias_id=fixture["endpoint_id"],
+                deployment_id=fixture["target_id"],
+                status="ACTIVE",
+                activated_at=now,
+            )
+        )
+        state = await session.get(RoutingState, 1)
+        assert state is not None
+        state.version = int(state.version) + 1
+        target_route_version = int(state.version)
+        activate = (
+            await session.execute(
+                select(OperationStep).where(
+                    OperationStep.operation_id == op_id,
+                    OperationStep.step_code == "ACTIVATE_TARGET_ROUTE",
+                )
+            )
+        ).scalar_one()
+        activate.detail_json = {
+            "route_routing_version": target_route_version,
+            "source_route_id": str(route_a_id),
+            "source_rewrite_model_name": "source-original-name",
+        }
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        meta = dict(op.metadata_json or {})
+        meta["hot_route_boundary_entered"] = True
+        op.metadata_json = meta
+        source = await session.get(Deployment, fixture["source_id"])
+        target = await session.get(Deployment, fixture["target_id"])
+        assert source and target
+        source.runtime_status = RuntimeStatus.RUNNING.value
+        source.health_status = HealthStatus.HEALTHY.value
+        tgt = f"ctr-tgt-exact-{fixture['suffix']}"
+        target.runtime_status = RuntimeStatus.RUNNING.value
+        target.health_status = HealthStatus.HEALTHY.value
+        target.container_id = tgt
+        await session.commit()
+        await _stamp_cancel(session, op_id)
+
+    fake_node.containers[str(fixture["source_id"])]["health_status"] = "HEALTHY"
+    fake_node.containers[str(fixture["source_id"])]["runtime_status"] = "RUNNING"
+    fake_node.containers[str(fixture["target_id"])] = {
+        "deployment_id": str(fixture["target_id"]),
+        "container_id": tgt,
+        "container_name": "tgt",
+        "runtime_status": "RUNNING",
+        "health_status": "HEALTHY",
+    }
+
+    from app.clients.gateway import GatewayClient
+
+    monkeypatch.setattr(
+        GatewayClient,
+        "get_route_runtime",
+        _make_synced_runtime(sf, fixture["endpoint_id"]),
+    )
+
+    await _claim_and_execute(
+        sf,
+        job_id=job_id,
+        settings=_settings(),
+        transport=transport,
+        engine=sf.kw["bind"],
+    )
+
+    async with sf() as session:
+        op = await session.get(Operation, op_id)
+        active = (
+            await session.execute(
+                select(EndpointRoute).where(
+                    EndpointRoute.endpoint_alias_id == fixture["endpoint_id"],
+                    EndpointRoute.status == "ACTIVE",
+                )
+            )
+        ).scalar_one()
+        route_b = await session.get(EndpointRoute, route_b_id)
+        target = await session.get(Deployment, fixture["target_id"])
+        activate = (
+            await session.execute(
+                select(OperationStep).where(
+                    OperationStep.operation_id == op_id,
+                    OperationStep.step_code == "ACTIVATE_TARGET_ROUTE",
+                )
+            )
+        ).scalar_one()
+        state = await session.get(RoutingState, 1)
+        assert op and route_b and target and state
+        assert op.status == OperationStatus.ROLLED_BACK.value
+        assert (activate.detail_json or {}).get("source_route_id") == str(route_a_id)
+        assert str(active.id) == str(route_a_id)
+        assert active.rewrite_model_name == "source-original-name"
+        assert route_b.status == "INACTIVE"
+        assert route_b.rewrite_model_name == "historical-wrong-name"
+        assert target.runtime_status == RuntimeStatus.RUNNING.value
+        assert int(state.version) == target_route_version + 1
+
+
+@pytest.mark.asyncio
+async def test_hot_activate_persists_source_route_id_in_cutover_tx(
+    db, monkeypatch
+) -> None:
+    """Route-cutover TX persists source_route_id even before succeed_step."""
+    from app.repositories.operations import OperationJobRepository
+    from app.services.hot_switch import HotSwitchExecutor
+    from app.services.operation_executor import OperationExecutor
+
+    sf = db
+    fake_node = ColdSwitchFakeNodeAgent()
+    fake_gw = FakeGateway()
+    transport = CombinedTransport(fake_node, fake_gw)
+    _configure_hot_vram(fake_node)
+
+    async with sf() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        await _seed_standard_runtime(fake_node, fake_gw, fixture)
+        route_a = await session.get(EndpointRoute, fixture["route_id"])
+        assert route_a is not None
+        route_a.rewrite_model_name = "source-original-name"
+        op_id, job_id = await _enqueue_hot_switch(session, fixture=fixture)
+        await _mark_steps_status(session, op_id, succeeded_through="PROBE_TARGET")
+        # Leave ACTIVATE PENDING — we call the step method directly.
+        activate = (
+            await session.execute(
+                select(OperationStep).where(
+                    OperationStep.operation_id == op_id,
+                    OperationStep.step_code == "ACTIVATE_TARGET_ROUTE",
+                )
+            )
+        ).scalar_one()
+        activate.status = StepStatus.RUNNING.value
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        meta = dict(op.metadata_json or {})
+        meta["hot_route_boundary_entered"] = True
+        op.metadata_json = meta
+        source = await session.get(Deployment, fixture["source_id"])
+        target = await session.get(Deployment, fixture["target_id"])
+        alias = await session.get(EndpointAlias, fixture["endpoint_id"])
+        assert source and target and alias
+        source.runtime_status = RuntimeStatus.RUNNING.value
+        target.runtime_status = RuntimeStatus.CREATED.value
+        state = await session.get(RoutingState, 1)
+        version_before = int(state.version) if state else 0
+        await session.commit()
+
+    lifecycle = OperationExecutor(
+        session_factory=sf,
+        settings=_settings(),
+        transport=transport,
+        engine=sf.kw["bind"],
+    )
+    executor = HotSwitchExecutor(lifecycle)
+
+    async with sf() as session:
+        op = await session.get(Operation, op_id)
+        alias = await session.get(EndpointAlias, fixture["endpoint_id"])
+        source = await session.get(Deployment, fixture["source_id"])
+        target = await session.get(Deployment, fixture["target_id"])
+        activate = (
+            await session.execute(
+                select(OperationStep).where(
+                    OperationStep.operation_id == op_id,
+                    OperationStep.step_code == "ACTIVATE_TARGET_ROUTE",
+                )
+            )
+        ).scalar_one()
+        assert op and alias and source and target
+        detail = await executor._step_activate_target_route(
+            session, op, alias, source, target, activate
+        )
+        # Do NOT call succeed_step — simulate crash after route TX commit.
+        await session.commit()
+
+    async with sf() as session:
+        activate = (
+            await session.execute(
+                select(OperationStep).where(
+                    OperationStep.operation_id == op_id,
+                    OperationStep.step_code == "ACTIVATE_TARGET_ROUTE",
+                )
+            )
+        ).scalar_one()
+        active = (
+            await session.execute(
+                select(EndpointRoute).where(
+                    EndpointRoute.endpoint_alias_id == fixture["endpoint_id"],
+                    EndpointRoute.status == "ACTIVE",
+                )
+            )
+        ).scalar_one()
+        state = await session.get(RoutingState, 1)
+        persisted = activate.detail_json or {}
+        assert persisted.get("source_route_id") == str(fixture["route_id"])
+        assert persisted.get("source_rewrite_model_name") == "source-original-name"
+        assert int(persisted["route_routing_version"]) == version_before + 1
+        assert str(active.deployment_id) == str(fixture["target_id"])
+        assert detail["source_route_id"] == str(fixture["route_id"])
+        assert int(detail["route_routing_version"]) == int(
+            persisted["route_routing_version"]
+        )
+        assert int(state.version) == version_before + 1
+        # Leave ACTIVATE as RUNNING (crash before succeed_step).
+        assert activate.status == StepStatus.RUNNING.value
+
+        # Post-route cancel/rollback must restore exact Source without another
+        # forward version bump.
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        meta = dict(op.metadata_json or {})
+        meta["hot_route_boundary_entered"] = True
+        op.metadata_json = meta
+        source = await session.get(Deployment, fixture["source_id"])
+        target = await session.get(Deployment, fixture["target_id"])
+        assert source and target
+        source.runtime_status = RuntimeStatus.RUNNING.value
+        source.health_status = HealthStatus.HEALTHY.value
+        tgt = f"ctr-tgt-crashcut-{fixture['suffix']}"
+        target.runtime_status = RuntimeStatus.RUNNING.value
+        target.health_status = HealthStatus.HEALTHY.value
+        target.container_id = tgt
+        # Skip remaining forward steps so executor enters cancel/rollback path.
+        for code in ("WAIT_ROUTE_APPLY", "FINALIZE"):
+            step = (
+                await session.execute(
+                    select(OperationStep).where(
+                        OperationStep.operation_id == op_id,
+                        OperationStep.step_code == code,
+                    )
+                )
+            ).scalar_one()
+            step.status = StepStatus.PENDING.value
+        # Mark ACTIVATE SUCCEEDED with already-persisted detail for resume.
+        activate.status = StepStatus.SUCCEEDED.value
+        await session.commit()
+        await _stamp_cancel(session, op_id)
+        cutover_version = int(state.version)
+
+    fake_node.containers[str(fixture["source_id"])]["health_status"] = "HEALTHY"
+    fake_node.containers[str(fixture["source_id"])]["runtime_status"] = "RUNNING"
+    fake_node.containers[str(fixture["target_id"])] = {
+        "deployment_id": str(fixture["target_id"]),
+        "container_id": tgt,
+        "container_name": "tgt",
+        "runtime_status": "RUNNING",
+        "health_status": "HEALTHY",
+    }
+
+    from app.clients.gateway import GatewayClient
+
+    monkeypatch.setattr(
+        GatewayClient,
+        "get_route_runtime",
+        _make_synced_runtime(sf, fixture["endpoint_id"]),
+    )
+
+    await _claim_and_execute(
+        sf,
+        job_id=job_id,
+        settings=_settings(),
+        transport=transport,
+        engine=sf.kw["bind"],
+    )
+
+    async with sf() as session:
+        op = await session.get(Operation, op_id)
+        active = (
+            await session.execute(
+                select(EndpointRoute).where(
+                    EndpointRoute.endpoint_alias_id == fixture["endpoint_id"],
+                    EndpointRoute.status == "ACTIVE",
+                )
+            )
+        ).scalar_one()
+        state = await session.get(RoutingState, 1)
+        assert op is not None
+        assert op.status == OperationStatus.ROLLED_BACK.value
+        assert str(active.id) == str(fixture["route_id"])
+        assert active.rewrite_model_name == "source-original-name"
+        # Exactly one bump for Source restore after cutover (no second forward bump).
+        assert int(state.version) == cutover_version + 1
+
+
+@pytest.mark.asyncio
+async def test_hot_rollback_exact_source_route_missing_with_historical_alt(
+    db, monkeypatch
+) -> None:
+    """Exact source_route_id missing; historical Source INACTIVE present → MIR."""
+    sf = db
+    fake_node = ColdSwitchFakeNodeAgent()
+    fake_gw = FakeGateway()
+    transport = CombinedTransport(fake_node, fake_gw)
+    _configure_hot_vram(fake_node)
+
+    async with sf() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        await _seed_standard_runtime(fake_node, fake_gw, fixture)
+        route_a_id = fixture["route_id"]
+        # Historical alternative Source route.
+        hist_id = uuid.uuid4()
+        session.add(
+            EndpointRoute(
+                id=hist_id,
+                endpoint_alias_id=fixture["endpoint_id"],
+                deployment_id=fixture["source_id"],
+                status="INACTIVE",
+                rewrite_model_name="historical-wrong-name",
+                activated_at=dt.datetime.now(tz=dt.UTC) - dt.timedelta(days=2),
+                deactivated_at=dt.datetime.now(tz=dt.UTC) - dt.timedelta(days=1),
+                created_at=dt.datetime.now(tz=dt.UTC) + dt.timedelta(days=1),
+            )
+        )
+        op_id, job_id = await _enqueue_hot_switch(session, fixture=fixture)
+        await _mark_steps_status(
+            session, op_id, succeeded_through="ACTIVATE_TARGET_ROUTE"
+        )
+        now = dt.datetime.now(tz=dt.UTC)
+        # Delete exact Route A; leave historical + Target ACTIVE.
+        route_a = await session.get(EndpointRoute, route_a_id)
+        assert route_a is not None
+        await session.delete(route_a)
+        await session.flush()
+        # Ensure no other ACTIVE; add Target ACTIVE.
+        for route in (
+            await session.execute(
+                select(EndpointRoute).where(
+                    EndpointRoute.endpoint_alias_id == fixture["endpoint_id"],
+                    EndpointRoute.status == "ACTIVE",
+                )
+            )
+        ).scalars().all():
+            route.status = "INACTIVE"
+            route.deactivated_at = now
+        session.add(
+            EndpointRoute(
+                id=uuid.uuid4(),
+                endpoint_alias_id=fixture["endpoint_id"],
+                deployment_id=fixture["target_id"],
+                status="ACTIVE",
+                activated_at=now,
+            )
+        )
+        state = await session.get(RoutingState, 1)
+        assert state is not None
+        state.version = int(state.version) + 1
+        version_before = int(state.version)
+        activate = (
+            await session.execute(
+                select(OperationStep).where(
+                    OperationStep.operation_id == op_id,
+                    OperationStep.step_code == "ACTIVATE_TARGET_ROUTE",
+                )
+            )
+        ).scalar_one()
+        activate.detail_json = {
+            "route_routing_version": version_before,
+            "source_route_id": str(route_a_id),
+        }
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        meta = dict(op.metadata_json or {})
+        meta["hot_route_boundary_entered"] = True
+        op.metadata_json = meta
+        source = await session.get(Deployment, fixture["source_id"])
+        target = await session.get(Deployment, fixture["target_id"])
+        assert source and target
+        source.runtime_status = RuntimeStatus.RUNNING.value
+        source.health_status = HealthStatus.HEALTHY.value
+        tgt = f"ctr-tgt-exactmiss-{fixture['suffix']}"
+        target.runtime_status = RuntimeStatus.RUNNING.value
+        target.health_status = HealthStatus.HEALTHY.value
+        target.container_id = tgt
+        await session.commit()
+        await _stamp_cancel(session, op_id)
+
+    fake_node.containers[str(fixture["source_id"])]["health_status"] = "HEALTHY"
+    fake_node.containers[str(fixture["source_id"])]["runtime_status"] = "RUNNING"
+    fake_node.containers[str(fixture["target_id"])] = {
+        "deployment_id": str(fixture["target_id"]),
+        "container_id": tgt,
+        "container_name": "tgt",
+        "runtime_status": "RUNNING",
+        "health_status": "HEALTHY",
+    }
+
+    from app.clients.gateway import GatewayClient
+
+    monkeypatch.setattr(
+        GatewayClient,
+        "get_route_runtime",
+        _make_synced_runtime(sf, fixture["endpoint_id"]),
+    )
+
+    stop_before = sum(
+        1 for c in fake_node.calls if str(c.get("path", "")).endswith("/stop")
+    )
+    await _claim_and_execute(
+        sf,
+        job_id=job_id,
+        settings=_settings(),
+        transport=transport,
+        engine=sf.kw["bind"],
+    )
+    stop_after = sum(
+        1 for c in fake_node.calls if str(c.get("path", "")).endswith("/stop")
+    )
+    assert stop_after == stop_before
+
+    async with sf() as session:
+        op = await session.get(Operation, op_id)
+        active = (
+            await session.execute(
+                select(EndpointRoute).where(
+                    EndpointRoute.endpoint_alias_id == fixture["endpoint_id"],
+                    EndpointRoute.status == "ACTIVE",
+                )
+            )
+        ).scalar_one()
+        hist = await session.get(EndpointRoute, hist_id)
+        state = await session.get(RoutingState, 1)
+        target = await session.get(Deployment, fixture["target_id"])
+        assert op and hist and state and target
+        assert op.status == OperationStatus.MANUAL_INTERVENTION_REQUIRED.value
+        assert op.error_code == "SOURCE_ROUTE_MISSING"
+        assert str(active.deployment_id) == str(fixture["target_id"])
+        assert hist.status == "INACTIVE"
+        assert int(state.version) == version_before
+        assert target.runtime_status == RuntimeStatus.RUNNING.value
+
+
+@pytest.mark.asyncio
+async def test_hot_rollback_wrong_source_route_active_mir(
+    db, monkeypatch
+) -> None:
+    """Source ACTIVE via different route row than persisted source_route_id → MIR."""
+    sf = db
+    fake_node = ColdSwitchFakeNodeAgent()
+    fake_gw = FakeGateway()
+    transport = CombinedTransport(fake_node, fake_gw)
+    _configure_hot_vram(fake_node)
+
+    async with sf() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        await _seed_standard_runtime(fake_node, fake_gw, fixture)
+        route_a_id = fixture["route_id"]
+        route_a = await session.get(EndpointRoute, route_a_id)
+        assert route_a is not None
+        route_a.status = "INACTIVE"
+        route_a.deactivated_at = dt.datetime.now(tz=dt.UTC)
+        route_a.rewrite_model_name = "source-original-name"
+
+        # Wrong Source route B is ACTIVE.
+        route_b_id = uuid.uuid4()
+        session.add(
+            EndpointRoute(
+                id=route_b_id,
+                endpoint_alias_id=fixture["endpoint_id"],
+                deployment_id=fixture["source_id"],
+                status="ACTIVE",
+                rewrite_model_name="wrong-active-name",
+                activated_at=dt.datetime.now(tz=dt.UTC),
+            )
+        )
+        op_id, job_id = await _enqueue_hot_switch(session, fixture=fixture)
+        await _mark_steps_status(
+            session, op_id, succeeded_through="ACTIVATE_TARGET_ROUTE"
+        )
+        state = await session.get(RoutingState, 1)
+        assert state is not None
+        version_before = int(state.version)
+        activate = (
+            await session.execute(
+                select(OperationStep).where(
+                    OperationStep.operation_id == op_id,
+                    OperationStep.step_code == "ACTIVATE_TARGET_ROUTE",
+                )
+            )
+        ).scalar_one()
+        activate.detail_json = {
+            "route_routing_version": version_before,
+            "source_route_id": str(route_a_id),
+        }
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        meta = dict(op.metadata_json or {})
+        meta["hot_route_boundary_entered"] = True
+        op.metadata_json = meta
+        source = await session.get(Deployment, fixture["source_id"])
+        target = await session.get(Deployment, fixture["target_id"])
+        assert source and target
+        source.runtime_status = RuntimeStatus.RUNNING.value
+        source.health_status = HealthStatus.HEALTHY.value
+        tgt = f"ctr-tgt-wrongact-{fixture['suffix']}"
+        target.runtime_status = RuntimeStatus.RUNNING.value
+        target.health_status = HealthStatus.HEALTHY.value
+        target.container_id = tgt
+        await session.commit()
+        await _stamp_cancel(session, op_id)
+
+    fake_node.containers[str(fixture["source_id"])]["health_status"] = "HEALTHY"
+    fake_node.containers[str(fixture["source_id"])]["runtime_status"] = "RUNNING"
+    fake_node.containers[str(fixture["target_id"])] = {
+        "deployment_id": str(fixture["target_id"]),
+        "container_id": tgt,
+        "container_name": "tgt",
+        "runtime_status": "RUNNING",
+        "health_status": "HEALTHY",
+    }
+
+    from app.clients.gateway import GatewayClient
+
+    monkeypatch.setattr(
+        GatewayClient,
+        "get_route_runtime",
+        _make_synced_runtime(sf, fixture["endpoint_id"]),
+    )
+
+    await _claim_and_execute(
+        sf,
+        job_id=job_id,
+        settings=_settings(),
+        transport=transport,
+        engine=sf.kw["bind"],
+    )
+
+    async with sf() as session:
+        op = await session.get(Operation, op_id)
+        active = (
+            await session.execute(
+                select(EndpointRoute).where(
+                    EndpointRoute.endpoint_alias_id == fixture["endpoint_id"],
+                    EndpointRoute.status == "ACTIVE",
+                )
+            )
+        ).scalar_one()
+        route_a = await session.get(EndpointRoute, route_a_id)
+        state = await session.get(RoutingState, 1)
+        assert op and route_a and state
+        assert op.status == OperationStatus.MANUAL_INTERVENTION_REQUIRED.value
+        assert op.error_code == "SOURCE_ROUTE_MISMATCH"
+        assert str(active.id) == str(route_b_id)
+        assert route_a.status == "INACTIVE"
+        assert int(state.version) == version_before

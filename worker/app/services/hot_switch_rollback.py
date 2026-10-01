@@ -469,10 +469,41 @@ class HotSwitchRollbackMixin:
         target: Deployment,
         step: OperationStep,
     ) -> dict[str, Any]:
-        from app.services.cold_switch import _bump_routing_version
+        from app.services.cold_switch import (
+            STEP_ACTIVATE_TARGET_ROUTE,
+            _bump_routing_version,
+        )
 
         detail = dict(step.detail_json or {})
         existing_version = detail.get("route_routing_version")
+
+        # Authoritative Source route identity comes from forward ACTIVATE detail.
+        activate = (
+            await session.execute(
+                select(OperationStep).where(
+                    OperationStep.operation_id == operation.id,
+                    OperationStep.step_code == STEP_ACTIVATE_TARGET_ROUTE,
+                )
+            )
+        ).scalar_one_or_none()
+        activate_detail = dict(
+            (activate.detail_json if activate is not None else None) or {}
+        )
+        source_route_id_raw = activate_detail.get("source_route_id")
+        if not source_route_id_raw:
+            raise PermanentStepError(
+                "Hot rollback missing durable source_route_id from forward "
+                "ACTIVATE_TARGET_ROUTE; refusing to guess Source route identity.",
+                code="SOURCE_ROUTE_ID_MISSING",
+            )
+        try:
+            source_route_uuid = uuid.UUID(str(source_route_id_raw))
+        except (TypeError, ValueError) as exc:
+            raise PermanentStepError(
+                "Hot rollback source_route_id is not a valid UUID.",
+                code="SOURCE_ROUTE_ID_MISSING",
+                details={"source_route_id": source_route_id_raw},
+            ) from exc
 
         async with self._session_factory() as tx:
             locked = (
@@ -503,7 +534,54 @@ class HotSwitchRollbackMixin:
                 )
             ).scalar_one_or_none()
 
+            source_route = (
+                await tx.execute(
+                    select(EndpointRoute)
+                    .where(EndpointRoute.id == source_route_uuid)
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+
+            if source_route is None:
+                raise PermanentStepError(
+                    "Hot rollback cannot restore Source: exact source_route_id "
+                    "row is missing.",
+                    code="SOURCE_ROUTE_MISSING",
+                    details={
+                        "source_route_id": str(source_route_uuid),
+                        "endpoint_alias_id": str(alias.id),
+                        "source_deployment_id": str(source.id),
+                    },
+                )
+
+            if str(source_route.endpoint_alias_id) != str(alias.id) or str(
+                source_route.deployment_id
+            ) != str(source.id):
+                raise PermanentStepError(
+                    "Persisted source_route_id does not match this Endpoint/Source.",
+                    code="SOURCE_ROUTE_MISMATCH",
+                    details={
+                        "source_route_id": str(source_route_uuid),
+                        "route_endpoint_alias_id": str(source_route.endpoint_alias_id),
+                        "route_deployment_id": str(source_route.deployment_id),
+                        "endpoint_alias_id": str(alias.id),
+                        "source_deployment_id": str(source.id),
+                    },
+                )
+
+            # Source already ACTIVE — only safe when exact persisted row is ACTIVE.
             if active is not None and str(active.deployment_id) == str(source.id):
+                if str(active.id) != str(source_route_uuid):
+                    raise PermanentStepError(
+                        "Source Deployment is ACTIVE via a different route row "
+                        "than the persisted source_route_id.",
+                        code="SOURCE_ROUTE_MISMATCH",
+                        details={
+                            "source_route_id": str(source_route_uuid),
+                            "active_route_id": str(active.id),
+                            "active_deployment_id": str(active.deployment_id),
+                        },
+                    )
                 if existing_version is not None:
                     version = int(existing_version)
                 else:
@@ -513,6 +591,8 @@ class HotSwitchRollbackMixin:
                 return {
                     "route_routing_version": version,
                     "active_deployment_id": str(source.id),
+                    "source_route_id": str(source_route_uuid),
+                    "rewrite_model_name": active.rewrite_model_name,
                     "already_active": True,
                     "traffic_state": TrafficState.SERVING.value,
                 }
@@ -532,51 +612,28 @@ class HotSwitchRollbackMixin:
                     },
                 )
 
-            now = dt.datetime.now(tz=dt.UTC)
-
-            # Require the persisted Source route before mutating ACTIVE Target.
-            # Never invent a Source route or guess rewrite_model_name.
-            inactive_source = (
-                await tx.execute(
-                    select(EndpointRoute)
-                    .where(
-                        EndpointRoute.endpoint_alias_id == alias.id,
-                        EndpointRoute.deployment_id == source.id,
-                        EndpointRoute.status == RouteStatus.INACTIVE.value,
-                    )
-                    .order_by(EndpointRoute.created_at.desc())
-                    .limit(1)
-                )
-            ).scalar_one_or_none()
-
-            if inactive_source is None:
+            if source_route.status != RouteStatus.INACTIVE.value:
                 raise PermanentStepError(
-                    "Hot rollback cannot restore Source: the original Source "
-                    "route row is missing. Refusing to invent rewrite/routing "
-                    "configuration.",
-                    code="SOURCE_ROUTE_MISSING",
+                    "Exact Source route must be INACTIVE before Hot rollback restore.",
+                    code="SOURCE_ROUTE_MISMATCH",
                     details={
-                        "endpoint_alias_id": str(alias.id),
-                        "source_deployment_id": str(source.id),
-                        "active_deployment_id": (
-                            str(active.deployment_id) if active is not None else None
-                        ),
+                        "source_route_id": str(source_route_uuid),
+                        "route_status": source_route.status,
                     },
                 )
 
+            now = dt.datetime.now(tz=dt.UTC)
             if active is not None and str(active.deployment_id) == str(target.id):
                 active.status = RouteStatus.INACTIVE.value
                 active.deactivated_at = now
                 await tx.flush()
 
-            # Reactivate the exact persisted Source route row — preserve
-            # rewrite_model_name and other configuration on that row.
-            inactive_source.status = RouteStatus.ACTIVE.value
-            inactive_source.activated_at = now
-            inactive_source.deactivated_at = None
-            inactive_source.operation_id = operation.id
-            route_id = str(inactive_source.id)
-            preserved_rewrite = inactive_source.rewrite_model_name
+            # Reactivate the exact persisted Source route row.
+            source_route.status = RouteStatus.ACTIVE.value
+            source_route.activated_at = now
+            source_route.deactivated_at = None
+            source_route.operation_id = operation.id
+            preserved_rewrite = source_route.rewrite_model_name
 
             version = await _bump_routing_version(tx)
             await tx.commit()
@@ -584,7 +641,8 @@ class HotSwitchRollbackMixin:
         return {
             "route_routing_version": version,
             "active_deployment_id": str(source.id),
-            "route_id": route_id,
+            "route_id": str(source_route_uuid),
+            "source_route_id": str(source_route_uuid),
             "rewrite_model_name": preserved_rewrite,
             "traffic_state": TrafficState.SERVING.value,
         }

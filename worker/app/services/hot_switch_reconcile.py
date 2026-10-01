@@ -259,6 +259,7 @@ class HotSwitchReconciler:
             node = await session.get(Node, target.node_id) if target.node_id else None
             db_traffic = str(alias.traffic_state)
             db_active = str(active.deployment_id) if active is not None else None
+            active_route_id = str(active.id) if active is not None else None
             alias_name = str(alias.alias)
             agent_url = (
                 str(node.agent_base_url) if node and node.agent_base_url else None
@@ -342,6 +343,7 @@ class HotSwitchReconciler:
             steps_snapshot, STEP_HOT_ROLLBACK_PROBE_SOURCE
         )
         rb_version = self._rollback_activate_version(steps_snapshot)
+        expected_source_route_id = self._forward_source_route_id(steps_snapshot)
 
         # 1) No cancel + Target fully proven → SUCCEEDED.
         if not cancel_requested and self._target_fully_serving(
@@ -367,6 +369,7 @@ class HotSwitchReconciler:
             )
 
         # 5) Source fully restored after post-route rollback → ROLLED_BACK.
+        # Exact Source route identity is required — deployment_id alone is insufficient.
         if self._source_fully_restored_after_rollback(
             db_active=db_active,
             db_traffic=db_traffic,
@@ -378,6 +381,8 @@ class HotSwitchReconciler:
             source_runtime=src_rt,
             source_health=src_hp,
             rollback_probe_succeeded=rb_probe_ok,
+            expected_source_route_id=expected_source_route_id,
+            active_route_id=active_route_id,
         ):
             return await self._finish_rolled_back(
                 operation_id=operation_id,
@@ -554,6 +559,18 @@ class HotSwitchReconciler:
             self._step_by_code(steps, STEP_WAIT_ROUTE_APPLY)
         )
 
+    @staticmethod
+    def _forward_source_route_id(steps: list[OperationStep]) -> str | None:
+        activate = None
+        for step in steps:
+            if step.step_code == STEP_ACTIVATE_TARGET_ROUTE:
+                activate = step
+                break
+        if activate is None:
+            return None
+        raw = (activate.detail_json or {}).get("source_route_id")
+        return str(raw) if raw is not None else None
+
     def _rollback_activate_version(self, steps: list[OperationStep]) -> int | None:
         v = self._version_from_detail(
             self._step_by_code(steps, STEP_HOT_ROLLBACK_ACTIVATE_SOURCE_ROUTE)
@@ -631,8 +648,14 @@ class HotSwitchReconciler:
         source_runtime: str,
         source_health: str,
         rollback_probe_succeeded: bool,
+        expected_source_route_id: str | None,
+        active_route_id: str | None,
     ) -> bool:
         if rollback_activate_version is None or not rollback_probe_succeeded:
+            return False
+        if not expected_source_route_id or not active_route_id:
+            return False
+        if active_route_id != expected_source_route_id:
             return False
         return (
             db_active == source_id

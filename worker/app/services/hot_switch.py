@@ -922,8 +922,16 @@ class HotSwitchExecutor(HotSwitchRollbackMixin):
         target: Deployment,
         step: OperationStep,
     ) -> dict[str, Any]:
+        """Activate Target route and persist exact Source route identity.
+
+        ``source_route_id`` / ``route_routing_version`` are written into the
+        ACTIVATE OperationStep detail in the **same** DB transaction as the
+        route mutation so crash after commit cannot lose Source identity.
+        """
         detail = dict(step.detail_json or {})
         existing_version = detail.get("route_routing_version")
+        existing_source_route_id = detail.get("source_route_id")
+        existing_source_rewrite = detail.get("source_rewrite_model_name")
 
         async with self._session_factory() as tx:
             locked = (
@@ -945,6 +953,27 @@ class HotSwitchExecutor(HotSwitchRollbackMixin):
                     details={"traffic_state": locked.traffic_state},
                 )
 
+            locked_step = (
+                await tx.execute(
+                    select(OperationStep)
+                    .where(OperationStep.id == step.id)
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+            step_detail = dict(
+                (locked_step.detail_json if locked_step is not None else None)
+                or detail
+            )
+            persisted_source_route_id = step_detail.get("source_route_id") or (
+                existing_source_route_id
+            )
+            persisted_version = step_detail.get("route_routing_version")
+            if persisted_version is None:
+                persisted_version = existing_version
+            persisted_rewrite = step_detail.get("source_rewrite_model_name")
+            if persisted_rewrite is None:
+                persisted_rewrite = existing_source_rewrite
+
             active = (
                 await tx.execute(
                     select(EndpointRoute).where(
@@ -954,16 +983,24 @@ class HotSwitchExecutor(HotSwitchRollbackMixin):
                 )
             ).scalar_one_or_none()
 
+            # Resume: Target already ACTIVE — require durable Source identity.
             if active is not None and str(active.deployment_id) == str(target.id):
-                if existing_version is not None:
-                    version = int(existing_version)
-                else:
-                    state = await tx.get(RoutingState, 1)
-                    version = int(state.version) if state else 0
+                if persisted_source_route_id is None or persisted_version is None:
+                    raise PermanentStepError(
+                        "Hot Switch resume with Target ACTIVE requires persisted "
+                        "source_route_id and route_routing_version on ACTIVATE.",
+                        code="SOURCE_ROUTE_ID_MISSING",
+                        details={
+                            "source_route_id": persisted_source_route_id,
+                            "route_routing_version": persisted_version,
+                        },
+                    )
                 await tx.commit()
                 return {
-                    "route_routing_version": version,
+                    "route_routing_version": int(persisted_version),
                     "active_deployment_id": str(target.id),
+                    "source_route_id": str(persisted_source_route_id),
+                    "source_rewrite_model_name": persisted_rewrite,
                     "already_active": True,
                     "traffic_state": TrafficState.SERVING.value,
                 }
@@ -982,13 +1019,26 @@ class HotSwitchExecutor(HotSwitchRollbackMixin):
                     },
                 )
 
-            now = __import__("datetime").datetime.now(
-                tz=__import__("datetime").UTC
-            )
-            if active is not None:
-                active.status = RouteStatus.INACTIVE.value
-                active.deactivated_at = now
-                await tx.flush()
+            # Initial cutover requires ACTIVE = Source (exact row identity).
+            if active is None or str(active.deployment_id) != str(source.id):
+                raise PermanentStepError(
+                    "Hot Switch ACTIVATE requires the ACTIVE route to be Source.",
+                    code="SOURCE_ROUTE_NOT_ACTIVE",
+                    details={
+                        "active_deployment_id": (
+                            str(active.deployment_id) if active is not None else None
+                        ),
+                        "source_deployment_id": str(source.id),
+                    },
+                )
+
+            now = dt.datetime.now(tz=dt.UTC)
+            source_route_id = str(active.id)
+            source_rewrite = active.rewrite_model_name
+
+            active.status = RouteStatus.INACTIVE.value
+            active.deactivated_at = now
+            await tx.flush()
 
             inactive_target = (
                 await tx.execute(
@@ -1026,12 +1076,23 @@ class HotSwitchExecutor(HotSwitchRollbackMixin):
 
             # Traffic remains SERVING for Hot Switch.
             version = await _bump_routing_version(tx)
+
+            # Durable Source identity + version in the same route-cutover TX.
+            if locked_step is not None:
+                merged = dict(locked_step.detail_json or {})
+                merged["source_route_id"] = source_route_id
+                merged["source_rewrite_model_name"] = source_rewrite
+                merged["route_routing_version"] = version
+                locked_step.detail_json = merged
+
             await tx.commit()
 
         return {
             "route_routing_version": version,
             "active_deployment_id": str(target.id),
             "route_id": route_id,
+            "source_route_id": source_route_id,
+            "source_rewrite_model_name": source_rewrite,
             "traffic_state": TrafficState.SERVING.value,
         }
 

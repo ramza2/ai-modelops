@@ -142,7 +142,10 @@ async def test_hot_reconcile_target_fully_serving_to_succeeded(db) -> None:
                 )
             )
         ).scalar_one()
-        activate.detail_json = {"route_routing_version": version}
+        activate.detail_json = {
+            "route_routing_version": version,
+            "source_route_id": str(fixture["route_id"]),
+        }
         for code in ("WAIT_ROUTE_APPLY", "FINALIZE"):
             step = (
                 await session.execute(
@@ -218,7 +221,10 @@ async def test_hot_reconcile_stale_gateway_version_resumes_wait(db) -> None:
                 )
             )
         ).scalar_one()
-        activate.detail_json = {"route_routing_version": version}
+        activate.detail_json = {
+            "route_routing_version": version,
+            "source_route_id": str(fixture["route_id"]),
+        }
         wait = (
             await session.execute(
                 select(OperationStep).where(
@@ -371,7 +377,10 @@ async def test_hot_reconcile_target_success_without_probe_remains_mir(db) -> Non
             )
         ).scalar_one()
         activate.status = StepStatus.SUCCEEDED.value
-        activate.detail_json = {"route_routing_version": version}
+        activate.detail_json = {
+            "route_routing_version": version,
+            "source_route_id": str(fixture["route_id"]),
+        }
         source = await session.get(Deployment, fixture["source_id"])
         target = await session.get(Deployment, fixture["target_id"])
         assert source and target
@@ -437,7 +446,10 @@ async def test_hot_reconcile_applied_version_contradiction_remains_mir(db) -> No
                 )
             )
         ).scalar_one()
-        activate.detail_json = {"route_routing_version": version}
+        activate.detail_json = {
+            "route_routing_version": version,
+            "source_route_id": str(fixture["route_id"]),
+        }
         wait = (
             await session.execute(
                 select(OperationStep).where(
@@ -511,7 +523,10 @@ async def test_hot_reconcile_post_route_cancel_resumes_rollback(db) -> None:
                 )
             )
         ).scalar_one()
-        activate.detail_json = {"route_routing_version": version}
+        activate.detail_json = {
+            "route_routing_version": version,
+            "source_route_id": str(fixture["route_id"]),
+        }
         # Pre-create HOT rollback steps once; leave VERIFY failed/open.
         max_seq = max(
             s.sequence_no
@@ -630,10 +645,39 @@ async def test_hot_reconcile_source_restored_to_rolled_back(db) -> None:
         await _mark_steps_status(
             session, op_id, succeeded_through="ACTIVATE_TARGET_ROUTE"
         )
-        # Source is ACTIVE again after rollback path.
-        version = await _set_active_route(
-            session, fixture["endpoint_id"], fixture["source_id"]
-        )
+        # Source is ACTIVE again on the *exact* original route row.
+        now = dt.datetime.now(tz=dt.UTC)
+        for route in (
+            await session.execute(
+                select(EndpointRoute).where(
+                    EndpointRoute.endpoint_alias_id == fixture["endpoint_id"]
+                )
+            )
+        ).scalars().all():
+            if route.status == "ACTIVE":
+                route.status = "INACTIVE"
+                route.deactivated_at = now
+        source_route = await session.get(EndpointRoute, fixture["route_id"])
+        assert source_route is not None
+        source_route.status = "ACTIVE"
+        source_route.activated_at = now
+        source_route.deactivated_at = None
+        state = await session.get(RoutingState, 1)
+        assert state is not None
+        state.version = int(state.version) + 1
+        version = int(state.version)
+        activate = (
+            await session.execute(
+                select(OperationStep).where(
+                    OperationStep.operation_id == op_id,
+                    OperationStep.step_code == "ACTIVATE_TARGET_ROUTE",
+                )
+            )
+        ).scalar_one()
+        activate.detail_json = {
+            "route_routing_version": version,
+            "source_route_id": str(fixture["route_id"]),
+        }
         max_seq = max(
             s.sequence_no
             for s in (
@@ -651,7 +695,10 @@ async def test_hot_reconcile_source_restored_to_rolled_back(db) -> None:
             )
             detail = {}
             if code == STEP_HOT_ROLLBACK_ACTIVATE_SOURCE_ROUTE:
-                detail = {"route_routing_version": version}
+                detail = {
+                    "route_routing_version": version,
+                    "source_route_id": str(fixture["route_id"]),
+                }
             if code == STEP_HOT_ROLLBACK_PROBE_SOURCE:
                 detail = {"probe_ok": True}
             session.add(
@@ -708,10 +755,19 @@ async def test_hot_reconcile_source_restored_to_rolled_back(db) -> None:
     async with sf() as session:
         op = await session.get(Operation, op_id)
         target = await session.get(Deployment, fixture["target_id"])
+        active = (
+            await session.execute(
+                select(EndpointRoute).where(
+                    EndpointRoute.endpoint_alias_id == fixture["endpoint_id"],
+                    EndpointRoute.status == "ACTIVE",
+                )
+            )
+        ).scalar_one()
         assert op and target
         assert op.status == OperationStatus.ROLLED_BACK.value
         assert op.cancel_requested_at is not None
         assert target.runtime_status == RuntimeStatus.RUNNING.value
+        assert str(active.id) == str(fixture["route_id"])
 
 
 @pytest.mark.asyncio
@@ -749,7 +805,10 @@ async def test_hot_reconcile_gateway_unavailable_remains_mir(db) -> None:
                 )
             )
         ).scalar_one()
-        activate.detail_json = {"route_routing_version": version}
+        activate.detail_json = {
+            "route_routing_version": version,
+            "source_route_id": str(fixture["route_id"]),
+        }
         source = await session.get(Deployment, fixture["source_id"])
         target = await session.get(Deployment, fixture["target_id"])
         assert source and target
@@ -812,7 +871,10 @@ async def test_hot_reconcile_node_agent_unavailable_remains_mir(db) -> None:
                 )
             )
         ).scalar_one()
-        activate.detail_json = {"route_routing_version": version}
+        activate.detail_json = {
+            "route_routing_version": version,
+            "source_route_id": str(fixture["route_id"]),
+        }
         source = await session.get(Deployment, fixture["source_id"])
         target = await session.get(Deployment, fixture["target_id"])
         assert source and target
@@ -903,7 +965,10 @@ async def test_hot_reconcile_cooldown_prevents_busy_loop(db) -> None:
                 )
             )
         ).scalar_one()
-        activate.detail_json = {"route_routing_version": version}
+        activate.detail_json = {
+            "route_routing_version": version,
+            "source_route_id": str(fixture["route_id"]),
+        }
         source = await session.get(Deployment, fixture["source_id"])
         target = await session.get(Deployment, fixture["target_id"])
         assert source and target
@@ -978,7 +1043,10 @@ async def test_hot_reconcile_does_not_duplicate_rollback_steps(db) -> None:
                 )
             )
         ).scalar_one()
-        activate.detail_json = {"route_routing_version": version}
+        activate.detail_json = {
+            "route_routing_version": version,
+            "source_route_id": str(fixture["route_id"]),
+        }
         # No rollback steps yet — reconciler should create exactly once.
         source = await session.get(Deployment, fixture["source_id"])
         target = await session.get(Deployment, fixture["target_id"])
@@ -1112,3 +1180,142 @@ async def test_hot_reconcile_activate_running_only_pre_route_cancel(
         assert op is not None
         assert op.status == OperationStatus.CANCELLED.value
         assert rb_steps == []
+
+
+@pytest.mark.asyncio
+async def test_hot_reconcile_wrong_source_route_active_not_rolled_back(db) -> None:
+    """ACTIVE Source via wrong route row must not prove ROLLED_BACK."""
+    sf = db
+    fake_node = ColdSwitchFakeNodeAgent()
+    fake_gw = FakeGateway()
+    transport = CombinedTransport(fake_node, fake_gw)
+    _configure_hot_vram(fake_node)
+
+    async with sf() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        await _seed_standard_runtime(fake_node, fake_gw, fixture)
+        op_id, _job_id = await _enqueue_hot_switch(session, fixture=fixture)
+        await _mark_steps_status(
+            session, op_id, succeeded_through="ACTIVATE_TARGET_ROUTE"
+        )
+        now = dt.datetime.now(tz=dt.UTC)
+        route_a = await session.get(EndpointRoute, fixture["route_id"])
+        assert route_a is not None
+        route_a.status = "INACTIVE"
+        route_a.deactivated_at = now
+        # Wrong Source route ACTIVE.
+        wrong_id = uuid.uuid4()
+        session.add(
+            EndpointRoute(
+                id=wrong_id,
+                endpoint_alias_id=fixture["endpoint_id"],
+                deployment_id=fixture["source_id"],
+                status="ACTIVE",
+                rewrite_model_name="wrong",
+                activated_at=now,
+            )
+        )
+        state = await session.get(RoutingState, 1)
+        assert state is not None
+        state.version = int(state.version) + 1
+        version = int(state.version)
+        activate = (
+            await session.execute(
+                select(OperationStep).where(
+                    OperationStep.operation_id == op_id,
+                    OperationStep.step_code == "ACTIVATE_TARGET_ROUTE",
+                )
+            )
+        ).scalar_one()
+        activate.detail_json = {
+            "route_routing_version": version,
+            "source_route_id": str(fixture["route_id"]),
+        }
+        max_seq = max(
+            s.sequence_no
+            for s in (
+                await session.execute(
+                    select(OperationStep).where(OperationStep.operation_id == op_id)
+                )
+            ).scalars().all()
+        )
+        for i, code in enumerate(HOT_ROLLBACK_STEPS, start=1):
+            detail = {}
+            if code == STEP_HOT_ROLLBACK_ACTIVATE_SOURCE_ROUTE:
+                detail = {
+                    "route_routing_version": version,
+                    "source_route_id": str(fixture["route_id"]),
+                }
+            if code == STEP_HOT_ROLLBACK_PROBE_SOURCE:
+                detail = {"probe_ok": True}
+            status = (
+                StepStatus.FAILED.value
+                if code == "HOT_ROLLBACK_FINALIZE"
+                else StepStatus.SUCCEEDED.value
+            )
+            session.add(
+                OperationStep(
+                    id=uuid.uuid4(),
+                    operation_id=op_id,
+                    sequence_no=max_seq + i,
+                    step_code=code,
+                    status=status,
+                    detail_json=detail,
+                )
+            )
+        for code in ("WAIT_ROUTE_APPLY", "FINALIZE"):
+            step = (
+                await session.execute(
+                    select(OperationStep).where(
+                        OperationStep.operation_id == op_id,
+                        OperationStep.step_code == code,
+                    )
+                )
+            ).scalar_one()
+            step.status = StepStatus.SKIPPED.value
+        source = await session.get(Deployment, fixture["source_id"])
+        target = await session.get(Deployment, fixture["target_id"])
+        assert source and target
+        source.runtime_status = RuntimeStatus.RUNNING.value
+        source.health_status = HealthStatus.HEALTHY.value
+        tgt = f"ctr-tgt-wrongrec-{fixture['suffix']}"
+        target.runtime_status = RuntimeStatus.RUNNING.value
+        target.health_status = HealthStatus.HEALTHY.value
+        target.container_id = tgt
+        await session.commit()
+        await _force_hot_mir(session, op_id, boundary=True, cancel=True)
+
+    fake_node.containers[str(fixture["source_id"])]["runtime_status"] = "RUNNING"
+    fake_node.containers[str(fixture["source_id"])]["health_status"] = "HEALTHY"
+    fake_node.containers[str(fixture["target_id"])] = {
+        "deployment_id": str(fixture["target_id"]),
+        "container_id": tgt,
+        "container_name": "tgt",
+        "runtime_status": "RUNNING",
+        "health_status": "HEALTHY",
+    }
+    fake_gw.active_deployment_id = str(fixture["source_id"])
+    fake_gw.traffic_state = TrafficState.SERVING.value
+    fake_gw.applied_routing_version = version
+    fake_gw.auto_apply = False
+
+    result = await _reconciler(sf, transport, sf.kw["bind"]).reconcile_operation(
+        op_id
+    )
+    # Must not terminalize ROLLED_BACK solely from deployment_id==Source.
+    assert result.outcome != "ROLLED_BACK", result
+    async with sf() as session:
+        op = await session.get(Operation, op_id)
+        active = (
+            await session.execute(
+                select(EndpointRoute).where(
+                    EndpointRoute.endpoint_alias_id == fixture["endpoint_id"],
+                    EndpointRoute.status == "ACTIVE",
+                )
+            )
+        ).scalar_one()
+        assert op is not None
+        assert op.status != OperationStatus.ROLLED_BACK.value
+        assert str(active.id) == str(wrong_id)
