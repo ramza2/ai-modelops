@@ -810,9 +810,47 @@ error_code
 
 Prompt/Response 원문은 반환하지 않는다.
 
+### GET /observability/invocations/summary
+
+M6-A1 Runtime Capacity Observability — Invocation capacity telemetry.
+
+```text
+GET /api/v1/observability/invocations/summary?hours=24&group_by=client
+```
+
+Query:
+
+```text
+hours     default 24; bounded 1..720
+group_by  client | alias | deployment (default client)
+```
+
+Response item fields (per group):
+
+```text
+group_key
+request_count
+success_count          # 200 <= http_status < 400
+error_count
+tokenized_request_count
+input_tokens_avg / p50 / p95 / max
+output_tokens_avg
+total_tokens_avg
+latency_ms_avg / p50 / p95 / max
+deployment_name        # only when group_by=deployment
+```
+
+Notes:
+
+- Token percentiles use PostgreSQL `percentile_cont` (NULL token rows ignored).
+- Client grouping prefers `client_app.client_key`, else `raw_client_key`, else `unknown`.
+- Alias grouping uses Endpoint Alias name; deployment grouping returns id + name.
+- No context-overflow classifier; no prompt/response storage.
+- Does **not** scrape vLLM `/metrics` (M6-A2).
+
 ### GET /invocations/stats
 
-집계 예:
+집계 예 (legacy matrix; prefer `/observability/invocations/summary` for M6-A1):
 
 ```text
 requests

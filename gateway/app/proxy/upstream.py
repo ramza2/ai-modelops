@@ -12,6 +12,8 @@ from fastapi import Response
 from fastapi.responses import StreamingResponse
 
 from app.core.errors import ErrorCode, GatewayError
+from app.proxy.stats import ProxyCompletionStats
+from app.runtime.sse_usage import SseUsageObserver
 
 logger = logging.getLogger(__name__)
 
@@ -80,14 +82,15 @@ async def proxy_sse_post(
     body: dict[str, Any],
     request_id: str,
     timeout_seconds: float,
-    on_complete: Callable[[int, int | None, str | None], Awaitable[None]]
-    | None = None,
+    on_complete: Callable[[ProxyCompletionStats], Awaitable[None]] | None = None,
 ) -> Response:
     """POST JSON and stream SSE bytes through without buffering the full body.
 
     Mid-stream upstream failures are re-raised so the connection closes
     abnormally (not a clean EOF after HTTP 200). Cleanup (upstream close +
     ``on_complete``) is shielded so ASGI cancellation still decrements inflight.
+
+    Usage telemetry is observational only: raw bytes are yielded unchanged.
     """
     base = upstream_base_url.rstrip("/")
     url = f"{base}{path}"
@@ -138,9 +141,14 @@ async def proxy_sse_post(
         response_bytes = 0
         error_code: str | None = None
         pending_exc: BaseException | None = None
+        observer = SseUsageObserver()
         try:
             async for chunk in upstream.aiter_bytes():
                 response_bytes += len(chunk)
+                try:
+                    observer.feed(chunk)
+                except Exception:  # noqa: BLE001 - never break proxy
+                    logger.exception("SSE usage observer failed; continuing proxy.")
                 yield chunk
         except httpx.TimeoutException as exc:
             error_code = ErrorCode.UPSTREAM_TIMEOUT
@@ -154,14 +162,28 @@ async def proxy_sse_post(
             error_code = "CLIENT_DISCONNECT"
             pending_exc = exc
         finally:
+            usage = None
+            try:
+                usage = observer.finish()
+            except Exception:  # noqa: BLE001
+                logger.exception("SSE usage observer finish failed.")
+
             async def _cleanup() -> None:
                 try:
                     await upstream.aclose()
                 except Exception:  # noqa: BLE001
                     logger.exception("Upstream SSE close failed path=%s", path)
                 if on_complete is not None:
+                    stats = ProxyCompletionStats(
+                        http_status=status_code,
+                        response_bytes=response_bytes,
+                        error_code=error_code,
+                        input_tokens=usage.input_tokens if usage else None,
+                        output_tokens=usage.output_tokens if usage else None,
+                        total_tokens=usage.total_tokens if usage else None,
+                    )
                     try:
-                        await on_complete(status_code, response_bytes, error_code)
+                        await on_complete(stats)
                     except Exception:  # noqa: BLE001
                         logger.exception("Streaming on_complete hook failed.")
 

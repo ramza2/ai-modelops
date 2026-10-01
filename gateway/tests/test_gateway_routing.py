@@ -240,12 +240,64 @@ class UpstreamRecorder:
                 content=payload,
             )
         if request.url.path.endswith("/embeddings"):
+            if self.mode == "embeddings_usage":
+                return httpx.Response(
+                    200,
+                    json={
+                        "object": "list",
+                        "data": [{"embedding": [0.1, 0.2], "index": 0}],
+                        "model": body.get("model"),
+                        "usage": {"prompt_tokens": 80, "total_tokens": 80},
+                    },
+                )
             return httpx.Response(
                 200,
                 json={
                     "object": "list",
                     "data": [{"embedding": [0.1, 0.2], "index": 0}],
                     "model": body.get("model"),
+                },
+            )
+        if self.mode == "ok_usage":
+            return httpx.Response(
+                200,
+                json={
+                    "id": "chatcmpl-test",
+                    "object": "chat.completion",
+                    "model": body.get("model"),
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {"role": "assistant", "content": "ok"},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "usage": {
+                        "prompt_tokens": 120,
+                        "completion_tokens": 30,
+                        "total_tokens": 150,
+                    },
+                },
+            )
+        if self.mode == "ok_usage_malformed":
+            return httpx.Response(
+                200,
+                json={
+                    "id": "chatcmpl-test",
+                    "object": "chat.completion",
+                    "model": body.get("model"),
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {"role": "assistant", "content": "ok"},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "usage": {
+                        "prompt_tokens": True,
+                        "completion_tokens": -5,
+                        "total_tokens": "nope",
+                    },
                 },
             )
         return httpx.Response(

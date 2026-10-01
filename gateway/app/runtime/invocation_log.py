@@ -29,6 +29,9 @@ class InvocationRecord:
     raw_client_key: str | None = None
     request_bytes: int | None = None
     response_bytes: int | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    total_tokens: int | None = None
 
 
 class InvocationLogWriter:
@@ -67,30 +70,43 @@ class InvocationLogWriter:
         assert self._session_factory is not None
         # Persist the exact client-visible request id (no UUID5 rewrite).
         request_id = str(record.request_id)
+        raw_client_key = record.raw_client_key or "unknown"
         try:
             async with self._session_factory() as session:
                 await session.execute(
                     text(
                         """
                         INSERT INTO invocation_log (
-                          request_id, requested_at, raw_client_key,
+                          request_id, requested_at, raw_client_key, client_app_id,
                           endpoint_alias_id, deployment_id, model_version_id,
                           api_path, http_status, latency_ms,
-                          request_bytes, response_bytes, is_streaming, error_code
+                          request_bytes, response_bytes,
+                          input_tokens, output_tokens, total_tokens,
+                          is_streaming, error_code
                         ) VALUES (
                           :request_id, :requested_at, :raw_client_key,
+                          (
+                            SELECT id
+                            FROM client_app
+                            WHERE client_key = :client_key_lookup
+                              AND is_active = true
+                            LIMIT 1
+                          ),
                           CAST(:endpoint_alias_id AS uuid),
                           CAST(:deployment_id AS uuid),
                           CAST(:model_version_id AS uuid),
                           :api_path, :http_status, :latency_ms,
-                          :request_bytes, :response_bytes, :is_streaming, :error_code
+                          :request_bytes, :response_bytes,
+                          :input_tokens, :output_tokens, :total_tokens,
+                          :is_streaming, :error_code
                         )
                         """
                     ),
                     {
                         "request_id": request_id,
                         "requested_at": record.requested_at,
-                        "raw_client_key": record.raw_client_key or "unknown",
+                        "raw_client_key": raw_client_key,
+                        "client_key_lookup": raw_client_key,
                         "endpoint_alias_id": record.endpoint_alias_id,
                         "deployment_id": record.deployment_id,
                         "model_version_id": record.model_version_id,
@@ -99,6 +115,9 @@ class InvocationLogWriter:
                         "latency_ms": max(0, int(record.latency_ms)),
                         "request_bytes": record.request_bytes,
                         "response_bytes": record.response_bytes,
+                        "input_tokens": record.input_tokens,
+                        "output_tokens": record.output_tokens,
+                        "total_tokens": record.total_tokens,
                         "is_streaming": bool(record.is_streaming),
                         "error_code": record.error_code,
                     },
@@ -125,6 +144,9 @@ def build_invocation_record(
     raw_client_key: str | None = None,
     request_bytes: int | None = None,
     response_bytes: int | None = None,
+    input_tokens: int | None = None,
+    output_tokens: int | None = None,
+    total_tokens: int | None = None,
 ) -> InvocationRecord:
     latency_ms = int((finished_at - started_at).total_seconds() * 1000)
     return InvocationRecord(
@@ -141,4 +163,7 @@ def build_invocation_record(
         raw_client_key=raw_client_key or "unknown",
         request_bytes=request_bytes,
         response_bytes=response_bytes,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_tokens=total_tokens,
     )

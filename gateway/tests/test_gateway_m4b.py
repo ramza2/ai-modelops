@@ -394,6 +394,7 @@ async def test_streaming_normal_completion_clears_inflight() -> None:
 @pytest.mark.asyncio
 async def test_proxy_sse_client_cancel_runs_shielded_cleanup() -> None:
     """Client disconnect (CancelledError mid-stream) must still close + on_complete."""
+    from app.proxy.stats import ProxyCompletionStats
     from app.proxy.upstream import proxy_sse_post
 
     completed = asyncio.Event()
@@ -426,11 +427,9 @@ async def test_proxy_sse_client_cancel_runs_shielded_cleanup() -> None:
 
     http_client = httpx.AsyncClient(transport=_CancelTransport())
 
-    async def on_complete(
-        http_status: int, response_bytes: int | None, error_code: str | None
-    ) -> None:
-        complete_args["error_code"] = error_code
-        complete_args["response_bytes"] = response_bytes
+    async def on_complete(stats: ProxyCompletionStats) -> None:
+        complete_args["error_code"] = stats.error_code
+        complete_args["response_bytes"] = stats.response_bytes
         completed.set()
 
     response = await proxy_sse_post(
@@ -458,6 +457,7 @@ async def test_proxy_sse_client_cancel_runs_shielded_cleanup() -> None:
 @pytest.mark.asyncio
 async def test_proxy_sse_midstream_timeout_not_swallowed() -> None:
     """Mid-stream upstream timeout must re-raise (not clean EOF) and still cleanup."""
+    from app.proxy.stats import ProxyCompletionStats
     from app.proxy.upstream import proxy_sse_post
 
     completed = asyncio.Event()
@@ -490,11 +490,9 @@ async def test_proxy_sse_midstream_timeout_not_swallowed() -> None:
 
     http_client = httpx.AsyncClient(transport=_TimeoutTransport())
 
-    async def on_complete(
-        http_status: int, response_bytes: int | None, error_code: str | None
-    ) -> None:
-        complete_args["error_code"] = error_code
-        complete_args["response_bytes"] = response_bytes
+    async def on_complete(stats: ProxyCompletionStats) -> None:
+        complete_args["error_code"] = stats.error_code
+        complete_args["response_bytes"] = stats.response_bytes
         completed.set()
 
     response = await proxy_sse_post(
@@ -522,6 +520,7 @@ async def test_proxy_sse_midstream_timeout_not_swallowed() -> None:
 
 @pytest.mark.asyncio
 async def test_proxy_sse_midstream_transport_error_not_swallowed() -> None:
+    from app.proxy.stats import ProxyCompletionStats
     from app.proxy.upstream import proxy_sse_post
 
     completed = asyncio.Event()
@@ -554,10 +553,8 @@ async def test_proxy_sse_midstream_transport_error_not_swallowed() -> None:
 
     http_client = httpx.AsyncClient(transport=_FailTransport())
 
-    async def on_complete(
-        http_status: int, response_bytes: int | None, error_code: str | None
-    ) -> None:
-        complete_args["error_code"] = error_code
+    async def on_complete(stats: ProxyCompletionStats) -> None:
+        complete_args["error_code"] = stats.error_code
         completed.set()
 
     response = await proxy_sse_post(

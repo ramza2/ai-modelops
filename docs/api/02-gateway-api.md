@@ -35,6 +35,11 @@ X-AI-Client: internal-service
 
 미제공 시 Invocation Log에는 `unknown`으로 기록한다.
 
+`X-AI-Client`는 optional client identification이며 인증 수단이 아니다.
+활성 `client_app.client_key`와 일치하면 InvocationLogWriter가 비동기로
+`client_app_id`를 채운다. 미등록/비활성은 `client_app_id=NULL`이며
+`raw_client_key`는 그대로 보존한다.
+
 ### X-Request-ID
 
 선택.
@@ -388,17 +393,19 @@ Gateway는 일반 추론 POST 요청을 임의로 자동 재시도하지 않는 
 
 ## 13. Invocation Logging
 
+M6-A1 populates capacity telemetry on `invocation_log` without storing
+prompt/response content.
+
 요청 시작 시:
 
 ```text
 request_id
 requested_at
-client_id
-source_ip
+raw_client_key          # X-AI-Client or "unknown" (identification, not auth)
+request_bytes           # exact raw JSON body byte length
 endpoint_alias
 api_path
 streaming
-request_bytes
 ```
 
 Route 결정 후:
@@ -413,12 +420,31 @@ model_version_id
 ```text
 http_status
 latency_ms
-input_tokens
-output_tokens
-total_tokens
+input_tokens / output_tokens / total_tokens   # upstream-reported usage only
 response_bytes
 error_code
+client_app_id           # resolved async in InvocationLogWriter when
+                        # client_app.client_key matches and is_active
 ```
+
+### Token usage contract
+
+Tokens are **upstream-reported**, never Gateway-estimated (no tokenizer).
+
+```text
+input_tokens  = usage.prompt_tokens  else usage.input_tokens
+output_tokens = usage.completion_tokens else usage.output_tokens
+total_tokens  = usage.total_tokens else input+output when both known
+```
+
+Embeddings: `prompt_tokens → input_tokens`, `output_tokens = 0` when completion
+tokens are absent.
+
+Malformed/missing usage → token columns stay NULL; inference is unchanged.
+
+Streaming: Gateway does **not** inject `stream_options.include_usage`.
+If upstream SSE already emits a usage object, it is captured by a bounded
+observer while raw bytes pass through unchanged. Otherwise tokens remain NULL.
 
 저장 금지 기본값:
 
