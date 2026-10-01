@@ -32,7 +32,6 @@ class SseUsageObserver:
     def feed(self, chunk: bytes) -> None:
         if not chunk:
             return
-        # Prefer CRLF event separators, then LF-only.
         self._buf.extend(chunk)
         while True:
             sep = self._find_event_separator(self._buf)
@@ -68,15 +67,21 @@ class SseUsageObserver:
 
     @staticmethod
     def _find_event_separator(buf: bytearray) -> tuple[int, int] | None:
-        """Return (content_end, consume_end) for the next SSE event, if any."""
-        # Search CRLFCRLF first, then LFLF.
-        idx = buf.find(b"\r\n\r\n")
-        if idx >= 0:
-            return idx, idx + 4
-        idx = buf.find(b"\n\n")
-        if idx >= 0:
-            return idx, idx + 2
-        return None
+        """Return (content_end, consume_end) for the earliest SSE event boundary.
+
+        Mixed LF / CRLF streams must choose the first boundary in buffer order,
+        not prefer CRLF globally (which can merge earlier LF-terminated events).
+        """
+        crlf = buf.find(b"\r\n\r\n")
+        lf = buf.find(b"\n\n")
+        candidates: list[tuple[int, int]] = []
+        if crlf >= 0:
+            candidates.append((crlf, crlf + 4))
+        if lf >= 0:
+            candidates.append((lf, lf + 2))
+        if not candidates:
+            return None
+        return min(candidates, key=lambda item: item[0])
 
     def _consume_event(self, event_bytes: bytes) -> None:
         data_parts: list[str] = []
@@ -100,6 +105,6 @@ class SseUsageObserver:
             payload: Any = json.loads(payload_text)
         except Exception:  # noqa: BLE001
             return
-        usage = extract_token_usage(payload)
+        usage = extract_token_usage(payload, missing_output_is_zero=False)
         if usage is not None:
             self._usage = usage

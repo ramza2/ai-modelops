@@ -26,11 +26,19 @@ def _as_nonneg_int(value: Any) -> int | None:
     return value
 
 
-def extract_token_usage(payload: Any) -> TokenUsage | None:
+def extract_token_usage(
+    payload: Any,
+    *,
+    missing_output_is_zero: bool = False,
+) -> TokenUsage | None:
     """Normalize OpenAI / vLLM usage objects into TokenUsage.
 
-    Returns None when usage is absent or unusable. Empty TokenUsage with all
-    None fields is never returned — callers treat None as "no telemetry".
+    Endpoint-neutral by default: absent completion/output stays NULL (Chat /
+    streaming). Pass ``missing_output_is_zero=True`` only for Embeddings,
+    where completion tokens are not produced.
+
+    Never derives ``output = total - input``. Never estimates tokens.
+    Returns None when usage is absent or yields no usable fields.
     """
     if not isinstance(payload, dict):
         return None
@@ -46,9 +54,9 @@ def extract_token_usage(payload: Any) -> TokenUsage | None:
     if output_tokens is None:
         output_tokens = _as_nonneg_int(usage.get("output_tokens"))
 
-    # Embeddings often omit completion/output tokens; treat as 0 when input known.
     if (
-        output_tokens is None
+        missing_output_is_zero
+        and output_tokens is None
         and input_tokens is not None
         and "completion_tokens" not in usage
         and "output_tokens" not in usage
@@ -68,7 +76,11 @@ def extract_token_usage(payload: Any) -> TokenUsage | None:
     )
 
 
-def extract_token_usage_from_json_bytes(body: bytes | bytearray | None) -> TokenUsage | None:
+def extract_token_usage_from_json_bytes(
+    body: bytes | bytearray | None,
+    *,
+    missing_output_is_zero: bool = False,
+) -> TokenUsage | None:
     """Best-effort parse of a non-streaming JSON response body."""
     if not body:
         return None
@@ -78,4 +90,6 @@ def extract_token_usage_from_json_bytes(body: bytes | bytearray | None) -> Token
         payload = json.loads(bytes(body))
     except Exception:  # noqa: BLE001 - telemetry only
         return None
-    return extract_token_usage(payload)
+    return extract_token_usage(
+        payload, missing_output_is_zero=missing_output_is_zero
+    )

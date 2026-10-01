@@ -207,7 +207,11 @@ async def _proxy_nonstream(
         body_bytes = getattr(response, "body", None)
         if isinstance(body_bytes, (bytes, bytearray)):
             response_bytes = len(body_bytes)
-            usage = extract_token_usage_from_json_bytes(body_bytes)
+            # Embeddings omit completion tokens; Chat must not invent output=0.
+            missing_output_is_zero = api_path.endswith("/embeddings")
+            usage = extract_token_usage_from_json_bytes(
+                body_bytes, missing_output_is_zero=missing_output_is_zero
+            )
             if usage is not None:
                 input_tokens = usage.input_tokens
                 output_tokens = usage.output_tokens

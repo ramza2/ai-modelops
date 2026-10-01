@@ -47,10 +47,71 @@ def test_extract_token_usage_openai_and_newer_names() -> None:
     assert (u2.input_tokens, u2.output_tokens, u2.total_tokens) == (10, 5, 15)
 
 
-def test_extract_token_usage_embeddings_and_malformed() -> None:
-    u = extract_token_usage({"usage": {"prompt_tokens": 80, "total_tokens": 80}})
+def test_extract_token_usage_chat_partial_does_not_invent_output() -> None:
+    # Chat: missing completion must stay NULL (never invent output=0).
+    u = extract_token_usage(
+        {"usage": {"prompt_tokens": 100, "total_tokens": 120}},
+        missing_output_is_zero=False,
+    )
     assert u is not None
-    assert (u.input_tokens, u.output_tokens, u.total_tokens) == (80, 0, 80)
+    assert (u.input_tokens, u.output_tokens, u.total_tokens) == (100, None, 120)
+
+    u2 = extract_token_usage(
+        {"usage": {"prompt_tokens": 100}},
+        missing_output_is_zero=False,
+    )
+    assert u2 is not None
+    assert (u2.input_tokens, u2.output_tokens, u2.total_tokens) == (100, None, None)
+
+
+def test_extract_token_usage_chat_explicit_zero_completion() -> None:
+    u = extract_token_usage(
+        {
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 0,
+                "total_tokens": 100,
+            }
+        },
+        missing_output_is_zero=False,
+    )
+    assert u is not None
+    assert (u.input_tokens, u.output_tokens, u.total_tokens) == (100, 0, 100)
+
+
+def test_extract_token_usage_embeddings_missing_output_is_zero() -> None:
+    # Default Chat semantics must NOT invent output=0.
+    chatish = extract_token_usage(
+        {"usage": {"prompt_tokens": 80, "total_tokens": 80}}
+    )
+    assert chatish is not None
+    assert (chatish.input_tokens, chatish.output_tokens, chatish.total_tokens) == (
+        80,
+        None,
+        80,
+    )
+
+    emb = extract_token_usage(
+        {"usage": {"prompt_tokens": 80, "total_tokens": 80}},
+        missing_output_is_zero=True,
+    )
+    assert emb is not None
+    assert (emb.input_tokens, emb.output_tokens, emb.total_tokens) == (80, 0, 80)
+
+
+def test_extract_token_usage_malformed_fields_preserve_valid() -> None:
+    # One malformed field must not invent replacements; keep valid siblings.
+    u = extract_token_usage(
+        {
+            "usage": {
+                "prompt_tokens": 50,
+                "completion_tokens": True,
+                "total_tokens": 70,
+            }
+        }
+    )
+    assert u is not None
+    assert (u.input_tokens, u.output_tokens, u.total_tokens) == (50, None, 70)
 
     assert extract_token_usage({"usage": {"prompt_tokens": True}}) is None
     assert extract_token_usage({"usage": {"prompt_tokens": -1}}) is None
@@ -76,6 +137,76 @@ def test_sse_usage_observer_split_chunks() -> None:
         20,
         120,
     )
+
+
+def test_sse_usage_observer_earliest_lf_then_crlf() -> None:
+    """LF-terminated event before CRLF must not be merged into the later event."""
+    obs = SseUsageObserver()
+    chunk = (
+        b'data: {"choices":[{"delta":{"content":"a"}}]}\n\n'
+        b'data: {"choices":[],"usage":{"prompt_tokens":11,'
+        b'"completion_tokens":2,"total_tokens":13}}\r\n\r\n'
+        b"data: [DONE]\r\n\r\n"
+    )
+    obs.feed(chunk)
+    usage = obs.finish()
+    assert usage is not None
+    assert (usage.input_tokens, usage.output_tokens, usage.total_tokens) == (
+        11,
+        2,
+        13,
+    )
+
+
+def test_sse_usage_observer_earliest_crlf_then_lf() -> None:
+    """CRLF-terminated event before LF must not be merged into the later event."""
+    obs = SseUsageObserver()
+    chunk = (
+        b'data: {"choices":[{"delta":{"content":"b"}}]}\r\n\r\n'
+        b'data: {"choices":[],"usage":{"prompt_tokens":21,'
+        b'"completion_tokens":3,"total_tokens":24}}\n\n'
+        b"data: [DONE]\n\n"
+    )
+    obs.feed(chunk)
+    usage = obs.finish()
+    assert usage is not None
+    assert (usage.input_tokens, usage.output_tokens, usage.total_tokens) == (
+        21,
+        3,
+        24,
+    )
+
+
+def test_sse_usage_observer_chat_partial_usage_keeps_output_null() -> None:
+    obs = SseUsageObserver()
+    obs.feed(
+        b'data: {"choices":[],"usage":{"prompt_tokens":100,"total_tokens":120}}\n\n'
+        b"data: [DONE]\n\n"
+    )
+    usage = obs.finish()
+    assert usage is not None
+    assert (usage.input_tokens, usage.output_tokens, usage.total_tokens) == (
+        100,
+        None,
+        120,
+    )
+
+
+def test_sse_usage_observer_oversized_event_drops_then_recovers() -> None:
+    obs = SseUsageObserver(max_event_buffer_bytes=2048)
+    # Oversized incomplete event (no separator) exceeds bound → drop telemetry
+    # for that event; a later normal usage event must still parse.
+    huge = b"data: " + (b"x" * 3000)
+    obs.feed(huge)
+    obs.feed(b"\n\n")
+    obs.feed(
+        b'data: {"choices":[],"usage":{"prompt_tokens":7,'
+        b'"completion_tokens":1,"total_tokens":8}}\n\n'
+        b"data: [DONE]\n\n"
+    )
+    usage = obs.finish()
+    assert usage is not None
+    assert (usage.input_tokens, usage.output_tokens, usage.total_tokens) == (7, 1, 8)
 
 
 @pytest.mark.asyncio
