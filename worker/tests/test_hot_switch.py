@@ -50,6 +50,16 @@ async def _enqueue_hot_switch(
     *,
     fixture: dict[str, Any],
 ) -> tuple[uuid.UUID, uuid.UUID]:
+    """Legacy D2-A 9-step HOT (no Source retirement) for cancel/reconcile regressions."""
+    return await _enqueue_legacy_hot_switch(session, fixture=fixture)
+
+
+async def _enqueue_b2_hot_switch(
+    session,
+    *,
+    fixture: dict[str, Any],
+) -> tuple[uuid.UUID, uuid.UUID]:
+    """M5-D2-B2 HOT with Source drain/stop steps."""
     now = dt.datetime.now(tz=dt.UTC)
     op_id = uuid.uuid4()
     job_id = uuid.uuid4()
@@ -66,8 +76,10 @@ async def _enqueue_hot_switch(
                 "strategy": SwitchStrategy.HOT.value,
                 "health_timeout_seconds": 5,
                 "gateway_apply_timeout_seconds": 5,
+                "drain_timeout_seconds": 5,
                 "safety_margin_mb": 1024,
                 "m5d1_hot_forward": True,
+                "m5d2b2_source_retirement": True,
             },
         )
     )
@@ -98,10 +110,71 @@ async def _enqueue_hot_switch(
     return op_id, job_id
 
 
+async def _enqueue_legacy_hot_switch(
+    session,
+    *,
+    fixture: dict[str, Any],
+) -> tuple[uuid.UUID, uuid.UUID]:
+    """Pre-B2 9-step HOT Operation without retirement marker."""
+    from app.services.hot_switch import HOT_SWITCH_STEPS_LEGACY_D2A
+
+    now = dt.datetime.now(tz=dt.UTC)
+    op_id = uuid.uuid4()
+    job_id = uuid.uuid4()
+    session.add(
+        Operation(
+            id=op_id,
+            operation_type=OperationType.SWITCH.value,
+            status=OperationStatus.QUEUED.value,
+            switch_strategy=SwitchStrategy.HOT.value,
+            endpoint_alias_id=fixture["endpoint_id"],
+            source_deployment_id=fixture["source_id"],
+            target_deployment_id=fixture["target_id"],
+            metadata_json={
+                "strategy": SwitchStrategy.HOT.value,
+                "health_timeout_seconds": 5,
+                "gateway_apply_timeout_seconds": 5,
+                "safety_margin_mb": 1024,
+                "m5d1_hot_forward": True,
+            },
+        )
+    )
+    for seq, code in enumerate(HOT_SWITCH_STEPS_LEGACY_D2A, start=1):
+        session.add(
+            OperationStep(
+                id=uuid.uuid4(),
+                operation_id=op_id,
+                sequence_no=seq,
+                step_code=code,
+                status=StepStatus.PENDING.value,
+                attempt_no=1,
+                detail_json={},
+            )
+        )
+    session.add(
+        OperationJob(
+            id=job_id,
+            operation_id=op_id,
+            status=JobStatus.QUEUED.value,
+            priority=100,
+            attempt_count=0,
+            max_attempts=3,
+            available_at=now,
+        )
+    )
+    await session.commit()
+    return op_id, job_id
+
+
 def _make_synced_runtime(session_factory, endpoint_id: uuid.UUID):
     from app.clients.gateway import GatewayClient
 
-    async def _synced_runtime(self: GatewayClient, alias: str) -> dict[str, Any]:
+    async def _synced_runtime(
+        self: GatewayClient,
+        alias: str,
+        *,
+        deployment_id: str | None = None,
+    ) -> dict[str, Any]:
         async with session_factory() as s:
             version = int(
                 (
@@ -129,13 +202,20 @@ def _make_synced_runtime(session_factory, endpoint_id: uuid.UUID):
                     {"id": str(endpoint_id)},
                 )
             ).scalar_one_or_none()
-        return {
+        payload: dict[str, Any] = {
             "alias": alias,
             "applied_routing_version": version,
             "traffic_state": str(traffic),
             "active_deployment_id": str(active) if active else None,
             "inflight_requests": 0,
+            "unbound_requests": 0,
+            "global_unbound_requests": 0,
         }
+        if deployment_id is not None:
+            payload["observed_deployment_id"] = str(deployment_id)
+            payload["observed_deployment_inflight_requests"] = 0
+            payload["observed_deployment_idle"] = True
+        return payload
 
     return _synced_runtime
 
@@ -173,8 +253,12 @@ async def test_hot_switch_happy_path(db, monkeypatch) -> None:
 
     traffic_seen: list[str] = []
 
-    async def _track_traffic(self, alias: str) -> dict[str, Any]:  # noqa: ANN001
-        runtime = await _make_synced_runtime(sf, fixture["endpoint_id"])(self, alias)
+    async def _track_traffic(
+        self, alias: str, *, deployment_id: str | None = None
+    ) -> dict[str, Any]:  # noqa: ANN001
+        runtime = await _make_synced_runtime(sf, fixture["endpoint_id"])(
+            self, alias, deployment_id=deployment_id
+        )
         traffic_seen.append(str(runtime["traffic_state"]))
         return runtime
 
@@ -210,6 +294,8 @@ async def test_hot_switch_happy_path(db, monkeypatch) -> None:
         assert target.desired_state == DesiredState.RUNNING.value
         assert target.health_status == HealthStatus.HEALTHY.value
 
+        from app.services.hot_switch import HOT_SWITCH_STEPS_LEGACY_D2A
+
         steps = (
             await session.execute(
                 select(OperationStep)
@@ -217,7 +303,7 @@ async def test_hot_switch_happy_path(db, monkeypatch) -> None:
                 .order_by(OperationStep.sequence_no.asc())
             )
         ).scalars().all()
-        assert [s.step_code for s in steps] == list(HOT_SWITCH_STEPS)
+        assert [s.step_code for s in steps] == list(HOT_SWITCH_STEPS_LEGACY_D2A)
         assert all(s.status == StepStatus.SUCCEEDED.value for s in steps)
         probe = next(s for s in steps if s.step_code == "PROBE_TARGET")
         assert probe.status == StepStatus.SUCCEEDED.value
@@ -232,7 +318,7 @@ async def test_hot_switch_happy_path(db, monkeypatch) -> None:
         ).scalar_one()
         assert str(active.deployment_id) == str(fixture["target_id"])
 
-    assert stop_after == stop_before  # Source never stopped
+    assert stop_after == stop_before  # Source never stopped (legacy D2-A)
     assert traffic_seen
     assert all(t == TrafficState.SERVING.value for t in traffic_seen)
 

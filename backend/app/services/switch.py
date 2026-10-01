@@ -57,7 +57,24 @@ COLD_SWITCH_STEPS: list[str] = [
 ]
 
 # Exact forward Hot Switch sequence (docs/state-machines/02-hot-switch.md).
+# M5-D2-B2 adds Source drain → stop after WAIT_ROUTE_APPLY.
 HOT_SWITCH_STEPS: list[str] = [
+    "VALIDATE",
+    "PREFLIGHT",
+    "PREPARE_TARGET",
+    "START_TARGET",
+    "WAIT_TARGET_HEALTH",
+    "PROBE_TARGET",
+    "ACTIVATE_TARGET_ROUTE",
+    "WAIT_ROUTE_APPLY",
+    "WAIT_SOURCE_DRAIN",
+    "STOP_SOURCE",
+    "VERIFY_SOURCE_STOPPED",
+    "FINALIZE",
+]
+
+# Pre-B2 9-step sequence retained for documentation / legacy fixtures only.
+HOT_SWITCH_STEPS_LEGACY_D2A: list[str] = [
     "VALIDATE",
     "PREFLIGHT",
     "PREPARE_TARGET",
@@ -179,6 +196,7 @@ class SwitchService:
                 "vram_release_timeout_seconds": int(vram_release_timeout_seconds),
                 "gateway_apply_timeout_seconds": int(gateway_apply_timeout_seconds),
                 "m5d1_hot_forward": True,
+                "m5d2b2_source_retirement": True,
             }
             if reason:
                 metadata["reason"] = reason

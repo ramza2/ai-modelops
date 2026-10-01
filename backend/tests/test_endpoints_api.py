@@ -421,3 +421,83 @@ async def test_bump_routing_version_emits_pg_notify(client) -> None:
     finally:
         await conn.remove_listener("modelops_routing_changed", _on_notify)
         await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_set_route_rejects_desired_state_stopped(client) -> None:
+    ac, session_factory = client
+    async with session_factory() as session:
+        target = await _seed_target(session)
+        await session.execute(
+            text(
+                "UPDATE deployment SET desired_state = 'STOPPED' WHERE id = :id"
+            ),
+            {"id": target["deployment_id"]},
+        )
+        await session.commit()
+
+    created = await ac.post(
+        "/api/v1/endpoints",
+        json={
+            "alias": f"des-{uuid.uuid4().hex[:8]}",
+            "display_name": "Desired",
+            "api_type": "CHAT",
+        },
+    )
+    endpoint_id = created.json()["id"]
+    reject = await ac.post(
+        f"/api/v1/endpoints/{endpoint_id}/route",
+        json={"deployment_id": target["deployment_id"]},
+    )
+    assert reject.status_code == 422
+    assert "desired_state" in reject.text.lower()
+
+
+@pytest.mark.asyncio
+async def test_set_route_busy_when_deployment_advisory_held(client) -> None:
+    ac, session_factory = client
+    async with session_factory() as session:
+        target = await _seed_target(session)
+        dep_id = target["deployment_id"]
+
+    created = await ac.post(
+        "/api/v1/endpoints",
+        json={
+            "alias": f"busy-{uuid.uuid4().hex[:8]}",
+            "display_name": "Busy",
+            "api_type": "CHAT",
+        },
+    )
+    endpoint_id = created.json()["id"]
+
+    # Hold the same Worker deployment advisory key on a second connection.
+    from sqlalchemy import text as sa_text
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    engine = create_async_engine(
+        session_factory.kw["bind"].url.render_as_string(hide_password=False),
+        future=True,
+    )
+    conn = await engine.connect()
+    try:
+        locked = await conn.execute(
+            sa_text("SELECT pg_try_advisory_lock(hashtext(:key))"),
+            {"key": str(dep_id)},
+        )
+        assert bool(locked.scalar_one())
+        await conn.commit()
+
+        reject = await ac.post(
+            f"/api/v1/endpoints/{endpoint_id}/route",
+            json={"deployment_id": dep_id},
+        )
+        assert reject.status_code == 409
+        assert reject.json()["error"]["code"] == "ROUTE_MUTATION_BUSY"
+    finally:
+        await conn.execute(
+            sa_text("SELECT pg_advisory_unlock(hashtext(:key))"),
+            {"key": str(dep_id)},
+        )
+        await conn.commit()
+        await conn.close()
+        await engine.dispose()
