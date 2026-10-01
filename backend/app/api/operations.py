@@ -83,13 +83,15 @@ async def retry_operation(
     service: SwitchService = Depends(get_switch_service),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> dict:
-    """Explicit retry of a terminal Cold SWITCH (M5-C2-B).
+    """Explicit retry of a terminal Cold or Hot SWITCH (M5-C2-B / M5-D2-C).
 
-    Creates a NEW Operation / Job / 14 PENDING steps. Never mutates the
-    original. Eligible only for FAILED / ROLLED_BACK Cold SWITCH that is
-    back at a safe baseline. MIR retry is out of scope until M5-C2-C.
+    Creates a NEW Operation / Job / PENDING steps. Never mutates the original.
+    Eligible only for FAILED / ROLLED_BACK SWITCH that is back at a safe
+    baseline. HOT children always use the current 12-step B2 contract.
+    MIR retry is out of scope until reconciliation first restores a
+    retryable terminal state.
     """
-    payload = await service.retry_cold_switch(
+    payload = await service.retry_switch(
         operation_id,
         idempotency_key=idempotency_key,
     )

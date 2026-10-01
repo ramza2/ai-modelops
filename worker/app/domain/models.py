@@ -258,6 +258,7 @@ class Operation(Base):
     cancel_requested_at: Mapped[dt.datetime | None] = mapped_column(
         DateTime(timezone=True)
     )
+    retry_of_operation_id: Mapped[str | None] = mapped_column(UUID(as_uuid=True))
     error_code: Mapped[str | None] = mapped_column(String(100))
     error_message: Mapped[str | None] = mapped_column(Text)
     metadata_json: Mapped[dict] = mapped_column(

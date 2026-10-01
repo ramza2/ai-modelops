@@ -1,4 +1,4 @@
-# Hot Switch State Machine (M5-D1 / M5-D2-A / M5-D2-B1 / M5-D2-B2)
+# Hot Switch State Machine (M5-D1 / M5-D2-A / M5-D2-B1 / M5-D2-B2 / M5-D2-C)
 
 ## 1. Purpose
 
@@ -9,7 +9,8 @@ Unlike Cold Switch, Hot Switch does **not** drain Endpoint traffic or wait for
 VRAM reclaim before Target start. After cutover, M5-D2-B2 may retire Source
 when process-local drain proof succeeds.
 
-Authoritative Worker Preflight must return `HOT_SWITCH_AVAILABLE`.
+Authoritative Worker Preflight must return `HOT_SWITCH_AVAILABLE`
+(or the retained-Target zero-incremental path documented below).
 Management API enqueue never treats standalone `POST /preflights` preview as
 execution approval.
 
@@ -20,11 +21,12 @@ execution approval.
 - **M5-D2-A:** RUNNING HOT cancel, route-boundary race, HOT rollback to Source,
   MIR reconciliation / sweeper.
 - **M5-D2-B1:** Gateway Deployment-scoped drain telemetry.
-- **M5-D2-B2 (this document):** HOT Source drain → safe retirement/stop after
-  cutover, with intentional retention when shared/drain-timeout.
+- **M5-D2-B2:** HOT Source drain → safe retirement/stop after cutover, with
+  intentional retention when shared/drain-timeout.
+- **M5-D2-C (this document):** HOT explicit retry via
+  `POST /operations/{id}/retry` (same endpoint as Cold).
 - **Deferred:**
   - post-route Target shutdown
-  - HOT explicit retry
   - `AUTO` / `ALTERNATE_NODE`
 
 ## 3. Forward steps (12 for new B2 Operations)
@@ -145,7 +147,67 @@ Target is never stopped by HOT rollback.
 | Post route boundary | `ROLLING_BACK` → HOT rollback → `ROLLED_BACK` |
 | After Source-stop boundary | rollback starts Source, then exact Source route restore |
 
-## 10. Non-negotiable invariants
+## 10. Explicit retry (M5-D2-C)
+
+Retry creates a **new** Operation (`retry_of_operation_id = original.id`).
+Never revive/mutate the original status, metadata, error, Job, or Steps.
+
+Eligible original statuses: `FAILED`, `ROLLED_BACK` only.
+
+Reject: `QUEUED` / `RUNNING` / `ROLLING_BACK` / `SUCCEEDED` / `CANCELLED` /
+`MANUAL_INTERVENTION_REQUIRED` (`INVALID_OPERATION_STATE`). MIR must be
+reconciled first; if MIR later becomes `ROLLED_BACK`, explicit retry is allowed.
+
+`FAILED` + `destructive_boundary_entered=true` → reject (Source stop may have
+happened; FAILED alone is not restored baseline). Do **not** blanket-reject
+`hot_route_boundary_entered` alone when Source is still ACTIVE/SERVING.
+
+Safe baseline (Management DB only; no Node Agent/Gateway in retry HTTP):
+
+```text
+Endpoint exists + enabled + traffic_state=SERVING
+ACTIVE route deployment == original Source
+Source/Target exist, Source ≠ Target, both MANAGED, same node_id
+Source runtime RUNNING + HEALTHY + desired RUNNING
+Target retired_at null + desired RUNNING
+Target GPU assignments + model/API compatibility valid
+```
+
+Target runtime may be STOPPED or RUNNING. A ROLLED_BACK HOT commonly leaves
+Target RUNNING; Worker live-inspects and re-validates health/probe.
+
+Child contract:
+
+```text
+switch_strategy=HOT, status=QUEUED
+12-step B2 sequence (legacy 9-step originals upgrade to B2)
+metadata: strategy=HOT, m5d1_hot_forward=true, m5d2b2_source_retirement=true
+(+ optional m5d2c_hot_retry); copy timeouts/reason only
+cancel_requested_at=null; no transient runtime/rollback/reconcile flags
+```
+
+### Retained RUNNING Target preflight
+
+During Worker PREFLIGHT, inspect **live** Target via Node Agent
+(`MutationHeaders`). Do not trust DB `runtime_status` alone for this path.
+
+- Live Target not RUNNING → normal HOT resource preflight; require
+  `HOT_SWITCH_AVAILABLE` (never silent HOT→COLD downgrade).
+- Live Target already RUNNING → zero-incremental capacity:
+  `preflight_basis=TARGET_ALREADY_RUNNING`,
+  `incremental_required_vram_mb=0`, ResourcePreflight numeric fields use
+  incremental values (`required_*=0`, `result=HOT_SWITCH_AVAILABLE`) while
+  configured Target VRAM stays in `detail_json`.
+
+Continue PREPARE/START/HEALTH/PROBE. Existing START_TARGET: live RUNNING →
+no duplicate start and **do not** claim
+`hot_target_start_owned_by_operation`. Ownership is Operation-specific;
+pre-route failure must not cleanup-stop a Target the child did not start.
+
+Retry ACTIVATE captures the child's current Source `route_id`; do not reuse
+the original Operation's persisted ACTIVATE detail.
+
+## 11. Non-negotiable invariants
 
 1. HOT never changes Endpoint traffic away from `SERVING`.
 2. Target ACTIVE only after persisted Target probe success.
@@ -155,3 +217,5 @@ Target is never stopped by HOT rollback.
 6. Single Gateway process/replica MVP for drain telemetry.
 7. Shared Source + Management `set_route` cannot race stop via advisory locks.
 8. Never infer B2 success from DB-only Source runtime.
+9. Explicit retry never mutates the original Operation.
+10. Retained RUNNING Target reuse requires live Node Agent observation.

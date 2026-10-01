@@ -625,7 +625,7 @@ ${DATABASE_URL}
 
 1. Resource Preflight
 2. Gateway traffic state
-3. Hot Switch (M5-D1 core + M5-D2-A cancel/rollback/reconcile + M5-D2-B1 Gateway drain telemetry + M5-D2-B2 Source retirement)
+3. Hot Switch (M5-D1 core + M5-D2-A cancel/rollback/reconcile + M5-D2-B1 Gateway drain telemetry + M5-D2-B2 Source retirement + M5-D2-C explicit retry)
 4. Cold Switch
 5. Rollback
 6. reconciliation

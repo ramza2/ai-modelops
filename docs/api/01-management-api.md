@@ -561,13 +561,14 @@ Worker는 실행 직전 **authoritative fresh Resource Preflight**를 다시 수
 Standalone `POST /preflights` preview는 실행 승인으로 사용하지 않는다.
 HOT requires fresh `HOT_SWITCH_AVAILABLE` (never silently downgraded to COLD).
 
-**M5-B / M5-D1 scope:**
+**M5-B / M5-D* scope:**
 - COLD: enqueue → 14 forward steps → FINALIZE; rollback/cancel/retry/reconcile
   as M5-C1 / M5-C2-*
-- HOT (M5-D1): enqueue → 9 forward steps → FINALIZE; Source retained RUNNING;
-  no HOT retry / full cancel / rollback / Source retirement yet (M5-D2)
-Destructive boundary(`STOP_SOURCE`) 이후 복구 불가 (COLD only)
-실패는 `MANUAL_INTERVENTION_REQUIRED` + Endpoint `MAINTENANCE`로 종료한다.
+- HOT: enqueue → 12 forward B2 steps → FINALIZE (Source retirement when safe);
+  cancel / rollback / reconcile / explicit retry (M5-D2-A / B1 / B2 / C)
+Destructive boundary(`STOP_SOURCE`) 이후 실패 복구는 strategy별 rollback / MIR.
+COLD destructive 실패는 `MANUAL_INTERVENTION_REQUIRED` + Endpoint `MAINTENANCE`로
+종료할 수 있다.
 
 응답: `202 Accepted`
 
@@ -690,32 +691,47 @@ M5-C2-A Safe Cancel. Optional body:
 
 ### POST /operations/{operation_id}/retry
 
-M5-C2-B Explicit Retry. **원본 Operation을 재개/리셋하지 않는다.**
+M5-C2-B / M5-D2-C Explicit Retry. **원본 Operation을 재개/리셋하지 않는다.**
+동일 엔드포인트가 원본 `switch_strategy`에 따라 Cold 또는 Hot retry를 수행한다
+(별도 HOT retry endpoint 없음).
 
 허용:
 
-- `operation_type = SWITCH` + `switch_strategy = COLD`
+- `operation_type = SWITCH` + `switch_strategy` ∈ {`COLD`, `HOT`}
 - terminal `FAILED` 또는 `ROLLED_BACK`
 - `FAILED`이면서 `destructive_boundary_entered=true` 이면 거부
-- 현재 상태가 Cold Switch 시작 안전 기준을 충족해야 함
-  (Endpoint enabled + `SERVING`, ACTIVE route = 원본 Source,
-  Source `RUNNING+HEALTHY`, Target 유효, 충돌 active op 없음)
+  (`hot_route_boundary_entered` alone는 Source가 여전히 ACTIVE면 허용)
+- 현재 상태가 strategy별 Switch 시작 안전 기준을 충족해야 함
+  - 공통: Endpoint enabled + `traffic_state=SERVING`, ACTIVE route = 원본 Source,
+    Source `RUNNING+HEALTHY` + `desired_state=RUNNING`, Target 유효(MANAGED,
+    same Node, GPU assignments, model/API 호환), Source ≠ Target,
+    충돌 active op 없음
+  - HOT 추가: Target `retired_at` null, Target `desired_state=RUNNING`
+    (Target runtime은 STOPPED/RUNNING 모두 허용; Worker가 live inspect)
 
 거부 (`409 INVALID_OPERATION_STATE`):
 
 - `QUEUED` / `RUNNING` / `ROLLING_BACK` / `SUCCEEDED` / `CANCELLED`
-- `MANUAL_INTERVENTION_REQUIRED` (explicit blind retry never; M5-C2-C
-  reconciliation may first terminalize to a retryable state such as
-  `ROLLED_BACK`)
-- non-SWITCH / non-COLD
+- `MANUAL_INTERVENTION_REQUIRED` (explicit blind retry never; reconciliation
+  may first terminalize to a retryable state such as `ROLLED_BACK`)
+- non-SWITCH / unsupported strategy
 - 안전 기준 미충족 / 이미 active retry child 존재
 
 동작:
 
-- 새 Operation (`retry_of_operation_id = original.id`, `status=QUEUED`)
-- 새 Job + 14 forward Steps (`PENDING`)
-- metadata whitelist만 복사 (timeouts / strategy / reason)
-- 기존 Cold Switch enqueue/Worker 경로로 실행 (별도 retry SM 없음)
+- 새 Operation (`retry_of_operation_id = original.id`, `status=QUEUED`,
+  `cancel_requested_at=null`, `error=null`)
+- 새 Job + strategy별 forward Steps (`PENDING`)
+  - COLD: 14 steps (기존 Cold 계약)
+  - HOT: **현재** 12-step B2 계약 (`m5d2b2_source_retirement=true`);
+    legacy 9-step HOT original도 B2 child로 upgrade
+- metadata whitelist만 복사 (timeouts / strategy / reason);
+  runtime/transient HOT·rollback·reconcile·cancel flags는 복사하지 않음
+- HOT child: `strategy=HOT`, `m5d1_hot_forward=true`,
+  `m5d2b2_source_retirement=true` (+ optional `m5d2c_hot_retry=true`)
+- 기존 strategy enqueue/Worker 경로로 실행 (별도 retry SM 없음;
+  HOT→COLD silent downgrade 금지)
+- Management retry HTTP는 DB only (Node Agent / Gateway 호출 없음)
 - `Idempotency-Key` (retry-scoped):
   - same key + same original → 기존 retry child 반환
   - same key + different original / non-retry Operation →
