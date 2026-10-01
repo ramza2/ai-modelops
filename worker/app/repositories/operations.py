@@ -530,19 +530,39 @@ class OperationJobRepository:
         step_id: uuid.UUID | None = None,
         step_detail_patch: dict | None = None,
     ) -> str:
-        """Atomically decide cancel vs destructive_boundary_entered under FOR UPDATE.
+        """Atomically decide cancel vs destructive_boundary_entered (Job→Op→Step).
 
         Short persistence transaction only — caller must not hold this lock across
         Node Agent / Gateway HTTP. Returns ``\"cancelled\"`` or ``\"boundary_entered\"``.
 
-        Metadata is patched from the freshly locked JSONB so concurrent
-        ``cancel_reason`` / other keys are preserved.
+        Lock order matches ``decide_hot_route_boundary`` / Safe Cancel / claim:
+        OperationJob → Operation → OperationStep. Metadata is patched from the
+        freshly locked JSONB so concurrent ``cancel_reason`` keys are preserved.
         """
-        # Expire any cached identity so FOR UPDATE reloads cancel_requested_at /
-        # metadata_json from the database (READ COMMITTED + populate_existing).
-        cached = await self._session.get(Operation, operation_id)
-        if cached is not None:
-            self._session.expire(cached)
+        cached_job = (
+            await self._session.execute(
+                select(OperationJob).where(
+                    OperationJob.operation_id == operation_id
+                )
+            )
+        ).scalar_one_or_none()
+        if cached_job is not None:
+            self._session.expire(cached_job)
+        cached_op = await self._session.get(Operation, operation_id)
+        if cached_op is not None:
+            self._session.expire(cached_op)
+        if step_id is not None:
+            cached_step = await self._session.get(OperationStep, step_id)
+            if cached_step is not None:
+                self._session.expire(cached_step)
+
+        # Lock Job first (same order as claim / cancel / hot route boundary).
+        await self._session.execute(
+            select(OperationJob)
+            .where(OperationJob.operation_id == operation_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
 
         operation = (
             await self._session.execute(
@@ -564,8 +584,15 @@ class OperationJobRepository:
         operation.metadata_json = meta
 
         if step_id is not None and step_detail_patch is not None:
-            step = await self._session.get(OperationStep, step_id)
-            if step is not None:
+            step = (
+                await self._session.execute(
+                    select(OperationStep)
+                    .where(OperationStep.id == step_id)
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                )
+            ).scalar_one_or_none()
+            if step is not None and str(step.operation_id) == str(operation_id):
                 detail = dict(step.detail_json or {})
                 detail.update(step_detail_patch)
                 detail["destructive_boundary_entered"] = True

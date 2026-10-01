@@ -679,6 +679,8 @@ async def test_b2_stop_idempotent_when_already_stopped(db, monkeypatch) -> None:
         meta["hot_route_boundary_entered"] = True
         meta["retirement_drain_proven"] = True
         meta["retirement_proof_routing_version"] = version
+        # Valid crash window: destructive boundary + desired STOPPED already durable.
+        meta["destructive_boundary_entered"] = True
         op.metadata_json = meta
         # DB still RUNNING (crash before runtime commit); live already STOPPED.
         source = await session.get(Deployment, fixture["source_id"])
@@ -691,6 +693,18 @@ async def test_b2_stop_idempotent_when_already_stopped(db, monkeypatch) -> None:
         target.runtime_status = RuntimeStatus.RUNNING.value
         target.health_status = HealthStatus.HEALTHY.value
         target.container_id = tgt
+        stop_step = (
+            await session.execute(
+                select(OperationStep).where(
+                    OperationStep.operation_id == op_id,
+                    OperationStep.step_code == "STOP_SOURCE",
+                )
+            )
+        ).scalar_one()
+        stop_step.detail_json = {
+            "hot_source_stop_boundary": True,
+            "destructive_boundary_entered": True,
+        }
         await session.commit()
 
     fake_node.containers[str(fixture["source_id"])]["runtime_status"] = "STOPPED"
@@ -978,3 +992,462 @@ async def test_b2_cancel_after_source_stopped_restarts_source(
             s for s in rb if s.step_code == "HOT_ROLLBACK_START_SOURCE"
         )
         assert (start_src.detail_json or {}).get("start_issued") is True
+
+
+@pytest.mark.asyncio
+async def test_b2_external_stopped_without_evidence_mir(db, monkeypatch) -> None:
+    """Live Source STOPPED without owned stop evidence → MIR, not retired success."""
+    from app.services.hot_switch_retirement import CODE_SOURCE_STOPPED_WITHOUT_EVIDENCE
+
+    sf = db
+    fake_node = ColdSwitchFakeNodeAgent()
+    fake_gw = FakeGateway()
+    transport = CombinedTransport(fake_node, fake_gw)
+    _configure_hot_vram(fake_node)
+
+    async with sf() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        await _seed_standard_runtime(fake_node, fake_gw, fixture)
+        op_id, job_id = await _enqueue_b2_hot_switch(session, fixture=fixture)
+        await _mark_steps_status(
+            session, op_id, succeeded_through="WAIT_SOURCE_DRAIN"
+        )
+        version = await _activate_target_route(session, fixture)
+        version_before = version
+        activate = (
+            await session.execute(
+                select(OperationStep).where(
+                    OperationStep.operation_id == op_id,
+                    OperationStep.step_code == "ACTIVATE_TARGET_ROUTE",
+                )
+            )
+        ).scalar_one()
+        activate.detail_json = {
+            "route_routing_version": version,
+            "source_route_id": str(fixture["route_id"]),
+        }
+        drain = (
+            await session.execute(
+                select(OperationStep).where(
+                    OperationStep.operation_id == op_id,
+                    OperationStep.step_code == "WAIT_SOURCE_DRAIN",
+                )
+            )
+        ).scalar_one()
+        drain.detail_json = {
+            "retirement_drain_proven": True,
+            "retirement_proof_routing_version": version,
+            "retirement_skipped": False,
+        }
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        meta = dict(op.metadata_json or {})
+        meta["hot_route_boundary_entered"] = True
+        meta["retirement_drain_proven"] = True
+        meta["retirement_proof_routing_version"] = version
+        # No destructive boundary / desired STOPPED — external stop only.
+        assert meta.get("destructive_boundary_entered") is not True
+        op.metadata_json = meta
+        source = await session.get(Deployment, fixture["source_id"])
+        target = await session.get(Deployment, fixture["target_id"])
+        assert source and target
+        source.runtime_status = RuntimeStatus.RUNNING.value
+        source.desired_state = DesiredState.RUNNING.value
+        source.health_status = HealthStatus.HEALTHY.value
+        tgt = f"ctr-tgt-ext-{fixture['suffix']}"
+        target.runtime_status = RuntimeStatus.RUNNING.value
+        target.health_status = HealthStatus.HEALTHY.value
+        target.container_id = tgt
+        await session.commit()
+
+    fake_node.containers[str(fixture["source_id"])]["runtime_status"] = "STOPPED"
+    fake_node.containers[str(fixture["source_id"])]["health_status"] = "UNKNOWN"
+    fake_node.containers[str(fixture["target_id"])] = {
+        "deployment_id": str(fixture["target_id"]),
+        "container_id": tgt,
+        "container_name": "tgt",
+        "runtime_status": "RUNNING",
+        "health_status": "HEALTHY",
+    }
+
+    monkeypatch.setattr(
+        GatewayClient,
+        "get_route_runtime",
+        _make_synced_runtime(sf, fixture["endpoint_id"]),
+    )
+
+    stop_before = sum(
+        1 for c in fake_node.calls if str(c.get("path", "")).endswith("/stop")
+    )
+    await _claim_and_execute(
+        sf,
+        job_id=job_id,
+        settings=_settings(),
+        transport=transport,
+        engine=sf.kw["bind"],
+    )
+    stop_after = sum(
+        1 for c in fake_node.calls if str(c.get("path", "")).endswith("/stop")
+    )
+    assert stop_after == stop_before
+
+    async with sf() as session:
+        op = await session.get(Operation, op_id)
+        source = await session.get(Deployment, fixture["source_id"])
+        state = await session.get(RoutingState, 1)
+        active = (
+            await session.execute(
+                select(EndpointRoute).where(
+                    EndpointRoute.endpoint_alias_id == fixture["endpoint_id"],
+                    EndpointRoute.status == "ACTIVE",
+                )
+            )
+        ).scalar_one()
+        assert op and source and state
+        assert op.status == OperationStatus.MANUAL_INTERVENTION_REQUIRED.value
+        assert op.error_code == CODE_SOURCE_STOPPED_WITHOUT_EVIDENCE
+        assert (op.metadata_json or {}).get("hot_source_retired") is not True
+        assert op.status != OperationStatus.SUCCEEDED.value
+        # No further route/version mutation from retirement path.
+        assert int(state.version) == version_before
+        assert str(active.deployment_id) == str(fixture["target_id"])
+        # Do not claim retirement on DB desired/runtime from external stop.
+        assert source.desired_state == DesiredState.RUNNING.value
+
+
+@pytest.mark.asyncio
+async def test_read_routing_version_bypasses_identity_map(db) -> None:
+    """_read_routing_version must issue fresh SQL, not reuse identity-map cache."""
+    from app.services.hot_switch_retirement import HotSwitchRetirementMixin
+
+    sf = db
+    async with sf() as session:
+        state = await session.get(RoutingState, 1)
+        assert state is not None
+        # Ensure row exists and pin identity-map copy at N.
+        n = int(state.version)
+
+    class _Probe(HotSwitchRetirementMixin):
+        def __init__(self) -> None:
+            self._session_factory = sf
+            self._settings = _settings()
+            self._lifecycle = None
+            self._sleep = asyncio.sleep
+
+    probe = _Probe()
+
+    async with sf() as session:
+        # Load identity-map object at N, then bump via separate session.
+        first = await probe._read_routing_version(session)
+        assert first == n
+        # Keep RoutingState identity cached by touching session.get.
+        cached = await session.get(RoutingState, 1)
+        assert cached is not None
+        assert int(cached.version) == n
+
+        async with sf() as other:
+            other_state = await other.get(RoutingState, 1)
+            assert other_state is not None
+            other_state.version = n + 1
+            await other.commit()
+
+        # Identity-map object is still N without expire; helper must return N+1.
+        assert int(cached.version) == n
+        second = await probe._read_routing_version(session)
+        assert second == n + 1
+
+
+@pytest.mark.asyncio
+async def test_b2_fresh_proof_requires_new_routing_version(db, monkeypatch) -> None:
+    """STOP_SOURCE fresh proof uses newly read RoutingState.version, not stale drain."""
+    sf = db
+    fake_node = ColdSwitchFakeNodeAgent()
+    fake_gw = FakeGateway()
+    transport = CombinedTransport(fake_node, fake_gw)
+    _configure_hot_vram(fake_node)
+
+    async with sf() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        await _seed_standard_runtime(fake_node, fake_gw, fixture)
+        fake_node.containers[str(fixture["source_id"])]["health_status"] = "HEALTHY"
+        op_id, job_id = await _enqueue_b2_hot_switch(session, fixture=fixture)
+        await _mark_steps_status(
+            session, op_id, succeeded_through="WAIT_SOURCE_DRAIN"
+        )
+        old_version = await _activate_target_route(session, fixture)
+        # Persist stale drain proof at old_version, then bump global version.
+        activate = (
+            await session.execute(
+                select(OperationStep).where(
+                    OperationStep.operation_id == op_id,
+                    OperationStep.step_code == "ACTIVATE_TARGET_ROUTE",
+                )
+            )
+        ).scalar_one()
+        activate.detail_json = {
+            "route_routing_version": old_version,
+            "source_route_id": str(fixture["route_id"]),
+        }
+        drain = (
+            await session.execute(
+                select(OperationStep).where(
+                    OperationStep.operation_id == op_id,
+                    OperationStep.step_code == "WAIT_SOURCE_DRAIN",
+                )
+            )
+        ).scalar_one()
+        drain.detail_json = {
+            "retirement_drain_proven": True,
+            "retirement_proof_routing_version": old_version,
+        }
+        state = await session.get(RoutingState, 1)
+        assert state is not None
+        state.version = old_version + 1
+        new_version = int(state.version)
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        meta = dict(op.metadata_json or {})
+        meta["hot_route_boundary_entered"] = True
+        meta["retirement_drain_proven"] = True
+        meta["retirement_proof_routing_version"] = old_version
+        op.metadata_json = meta
+        source = await session.get(Deployment, fixture["source_id"])
+        target = await session.get(Deployment, fixture["target_id"])
+        assert source and target
+        source.runtime_status = RuntimeStatus.RUNNING.value
+        source.health_status = HealthStatus.HEALTHY.value
+        tgt = f"ctr-tgt-ver-{fixture['suffix']}"
+        target.runtime_status = RuntimeStatus.RUNNING.value
+        target.health_status = HealthStatus.HEALTHY.value
+        target.container_id = tgt
+        await session.commit()
+
+    fake_node.containers[str(fixture["source_id"])]["runtime_status"] = "RUNNING"
+    fake_node.containers[str(fixture["source_id"])]["health_status"] = "HEALTHY"
+    fake_node.containers[str(fixture["target_id"])] = {
+        "deployment_id": str(fixture["target_id"]),
+        "container_id": tgt,
+        "container_name": "tgt",
+        "runtime_status": "RUNNING",
+        "health_status": "HEALTHY",
+    }
+
+    # Gateway applied only old_version → fresh proof must NOT treat as drained.
+    base = _make_synced_runtime(sf, fixture["endpoint_id"])
+
+    async def _stale_applied(self, alias: str, *, deployment_id: str | None = None):
+        payload = await base(self, alias, deployment_id=deployment_id)
+        payload["applied_routing_version"] = old_version
+        return payload
+
+    monkeypatch.setattr(GatewayClient, "get_route_runtime", _stale_applied)
+
+    await _claim_and_execute(
+        sf,
+        job_id=job_id,
+        settings=_settings(),
+        transport=transport,
+        engine=sf.kw["bind"],
+    )
+
+    async with sf() as session:
+        op = await session.get(Operation, op_id)
+        source = await session.get(Deployment, fixture["source_id"])
+        assert op and source
+        # Soft retention because fresh proof cannot get applied >= new_version.
+        assert op.status == OperationStatus.SUCCEEDED.value
+        assert source.runtime_status == RuntimeStatus.RUNNING.value
+        assert (op.metadata_json or {}).get("retirement_skipped") is True
+        assert (op.metadata_json or {}).get("hot_source_retained") is True
+
+
+@pytest.mark.asyncio
+async def test_destructive_boundary_job_op_lock_order_vs_cancel(db) -> None:
+    """Cancel and decide_destructive_boundary share Job→Operation lock order."""
+    from app.repositories.operations import OperationJobRepository
+
+    sf = db
+    fake_node = ColdSwitchFakeNodeAgent()
+
+    # --- cancel wins ---
+    async with sf() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        op_id, job_id = await _enqueue_b2_hot_switch(session, fixture=fixture)
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        op.status = OperationStatus.RUNNING.value
+        await session.commit()
+
+    gate_cancel = asyncio.Event()
+    locked_cancel = asyncio.Event()
+    results: dict[str, str] = {}
+
+    async def cancel_holds_job_then_op() -> None:
+        async with sf() as session:
+            job = (
+                await session.execute(
+                    select(OperationJob)
+                    .where(OperationJob.id == job_id)
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                )
+            ).scalar_one()
+            _ = job
+            op = (
+                await session.execute(
+                    select(Operation)
+                    .where(Operation.id == op_id)
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                )
+            ).scalar_one()
+            locked_cancel.set()
+            await asyncio.wait_for(gate_cancel.wait(), timeout=5.0)
+            op.cancel_requested_at = dt.datetime.now(tz=dt.UTC)
+            meta = dict(op.metadata_json or {})
+            meta["cancel_reason"] = "cancel-wins"
+            op.metadata_json = meta
+            await session.commit()
+
+    async def boundary_after_cancel_lock() -> None:
+        await locked_cancel.wait()
+        async with sf() as session:
+            repo = OperationJobRepository(session)
+            decision = await asyncio.wait_for(
+                repo.decide_destructive_boundary(op_id),
+                timeout=5.0,
+            )
+            results["cancel_wins"] = decision
+
+    t1 = asyncio.create_task(cancel_holds_job_then_op())
+    t2 = asyncio.create_task(boundary_after_cancel_lock())
+    await locked_cancel.wait()
+    await asyncio.sleep(0.05)
+    gate_cancel.set()
+    await asyncio.gather(t1, t2)
+    assert results["cancel_wins"] == "cancelled"
+
+    async with sf() as session:
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        assert op.cancel_requested_at is not None
+        assert (op.metadata_json or {}).get("destructive_boundary_entered") is not True
+
+    # --- boundary wins ---
+    fake_node2 = ColdSwitchFakeNodeAgent()
+    async with sf() as session:
+        fixture2 = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node2.gpu_uuid
+        )
+        op2_id, job2_id = await _enqueue_b2_hot_switch(session, fixture=fixture2)
+        op2 = await session.get(Operation, op2_id)
+        assert op2 is not None
+        op2.status = OperationStatus.RUNNING.value
+        stop_step = (
+            await session.execute(
+                select(OperationStep).where(
+                    OperationStep.operation_id == op2_id,
+                    OperationStep.step_code == "STOP_SOURCE",
+                )
+            )
+        ).scalar_one()
+        stop_step_id = stop_step.id
+        await session.commit()
+
+    gate_boundary = asyncio.Event()
+    locked_boundary = asyncio.Event()
+
+    async def boundary_holds_job_then_op() -> None:
+        async with sf() as session:
+            repo = OperationJobRepository(session)
+            # Mirror decide_destructive_boundary lock order, hold before commit.
+            await session.execute(
+                select(OperationJob)
+                .where(OperationJob.operation_id == op2_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            op = (
+                await session.execute(
+                    select(Operation)
+                    .where(Operation.id == op2_id)
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                )
+            ).scalar_one()
+            locked_boundary.set()
+            await asyncio.wait_for(gate_boundary.wait(), timeout=5.0)
+            if op.cancel_requested_at is not None:
+                await session.commit()
+                results["boundary_wins"] = "cancelled"
+                return
+            meta = dict(op.metadata_json or {})
+            meta["destructive_boundary_entered"] = True
+            op.metadata_json = meta
+            step = (
+                await session.execute(
+                    select(OperationStep)
+                    .where(OperationStep.id == stop_step_id)
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                )
+            ).scalar_one()
+            detail = dict(step.detail_json or {})
+            detail["hot_source_stop_boundary"] = True
+            detail["destructive_boundary_entered"] = True
+            step.detail_json = detail
+            await session.commit()
+            results["boundary_wins"] = "boundary_entered"
+            _ = repo
+
+    async def cancel_after_boundary_lock() -> None:
+        await locked_boundary.wait()
+
+        async def _stamp() -> None:
+            async with sf() as session:
+                await session.execute(
+                    select(OperationJob)
+                    .where(OperationJob.id == job2_id)
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                )
+                op = (
+                    await session.execute(
+                        select(Operation)
+                        .where(Operation.id == op2_id)
+                        .with_for_update()
+                        .execution_options(populate_existing=True)
+                    )
+                ).scalar_one()
+                if op.cancel_requested_at is None:
+                    op.cancel_requested_at = dt.datetime.now(tz=dt.UTC)
+                meta = dict(op.metadata_json or {})
+                meta["cancel_reason"] = "after-boundary"
+                op.metadata_json = meta
+                await session.commit()
+
+        task = asyncio.create_task(_stamp())
+        await asyncio.sleep(0.05)
+        gate_boundary.set()
+        await asyncio.wait_for(task, timeout=5.0)
+
+    await asyncio.gather(
+        asyncio.create_task(boundary_holds_job_then_op()),
+        asyncio.create_task(cancel_after_boundary_lock()),
+    )
+    assert results["boundary_wins"] == "boundary_entered"
+
+    async with sf() as session:
+        op = await session.get(Operation, op2_id)
+        step = await session.get(OperationStep, stop_step_id)
+        assert op is not None and step is not None
+        assert (op.metadata_json or {}).get("destructive_boundary_entered") is True
+        assert op.cancel_requested_at is not None
+        assert (op.metadata_json or {}).get("cancel_reason") == "after-boundary"
+        assert (step.detail_json or {}).get("hot_source_stop_boundary") is True

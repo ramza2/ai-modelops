@@ -56,6 +56,8 @@ HOT_SOURCE_RETAINED = "hot_source_retained"
 REASON_SOURCE_ACTIVE_ON_OTHER_ALIAS = "SOURCE_ACTIVE_ON_OTHER_ALIAS"
 REASON_DRAIN_TIMEOUT = "DRAIN_TIMEOUT"
 REASON_DRAIN_TELEMETRY_UNAVAILABLE = "DRAIN_TELEMETRY_UNAVAILABLE"
+HOT_SOURCE_STOP_BOUNDARY = "hot_source_stop_boundary"
+CODE_SOURCE_STOPPED_WITHOUT_EVIDENCE = "SOURCE_STOPPED_WITHOUT_RETIREMENT_EVIDENCE"
 
 
 def operation_has_b2_retirement(operation: Operation, steps: list[OperationStep] | None = None) -> bool:
@@ -82,6 +84,39 @@ def retirement_was_skipped(operation: Operation, steps: list[OperationStep] | No
     return False
 
 
+def has_owned_source_stop_evidence(
+    operation: Any,
+    *,
+    source: Any | None = None,
+    steps: list[OperationStep] | None = None,
+) -> bool:
+    """True when durable evidence proves this Operation entered Source-stop.
+
+    Live Source STOPPED alone is insufficient — Source may be stopped by
+    operators or unrelated lifecycle paths.
+    """
+    meta = getattr(operation, "metadata_json", None) or {}
+    if bool(meta.get("destructive_boundary_entered")):
+        return True
+    if bool(meta.get(SOURCE_STOP_VERIFIED)):
+        return True
+    if source is not None and str(
+        getattr(source, "desired_state", None) or ""
+    ) == DesiredState.STOPPED.value:
+        # desired_state STOPPED is written by this Operation only after the
+        # destructive boundary decision (crash window C/D).
+        return True
+    for step in steps or ():
+        if step.step_code != STEP_STOP_SOURCE:
+            continue
+        detail = step.detail_json or {}
+        if bool(detail.get(HOT_SOURCE_STOP_BOUNDARY)) or bool(
+            detail.get("destructive_boundary_entered")
+        ):
+            return True
+    return False
+
+
 class HotSwitchRetirementMixin:
     """WAIT_SOURCE_DRAIN / STOP_SOURCE / VERIFY_SOURCE_STOPPED for B2."""
 
@@ -104,8 +139,12 @@ class HotSwitchRetirementMixin:
         return list(result.scalars().all())
 
     async def _read_routing_version(self, session: AsyncSession) -> int:
-        state = await session.get(RoutingState, 1)
-        return int(state.version) if state is not None else 0
+        """Force a fresh SQL read — do not trust identity-map RoutingState."""
+        result = await session.execute(
+            select(RoutingState.version).where(RoutingState.id == 1)
+        )
+        version = result.scalar_one_or_none()
+        return int(version) if version is not None else 0
 
     async def _persist_operation_meta_patch(
         self,
@@ -424,7 +463,7 @@ class HotSwitchRetirementMixin:
                 "source_retained": True,
             }
 
-        # Live already STOPPED → reconcile without re-proof / re-stop.
+        # Live already STOPPED / missing: only safe as owned crash-resume.
         try:
             inspected = await client.get_deployment(
                 str(source.id), mutation=mutation
@@ -438,26 +477,49 @@ class HotSwitchRetirementMixin:
                 exc.message, code=exc.code, details=exc.details
             ) from exc
 
-        if inspected is not None and str(
+        live_stopped = inspected is not None and str(
             inspected.get("runtime_status") or ""
-        ) == RuntimeStatus.STOPPED.value:
-            self._lifecycle._merge_container_id(source, inspected)
+        ) == RuntimeStatus.STOPPED.value
+        live_missing = inspected is None
+        if live_stopped or live_missing:
+            steps = await repo.list_steps(uuid.UUID(str(operation.id)))
+            await session.refresh(source)
+            await session.refresh(operation)
+            if not has_owned_source_stop_evidence(
+                operation, source=source, steps=steps
+            ):
+                raise PermanentStepError(
+                    "Source is STOPPED/absent without durable B2 stop ownership.",
+                    code=CODE_SOURCE_STOPPED_WITHOUT_EVIDENCE,
+                    details={
+                        "live_runtime_status": (
+                            RuntimeStatus.STOPPED.value
+                            if live_stopped
+                            else None
+                        ),
+                        "container_missing": live_missing,
+                        "desired_state": source.desired_state,
+                        "destructive_boundary_entered": bool(
+                            (operation.metadata_json or {}).get(
+                                "destructive_boundary_entered"
+                            )
+                        ),
+                    },
+                )
+            if live_stopped:
+                self._lifecycle._merge_container_id(source, inspected)
             self._lifecycle._mark_runtime_stopped(source)
             source.desired_state = DesiredState.STOPPED.value
             await session.commit()
             return {
-                "reconciled_already_stopped": True,
+                (
+                    "reconciled_already_stopped"
+                    if live_stopped
+                    else "reconciled_missing_container"
+                ): True,
                 "runtime_status": RuntimeStatus.STOPPED.value,
                 "desired_state": DesiredState.STOPPED.value,
-            }
-        if inspected is None:
-            self._lifecycle._mark_runtime_stopped(source)
-            source.desired_state = DesiredState.STOPPED.value
-            await session.commit()
-            return {
-                "reconciled_missing_container": True,
-                "runtime_status": RuntimeStatus.STOPPED.value,
-                "desired_state": DesiredState.STOPPED.value,
+                "owned_stop_evidence": True,
             }
 
         # Fresh proof required after crash / lock release gaps.
@@ -472,7 +534,7 @@ class HotSwitchRetirementMixin:
             uuid.UUID(str(operation.id)),
             step_id=uuid.UUID(str(step.id)),
             step_detail_patch={
-                "hot_source_stop_boundary": True,
+                HOT_SOURCE_STOP_BOUNDARY: True,
                 RETIREMENT_PROOF_VERSION: proof.get(RETIREMENT_PROOF_VERSION),
             },
         )

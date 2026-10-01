@@ -1686,3 +1686,103 @@ async def test_b2_reconcile_pending_retirement_resumes_forward(db) -> None:
         assert op is not None
         assert op.status == OperationStatus.RUNNING.value
         assert op.status != OperationStatus.SUCCEEDED.value
+
+
+@pytest.mark.asyncio
+async def test_b2_reconcile_stopped_without_ownership_remains_mir(db) -> None:
+    """Target serving + live Source STOPPED without ownership must not SUCCEEDED."""
+    from tests.test_hot_switch import _enqueue_b2_hot_switch
+
+    sf = db
+    fake_node = ColdSwitchFakeNodeAgent()
+    fake_gw = FakeGateway()
+    transport = CombinedTransport(fake_node, fake_gw)
+    _configure_hot_vram(fake_node)
+
+    async with sf() as session:
+        fixture = await _seed_cold_switch_fixture(
+            session, gpu_uuid=fake_node.gpu_uuid
+        )
+        await _seed_standard_runtime(fake_node, fake_gw, fixture)
+        op_id, _job_id = await _enqueue_b2_hot_switch(session, fixture=fixture)
+        await _mark_steps_status(
+            session, op_id, succeeded_through="WAIT_SOURCE_DRAIN"
+        )
+        version = await _set_active_route(
+            session, fixture["endpoint_id"], fixture["target_id"]
+        )
+        activate = (
+            await session.execute(
+                select(OperationStep).where(
+                    OperationStep.operation_id == op_id,
+                    OperationStep.step_code == "ACTIVATE_TARGET_ROUTE",
+                )
+            )
+        ).scalar_one()
+        activate.detail_json = {
+            "route_routing_version": version,
+            "source_route_id": str(fixture["route_id"]),
+        }
+        drain = (
+            await session.execute(
+                select(OperationStep).where(
+                    OperationStep.operation_id == op_id,
+                    OperationStep.step_code == "WAIT_SOURCE_DRAIN",
+                )
+            )
+        ).scalar_one()
+        drain.detail_json = {"retirement_drain_proven": True}
+        # STOP_SOURCE failed without ownership markers.
+        stop = (
+            await session.execute(
+                select(OperationStep).where(
+                    OperationStep.operation_id == op_id,
+                    OperationStep.step_code == "STOP_SOURCE",
+                )
+            )
+        ).scalar_one()
+        stop.status = StepStatus.FAILED.value
+        stop.error_code = "SOURCE_STOPPED_WITHOUT_RETIREMENT_EVIDENCE"
+        source = await session.get(Deployment, fixture["source_id"])
+        target = await session.get(Deployment, fixture["target_id"])
+        assert source and target
+        source.runtime_status = RuntimeStatus.STOPPED.value
+        source.desired_state = "RUNNING"
+        tgt = f"ctr-tgt-noe-{fixture['suffix']}"
+        target.runtime_status = RuntimeStatus.RUNNING.value
+        target.health_status = HealthStatus.HEALTHY.value
+        target.container_id = tgt
+        await session.commit()
+        await _force_hot_mir(
+            session,
+            op_id,
+            boundary=True,
+            metadata_extra={
+                "retirement_drain_proven": True,
+                # Explicitly no destructive_boundary_entered.
+            },
+        )
+
+    fake_node.containers[str(fixture["source_id"])]["runtime_status"] = "STOPPED"
+    fake_node.containers[str(fixture["source_id"])]["health_status"] = "UNKNOWN"
+    fake_node.containers[str(fixture["target_id"])] = {
+        "deployment_id": str(fixture["target_id"]),
+        "container_id": tgt,
+        "container_name": "tgt",
+        "runtime_status": "RUNNING",
+        "health_status": "HEALTHY",
+    }
+    fake_gw.active_deployment_id = str(fixture["target_id"])
+    fake_gw.traffic_state = TrafficState.SERVING.value
+    fake_gw.applied_routing_version = version
+    fake_gw.auto_apply = False
+
+    result = await _reconciler(sf, transport, sf.kw["bind"]).reconcile_operation(
+        op_id
+    )
+    assert result.outcome != "SUCCEEDED"
+
+    async with sf() as session:
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        assert op.status == OperationStatus.MANUAL_INTERVENTION_REQUIRED.value

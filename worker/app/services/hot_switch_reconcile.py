@@ -55,10 +55,10 @@ from app.services.cold_switch import (
 from app.services.hot_switch_retirement import (
     B2_RETIREMENT_FLAG,
     RETIREMENT_SKIPPED,
-    SOURCE_STOP_VERIFIED,
     STEP_STOP_SOURCE,
     STEP_VERIFY_SOURCE_STOPPED,
     STEP_WAIT_SOURCE_DRAIN,
+    has_owned_source_stop_evidence,
     operation_has_b2_retirement,
     retirement_was_skipped,
 )
@@ -290,6 +290,7 @@ class HotSwitchReconciler:
             b2_retirement = operation_has_b2_retirement(operation, steps_snapshot)
             retirement_skipped = retirement_was_skipped(operation, steps_snapshot)
             destructive = bool(op_meta.get("destructive_boundary_entered"))
+            source_desired = str(source.desired_state)
             agent_url = (
                 str(node.agent_base_url) if node and node.agent_base_url else None
             )
@@ -387,18 +388,21 @@ class HotSwitchReconciler:
             probe_succeeded=probe_ok,
         )
 
-        # 1a) B2 no cancel + Target proven + Source STOPPED + retirement evidence → SUCCEEDED.
+        # 1a) B2 no cancel + Target proven + Source STOPPED + ownership → SUCCEEDED.
+        # Live STOPPED + Target serving alone is NOT enough (external/manual stop).
+        from types import SimpleNamespace
+
+        owned_stop = has_owned_source_stop_evidence(
+            SimpleNamespace(metadata_json=op_meta),
+            source=SimpleNamespace(desired_state=source_desired),
+            steps=steps_snapshot,
+        )
         if (
             not cancel_requested
             and b2_retirement
             and target_serving
             and src_rt == RuntimeStatus.STOPPED.value
-            and (
-                destructive
-                or bool(op_meta.get(SOURCE_STOP_VERIFIED))
-                or self._step_succeeded(steps_snapshot, STEP_VERIFY_SOURCE_STOPPED)
-                or self._step_succeeded(steps_snapshot, STEP_STOP_SOURCE)
-            )
+            and owned_stop
         ):
             return await self._finish_succeeded(
                 operation_id=operation_id,
