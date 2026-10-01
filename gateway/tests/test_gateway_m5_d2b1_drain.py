@@ -1476,3 +1476,159 @@ async def test_cancellation_after_bind_nonstream_releases_deployment() -> None:
 
     await http_client.aclose()
     await engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# Safety: cross-Alias hidden bind — global unbound is required for B2
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_cross_alias_hidden_bind_requires_global_unbound() -> None:
+    """Alias-local unbound=0 can hide another Alias RESERVED→Source bind."""
+    engine = create_async_engine(_database_url(), future=True)
+    session_factory = async_sessionmaker(
+        engine, expire_on_commit=False, autoflush=False
+    )
+    store = RoutingStore(session_factory, poll_seconds=60.0)
+
+    alias_a = await _seed_alias_route(session_factory)
+    source_id = alias_a["deployment_id"]
+    fks = await _lookup_seed_fk(session_factory, source_id)
+    await _point_upstream(session_factory, source_id, "http://upstream.test")
+    alias_b = await _seed_second_alias_same_deployment(
+        session_factory, deployment_id=source_id
+    )
+    target_a = await _add_deployment(
+        session_factory,
+        node_id=fks["node_id"],
+        model_version_id=fks["model_version_id"],
+        upstream="http://upstream.test",
+        name_suffix="ta",
+    )
+    target_b = await _add_deployment(
+        session_factory,
+        node_id=fks["node_id"],
+        model_version_id=fks["model_version_id"],
+        upstream="http://upstream.test",
+        name_suffix="tb",
+    )
+    await store.reload(force=True)
+
+    # 1. Cut Alias A Source → Target-A
+    await _switch_active_route(
+        session_factory,
+        endpoint_id=alias_a["endpoint_id"],
+        source_deployment_id=source_id,
+        target_deployment_id=target_a,
+    )
+    await store.reload(force=True)
+
+    inflight = InflightTracker()
+    bind_gate = asyncio.Event()
+    reserved = asyncio.Event()
+    original_bind = InflightTracker.bind
+
+    async def _gated_bind(
+        self: InflightTracker, handle: Any, deployment_id: str
+    ) -> None:
+        reserved.set()
+        await bind_gate.wait()
+        await original_bind(self, handle, deployment_id)
+
+    http_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda r: httpx.Response(
+                200,
+                json={
+                    "id": "c",
+                    "object": "chat.completion",
+                    "model": "m",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {"role": "assistant", "content": "ok"},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                },
+            )
+        ),
+        base_url="http://upstream.test",
+    )
+    app = create_app(
+        routing_store=store,
+        http_client=http_client,
+        inflight=inflight,
+        invocation_logs=InvocationLogWriter(None),
+    )
+    with patch.object(InflightTracker, "bind", _gated_bind):
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://gw.test"
+        ) as ac:
+            # 2–3. Alias B request: admit+resolve Source, pause before bind
+            task_b = asyncio.create_task(
+                ac.post(
+                    "/v1/chat/completions",
+                    json={
+                        "model": alias_b["alias"],
+                        "messages": [{"role": "user", "content": "b"}],
+                    },
+                )
+            )
+            await asyncio.wait_for(reserved.wait(), timeout=2.0)
+            assert inflight.get_unbound(alias_b["alias"]) == 1
+            assert inflight.get_unbound_total() == 1
+            assert inflight.get_deployment(source_id) == 0
+
+            # 4. Cut Alias B Source → Target-B (Source no longer ACTIVE anywhere)
+            await _switch_active_route(
+                session_factory,
+                endpoint_id=alias_b["endpoint_id"],
+                source_deployment_id=source_id,
+                target_deployment_id=target_b,
+            )
+            await store.reload(force=True)
+            snap = store.snapshot
+            assert snap is not None
+            assert snap.get(alias_a["alias"]).deployment_id == target_a
+            assert snap.get(alias_b["alias"]).deployment_id == target_b
+
+            # 5. Observe Source through Alias A — old proof would look "safe"
+            runtime = await ac.get(
+                f"/internal/v1/routes/{alias_a['alias']}/runtime",
+                params={"deployment_id": source_id},
+            )
+            body = runtime.json()
+            assert body["unbound_requests"] == 0
+            assert body["observed_deployment_id"] == source_id
+            assert body["observed_deployment_inflight_requests"] == 0
+            assert body["global_unbound_requests"] == 1
+
+            # Allow B to bind the already-resolved Source entry
+            bind_gate.set()
+            for _ in range(50):
+                if (
+                    inflight.get_unbound_total() == 0
+                    and inflight.get_deployment(source_id) == 1
+                ):
+                    break
+                await asyncio.sleep(0.02)
+            assert inflight.get_unbound_total() == 0
+            assert inflight.get_deployment(source_id) == 1
+
+            runtime2 = await ac.get(
+                f"/internal/v1/routes/{alias_a['alias']}/runtime",
+                params={"deployment_id": source_id},
+            )
+            body2 = runtime2.json()
+            assert body2["global_unbound_requests"] == 0
+            assert body2["observed_deployment_inflight_requests"] == 1
+
+            resp = await task_b
+            assert resp.status_code == 200
+            assert inflight.get_deployment(source_id) == 0
+            assert inflight.get_unbound_total() == 0
+
+    await http_client.aclose()
+    await engine.dispose()

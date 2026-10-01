@@ -116,6 +116,7 @@ async def test_get_route_runtime_with_deployment_id_validates_drain_fields() -> 
             200,
             json=_runtime_payload(
                 unbound_requests=0,
+                global_unbound_requests=0,
                 observed_deployment_id="dep-source",
                 observed_deployment_inflight_requests=1,
                 observed_deployment_idle=False,
@@ -130,6 +131,7 @@ async def test_get_route_runtime_with_deployment_id_validates_drain_fields() -> 
     data = await client.get_route_runtime("company-llm", deployment_id="dep-source")
     assert seen["deployment_id"] == "dep-source"
     assert data["unbound_requests"] == 0
+    assert data["global_unbound_requests"] == 0
     assert data["observed_deployment_inflight_requests"] == 1
 
 
@@ -151,14 +153,75 @@ async def test_get_route_runtime_with_deployment_id_missing_drain_fields() -> No
 
 
 @pytest.mark.asyncio
+async def test_get_route_runtime_missing_global_unbound_rejected() -> None:
+    def _handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=_runtime_payload(
+                unbound_requests=0,
+                observed_deployment_id="dep-source",
+                observed_deployment_inflight_requests=0,
+            ),
+        )
+
+    client = GatewayClient(
+        base_url="http://gateway.test",
+        timeout_seconds=1.0,
+        transport=httpx.MockTransport(_handler),
+    )
+    with pytest.raises(GatewayError) as exc_info:
+        await client.get_route_runtime("company-llm", deployment_id="dep-source")
+    err = exc_info.value
+    assert err.code == "GATEWAY_INVALID_RESPONSE"
+    assert "global_unbound_requests" in err.details.get("missing", [])
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "overrides",
     [
-        {"unbound_requests": False, "observed_deployment_id": "dep-source", "observed_deployment_inflight_requests": 0},
-        {"unbound_requests": 0, "observed_deployment_id": "dep-source", "observed_deployment_inflight_requests": False},
-        {"unbound_requests": -1, "observed_deployment_id": "dep-source", "observed_deployment_inflight_requests": 0},
-        {"unbound_requests": 0, "observed_deployment_id": "dep-source", "observed_deployment_inflight_requests": -3},
-        {"unbound_requests": 0, "observed_deployment_id": "dep-other", "observed_deployment_inflight_requests": 0},
+        {
+            "unbound_requests": False,
+            "global_unbound_requests": 0,
+            "observed_deployment_id": "dep-source",
+            "observed_deployment_inflight_requests": 0,
+        },
+        {
+            "unbound_requests": 0,
+            "global_unbound_requests": False,
+            "observed_deployment_id": "dep-source",
+            "observed_deployment_inflight_requests": 0,
+        },
+        {
+            "unbound_requests": 0,
+            "global_unbound_requests": 0,
+            "observed_deployment_id": "dep-source",
+            "observed_deployment_inflight_requests": False,
+        },
+        {
+            "unbound_requests": -1,
+            "global_unbound_requests": 0,
+            "observed_deployment_id": "dep-source",
+            "observed_deployment_inflight_requests": 0,
+        },
+        {
+            "unbound_requests": 0,
+            "global_unbound_requests": -1,
+            "observed_deployment_id": "dep-source",
+            "observed_deployment_inflight_requests": 0,
+        },
+        {
+            "unbound_requests": 0,
+            "global_unbound_requests": 0,
+            "observed_deployment_id": "dep-source",
+            "observed_deployment_inflight_requests": -3,
+        },
+        {
+            "unbound_requests": 0,
+            "global_unbound_requests": 0,
+            "observed_deployment_id": "dep-other",
+            "observed_deployment_inflight_requests": 0,
+        },
     ],
 )
 async def test_get_route_runtime_strict_drain_validation_rejects(
@@ -184,6 +247,7 @@ async def test_get_route_runtime_strict_drain_validation_accepts_zero_int() -> N
             200,
             json=_runtime_payload(
                 unbound_requests=0,
+                global_unbound_requests=0,
                 observed_deployment_id="dep-source",
                 observed_deployment_inflight_requests=0,
                 observed_deployment_idle=True,
@@ -197,5 +261,6 @@ async def test_get_route_runtime_strict_drain_validation_accepts_zero_int() -> N
     )
     data = await client.get_route_runtime("company-llm", deployment_id="dep-source")
     assert data["unbound_requests"] == 0
+    assert data["global_unbound_requests"] == 0
     assert data["observed_deployment_inflight_requests"] == 0
     assert data["observed_deployment_id"] == "dep-source"

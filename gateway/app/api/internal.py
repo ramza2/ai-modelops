@@ -78,6 +78,7 @@ async def route_runtime(
     tracker = request.app.state.inflight
     inflight = int(tracker.get(entry.alias))
     unbound = int(tracker.get_unbound(entry.alias))
+    global_unbound = int(tracker.get_unbound_total())
     draining = entry.traffic_state == TrafficState.DRAINING.value
 
     observed_raw = (deployment_id or "").strip() or None
@@ -104,6 +105,7 @@ async def route_runtime(
         "upstream_base_url": entry.upstream_base_url,
         "inflight_requests": inflight,
         "unbound_requests": unbound,
+        "global_unbound_requests": global_unbound,
         "drain_complete": bool(draining and inflight == 0),
         "observed_deployment_id": observed_deployment_id,
         "observed_deployment_inflight_requests": observed_inflight,

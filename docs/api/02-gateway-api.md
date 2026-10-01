@@ -295,14 +295,16 @@ Admission 상태:
 RESERVED(alias)  →  BOUND(alias, deployment_id)  →  RELEASED
 ```
 
-- `unbound_requests`: admit 후 Deployment bind 전 요청 수
+- `unbound_requests`: **Alias-local** — 이 Alias에서 admit 후 Deployment bind 전
+- `global_unbound_requests`: **process-global** — Gateway process 전체 unbound 합
+  (다른 Alias에 숨은 RESERVED가 Source로 bind될 수 있으므로 B2 권위 신호)
 - Deployment inflight는 **Alias가 아니라 Deployment 전역** (process-local)
   — 한 Deployment가 여러 Alias에 공유될 수 있음
 - Streaming SSE는 `StreamingResponse` 반환 시점이 아니라 실제 EOF /
   upstream error / timeout / client disconnect 시에만 release
 
 `drain_complete`는 Cold Alias/DRAINING 의미만 유지한다.
-HOT Source 안전 정지를 이 필드만으로 판단하지 않는다.
+HOT Source 안전 정지를 Alias-local `unbound_requests`만으로 판단하지 않는다.
 
 현재 MVP Gateway는 단일 process/replica다. 이 telemetry는 cluster-wide가 아니며
 multi-process 집계는 후속이다.
@@ -472,6 +474,7 @@ Query (optional):
   "applied_routing_version": 42,
   "inflight_requests": 2,
   "unbound_requests": 0,
+  "global_unbound_requests": 0,
   "drain_complete": false,
   "observed_deployment_id": "uuid",
   "observed_deployment_inflight_requests": 1,
@@ -484,7 +487,8 @@ Query (optional):
 | Field | Meaning |
 |---|---|
 | `inflight_requests` | Alias-wide total (Cold drain) |
-| `unbound_requests` | Admitted for this Alias but not yet bound to a Deployment |
+| `unbound_requests` | Alias-local: admitted for this Alias but not yet Deployment-bound |
+| `global_unbound_requests` | Process-global unbound reservations across all Aliases |
 | `drain_complete` | Cold only: `DRAINING` and alias inflight == 0 |
 | `observed_deployment_id` | Query `deployment_id`, else ACTIVE Deployment |
 | `observed_deployment_inflight_requests` | Global process-local count for that Deployment |
@@ -492,19 +496,23 @@ Query (optional):
 
 Cold Switch Worker가 Drain 완료와 Route 적용 여부를 검증하는 핵심 API다.
 
-HOT Source retirement (M5-D2-B2, 미구현)은 최소 한 번의 observation에서
+HOT Source retirement (M5-D2-B2, 미구현)은 최소 한 번의 Gateway observation에서
 대략 다음을 함께 확인해야 한다 (고정 sleep 없음):
 
 ```text
 active_deployment_id == Target
 applied_routing_version >= HOT cutover routing version
 traffic_state == SERVING
-unbound_requests == 0
+global_unbound_requests == 0
 observed_deployment_id == Source
 observed_deployment_inflight_requests == 0
 ```
 
-Alias-wide `inflight_requests`는 Target 신규 트래픽 때문에 0일 필요가 없다.
+Alias-local `unbound_requests == 0` alone is **not** authoritative for Source stop
+(another Alias may still hold a hidden RESERVED admission that later binds Source).
+
+Additionally, Control Plane routing must prove Source is not ACTIVE for any
+other Alias when Deployments are shared.
 
 ### POST /internal/v1/routes/reload
 

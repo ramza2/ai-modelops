@@ -169,25 +169,47 @@ release()              # exactly once on request/stream completion
 Streaming holds Deployment inflight for the full SSE lifetime (EOF, upstream
 error, timeout, client disconnect).
 
+Distinguish three counters:
+
+```text
+unbound_requests              # Alias-local diagnostic only
+global_unbound_requests       # process-global unbound (authoritative for B2)
+observed_deployment_inflight  # process-global Deployment bound count
+```
+
 A later Source-retirement Worker (D2-B2) may treat Source drain as proven only
-when one observation shows at least:
+when one Gateway observation shows at least:
 
 ```text
 active_deployment_id == Target
 applied_routing_version >= HOT cutover routing version
 traffic_state == SERVING
-unbound_requests == 0
+global_unbound_requests == 0
 observed_deployment_id == Source
 observed_deployment_inflight_requests == 0
 ```
 
+Alias-local `unbound_requests == 0` is **not** sufficient: another Alias may still
+hold a RESERVED admission that later binds the old Source after cutover.
+
 `observed_deployment_idle` alone is not “safe to stop Source”.
 Alias-wide `inflight_requests` need not be zero (Target traffic is allowed).
 
-The observation above is **necessary but not sufficient** when one Deployment
-is shared by multiple Endpoint Aliases. Before stopping Source, B2 must also
-prove Source is no longer an ACTIVE routing target for any other Alias.
-That multi-alias ACTIVE check is deferred to B2 (not implemented here).
+Complete future B2 concept (telemetry + routing; not implemented here):
+
+```text
+Gateway:
+  Target active
+  cutover version applied
+  traffic SERVING
+  process-global unbound == 0
+  Source deployment inflight == 0
+
+Control Plane routing:
+  Source not ACTIVE for any other Alias
+```
+
+No fixed sleep.
 
 **MVP constraint:** telemetry is valid only for the current single Gateway
 process/replica model. Do not treat counters as cluster-wide. No Redis /

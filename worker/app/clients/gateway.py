@@ -127,6 +127,7 @@ class GatewayClient:
             requested_deployment_id = params["deployment_id"]
             drain_required = (
                 "unbound_requests",
+                "global_unbound_requests",
                 "observed_deployment_id",
                 "observed_deployment_inflight_requests",
             )
@@ -142,6 +143,11 @@ class GatewayClient:
             self._require_nonneg_int(
                 data["unbound_requests"],
                 field_name="unbound_requests",
+                status_code=response.status_code,
+            )
+            self._require_nonneg_int(
+                data["global_unbound_requests"],
+                field_name="global_unbound_requests",
                 status_code=response.status_code,
             )
             self._require_nonneg_int(

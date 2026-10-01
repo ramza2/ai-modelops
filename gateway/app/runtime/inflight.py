@@ -136,6 +136,10 @@ class InflightTracker:
     def get_unbound(self, alias: str) -> int:
         return int(self._alias_unbound.get(alias.lower(), 0))
 
+    def get_unbound_total(self) -> int:
+        """Process-global unbound reservations across all Aliases."""
+        return int(sum(self._alias_unbound.values()))
+
     def get_deployment(self, deployment_id: str) -> int:
         return int(self._deployment.get(str(deployment_id), 0))
 
@@ -149,6 +153,7 @@ class InflightTracker:
             "alias_unbound": {
                 k: int(v) for k, v in self._alias_unbound.items() if v > 0
             },
+            "global_unbound": self.get_unbound_total(),
             "deployment": {
                 k: int(v) for k, v in self._deployment.items() if v > 0
             },
