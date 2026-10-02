@@ -548,9 +548,10 @@ also returns sanitized allowlisted argv capacity flags:
       "tensor_parallel_size": 2,
       "gpu_memory_utilization": 0.8,
       "dtype": "auto",
-      "quantization": "AWQ"
+      "quantization": "AWQ",
+      "scheduling_policy": "priority"
     },
-    "explicit_fields": ["max_model_len", "tensor_parallel_size", "gpu_memory_utilization", "dtype", "quantization"],
+    "explicit_fields": ["max_model_len", "tensor_parallel_size", "gpu_memory_utilization", "dtype", "quantization", "scheduling_policy"],
     "invalid_fields": []
   }
 }
@@ -561,10 +562,13 @@ Rules:
 - Recognizes ModelOps entrypoint `python -m vllm.entrypoints.openai.api_server`
   and modern `vllm serve ...`. Unrecognized → `entrypoint=UNRECOGNIZED`, empty values.
 - Supports `--flag value` and `--flag=value` for the allowlist only (optional `-tp`).
+- Allowlisted fields include `scheduling_policy` via `--scheduling-policy`
+  (normalized to `fcfs` | `priority`; other values → explicit+invalid, value null).
 - Last duplicate flag wins. Malformed values: field in `explicit_fields` +
   `invalid_fields`, normalized value null — never raw malformed argv.
 - Does **not** return raw command, model path, or environment.
-- Absent flags stay null — no vLLM runtime defaults are synthesized.
+- Absent flags stay null — no vLLM runtime defaults are synthesized
+  (including not synthesizing `scheduling_policy=fcfs`).
 - Unrecognized argv must not turn metrics UNAVAILABLE.
 - On `RUNTIME_INSTANCE_CHANGED_DURING_SCRAPE`, omit `runtime_config` (mixed instance).
 - On stable instance + metrics scrape failure (`METRICS_*`), still return

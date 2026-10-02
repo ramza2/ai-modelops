@@ -180,8 +180,16 @@ whose rendering inputs fit the supported `/tokenize` subset; unproven
 rendering-sensitive fields fail closed (`CLIENT_INPUT_TOKEN_CHECK_UNAVAILABLE`).
 Non-VLLM with an active input policy also fails closed. No local tokenizer /
 character estimation / truncation. One Chat request pins a single
-`ClientPolicyEntry` for B3/B2/B4. Embeddings input policy deferred. Priority
-remains registry-only.
+`ClientPolicyEntry` for B3/B2/B4. Embeddings input policy deferred.
+M6-B5-A: Managed vLLM `--scheduling-policy` wiring + Capacity Profile
+requested/observed observability (`fcfs` | `priority`). Deployment config >
+ModelVersion runtime_config > UNSET. Explicit Deployment null is invalid (no
+fallback). Unset omits the flag — absent observed argv is never synthesized as
+`fcfs`. Existing containers are not recreated on config change. Gateway does
+**not** forward `ClientRuntimePolicy.priority` yet (B5-B). Future B5-B may trust
+priority capability only from observed CONTAINER_ARGV / VLLM /
+`scheduling_policy == priority` evidence — not from requested config alone.
+Priority remains registry-only on the Gateway path.
 No Prometheus/Grafana server is introduced. A2 histogram scrapes are cumulative;
 A3 P50/P95 are classic bucket estimates over valid same-instance deltas only.
 IMPORTED runtime metrics / argv observation are deferred (profile returns

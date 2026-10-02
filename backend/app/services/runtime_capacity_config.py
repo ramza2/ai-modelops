@@ -16,6 +16,7 @@ CAPACITY_FIELDS = (
     "gpu_memory_utilization",
     "dtype",
     "quantization",
+    "scheduling_policy",
 )
 
 SOURCE_MODEL_VERSION = "MODEL_VERSION"
@@ -27,6 +28,9 @@ SOURCE_UNSET = "UNSET"
 ERROR_INVALID_POSITIVE_INTEGER = "INVALID_POSITIVE_INTEGER"
 ERROR_INVALID_GPU_MEMORY_UTILIZATION = "INVALID_GPU_MEMORY_UTILIZATION"
 ERROR_INVALID_NONEMPTY_STRING = "INVALID_NONEMPTY_STRING"
+ERROR_INVALID_SCHEDULING_POLICY = "INVALID_SCHEDULING_POLICY"
+
+_SCHEDULING_POLICY_ALLOWED = frozenset({"fcfs", "priority"})
 
 
 def resolve_requested_capacity_config(
@@ -66,6 +70,7 @@ def resolve_requested_capacity_config(
         "quantization": _resolve_dtype_or_quant(
             "quantization", quantization, deployment_cfg, runtime_cfg
         ),
+        "scheduling_policy": _resolve_scheduling_policy(deployment_cfg, runtime_cfg),
     }
 
 
@@ -239,3 +244,40 @@ def _validate_nonempty_string(raw: Any, source: str) -> dict[str, Any]:
             error=ERROR_INVALID_NONEMPTY_STRING,
         )
     return _field(value=text, source=source, valid=True)
+
+
+def _resolve_scheduling_policy(
+    deployment_cfg: dict[str, Any],
+    runtime_cfg: dict[str, Any],
+) -> dict[str, Any]:
+    # Deployment.deployment_config_json > ModelVersion.runtime_config_json
+    # Explicit Deployment key (even null) wins and does not fall back.
+    if "scheduling_policy" in deployment_cfg:
+        return _validate_scheduling_policy(
+            deployment_cfg.get("scheduling_policy"), SOURCE_DEPLOYMENT_CONFIG
+        )
+    if "scheduling_policy" in runtime_cfg:
+        return _validate_scheduling_policy(
+            runtime_cfg.get("scheduling_policy"),
+            SOURCE_MODEL_VERSION_RUNTIME_CONFIG,
+        )
+    return _unset()
+
+
+def _validate_scheduling_policy(raw: Any, source: str) -> dict[str, Any]:
+    if not isinstance(raw, str):
+        return _field(
+            value=None,
+            source=source,
+            valid=False,
+            error=ERROR_INVALID_SCHEDULING_POLICY,
+        )
+    normalized = raw.strip().lower()
+    if normalized not in _SCHEDULING_POLICY_ALLOWED:
+        return _field(
+            value=None,
+            source=source,
+            valid=False,
+            error=ERROR_INVALID_SCHEDULING_POLICY,
+        )
+    return _field(value=normalized, source=source, valid=True)

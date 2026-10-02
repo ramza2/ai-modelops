@@ -174,6 +174,7 @@ async def _seed_profile(session_factory, **overrides) -> dict[str, Any]:
             "gpu_memory_utilization": 0.8,
             "max_num_seqs": max_num_seqs,
         }
+        dep_cfg.update(overrides.get("deployment_config_extra") or {})
         await session.execute(
             text(
                 """
@@ -498,6 +499,46 @@ async def test_imported_deployment_unknown_observation(client) -> None:
     )
     # Still returns metadata + invocations.
     assert body["invocations"]["request_count"] == 5
+
+
+@pytest.mark.anyio
+async def test_capacity_profile_scheduling_policy_match(client) -> None:
+    """M6-B5-A: Capacity Profile exposes scheduling_policy MATCH."""
+    fixture = await _seed_profile(
+        client["session_factory"],
+        max_num_seqs=4,
+        runtime_config_override=_runtime_config(
+            values={
+                "max_model_len": 8192,
+                "max_num_seqs": None,
+                "tensor_parallel_size": 2,
+                "gpu_memory_utilization": 0.8,
+                "dtype": "auto",
+                "quantization": "AWQ",
+                "scheduling_policy": "priority",
+            },
+            explicit=[
+                "max_model_len",
+                "tensor_parallel_size",
+                "gpu_memory_utilization",
+                "dtype",
+                "quantization",
+                "scheduling_policy",
+            ],
+        ),
+        deployment_config_extra={"scheduling_policy": "priority"},
+    )
+    resp = await client["client"].get(
+        f"/api/v1/observability/runtime/deployments/{fixture['deployment_id']}"
+        f"/capacity-profile"
+    )
+    assert resp.status_code == 200
+    settings = resp.json()["configuration"]["settings"]
+    sp = settings["scheduling_policy"]
+    assert sp["requested"] == "priority"
+    assert sp["requested_source"] == "DEPLOYMENT_CONFIG"
+    assert sp["observed_explicit"] == "priority"
+    assert sp["comparison_status"] == "MATCH"
 
 
 @pytest.mark.anyio

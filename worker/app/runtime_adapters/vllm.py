@@ -7,6 +7,7 @@ from app.runtime_adapters.base import (
     RuntimeBuildInput,
     RuntimeCreateSpec,
     VolumeSpec,
+    _merged_choice,
     _merged_int,
     _merged_positive_int,
     _require_model_path,
@@ -14,6 +15,8 @@ from app.runtime_adapters.base import (
     resolve_health_path,
     resolve_probe_type_from_model,
 )
+
+_SCHEDULING_POLICY_ALLOWED = frozenset({"fcfs", "priority"})
 
 
 class VLLMAdapter:
@@ -43,6 +46,9 @@ class VLLMAdapter:
         quantization = inp.quantization or cfg.get("quantization")
         gpu_util = cfg.get("gpu_memory_utilization")
         max_num_seqs = _merged_positive_int(cfg, "max_num_seqs")
+        scheduling_policy = _merged_choice(
+            cfg, "scheduling_policy", allowed=_SCHEDULING_POLICY_ALLOWED
+        )
 
         # argv list only — never a shell string.
         command: list[str] = [
@@ -70,6 +76,8 @@ class VLLMAdapter:
             command.extend(["--gpu-memory-utilization", str(gpu_util)])
         if max_num_seqs is not None:
             command.extend(["--max-num-seqs", str(max_num_seqs)])
+        if scheduling_policy is not None:
+            command.extend(["--scheduling-policy", scheduling_policy])
 
         env = {
             "MODEL_OPS_SERVED_MODEL_NAME": served,

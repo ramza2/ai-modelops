@@ -355,6 +355,110 @@ def test_parse_last_malformed_duplicate_wins() -> None:
 
 
 # ---------------------------------------------------------------------------
+# M6-B5-A scheduling_policy
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "token,expected",
+    [
+        (["--scheduling-policy", "priority"], "priority"),
+        (["--scheduling-policy=priority"], "priority"),
+        (["--scheduling-policy", "FCFS"], "fcfs"),
+        (["--scheduling-policy", " PRIORITY "], "priority"),
+    ],
+)
+def test_parse_scheduling_policy_normalized(token, expected) -> None:
+    cmd = [
+        "python",
+        "-m",
+        "vllm.entrypoints.openai.api_server",
+        *token,
+    ]
+    result = parse_vllm_runtime_config(cmd)
+    assert result["values"]["scheduling_policy"] == expected
+    assert "scheduling_policy" in result["explicit_fields"]
+    assert "scheduling_policy" not in result["invalid_fields"]
+    assert "command" not in result
+
+
+def test_parse_scheduling_policy_missing_value_boundary() -> None:
+    cmd = [
+        "python",
+        "-m",
+        "vllm.entrypoints.openai.api_server",
+        "--scheduling-policy",
+        "--max-num-seqs",
+        "4",
+    ]
+    result = parse_vllm_runtime_config(cmd)
+    assert "scheduling_policy" in result["explicit_fields"]
+    assert "scheduling_policy" in result["invalid_fields"]
+    assert result["values"]["scheduling_policy"] is None
+    assert result["values"]["max_num_seqs"] == 4
+    assert "max_num_seqs" in result["explicit_fields"]
+
+
+def test_parse_scheduling_policy_empty_equals_invalid() -> None:
+    cmd = [
+        "python",
+        "-m",
+        "vllm.entrypoints.openai.api_server",
+        "--scheduling-policy=",
+    ]
+    result = parse_vllm_runtime_config(cmd)
+    assert "scheduling_policy" in result["explicit_fields"]
+    assert "scheduling_policy" in result["invalid_fields"]
+    assert result["values"]["scheduling_policy"] is None
+
+
+def test_parse_scheduling_policy_invalid_choice() -> None:
+    cmd = [
+        "python",
+        "-m",
+        "vllm.entrypoints.openai.api_server",
+        "--scheduling-policy",
+        "fifo",
+    ]
+    result = parse_vllm_runtime_config(cmd)
+    assert "scheduling_policy" in result["explicit_fields"]
+    assert "scheduling_policy" in result["invalid_fields"]
+    assert result["values"]["scheduling_policy"] is None
+
+
+def test_parse_scheduling_policy_duplicate_last_wins() -> None:
+    cmd = [
+        "python",
+        "-m",
+        "vllm.entrypoints.openai.api_server",
+        "--scheduling-policy",
+        "fcfs",
+        "--scheduling-policy",
+        "priority",
+    ]
+    result = parse_vllm_runtime_config(cmd)
+    assert result["values"]["scheduling_policy"] == "priority"
+    assert "scheduling_policy" in result["explicit_fields"]
+    assert "scheduling_policy" not in result["invalid_fields"]
+
+
+def test_parse_scheduling_policy_duplicate_last_invalid() -> None:
+    cmd = [
+        "python",
+        "-m",
+        "vllm.entrypoints.openai.api_server",
+        "--scheduling-policy",
+        "priority",
+        "--scheduling-policy",
+        "invalid",
+    ]
+    result = parse_vllm_runtime_config(cmd)
+    assert "scheduling_policy" in result["explicit_fields"]
+    assert "scheduling_policy" in result["invalid_fields"]
+    assert result["values"]["scheduling_policy"] is None
+
+
+# ---------------------------------------------------------------------------
 # Scrape attachment integration
 # ---------------------------------------------------------------------------
 

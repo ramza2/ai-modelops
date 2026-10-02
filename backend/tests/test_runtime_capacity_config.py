@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from app.services.runtime_capacity_compare import compare_capacity_settings
 from app.services.runtime_capacity_config import resolve_requested_capacity_config
 
@@ -260,3 +262,154 @@ def test_compare_float_exact_match() -> None:
         observation_available=True,
     )
     assert settings["gpu_memory_utilization"]["comparison_status"] == "MATCH"
+
+
+# ---------------------------------------------------------------------------
+# M6-B5-A scheduling_policy
+# ---------------------------------------------------------------------------
+
+
+def test_scheduling_policy_deployment_over_runtime() -> None:
+    result = resolve_requested_capacity_config(
+        runtime_config_json={"scheduling_policy": "fcfs"},
+        deployment_config_json={"scheduling_policy": "priority"},
+    )
+    assert result["scheduling_policy"]["value"] == "priority"
+    assert result["scheduling_policy"]["source"] == "DEPLOYMENT_CONFIG"
+    assert result["scheduling_policy"]["valid"] is True
+
+
+def test_scheduling_policy_runtime_fallback() -> None:
+    result = resolve_requested_capacity_config(
+        runtime_config_json={"scheduling_policy": "priority"},
+        deployment_config_json={},
+    )
+    assert result["scheduling_policy"]["value"] == "priority"
+    assert result["scheduling_policy"]["source"] == "MODEL_VERSION_RUNTIME_CONFIG"
+
+
+def test_scheduling_policy_unset() -> None:
+    result = resolve_requested_capacity_config(
+        runtime_config_json={},
+        deployment_config_json={},
+    )
+    assert result["scheduling_policy"]["value"] is None
+    assert result["scheduling_policy"]["source"] == "UNSET"
+    assert result["scheduling_policy"]["valid"] is True
+
+
+def test_scheduling_policy_explicit_null_invalid_no_fallback() -> None:
+    result = resolve_requested_capacity_config(
+        runtime_config_json={"scheduling_policy": "priority"},
+        deployment_config_json={"scheduling_policy": None},
+    )
+    assert result["scheduling_policy"]["value"] is None
+    assert result["scheduling_policy"]["valid"] is False
+    assert result["scheduling_policy"]["error"] == "INVALID_SCHEDULING_POLICY"
+    assert result["scheduling_policy"]["source"] == "DEPLOYMENT_CONFIG"
+
+
+@pytest.mark.parametrize("value", ["fifo", "", 1, True, False, 0, [], {}])
+def test_scheduling_policy_invalid_choice(value) -> None:
+    result = resolve_requested_capacity_config(
+        deployment_config_json={"scheduling_policy": value},
+    )
+    assert result["scheduling_policy"]["value"] is None
+    assert result["scheduling_policy"]["valid"] is False
+    assert result["scheduling_policy"]["error"] == "INVALID_SCHEDULING_POLICY"
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [("FCFS", "fcfs"), (" priority ", "priority"), ("PRIORITY", "priority")],
+)
+def test_scheduling_policy_case_normalization(value, expected) -> None:
+    result = resolve_requested_capacity_config(
+        deployment_config_json={"scheduling_policy": value},
+    )
+    assert result["scheduling_policy"]["value"] == expected
+    assert result["scheduling_policy"]["valid"] is True
+
+
+def test_compare_scheduling_policy_match() -> None:
+    settings = compare_capacity_settings(
+        requested={"scheduling_policy": _req("priority")},
+        observed_config=_obs(
+            values={"scheduling_policy": "priority"},
+            explicit=["scheduling_policy"],
+        ),
+        observation_available=True,
+    )
+    field = settings["scheduling_policy"]
+    assert field["requested"] == "priority"
+    assert field["observed_explicit"] == "priority"
+    assert field["comparison_status"] == "MATCH"
+
+
+def test_compare_scheduling_policy_mismatch() -> None:
+    settings = compare_capacity_settings(
+        requested={"scheduling_policy": _req("priority")},
+        observed_config=_obs(
+            values={"scheduling_policy": "fcfs"},
+            explicit=["scheduling_policy"],
+        ),
+        observation_available=True,
+    )
+    assert settings["scheduling_policy"]["comparison_status"] == "MISMATCH"
+
+
+def test_compare_scheduling_policy_requested_not_observed() -> None:
+    settings = compare_capacity_settings(
+        requested={"scheduling_policy": _req("priority")},
+        observed_config=_obs(values={}, explicit=[]),
+        observation_available=True,
+    )
+    field = settings["scheduling_policy"]
+    assert field["requested"] == "priority"
+    assert field["observed_explicit"] is None
+    assert field["comparison_status"] == "REQUESTED_NOT_OBSERVED"
+    # Absent flag must NOT become synthesized fcfs.
+    assert field["observed_explicit"] != "fcfs"
+
+
+def test_compare_scheduling_policy_observed_only() -> None:
+    settings = compare_capacity_settings(
+        requested={},
+        observed_config=_obs(
+            values={"scheduling_policy": "priority"},
+            explicit=["scheduling_policy"],
+        ),
+        observation_available=True,
+    )
+    assert settings["scheduling_policy"]["comparison_status"] == "OBSERVED_ONLY"
+    assert settings["scheduling_policy"]["observed_explicit"] == "priority"
+
+
+def test_compare_scheduling_policy_invalid_requested() -> None:
+    settings = compare_capacity_settings(
+        requested={
+            "scheduling_policy": _req(
+                None,
+                "DEPLOYMENT_CONFIG",
+                valid=False,
+                error="INVALID_SCHEDULING_POLICY",
+            )
+        },
+        observed_config=_obs(),
+        observation_available=True,
+    )
+    assert settings["scheduling_policy"]["comparison_status"] == "INVALID_REQUESTED"
+    assert settings["scheduling_policy"]["requested_error"] == "INVALID_SCHEDULING_POLICY"
+
+
+def test_compare_scheduling_policy_invalid_observed() -> None:
+    settings = compare_capacity_settings(
+        requested={"scheduling_policy": _req("priority")},
+        observed_config=_obs(
+            values={"scheduling_policy": None},
+            explicit=["scheduling_policy"],
+            invalid=["scheduling_policy"],
+        ),
+        observation_available=True,
+    )
+    assert settings["scheduling_policy"]["comparison_status"] == "INVALID_OBSERVED"

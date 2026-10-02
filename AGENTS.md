@@ -676,7 +676,7 @@ ${DATABASE_URL}
      `max_tokens`) above policy → 422 `CLIENT_OUTPUT_TOKEN_LIMIT`
      (no silent clamp); absent → inject `max_completion_tokens` on
      upstream copy; runs before B2/M5; Embeddings unaffected.
-   - **M6-B4 (current):** Chat `max_input_tokens` via trusted bound
+   - **M6-B4 (done):** Chat `max_input_tokens` via trusted bound
      VLLM `POST /tokenize` after M5 Deployment bind (same RouteEntry
      for tokenize + inference). `runtime_type=VLLM` identifies the
      trusted tokenizer owner; B4 only forwards the stable supported
@@ -685,7 +685,19 @@ ${DATABASE_URL}
      rendering-sensitive fields. One Chat request pins a single
      `ClientPolicyEntry` through B3/B2/B4. Non-VLLM with active
      policy → 503. No local tokenizer / truncation / estimation.
-     Embeddings input deferred. Priority still registry-only.
+     Embeddings input deferred.
+   - **M6-B5-A (current):** Managed vLLM `--scheduling-policy`
+     (`fcfs` | `priority`) create-time argv wiring + Node Agent
+     observed argv + Capacity Profile requested/observed compare.
+     Deployment config > ModelVersion runtime_config > UNSET;
+     explicit Deployment null invalid (no fallback); unset omits
+     flag (never synthesize `fcfs`). Existing containers are not
+     recreated on config change. Gateway does **not** forward
+     `ClientRuntimePolicy.priority` yet.
+   - **M6-B5-B (future):** Trusted observed-priority evidence on
+     the Gateway path before forwarding request priority
+     (`JSON priority` vs `X-Vllm-Priority` deferred). Requested
+     config alone is not sufficient proof.
 
 한 번에 모든 기능을 스캐폴딩만 하는 것보다 각 milestone을 end-to-end로 동작하게 완성하는 것을 우선한다.
 

@@ -145,6 +145,38 @@ def _merged_positive_int(config: dict[str, Any], key: str) -> int | None:
     return int(round(number))
 
 
+def _merged_choice(
+    config: dict[str, Any],
+    key: str,
+    *,
+    allowed: frozenset[str] | set[str],
+) -> str | None:
+    """Resolve an allowlisted string choice from merged config.
+
+    Key absent → None (omit from argv).
+    Key present → must be a string that normalizes (strip + lowercase) to an
+    allowed value, or raise RuntimeAdapterError naming ``key``.
+    Explicit null / bool / numeric / empty / unknown strings are invalid
+    (no fallback to a lower-precedence source — caller merges Deployment over
+    ModelVersion first).
+    """
+    if key not in config:
+        return None
+    raw = config[key]
+    allowed_norm = {str(v).strip().lower() for v in allowed}
+    allowed_display = ", ".join(sorted(allowed_norm))
+    if not isinstance(raw, str):
+        raise RuntimeAdapterError(
+            f"{key} must be one of: {allowed_display}."
+        )
+    normalized = raw.strip().lower()
+    if normalized not in allowed_norm:
+        raise RuntimeAdapterError(
+            f"{key} must be one of: {allowed_display}."
+        )
+    return normalized
+
+
 def resolve_probe_type_from_model(
     *, model_type: str | None, deployment_config: dict[str, Any]
 ) -> str:

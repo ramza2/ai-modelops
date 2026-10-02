@@ -17,6 +17,7 @@ CAPACITY_FIELDS = (
     "gpu_memory_utilization",
     "dtype",
     "quantization",
+    "scheduling_policy",
 )
 
 # Flag token → capacity field. Short -tp is the documented TP alias.
@@ -28,9 +29,11 @@ _FLAG_TO_FIELD: dict[str, str] = {
     "--gpu-memory-utilization": "gpu_memory_utilization",
     "--dtype": "dtype",
     "--quantization": "quantization",
+    "--scheduling-policy": "scheduling_policy",
 }
 
 _OPENAI_API_SERVER_MODULE = "vllm.entrypoints.openai.api_server"
+_SCHEDULING_POLICY_ALLOWED = frozenset({"fcfs", "priority"})
 
 
 def parse_vllm_runtime_config(command: list[str] | None) -> dict[str, Any]:
@@ -162,6 +165,17 @@ def _normalize_field(field: str, raw: str) -> int | float | str | None:
         return _gpu_util(text)
     if field in {"dtype", "quantization"}:
         return text if text else None
+    if field == "scheduling_policy":
+        return _scheduling_policy(text)
+    return None
+
+
+def _scheduling_policy(raw: str) -> str | None:
+    if not raw:
+        return None
+    normalized = raw.strip().lower()
+    if normalized in _SCHEDULING_POLICY_ALLOWED:
+        return normalized
     return None
 
 
