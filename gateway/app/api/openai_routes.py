@@ -8,7 +8,10 @@ M6-B3: Chat ``max_output_tokens`` policy runs *before* B2/M5 admission so
 
 M6-B4: Chat ``max_input_tokens`` uses the bound Deployment's trusted vLLM
 ``POST /tokenize`` after M5 bind; tokenize and inference share one RouteEntry.
-One Chat request pins a single ``ClientPolicyEntry`` for B3/B2/B4.
+One Chat request pins a single ``ClientPolicyEntry`` for B3/B2/B4/B5-B.
+
+M6-B5-B: Chat client ``priority`` forwarding after B4, only when the bound
+RouteEntry has trusted current-container priority-scheduler evidence.
 """
 
 from __future__ import annotations
@@ -37,9 +40,15 @@ from app.policy.output_tokens import (
     OutputTokenPolicyExceeded,
     apply_output_token_policy,
 )
+from app.policy.priority import (
+    PrioritySchedulerUnavailable,
+    apply_client_priority_policy,
+    strip_caller_priority,
+)
 from app.policy.snapshot import ClientPolicyEntry
 from app.proxy.stats import ProxyCompletionStats
 from app.proxy.upstream import proxy_json_post, proxy_sse_post
+from app.routing.priority_evidence import REASON_ROUTING_LKG
 from app.routing.resolve import resolve_route
 from app.routing.snapshot import RouteEntry
 from app.routing.store import RoutingStore
@@ -252,7 +261,7 @@ async def chat_completions(request: Request) -> Response:
             param="model",
         )
     client_key = _client_key(request)
-    # Pin one ClientPolicyEntry for this Chat request (B3/B2/B4).
+    # Pin one ClientPolicyEntry for this Chat request (B3/B2/B4/B5-B).
     # PolicyStore may reload mid-request; do not re-lookup.
     client_policy = _lookup_client_policy(request, client_key)
     # B3 output policy before B2/M5 so rejects never consume concurrency.
@@ -264,6 +273,8 @@ async def chat_completions(request: Request) -> Response:
         is_streaming=streaming,
         request_bytes=request_bytes,
     )
+    # Caller priority is never authoritative — strip before B2/M5/B4/B5-B.
+    upstream_body = strip_caller_priority(upstream_body)
     client_admission = await _admit_client_concurrency(
         request,
         client_key=client_key,
@@ -286,6 +297,17 @@ async def chat_completions(request: Request) -> Response:
         entry=entry,
         admissions=admissions,
         original_body=body,
+        client_key=client_key,
+        policy=client_policy,
+        is_streaming=streaming,
+        request_bytes=request_bytes,
+    )
+    # B5-B: trusted priority injection on the SAME bound RouteEntry.
+    upstream_body = await _apply_chat_priority_policy(
+        request,
+        entry=entry,
+        admissions=admissions,
+        upstream_body=upstream_body,
         client_key=client_key,
         policy=client_policy,
         is_streaming=streaming,
@@ -484,6 +506,68 @@ async def _enforce_chat_input_token_policy(
                 "deployment_id": entry.deployment_id,
             },
         ) from exc
+
+
+async def _apply_chat_priority_policy(
+    request: Request,
+    *,
+    entry: RouteEntry,
+    admissions: _RequestAdmissions,
+    upstream_body: dict[str, Any],
+    client_key: str,
+    policy: ClientPolicyEntry | None,
+    is_streaming: bool,
+    request_bytes: int | None,
+) -> dict[str, Any]:
+    """Inject pinned client priority only with trusted current-container evidence.
+
+    RoutingStore LKG disables non-zero priority forwarding even if the LKG
+    RouteEntry previously carried trusted evidence.
+    """
+    snap = _store(request).snapshot
+    routing_lkg = bool(snap.using_last_known_good) if snap is not None else False
+    policy_priority = policy.priority if policy is not None else None
+    try:
+        result = apply_client_priority_policy(
+            upstream_body,
+            policy_priority,
+            priority_scheduler_trusted=bool(entry.priority_scheduler_trusted),
+            routing_snapshot_lkg=routing_lkg,
+            evidence_reason=str(entry.priority_scheduler_evidence_reason),
+        )
+    except PrioritySchedulerUnavailable as exc:
+        await asyncio.shield(_release_all(request, admissions))
+        _schedule_rejection_log(
+            request,
+            client_key=client_key,
+            api_path="/v1/chat/completions",
+            is_streaming=is_streaming,
+            http_status=503,
+            error_code=ErrorCode.CLIENT_PRIORITY_SCHEDULER_UNAVAILABLE,
+            request_bytes=request_bytes,
+            param="priority",
+            entry=entry,
+        )
+        reason = str(exc.reason or entry.priority_scheduler_evidence_reason)
+        if routing_lkg:
+            reason = REASON_ROUTING_LKG
+        sampled = entry.priority_scheduler_evidence_sampled_at
+        raise GatewayError(
+            "Priority scheduling is unavailable for this route.",
+            code=ErrorCode.CLIENT_PRIORITY_SCHEDULER_UNAVAILABLE,
+            http_status=503,
+            param="priority",
+            details={
+                "deployment_id": entry.deployment_id,
+                "evidence_reason": reason,
+                "evidence_sampled_at": (
+                    sampled.isoformat().replace("+00:00", "Z")
+                    if sampled is not None
+                    else None
+                ),
+            },
+        ) from exc
+    return result.body
 
 
 async def _admit_client_concurrency(
