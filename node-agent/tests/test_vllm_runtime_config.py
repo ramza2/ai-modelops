@@ -249,6 +249,7 @@ def test_parse_unknown_flags_ignored() -> None:
         "gpu_memory_utilization",
         "dtype",
         "quantization",
+        "scheduling_policy",
     }
     assert result["values"]["max_model_len"] == 1024
     assert "/secret" not in str(result)
