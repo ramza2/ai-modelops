@@ -18,7 +18,7 @@ import datetime as dt
 import json
 import logging
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Final
 
 import httpx
 from fastapi import APIRouter, Request, Response
@@ -57,6 +57,15 @@ from app.runtime.usage import extract_token_usage_from_json_bytes
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["openai"])
+
+
+class _PolicyNotSuppliedType:
+    """Sentinel type: caller omitted ``policy`` (Embeddings lookup-once path)."""
+
+    __slots__ = ()
+
+
+_POLICY_NOT_SUPPLIED: Final[_PolicyNotSuppliedType] = _PolicyNotSuppliedType()
 
 
 @dataclass(slots=True)
@@ -484,21 +493,25 @@ async def _admit_client_concurrency(
     api_path: str,
     is_streaming: bool,
     request_bytes: int | None,
-    policy: ClientPolicyEntry | None = None,
+    policy: ClientPolicyEntry | None | _PolicyNotSuppliedType = _POLICY_NOT_SUPPLIED,
 ) -> ClientConcurrencyAdmission | None:
     """Admit under PolicyStore max_concurrent_requests, or bypass.
 
     Fail-open when PolicyStore.snapshot is None or no enforceable limit.
     LKG snapshots with a limit are still enforced.
 
-    When ``policy`` is provided (Chat path), use it and do not re-lookup.
-    Embeddings may omit ``policy`` and look up once here.
+    Chat passes a pinned ``ClientPolicyEntry | None`` and must never
+    re-lookup (``None`` means pinned no-policy, not "omitted").
+    Embeddings omit ``policy`` (sentinel) and look up once here.
     """
-    if policy is None:
-        policy = _lookup_client_policy(request, client_key)
-    if policy is None or policy.max_concurrent_requests is None:
+    resolved: ClientPolicyEntry | None
+    if isinstance(policy, _PolicyNotSuppliedType):
+        resolved = _lookup_client_policy(request, client_key)
+    else:
+        resolved = policy
+    if resolved is None or resolved.max_concurrent_requests is None:
         return None
-    limit = int(policy.max_concurrent_requests)
+    limit = int(resolved.max_concurrent_requests)
     tracker = _client_concurrency(request)
     try:
         return await tracker.admit(client_key, limit)

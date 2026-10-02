@@ -344,6 +344,7 @@ class FakeVllmUpstream:
         tokenize_raw: bytes | None = None,
         hold_tokenize: bool = False,
         fail_tokenize_after_hold: bool = False,
+        hold_chat: bool = False,
     ) -> None:
         self.tokenize_count = tokenize_count
         self.tokenize_status = tokenize_status
@@ -351,8 +352,11 @@ class FakeVllmUpstream:
         self.tokenize_raw = tokenize_raw
         self.hold_tokenize = hold_tokenize
         self.fail_tokenize_after_hold = fail_tokenize_after_hold
+        self.hold_chat = hold_chat
         self.tokenize_gate = asyncio.Event()
         self.tokenize_entered = asyncio.Event()
+        self.chat_gate = asyncio.Event()
+        self.chat_entered = asyncio.Event()
         self.tokenize_calls: list[dict[str, Any]] = []
         self.chat_calls: list[dict[str, Any]] = []
         self.hosts: list[str] = []
@@ -391,6 +395,9 @@ class FakeVllmUpstream:
             body = await request.json()
             upstream.chat_calls.append(body)
             upstream.hosts.append(request.headers.get("host", ""))
+            if upstream.hold_chat:
+                upstream.chat_entered.set()
+                await upstream.chat_gate.wait()
             if body.get("stream") is True:
 
                 async def gen():
@@ -1364,6 +1371,143 @@ async def test_chat_pins_one_policy_snapshot_across_b3_b2_b4() -> None:
     assert ctx["client_concurrency"].total() == 0
     assert ctx["inflight"].snapshot() == {}
 
+    await http_client.aclose()
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_pinned_none_does_not_relookup_on_midrequest_policy_install() -> None:
+    """Pinned client_policy=None must not be conflated with "policy omitted".
+
+    Snapshot starts with no entry for client_key. After Chat pins None, replace
+    snapshot with a strict policy before B3/B2/B4. First request must stay
+    fail-open (no B3/B2/B4). Next request must enforce the new policy.
+    """
+    from app.api import openai_routes as routes_mod
+
+    engine = create_async_engine(_database_url(), future=True)
+    session_factory = async_sessionmaker(
+        engine, expire_on_commit=False, autoflush=False
+    )
+    fake = FakeVllmUpstream(tokenize_count=50, hold_chat=True)
+    http_client = fake.as_client()
+    client_key = f"pnone-{uuid.uuid4().hex[:6]}"
+    # Empty policies → lookup returns None (pinned no-policy).
+    policy = _policy_store_with({})
+    reload_calls = {"n": 0}
+    original_reload = policy.reload
+
+    async def counting_reload() -> dict[str, Any]:
+        reload_calls["n"] += 1
+        return await original_reload()
+
+    policy.reload = counting_reload  # type: ignore[method-assign]
+
+    lookup_calls = {"n": 0}
+    original_lookup = routes_mod._lookup_client_policy
+
+    def counting_lookup(request: Any, client_key_arg: str) -> ClientPolicyEntry | None:
+        lookup_calls["n"] += 1
+        return original_lookup(request, client_key_arg)
+
+    routes_mod._lookup_client_policy = counting_lookup  # type: ignore[assignment]
+
+    new_entry = _policy_entry(
+        client_key,
+        max_input_tokens=1,
+        max_output_tokens=1,
+        max_concurrent_requests=1,
+    )
+    original_apply = routes_mod._apply_chat_output_token_policy
+    swapped = {"done": False}
+
+    def swap_then_apply(
+        request: Any,
+        *,
+        body: dict[str, Any],
+        client_key: str,
+        policy: ClientPolicyEntry | None,
+        is_streaming: bool,
+        request_bytes: int | None,
+    ) -> dict[str, Any]:
+        # Chat already pinned policy=None; install a real policy before B3.
+        assert policy is None
+        if not swapped["done"]:
+            store = request.app.state.policy_store
+            store._snapshot = PolicySnapshot(
+                loaded_at=dt.datetime.now(tz=dt.UTC),
+                policies={client_key: new_entry},
+                using_last_known_good=False,
+            )
+            swapped["done"] = True
+        return original_apply(
+            request,
+            body=body,
+            client_key=client_key,
+            policy=policy,
+            is_streaming=is_streaming,
+            request_bytes=request_bytes,
+        )
+
+    routes_mod._apply_chat_output_token_policy = swap_then_apply  # type: ignore[assignment]
+
+    seeded = await _seed_alias_route(session_factory, runtime_type="VLLM")
+    ctx = await _build_gw(
+        policy_store=policy, http_client=http_client, session_factory=session_factory
+    )
+
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=ctx["app"]), base_url="http://gw.test"
+        ) as ac:
+            task = asyncio.create_task(
+                ac.post(
+                    "/v1/chat/completions",
+                    headers={"X-AI-Client": client_key},
+                    json={
+                        "model": seeded["alias"],
+                        "messages": [{"role": "user", "content": "hi"}],
+                        # Would 422 under new max_output_tokens=1 if B3 re-read.
+                        "max_tokens": 100,
+                    },
+                )
+            )
+            await asyncio.wait_for(fake.chat_entered.wait(), timeout=2.0)
+            # Pinned no-policy: no B2 admission even though snapshot now has limit=1.
+            assert ctx["client_concurrency"].get(client_key) == 0
+            assert fake.tokenize_calls == []
+            assert lookup_calls["n"] == 1
+            fake.chat_gate.set()
+            resp = await task
+            assert resp.status_code == 200, resp.text
+
+            assert fake.tokenize_calls == []
+            assert len(fake.chat_calls) == 1
+            assert fake.chat_calls[0].get("max_tokens") == 100
+            assert lookup_calls["n"] == 1
+            assert reload_calls["n"] == 0
+
+            # Next request sees the installed policy (B3 output limit).
+            lookup_before = lookup_calls["n"]
+            resp2 = await ac.post(
+                "/v1/chat/completions",
+                headers={"X-AI-Client": client_key},
+                json={
+                    "model": seeded["alias"],
+                    "messages": [{"role": "user", "content": "next"}],
+                    "max_tokens": 100,
+                },
+            )
+            assert resp2.status_code == 422
+            assert resp2.json()["error"]["code"] == ErrorCode.CLIENT_OUTPUT_TOKEN_LIMIT
+            assert lookup_calls["n"] == lookup_before + 1
+            assert fake.tokenize_calls == []
+    finally:
+        routes_mod._lookup_client_policy = original_lookup  # type: ignore[assignment]
+        routes_mod._apply_chat_output_token_policy = original_apply  # type: ignore[assignment]
+
+    assert ctx["client_concurrency"].total() == 0
+    assert ctx["inflight"].snapshot() == {}
     await http_client.aclose()
     await engine.dispose()
 
