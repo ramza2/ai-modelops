@@ -162,6 +162,9 @@ vLLM containers from requested config (Deployment > ModelVersion runtime_config)
 Existing containers are not automatically recreated; Capacity Profile continues
 to show requested-vs-observed drift until a legitimate new create.
 `max_num_seqs` is scheduler/runner sequence capacity, not guaranteed simultaneous users.
+M6-B1: `ClientApp` ↔ optional `ClientRuntimePolicy` registry via Management API,
+distributed to Gateway `PolicyStore` (independent from RoutingStore; periodic poll +
+Last Known Good). **B1 does not enforce policies** — inference path unchanged.
 No Prometheus/Grafana server is introduced. A2 histogram scrapes are cumulative;
 A3 P50/P95 are classic bucket estimates over valid same-instance deltas only.
 IMPORTED runtime metrics / argv observation are deferred (profile returns

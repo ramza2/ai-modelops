@@ -655,11 +655,16 @@ ${DATABASE_URL}
      observed_explicit Managed vLLM argv + A1 invocation demand + A3
      analytics; `GET .../capacity-profile` (DB-only, no auto tuning;
      no runtime defaults synthesized).
-   - **M6-A5 (current):** Managed vLLM `--max-num-seqs` emitted on newly
+   - **M6-A5 (done):** Managed vLLM `--max-num-seqs` emitted on newly
      created containers from requested config (Deployment >
      ModelVersion runtime_config). Existing containers are not
      automatically recreated; Capacity Profile continues to expose
      requested-vs-observed drift until a legitimate new create.
+   - **M6-B1 (current):** Client Runtime Policy registry
+     (`ClientApp` 1──0..1 `ClientRuntimePolicy`) + Gateway
+     `PolicyStore` snapshot (periodic DB poll, LKG). Distribution
+     only — no inference enforcement, no priority forwarding, no
+     concurrency admission, no token counting.
 
 한 번에 모든 기능을 스캐폴딩만 하는 것보다 각 milestone을 end-to-end로 동작하게 완성하는 것을 우선한다.
 

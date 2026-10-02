@@ -39,6 +39,7 @@ EXPECTED_TABLES = {
     "deployment_runtime_metric_snapshot",
     "health_check",
     "client_app",
+    "client_runtime_policy",
     "invocation_log",
     "audit_log",
 }

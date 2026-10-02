@@ -1026,6 +1026,61 @@ day
 
 ---
 
+## 11.1 Clients / Runtime Policy (M6-B1)
+
+Registry only. Gateway does **not** enforce these policies in B1.
+
+### GET /clients
+
+```text
+GET /api/v1/clients?is_active=true&q=alzi&page=1&page_size=50
+```
+
+### POST /clients
+
+```json
+{
+  "client_key": "alzi",
+  "display_name": "ALZI",
+  "description": "Internal knowledge search"
+}
+```
+
+`client_key` is stripped, exact-case preserved (not lowercased), unique, immutable.
+
+### GET /clients/{client_id}
+
+### PATCH /clients/{client_id}
+
+Mutable: `display_name`, `description`, `is_active`.  
+Immutable: `client_key`. No DELETE — deactivate with `is_active=false`.
+
+### GET /clients/{client_id}/runtime-policy
+
+When no policy row exists:
+
+```json
+{ "client_id": "...", "client_key": "alzi", "policy": null }
+```
+
+### PUT /clients/{client_id}/runtime-policy
+
+Idempotent **full replacement** upsert:
+
+```json
+{
+  "is_enabled": true,
+  "max_input_tokens": 8192,
+  "max_output_tokens": 2048,
+  "max_concurrent_requests": 4,
+  "priority": 0
+}
+```
+
+Omitted nullable limit fields clear to `null` (unrestricted). Positive integers only for limits; `priority` is nullable integer (`smaller = higher` intent). Bool rejected. Does not bump `routing_state.version`.
+
+---
+
 ## 12. Audit Log
 
 ### GET /audit-logs

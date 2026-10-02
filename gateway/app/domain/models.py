@@ -9,6 +9,7 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     DateTime,
+    Integer,
     SmallInteger,
     String,
     Text,
@@ -90,3 +91,31 @@ class ModelVersion(Base):
 
     id: Mapped[uuid.UUID] = _uuid_pk()
     served_model_name: Mapped[str] = mapped_column(String(255), nullable=False)
+
+
+class ClientApp(Base):
+    """Read-only ClientApp mapping for PolicyStore (M6-B1)."""
+
+    __tablename__ = "client_app"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    client_key: Mapped[str] = mapped_column(String(120), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False)
+
+
+class ClientRuntimePolicy(Base):
+    """Read-only ClientRuntimePolicy mapping for PolicyStore (M6-B1)."""
+
+    __tablename__ = "client_runtime_policy"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    client_app_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), nullable=False
+    )
+    is_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    max_input_tokens: Mapped[int | None] = mapped_column(Integer)
+    max_output_tokens: Mapped[int | None] = mapped_column(Integer)
+    max_concurrent_requests: Mapped[int | None] = mapped_column(Integer)
+    priority: Mapped[int | None] = mapped_column(Integer)
+

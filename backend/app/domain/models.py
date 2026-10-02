@@ -837,6 +837,51 @@ class ClientApp(Base):
     )
 
 
+class ClientRuntimePolicy(Base):
+    """Per-ClientApp runtime policy registry (M6-B1).
+
+    Observation/distribution only in B1 — Gateway does not enforce these
+    limits yet. One optional policy row per ClientApp.
+    """
+
+    __tablename__ = "client_runtime_policy"
+
+    id: Mapped[str] = _uuid_pk()
+    client_app_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("client_app.id"),
+        nullable=False,
+    )
+    is_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("true")
+    )
+    max_input_tokens: Mapped[int | None] = mapped_column(Integer)
+    max_output_tokens: Mapped[int | None] = mapped_column(Integer)
+    max_concurrent_requests: Mapped[int | None] = mapped_column(Integer)
+    priority: Mapped[int | None] = mapped_column(Integer)
+    created_at: Mapped[dt.datetime] = _created_at()
+    updated_at: Mapped[dt.datetime] = _updated_at()
+
+    __table_args__ = (
+        UniqueConstraint(
+            "client_app_id", name="uq_client_runtime_policy_client_app"
+        ),
+        CheckConstraint(
+            "max_input_tokens IS NULL OR max_input_tokens > 0",
+            name="ck_client_runtime_policy_max_input_tokens",
+        ),
+        CheckConstraint(
+            "max_output_tokens IS NULL OR max_output_tokens > 0",
+            name="ck_client_runtime_policy_max_output_tokens",
+        ),
+        CheckConstraint(
+            "max_concurrent_requests IS NULL OR max_concurrent_requests > 0",
+            name="ck_client_runtime_policy_max_concurrent_requests",
+        ),
+        Index("ix_client_runtime_policy_enabled", "is_enabled"),
+    )
+
+
 class InvocationLog(Base):
     __tablename__ = "invocation_log"
 
