@@ -979,10 +979,13 @@ Important semantics:
 - `runtime_config.entrypoint == "UNRECOGNIZED"` is diagnostic only and does **not**
   prove flag absence → comparison `UNKNOWN` (same as no observation).
 - Only `entrypoint == "VLLM"` may yield `REQUESTED_NOT_OBSERVED` for missing flags.
-- Requested `max_num_seqs` is observability-only today — Worker adapter does not emit
-  `--max-num-seqs`, so expect `REQUESTED_NOT_OBSERVED` when requested but argv lacks it.
+- `max_num_seqs` is scheduler/runner sequence capacity, not guaranteed simultaneous users.
+- For newly created Managed vLLM containers (M6-A5), Worker emits `--max-num-seqs N`
+  from requested config (Deployment.deployment_config_json > ModelVersion.runtime_config_json).
+  Existing containers are not automatically recreated/reconfigured; Capacity Profile
+  continues to expose requested-vs-observed drift (`REQUESTED_NOT_OBSERVED` / `MISMATCH`)
+  until a legitimate new container is created.
 - `max_model_len` is prompt+output context capacity; do not divide A1 input_tokens by it.
-- `max_num_seqs` is scheduler sequence capacity, not guaranteed simultaneous users.
 - `gpu_memory_utilization` is per-runtime memory fraction.
 - No auto tuning / recommendations in this API.
 - IMPORTED: metadata + invocations OK; observed argv = null / `UNKNOWN`.
@@ -992,7 +995,8 @@ Notes:
 
 - M6-A1 = invocation-side telemetry; M6-A2 = cumulative runtime snapshots;
   M6-A3 = recent-window delta analytics; M6-A4 = capacity profile
-  (requested vs observed_explicit + A1/A3 composition).
+  (requested vs observed_explicit + A1/A3 composition);
+  M6-A5 = emit `--max-num-seqs` on new Managed vLLM creates.
 - IMPORTED Deployment runtime metrics are deferred.
 - No Prometheus server or Grafana is introduced.
 

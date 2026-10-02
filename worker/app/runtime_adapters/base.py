@@ -6,6 +6,7 @@ metadata into a Node Agent create payload. No shell string evaluation.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -117,6 +118,31 @@ def _merged_int(
         return int(raw)
     except (TypeError, ValueError) as exc:
         raise RuntimeAdapterError(f"{key} must be an integer.") from exc
+
+
+def _merged_positive_int(config: dict[str, Any], key: str) -> int | None:
+    """Resolve a positive integer from merged config.
+
+    Key absent → None (omit from argv).
+    Key present → must normalize to a positive integer or raise RuntimeAdapterError.
+    Explicit null / bool / non-integral / non-finite values are invalid (no fallback).
+    """
+    if key not in config:
+        return None
+    raw = config[key]
+    if isinstance(raw, bool):
+        raise RuntimeAdapterError(f"{key} must be a positive integer.")
+    if raw is None:
+        raise RuntimeAdapterError(f"{key} must be a positive integer.")
+    try:
+        number = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeAdapterError(f"{key} must be a positive integer.") from exc
+    if not math.isfinite(number) or number <= 0:
+        raise RuntimeAdapterError(f"{key} must be a positive integer.")
+    if abs(number - round(number)) > 1e-9:
+        raise RuntimeAdapterError(f"{key} must be a positive integer.")
+    return int(round(number))
 
 
 def resolve_probe_type_from_model(

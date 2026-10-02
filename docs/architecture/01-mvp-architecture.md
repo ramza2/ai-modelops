@@ -157,6 +157,11 @@ M6-A4 Capacity Profile composes requested ModelOps config vs observed_explicit
 Managed container argv, plus A1 invocation demand and A3 analytics
 (`GET .../capacity-profile`). Observation-only — no auto tuning, no runtime
 defaults synthesized for absent flags, no live Node Agent scrape from the profile API.
+M6-A5: Worker `VLLMAdapter` emits `--max-num-seqs` for newly created Managed
+vLLM containers from requested config (Deployment > ModelVersion runtime_config).
+Existing containers are not automatically recreated; Capacity Profile continues
+to show requested-vs-observed drift until a legitimate new create.
+`max_num_seqs` is scheduler/runner sequence capacity, not guaranteed simultaneous users.
 No Prometheus/Grafana server is introduced. A2 histogram scrapes are cumulative;
 A3 P50/P95 are classic bucket estimates over valid same-instance deltas only.
 IMPORTED runtime metrics / argv observation are deferred (profile returns
