@@ -660,11 +660,17 @@ ${DATABASE_URL}
      ModelVersion runtime_config). Existing containers are not
      automatically recreated; Capacity Profile continues to expose
      requested-vs-observed drift until a legitimate new create.
-   - **M6-B1 (current):** Client Runtime Policy registry
+   - **M6-B1 (done):** Client Runtime Policy registry
      (`ClientApp` 1──0..1 `ClientRuntimePolicy`) + Gateway
      `PolicyStore` snapshot (periodic DB poll, LKG). Distribution
-     only — no inference enforcement, no priority forwarding, no
-     concurrency admission, no token counting.
+     only for token/priority fields — no priority forwarding, no
+     token counting.
+   - **M6-B2 (current):** Process-local per-client concurrency
+     admission (`ClientConcurrencyTracker`) enforcing only
+     `max_concurrent_requests`. 429 `CLIENT_CONCURRENCY_LIMIT`
+     before M5 Alias/Deployment inflight; fail-open when PolicyStore
+     has no snapshot; LKG snapshot still enforced. No Redis /
+     distributed semaphore; no input/output/priority enforcement.
 
 한 번에 모든 기능을 스캐폴딩만 하는 것보다 각 milestone을 end-to-end로 동작하게 완성하는 것을 우선한다.
 

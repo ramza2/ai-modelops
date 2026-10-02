@@ -164,7 +164,12 @@ to show requested-vs-observed drift until a legitimate new create.
 `max_num_seqs` is scheduler/runner sequence capacity, not guaranteed simultaneous users.
 M6-B1: `ClientApp` ↔ optional `ClientRuntimePolicy` registry via Management API,
 distributed to Gateway `PolicyStore` (independent from RoutingStore; periodic poll +
-Last Known Good). **B1 does not enforce policies** — inference path unchanged.
+Last Known Good).
+M6-B2: Gateway enforces only `max_concurrent_requests` via process-local
+`ClientConcurrencyTracker` (separate from M5 `InflightTracker`). Admission runs
+before Alias/Deployment inflight so 429 rejects never touch route counters.
+`PolicyStore.snapshot is None` → fail-open; LKG snapshot with a limit → enforce LKG.
+Still not enforced: input/output token limits, priority forwarding.
 No Prometheus/Grafana server is introduced. A2 histogram scrapes are cumulative;
 A3 P50/P95 are classic bucket estimates over valid same-instance deltas only.
 IMPORTED runtime metrics / argv observation are deferred (profile returns
