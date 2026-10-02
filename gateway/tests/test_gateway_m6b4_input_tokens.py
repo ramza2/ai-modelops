@@ -346,7 +346,10 @@ class FakeVllmUpstream:
                 return JSONResponse(
                     {"error": "bad request"}, status_code=upstream.tokenize_status
                 )
-            payload = upstream.tokenize_payload or {"count": upstream.tokenize_count}
+            if upstream.tokenize_payload is not None:
+                payload = upstream.tokenize_payload
+            else:
+                payload = {"count": upstream.tokenize_count}
             return JSONResponse(payload, status_code=upstream.tokenize_status)
 
         async def chat_smart(request: StarletteRequest) -> Any:
@@ -706,24 +709,40 @@ async def test_unsupported_runtime_503_fail_closed() -> None:
 
 
 @pytest.mark.asyncio
-async def test_tokenizer_timeout_503() -> None:
+async def test_tokenizer_timeout_and_transport_map_to_503() -> None:
     engine = create_async_engine(_database_url(), future=True)
     session_factory = async_sessionmaker(
         engine, expire_on_commit=False, autoflush=False
     )
-    fake = FakeVllmUpstream(tokenize_count=10, hold_tokenize=True)
-    http_client = fake.as_client()
-    # Force tiny timeout via env-backed settings cache clear.
-    from app.core import config as config_mod
+    client_key = f"to-{uuid.uuid4().hex[:6]}"
+    policy = _policy_store_with(
+        {client_key: _policy_entry(client_key, max_input_tokens=100)}
+    )
+    seeded = await _seed_alias_route(session_factory)
 
-    config_mod.get_settings.cache_clear()
-    os.environ["MODELOPS_INPUT_TOKENIZE_TIMEOUT_SECONDS"] = "0.05"
-    try:
-        client_key = f"to-{uuid.uuid4().hex[:6]}"
-        policy = _policy_store_with(
-            {client_key: _policy_entry(client_key, max_input_tokens=100)}
-        )
-        seeded = await _seed_alias_route(session_factory)
+    class _BoomStream:
+        def __init__(self, exc: Exception) -> None:
+            self._exc = exc
+
+        async def __aenter__(self):
+            raise self._exc
+
+        async def __aexit__(self, *args: Any) -> bool:
+            return False
+
+    class _BoomClient(httpx.AsyncClient):
+        def __init__(self, exc: Exception) -> None:
+            super().__init__()
+            self._exc = exc
+
+        def stream(self, *args: Any, **kwargs: Any):  # type: ignore[override]
+            return _BoomStream(self._exc)
+
+    for exc in (
+        httpx.ReadTimeout("timeout", request=httpx.Request("POST", "http://t/tokenize")),
+        httpx.ConnectError("boom", request=httpx.Request("POST", "http://t/tokenize")),
+    ):
+        http_client = _BoomClient(exc)
         ctx = await _build_gw(
             policy_store=policy,
             http_client=http_client,
@@ -740,19 +759,16 @@ async def test_tokenizer_timeout_503() -> None:
                     "messages": [{"role": "user", "content": "hi"}],
                 },
             )
-            assert resp.status_code == 503
+            assert resp.status_code == 503, resp.text
             assert (
                 resp.json()["error"]["code"]
                 == ErrorCode.CLIENT_INPUT_TOKEN_CHECK_UNAVAILABLE
             )
-        assert fake.chat_calls == []
         assert ctx["client_concurrency"].total() == 0
-        fake.tokenize_gate.set()
-    finally:
-        os.environ.pop("MODELOPS_INPUT_TOKENIZE_TIMEOUT_SECONDS", None)
-        config_mod.get_settings.cache_clear()
+        assert ctx["inflight"].snapshot() == {}
         await http_client.aclose()
-        await engine.dispose()
+
+    await engine.dispose()
 
 
 @pytest.mark.asyncio
@@ -800,9 +816,11 @@ async def test_tokenizer_5xx_and_malformed_and_oversized() -> None:
     from app.core import config as config_mod
 
     config_mod.get_settings.cache_clear()
-    os.environ["MODELOPS_INPUT_TOKENIZE_MAX_RESPONSE_BYTES"] = "64"
+    os.environ["MODELOPS_INPUT_TOKENIZE_MAX_RESPONSE_BYTES"] = "2048"
     try:
-        fake = FakeVllmUpstream(tokenize_raw=b'{"count":1,"pad":"' + (b"x" * 200) + b'"}')
+        fake = FakeVllmUpstream(
+            tokenize_raw=b'{"count":1,"pad":"' + (b"x" * 4000) + b'"}'
+        )
         http_client = fake.as_client()
         ctx = await _build_gw(
             policy_store=policy,
@@ -820,8 +838,9 @@ async def test_tokenizer_5xx_and_malformed_and_oversized() -> None:
                     "messages": [{"role": "user", "content": "hi"}],
                 },
             )
-            assert resp.status_code == 503
+            assert resp.status_code == 503, resp.text
             assert fake.chat_calls == []
+            assert ctx["client_concurrency"].total() == 0
         await http_client.aclose()
     finally:
         os.environ.pop("MODELOPS_INPUT_TOKENIZE_MAX_RESPONSE_BYTES", None)
