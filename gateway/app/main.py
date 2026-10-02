@@ -1,4 +1,4 @@
-"""ModelOps AI Gateway entrypoint (Milestone 4-A / 4-B)."""
+"""ModelOps AI Gateway entrypoint (Milestone 4-A / 4-B / M6-B1)."""
 
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ from app.api.openai_routes import router as openai_router
 from app.core.config import get_settings
 from app.core.db import dispose_engine, get_sessionmaker
 from app.core.errors import ErrorCode, GatewayError, error_envelope
+from app.policy.store import PolicyStore
 from app.routing.notify import RoutingNotifierListener
 from app.routing.store import RoutingStore
 from app.runtime.inflight import InflightTracker
@@ -33,6 +34,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     store = RoutingStore(
         session_factory, poll_seconds=settings.routing_poll_seconds
     )
+    policy_store = PolicyStore(
+        session_factory, poll_seconds=settings.policy_poll_seconds
+    )
     inflight = InflightTracker()
     invocation_logs = InvocationLogWriter(session_factory)
     http_client = httpx.AsyncClient()
@@ -46,14 +50,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         reconnect_seconds=settings.routing_listen_reconnect_seconds,
     )
     app.state.routing_store = store
+    app.state.policy_store = policy_store
     app.state.http_client = http_client
     app.state.inflight = inflight
     app.state.invocation_logs = invocation_logs
     app.state.routing_listener = listener
     await store.start()
+    await policy_store.start()
     await listener.start()
     yield
     await listener.stop()
+    await policy_store.stop()
     await store.stop()
     await invocation_logs.drain()
     await http_client.aclose()
@@ -67,6 +74,7 @@ def create_app(
     inflight: InflightTracker | None = None,
     invocation_logs: InvocationLogWriter | None = None,
     routing_listener: RoutingNotifierListener | None = None,
+    policy_store: PolicyStore | None = None,
 ) -> FastAPI:
     """Create the Gateway app.
 
@@ -85,6 +93,8 @@ def create_app(
         app.state.inflight = inflight or InflightTracker()
         app.state.invocation_logs = invocation_logs or InvocationLogWriter(None)
         app.state.routing_listener = routing_listener
+        # Tests may inject a PolicyStore; default to an inert store (no poller).
+        app.state.policy_store = policy_store or PolicyStore(None)
 
     @app.middleware("http")
     async def request_id_middleware(request: Request, call_next):

@@ -28,6 +28,8 @@ class Settings(BaseSettings):
     routing_poll_seconds: float = 2.0
     # LISTEN reconnect backoff when NOTIFY connection drops.
     routing_listen_reconnect_seconds: float = 2.0
+    # Client runtime policy snapshot poll interval (M6-B1; no enforcement).
+    policy_poll_seconds: float = 2.0
 
 
 @lru_cache

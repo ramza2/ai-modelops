@@ -702,6 +702,47 @@ UNIQUE(client_key)
 
 ---
 
+## 22.1 client_runtime_policy (M6-B1)
+
+Per-`ClientApp` runtime policy registry. **B1 stores and distributes only — Gateway does not enforce.**
+
+| Column | Type | Null |
+|---|---|---:|
+| id | UUID | N |
+| client_app_id | UUID | N |
+| is_enabled | BOOLEAN | N |
+| max_input_tokens | INTEGER | Y |
+| max_output_tokens | INTEGER | Y |
+| max_concurrent_requests | INTEGER | Y |
+| priority | INTEGER | Y |
+| created_at | TIMESTAMPTZ | N |
+| updated_at | TIMESTAMPTZ | N |
+
+### Constraints
+
+```text
+UNIQUE(client_app_id)
+FK(client_app_id) → client_app.id
+max_input_tokens IS NULL OR max_input_tokens > 0
+max_output_tokens IS NULL OR max_output_tokens > 0
+max_concurrent_requests IS NULL OR max_concurrent_requests > 0
+```
+
+```text
+ClientApp  1 ── 0..1  ClientRuntimePolicy
+```
+
+Semantics (registry intent; not enforced in B1):
+
+- `max_input_tokens` — future input/prompt token policy (Gateway does not tokenize in B1)
+- `max_output_tokens` — future output token policy (no request rewrite in B1)
+- `max_concurrent_requests` — future per-client concurrency (separate from M5 InflightTracker)
+- `priority` — future scheduling priority (`smaller = higher`); **not forwarded to vLLM in B1**
+
+Inactive `ClientApp` or `is_enabled=false` policies are omitted from the Gateway PolicySnapshot.
+
+---
+
 ## 23. invocation_log
 
 | Column | Type | Null |
@@ -878,6 +919,7 @@ FK 의존성을 고려한 권장 생성 순서:
 20. deployment_runtime_metric_snapshot
 21. health_check
 22. client_app
+22.1 client_runtime_policy
 23. invocation_log
 24. audit_log
 ```

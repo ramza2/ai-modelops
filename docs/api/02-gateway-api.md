@@ -554,6 +554,44 @@ other Alias when Deployments are shared.
 }
 ```
 
+### GET /internal/v1/policies/runtime (M6-B1)
+
+Diagnostic PolicyStore status. Does **not** affect Gateway `/ready`.
+
+```json
+{
+  "status": "READY",
+  "loaded_at": "...",
+  "policy_count": 3,
+  "database_connected": true,
+  "using_last_known_good": false
+}
+```
+
+### GET /internal/v1/policies/{client_key} (M6-B1)
+
+Exact `client_key` lookup (not lowercased). Active ClientApp + enabled policy only.
+
+```json
+{
+  "client_key": "alzi",
+  "policy": {
+    "max_input_tokens": 8192,
+    "max_output_tokens": 2048,
+    "max_concurrent_requests": 4,
+    "priority": 0
+  },
+  "loaded_at": "..."
+}
+```
+
+Unknown / inactive / disabled → HTTP 200 with `policy: null`.
+
+**B1 does not enforce policies.** Inference paths do not consult PolicyStore.
+`priority` is registered only — not sent to vLLM. `max_input_tokens` is not
+estimated from characters/bytes. `max_output_tokens` is not rewritten into
+request bodies. `max_concurrent_requests` does not modify M5 InflightTracker.
+
 ---
 
 ## 15. Health Endpoints
