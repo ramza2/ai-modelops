@@ -36,6 +36,7 @@ class RouteEntry:
     runtime_status: str | None
     health_status: str | None
     route_id: str | None
+    runtime_type: str | None = None
 
     @property
     def upstream_model_name(self) -> str | None:
@@ -121,6 +122,11 @@ async def load_routing_snapshot(
                 str(dep_row.health_status) if dep_row is not None else None
             ),
             route_id=str(route_row.id) if route_row is not None else None,
+            runtime_type=(
+                str(version_row.runtime_type)
+                if version_row is not None and version_row.runtime_type
+                else None
+            ),
         )
 
     return RoutingSnapshot(

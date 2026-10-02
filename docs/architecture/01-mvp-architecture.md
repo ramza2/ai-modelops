@@ -173,7 +173,15 @@ M6-B3: Chat `max_output_tokens` — explicit effective cap
 (`max_completion_tokens` > `max_tokens`) above policy → 422
 `CLIENT_OUTPUT_TOKEN_LIMIT` (no silent clamp); absent cap → inject
 `max_completion_tokens` on the upstream body copy; Embeddings unaffected.
-Still not enforced: `max_input_tokens`, priority forwarding.
+M6-B4: Chat `max_input_tokens` enforced only through the bound Deployment's
+trusted VLLM `POST /tokenize` (same RouteEntry as inference). `runtime_type=VLLM`
+identifies the trusted tokenizer owner, but B4 only enforces Chat requests
+whose rendering inputs fit the supported `/tokenize` subset; unproven
+rendering-sensitive fields fail closed (`CLIENT_INPUT_TOKEN_CHECK_UNAVAILABLE`).
+Non-VLLM with an active input policy also fails closed. No local tokenizer /
+character estimation / truncation. One Chat request pins a single
+`ClientPolicyEntry` for B3/B2/B4. Embeddings input policy deferred. Priority
+remains registry-only.
 No Prometheus/Grafana server is introduced. A2 histogram scrapes are cumulative;
 A3 P50/P95 are classic bucket estimates over valid same-instance deltas only.
 IMPORTED runtime metrics / argv observation are deferred (profile returns

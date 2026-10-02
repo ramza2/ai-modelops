@@ -671,12 +671,21 @@ ${DATABASE_URL}
      before M5 Alias/Deployment inflight; fail-open when PolicyStore
      has no snapshot; LKG snapshot still enforced. No Redis /
      distributed semaphore.
-   - **M6-B3 (current):** Chat `max_output_tokens` enforcement —
+   - **M6-B3 (done):** Chat `max_output_tokens` enforcement —
      explicit effective cap (`max_completion_tokens` >
      `max_tokens`) above policy → 422 `CLIENT_OUTPUT_TOKEN_LIMIT`
      (no silent clamp); absent → inject `max_completion_tokens` on
      upstream copy; runs before B2/M5; Embeddings unaffected.
-     Still registry-only: `max_input_tokens`, `priority`.
+   - **M6-B4 (current):** Chat `max_input_tokens` via trusted bound
+     VLLM `POST /tokenize` after M5 Deployment bind (same RouteEntry
+     for tokenize + inference). `runtime_type=VLLM` identifies the
+     trusted tokenizer owner; B4 only forwards the stable supported
+     `/tokenize` Chat subset and fails closed
+     (`CLIENT_INPUT_TOKEN_CHECK_UNAVAILABLE`) on unproven
+     rendering-sensitive fields. One Chat request pins a single
+     `ClientPolicyEntry` through B3/B2/B4. Non-VLLM with active
+     policy → 503. No local tokenizer / truncation / estimation.
+     Embeddings input deferred. Priority still registry-only.
 
 한 번에 모든 기능을 스캐폴딩만 하는 것보다 각 milestone을 end-to-end로 동작하게 완성하는 것을 우선한다.
 
