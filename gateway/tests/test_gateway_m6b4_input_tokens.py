@@ -24,11 +24,14 @@ from app.core.errors import ErrorCode
 from app.main import create_app
 from app.policy.input_tokens import (
     GENERATION_ONLY_FIELDS,
+    PARITY_UNPROVEN_REASON,
     TOKENIZE_CHAT_FIELDS,
+    UNPROVEN_RENDERING_SENSITIVE_FIELDS,
     InputTokenCheckUnavailable,
     build_vllm_chat_tokenize_body,
     is_trusted_vllm_runtime,
     parse_tokenize_count,
+    validate_tokenize_chat_parity,
 )
 from app.policy.snapshot import ClientPolicyEntry, PolicySnapshot
 from app.policy.store import PolicyStore
@@ -69,10 +72,12 @@ def test_tokenize_body_allowlist_excludes_generation_fields() -> None:
         "model": "client-model",
         "messages": [{"role": "user", "content": "hi"}],
         "tools": [{"type": "function", "function": {"name": "t"}}],
-        "tool_choice": "auto",
         "add_generation_prompt": True,
         "continue_final_message": False,
+        "add_special_tokens": True,
+        "chat_template": "custom",
         "chat_template_kwargs": {"enable_thinking": False},
+        "mm_processor_kwargs": {"num_crops": 4},
         "temperature": 0.7,
         "max_tokens": 128,
         "max_completion_tokens": 64,
@@ -83,15 +88,45 @@ def test_tokenize_body_allowlist_excludes_generation_fields() -> None:
     assert out["model"] == "served-x"
     assert out["messages"] == body["messages"]
     assert out["tools"] == body["tools"]
-    assert out["tool_choice"] == "auto"
     assert out["add_generation_prompt"] is True
     assert out["continue_final_message"] is False
+    assert out["add_special_tokens"] is True
+    assert out["chat_template"] == "custom"
     assert out["chat_template_kwargs"] == {"enable_thinking": False}
+    assert out["mm_processor_kwargs"] == {"num_crops": 4}
     for field in GENERATION_ONLY_FIELDS:
         assert field not in out
     for field in TOKENIZE_CHAT_FIELDS:
         if field in body:
             assert field in out
+    # Unproven fields must not be silently forwarded by the builder either
+    # (parity validation rejects them under active policy before build).
+    for field in UNPROVEN_RENDERING_SENSITIVE_FIELDS:
+        assert field not in out
+
+
+def test_validate_tokenize_chat_parity_safe_and_generation_ok() -> None:
+    body = {
+        "messages": [{"role": "user", "content": "hi"}],
+        "tools": [{"type": "function", "function": {"name": "t"}}],
+        "add_generation_prompt": True,
+        "temperature": 0.5,
+        "max_tokens": 10,
+        "stream": True,
+    }
+    validate_tokenize_chat_parity(body)  # does not raise
+
+
+@pytest.mark.parametrize("field", sorted(UNPROVEN_RENDERING_SENSITIVE_FIELDS))
+def test_validate_tokenize_chat_parity_unproven_fields(field: str) -> None:
+    body: dict[str, Any] = {
+        "messages": [{"role": "user", "content": "hi"}],
+        field: {"x": 1} if field.endswith("kwargs") or field == "response_format"
+        else ("auto" if field == "tool_choice" else 1),
+    }
+    with pytest.raises(InputTokenCheckUnavailable) as exc:
+        validate_tokenize_chat_parity(body)
+    assert str(exc.value.message) == PARITY_UNPROVEN_REASON
 
 
 def test_parse_tokenize_count_validation() -> None:
@@ -489,10 +524,12 @@ async def test_exact_limit_allows_and_calls_chat_once() -> None:
                 "model": seeded["alias"],
                 "messages": [{"role": "user", "content": "hi"}],
                 "tools": [{"type": "function", "function": {"name": "t"}}],
-                "tool_choice": "auto",
                 "add_generation_prompt": True,
                 "continue_final_message": False,
+                "add_special_tokens": True,
+                "chat_template": "tmpl",
                 "chat_template_kwargs": {"x": 1},
+                "mm_processor_kwargs": {"num_crops": 2},
                 "temperature": 0.2,
                 "max_tokens": 50,
             },
@@ -504,12 +541,15 @@ async def test_exact_limit_allows_and_calls_chat_once() -> None:
     tok = fake.tokenize_calls[0]
     assert tok["messages"][0]["content"] == "hi"
     assert tok["tools"][0]["function"]["name"] == "t"
-    assert tok["tool_choice"] == "auto"
     assert tok["add_generation_prompt"] is True
     assert tok["continue_final_message"] is False
+    assert tok["add_special_tokens"] is True
+    assert tok["chat_template"] == "tmpl"
     assert tok["chat_template_kwargs"] == {"x": 1}
+    assert tok["mm_processor_kwargs"] == {"num_crops": 2}
     assert "temperature" not in tok
     assert "max_tokens" not in tok
+    assert "tool_choice" not in tok
     assert ctx["client_concurrency"].total() == 0
     assert ctx["inflight"].snapshot() == {}
 
@@ -1230,3 +1270,312 @@ async def test_hot_switch_race_same_deployment_for_tokenize_and_infer() -> None:
     await http2.aclose()
     await engine.dispose()
     _ = a  # seeded A used via alias
+
+
+# ---------------------------------------------------------------------------
+# Pinned ClientPolicyEntry + conservative tokenize parity
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_chat_pins_one_policy_snapshot_across_b3_b2_b4() -> None:
+    """One Chat request must not mix PolicyStore snapshots A then B.
+
+    Captures A (input=100, output=2048, concurrency=2). While /tokenize is
+    held, atomically replace snapshot with B (input=10, output=512,
+    concurrency=1). First request (count=50, max_tokens=1500) must succeed
+    under A. Next request with the same count must reject under B.
+    """
+    engine = create_async_engine(_database_url(), future=True)
+    session_factory = async_sessionmaker(
+        engine, expire_on_commit=False, autoflush=False
+    )
+    fake = FakeVllmUpstream(tokenize_count=50, hold_tokenize=True)
+    http_client = fake.as_client()
+    client_key = f"pin-{uuid.uuid4().hex[:6]}"
+    policy_a = _policy_entry(
+        client_key,
+        max_input_tokens=100,
+        max_output_tokens=2048,
+        max_concurrent_requests=2,
+    )
+    policy_b = _policy_entry(
+        client_key,
+        max_input_tokens=10,
+        max_output_tokens=512,
+        max_concurrent_requests=1,
+    )
+    policy = _policy_store_with({client_key: policy_a})
+    reload_calls = {"n": 0}
+    original_reload = policy.reload
+
+    async def counting_reload() -> dict[str, Any]:
+        reload_calls["n"] += 1
+        return await original_reload()
+
+    policy.reload = counting_reload  # type: ignore[method-assign]
+
+    seeded = await _seed_alias_route(session_factory, runtime_type="VLLM")
+    ctx = await _build_gw(
+        policy_store=policy, http_client=http_client, session_factory=session_factory
+    )
+
+    async with AsyncClient(
+        transport=ASGITransport(app=ctx["app"]), base_url="http://gw.test"
+    ) as ac:
+        task = asyncio.create_task(
+            ac.post(
+                "/v1/chat/completions",
+                headers={"X-AI-Client": client_key},
+                json={
+                    "model": seeded["alias"],
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "max_tokens": 1500,  # above B's 512; allowed under A's 2048
+                },
+            )
+        )
+        await asyncio.wait_for(fake.tokenize_entered.wait(), timeout=2.0)
+        # Mid-request policy swap — must not affect the in-flight request.
+        policy._snapshot = PolicySnapshot(
+            loaded_at=dt.datetime.now(tz=dt.UTC),
+            policies={client_key: policy_b},
+            using_last_known_good=False,
+        )
+        fake.tokenize_gate.set()
+        resp = await task
+        assert resp.status_code == 200, resp.text
+
+        # Next request observes B and rejects count=50 > input limit 10.
+        resp2 = await ac.post(
+            "/v1/chat/completions",
+            headers={"X-AI-Client": client_key},
+            json={
+                "model": seeded["alias"],
+                "messages": [{"role": "user", "content": "next"}],
+                "max_tokens": 100,
+            },
+        )
+        assert resp2.status_code == 422
+        assert resp2.json()["error"]["code"] == ErrorCode.CLIENT_INPUT_TOKEN_LIMIT
+
+    assert len(fake.tokenize_calls) == 2
+    assert len(fake.chat_calls) == 1
+    assert reload_calls["n"] == 0  # no PolicyStore.reload / SQL during requests
+    assert ctx["client_concurrency"].total() == 0
+    assert ctx["inflight"].snapshot() == {}
+
+    await http_client.aclose()
+    await engine.dispose()
+
+
+@pytest.mark.parametrize("field", sorted(UNPROVEN_RENDERING_SENSITIVE_FIELDS))
+@pytest.mark.asyncio
+async def test_unproven_rendering_fields_fail_closed(field: str) -> None:
+    engine = create_async_engine(_database_url(), future=True)
+    session_factory = async_sessionmaker(
+        engine, expire_on_commit=False, autoflush=False
+    )
+    fake = FakeVllmUpstream(tokenize_count=1)
+    http_client = fake.as_client()
+    client_key = f"upar-{uuid.uuid4().hex[:6]}"
+    policy = _policy_store_with(
+        {
+            client_key: _policy_entry(
+                client_key,
+                max_input_tokens=1000,
+                max_concurrent_requests=4,
+            )
+        }
+    )
+    seeded = await _seed_alias_route(session_factory, runtime_type="VLLM")
+    ctx = await _build_gw(
+        policy_store=policy, http_client=http_client, session_factory=session_factory
+    )
+    value: Any
+    if field == "tool_choice":
+        value = "auto"
+    elif field in {"media_io_kwargs", "response_format", "documents"}:
+        value = {"type": "json_object"} if field == "response_format" else [{"x": 1}]
+    elif field.endswith("kwargs"):
+        value = {"x": 1}
+    else:
+        value = 1
+    payload = {
+        "model": seeded["alias"],
+        "messages": [{"role": "user", "content": "hi"}],
+        field: value,
+    }
+    async with AsyncClient(
+        transport=ASGITransport(app=ctx["app"]), base_url="http://gw.test"
+    ) as ac:
+        resp = await ac.post(
+            "/v1/chat/completions",
+            headers={"X-AI-Client": client_key},
+            json=payload,
+        )
+        assert resp.status_code == 503, resp.text
+        err = resp.json()["error"]
+        assert err["code"] == ErrorCode.CLIENT_INPUT_TOKEN_CHECK_UNAVAILABLE
+        assert err["param"] == "messages"
+        assert err["message"] == (
+            "Input token check unavailable for this client policy."
+        )
+        # Public body stays generic — no unproven field list leakage.
+        assert field not in json.dumps(resp.json())
+
+    assert fake.tokenize_calls == []
+    assert fake.chat_calls == []
+    assert ctx["client_concurrency"].get(client_key) == 0
+    assert ctx["inflight"].get_alias(seeded["alias"]) == 0
+    assert ctx["inflight"].get_unbound(seeded["alias"]) == 0
+    assert ctx["inflight"].get_deployment(seeded["deployment_id"]) == 0
+
+    await http_client.aclose()
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_unproven_fields_without_input_policy_passthrough() -> None:
+    """Advanced rendering fields are allowed when max_input_tokens is null."""
+    engine = create_async_engine(_database_url(), future=True)
+    session_factory = async_sessionmaker(
+        engine, expire_on_commit=False, autoflush=False
+    )
+    fake = FakeVllmUpstream(tokenize_count=1)
+    http_client = fake.as_client()
+    client_key = f"adv-{uuid.uuid4().hex[:6]}"
+    policy = _policy_store_with(
+        {
+            client_key: _policy_entry(
+                client_key,
+                max_input_tokens=None,
+                max_output_tokens=2048,
+                max_concurrent_requests=2,
+            )
+        }
+    )
+    seeded = await _seed_alias_route(session_factory, runtime_type="VLLM")
+    ctx = await _build_gw(
+        policy_store=policy, http_client=http_client, session_factory=session_factory
+    )
+    async with AsyncClient(
+        transport=ASGITransport(app=ctx["app"]), base_url="http://gw.test"
+    ) as ac:
+        resp = await ac.post(
+            "/v1/chat/completions",
+            headers={"X-AI-Client": client_key},
+            json={
+                "model": seeded["alias"],
+                "messages": [{"role": "user", "content": "hi"}],
+                "tool_choice": "auto",
+                "documents": [{"text": "doc"}],
+                "reasoning_effort": "high",
+                "media_io_kwargs": {"x": 1},
+                "response_format": {"type": "json_object"},
+                "truncate_prompt_tokens": 100,
+                "truncation_side": "left",
+                "temperature": 0.1,
+            },
+        )
+        assert resp.status_code == 200, resp.text
+
+    assert fake.tokenize_calls == []
+    assert len(fake.chat_calls) == 1
+    chat = fake.chat_calls[0]
+    assert chat["tool_choice"] == "auto"
+    assert chat["documents"] == [{"text": "doc"}]
+
+    await http_client.aclose()
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_parity_rejection_invocation_log_and_cleanup() -> None:
+    engine = create_async_engine(_database_url(), future=True)
+    session_factory = async_sessionmaker(
+        engine, expire_on_commit=False, autoflush=False
+    )
+    fake = FakeVllmUpstream(tokenize_count=1)
+    http_client = fake.as_client()
+    client_key = f"plog-{uuid.uuid4().hex[:6]}"
+    async with session_factory() as session:
+        await session.execute(
+            text(
+                """
+                INSERT INTO client_app (id, client_key, display_name, is_active)
+                VALUES (:id, :key, :name, true)
+                """
+            ),
+            {"id": str(uuid.uuid4()), "key": client_key, "name": client_key},
+        )
+        await session.commit()
+    policy = _policy_store_with(
+        {
+            client_key: _policy_entry(
+                client_key,
+                max_input_tokens=100,
+                max_concurrent_requests=3,
+            )
+        }
+    )
+    seeded = await _seed_alias_route(session_factory, runtime_type="VLLM")
+    logs = InvocationLogWriter(session_factory)
+    ctx = await _build_gw(
+        policy_store=policy,
+        http_client=http_client,
+        session_factory=session_factory,
+        invocation_logs=logs,
+    )
+    payload = {
+        "model": seeded["alias"],
+        "messages": [{"role": "user", "content": "hi"}],
+        "tool_choice": "auto",
+    }
+    raw = json.dumps(payload, separators=(",", ":")).encode()
+    async with AsyncClient(
+        transport=ASGITransport(app=ctx["app"]), base_url="http://gw.test"
+    ) as ac:
+        resp = await ac.post(
+            "/v1/chat/completions",
+            headers={"X-AI-Client": client_key, "content-type": "application/json"},
+            content=raw,
+        )
+        assert resp.status_code == 503
+    await logs.drain(timeout_seconds=3.0)
+    async with session_factory() as session:
+        rows = (
+            await session.execute(
+                text(
+                    """
+                    SELECT http_status, error_code, request_bytes,
+                           input_tokens, output_tokens, total_tokens,
+                           deployment_id::text, endpoint_alias_id::text,
+                           model_version_id::text
+                    FROM invocation_log
+                    WHERE raw_client_key = :key
+                      AND error_code = :code
+                    """
+                ),
+                {
+                    "key": client_key,
+                    "code": ErrorCode.CLIENT_INPUT_TOKEN_CHECK_UNAVAILABLE,
+                },
+            )
+        ).all()
+    assert len(rows) == 1
+    row = rows[0]
+    assert int(row[0]) == 503
+    assert row[1] == ErrorCode.CLIENT_INPUT_TOKEN_CHECK_UNAVAILABLE
+    assert int(row[2]) == len(raw)
+    assert row[3] is None
+    assert row[4] is None
+    assert row[5] is None
+    assert row[6] == seeded["deployment_id"]
+    assert row[7] == seeded["endpoint_id"]
+    assert row[8] == seeded["model_version_id"]
+    assert fake.tokenize_calls == []
+    assert ctx["client_concurrency"].get(client_key) == 0
+    assert ctx["inflight"].snapshot() == {}
+
+    await http_client.aclose()
+    await engine.dispose()

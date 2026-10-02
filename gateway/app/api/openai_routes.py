@@ -8,6 +8,7 @@ M6-B3: Chat ``max_output_tokens`` policy runs *before* B2/M5 admission so
 
 M6-B4: Chat ``max_input_tokens`` uses the bound Deployment's trusted vLLM
 ``POST /tokenize`` after M5 bind; tokenize and inference share one RouteEntry.
+One Chat request pins a single ``ClientPolicyEntry`` for B3/B2/B4.
 """
 
 from __future__ import annotations
@@ -155,11 +156,14 @@ def _apply_chat_output_token_policy(
     *,
     body: dict[str, Any],
     client_key: str,
+    policy: ClientPolicyEntry | None,
     is_streaming: bool,
     request_bytes: int | None,
 ) -> dict[str, Any]:
-    """Apply max_output_tokens before B2/M5. Returns upstream body copy."""
-    policy = _lookup_client_policy(request, client_key)
+    """Apply max_output_tokens before B2/M5. Returns upstream body copy.
+
+    Uses the Chat-request-pinned ``policy`` — never re-reads PolicyStore.
+    """
     limit = policy.max_output_tokens if policy is not None else None
     try:
         result = apply_output_token_policy(body, limit)
@@ -239,17 +243,22 @@ async def chat_completions(request: Request) -> Response:
             param="model",
         )
     client_key = _client_key(request)
+    # Pin one ClientPolicyEntry for this Chat request (B3/B2/B4).
+    # PolicyStore may reload mid-request; do not re-lookup.
+    client_policy = _lookup_client_policy(request, client_key)
     # B3 output policy before B2/M5 so rejects never consume concurrency.
     upstream_body = _apply_chat_output_token_policy(
         request,
         body=body,
         client_key=client_key,
+        policy=client_policy,
         is_streaming=streaming,
         request_bytes=request_bytes,
     )
     client_admission = await _admit_client_concurrency(
         request,
         client_key=client_key,
+        policy=client_policy,
         api_path="/v1/chat/completions",
         is_streaming=streaming,
         request_bytes=request_bytes,
@@ -269,6 +278,7 @@ async def chat_completions(request: Request) -> Response:
         admissions=admissions,
         original_body=body,
         client_key=client_key,
+        policy=client_policy,
         is_streaming=streaming,
         request_bytes=request_bytes,
     )
@@ -339,15 +349,16 @@ async def _enforce_chat_input_token_policy(
     admissions: _RequestAdmissions,
     original_body: dict[str, Any],
     client_key: str,
+    policy: ClientPolicyEntry | None,
     is_streaming: bool,
     request_bytes: int | None,
 ) -> None:
     """Trusted VLLM /tokenize against the already-bound RouteEntry (M6-B4).
 
-    Captures the visible policy limit once. On any reject/cancel after
-    admissions are held, releases both counters before raising.
+    Uses the Chat-request-pinned ``policy`` — never re-reads PolicyStore.
+    On any reject/cancel after admissions are held, releases both counters
+    before raising.
     """
-    policy = _lookup_client_policy(request, client_key)
     limit = policy.max_input_tokens if policy is not None else None
     if limit is None:
         return
@@ -473,13 +484,18 @@ async def _admit_client_concurrency(
     api_path: str,
     is_streaming: bool,
     request_bytes: int | None,
+    policy: ClientPolicyEntry | None = None,
 ) -> ClientConcurrencyAdmission | None:
     """Admit under PolicyStore max_concurrent_requests, or bypass.
 
     Fail-open when PolicyStore.snapshot is None or no enforceable limit.
     LKG snapshots with a limit are still enforced.
+
+    When ``policy`` is provided (Chat path), use it and do not re-lookup.
+    Embeddings may omit ``policy`` and look up once here.
     """
-    policy = _lookup_client_policy(request, client_key)
+    if policy is None:
+        policy = _lookup_client_policy(request, client_key)
     if policy is None or policy.max_concurrent_requests is None:
         return None
     limit = int(policy.max_concurrent_requests)

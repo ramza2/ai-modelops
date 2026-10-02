@@ -4,6 +4,11 @@ Gateway never tokenizes locally. When ``max_input_tokens`` is configured,
 prompt tokens are counted via the **bound** Deployment's ``POST /tokenize``
 endpoint so the tokenizer and subsequent ``/v1/chat/completions`` share the
 same RouteEntry / Deployment identity.
+
+``runtime_type=VLLM`` identifies the trusted tokenizer owner, but B4 only
+forwards the stable Chat-tokenization subset whose rendering inputs can be
+represented safely by the supported ``/tokenize`` contract. Unproven
+rendering-sensitive fields fail closed under an active input policy.
 """
 
 from __future__ import annotations
@@ -19,27 +24,40 @@ logger = logging.getLogger(__name__)
 
 TRUSTED_RUNTIME_TYPE = "VLLM"
 
-# Rendering/tokenization fields only — not generation/sampling knobs.
-# Verified against vLLM Tokenizer Chat protocol (messages + template/tools).
+# Stable trusted Chat-tokenization subset. No defaults are injected.
+# Verified as safe to forward for ModelOps MVP without claiming full
+# vLLM-version Chat/tokenize protocol parity.
 TOKENIZE_CHAT_FIELDS: tuple[str, ...] = (
     "messages",
     "tools",
-    "tool_choice",
     "add_generation_prompt",
     "continue_final_message",
     "add_special_tokens",
-    "documents",
     "chat_template",
     "chat_template_kwargs",
-    "reasoning_effort",
-    "media_io_kwargs",
     "mm_processor_kwargs",
-    "response_format",
-    "truncate_prompt_tokens",
-    "truncation_side",
 )
 
+# Rendering-sensitive fields that may affect prompt length but are not
+# proven identical across ModelOps-allowed vLLM /tokenize schemas.
+# With an active max_input_tokens policy these must fail closed — never
+# silently omit and under-count.
+UNPROVEN_RENDERING_SENSITIVE_FIELDS: frozenset[str] = frozenset(
+    {
+        "tool_choice",
+        "documents",
+        "reasoning_effort",
+        "media_io_kwargs",
+        "response_format",
+        "truncate_prompt_tokens",
+        "truncation_side",
+    }
+)
+
+PARITY_UNPROVEN_REASON = "TOKENIZE_REQUEST_PARITY_UNPROVEN"
+
 # Explicitly excluded from /tokenize even if present on Chat body.
+# Generation/sampling knobs do not need /tokenize parity.
 GENERATION_ONLY_FIELDS: frozenset[str] = frozenset(
     {
         "temperature",
@@ -108,12 +126,30 @@ def is_trusted_vllm_runtime(runtime_type: str | None) -> bool:
     return str(runtime_type).strip().upper() == TRUSTED_RUNTIME_TYPE
 
 
+def validate_tokenize_chat_parity(chat_body: dict[str, Any]) -> None:
+    """Fail closed when unproven rendering-sensitive fields are present.
+
+    Safe supported fields and generation-only fields are allowed.
+    Unknown keys that are neither generation-only nor the safe subset are
+    treated as unproven only when listed in
+    ``UNPROVEN_RENDERING_SENSITIVE_FIELDS``.
+    """
+    for field in UNPROVEN_RENDERING_SENSITIVE_FIELDS:
+        if field in chat_body:
+            raise InputTokenCheckUnavailable(PARITY_UNPROVEN_REASON)
+
+
 def build_vllm_chat_tokenize_body(
     chat_body: dict[str, Any],
     *,
     model_name: str,
 ) -> dict[str, Any]:
-    """Build ``POST /tokenize`` JSON from Chat rendering fields only."""
+    """Build ``POST /tokenize`` JSON from the safe Chat rendering subset.
+
+    Callers that enforce an active input policy must run
+    ``validate_tokenize_chat_parity`` first so unproven fields are never
+    silently dropped.
+    """
     out: dict[str, Any] = {"model": model_name}
     for field in TOKENIZE_CHAT_FIELDS:
         if field in GENERATION_ONLY_FIELDS:
@@ -148,6 +184,7 @@ async def count_vllm_chat_input_tokens(
     max_response_bytes: int,
 ) -> int:
     """POST ``{upstream}/tokenize`` and return bounded ``count``."""
+    validate_tokenize_chat_parity(request_body)
     base = str(upstream_base_url).rstrip("/")
     url = f"{base}/tokenize"
     body = build_vllm_chat_tokenize_body(

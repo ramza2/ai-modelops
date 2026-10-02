@@ -730,6 +730,12 @@ POST {RouteEntry.upstream_base_url}/tokenize
 Gateway does **not** load tokenizers, estimate characters/bytes, truncate
 prompts, or call `/v1/tokenize`.
 
+`runtime_type=VLLM` identifies the trusted tokenizer owner, but B4 only
+enforces Chat requests whose rendering inputs can be represented safely by
+the supported `/tokenize` contract. ModelOps does **not** claim arbitrary
+vLLM-version Chat/`/tokenize` protocol parity. Explicit tokenizer
+capability/version negotiation is deferred to a later milestone.
+
 Ordering:
 
 ```text
@@ -740,22 +746,57 @@ B3 output policy
 → /v1/chat/completions on the SAME RouteEntry
 ```
 
+One Chat request pins a single `ClientPolicyEntry` immediately after
+`client_key` resolution and passes that immutable entry through B3, B2, and
+B4. Mid-request `PolicyStore` snapshot swaps must not remix policy versions
+for the in-flight request.
+
 Semantics:
 
 | Case | Result |
 |---|---|
-| no policy / null `max_input_tokens` / PolicyStore snapshot absent | fail-open; `/tokenize` not called |
-| LKG snapshot with limit | enforce LKG |
+| no policy / null `max_input_tokens` / PolicyStore snapshot absent | fail-open; `/tokenize` not called; advanced Chat fields allowed |
+| LKG snapshot with limit | enforce pinned LKG entry |
 | `runtime_type == VLLM` and `count <= limit` | allow; exact equality allowed |
 | `count > limit` | HTTP 422 `CLIENT_INPUT_TOKEN_LIMIT` |
 | non-VLLM / missing runtime with active policy | HTTP 503 `CLIENT_INPUT_TOKEN_CHECK_UNAVAILABLE` (fail closed) |
+| unproven rendering-sensitive fields with active input policy | HTTP 503 `CLIENT_INPUT_TOKEN_CHECK_UNAVAILABLE` (fail closed; `/tokenize` not called) |
 | tokenizer timeout / transport / 5xx / malformed / oversized | HTTP 503 `CLIENT_INPUT_TOKEN_CHECK_UNAVAILABLE` |
 | tokenizer 4xx (unrenderable Chat) | HTTP 422 `VALIDATION_ERROR` (`param=messages`) |
 
-Tokenizer request carries Chat **rendering** fields only (`messages`, `tools`,
-`tool_choice`, template kwargs, …). Generation fields (`max_tokens`,
-`temperature`, `stream`, …) are not sent. Token IDs are never logged or stored
-in InvocationLog token columns (those remain upstream inference usage only).
+Safe `/tokenize` request subset (forwarded unchanged when present; no Gateway
+defaults):
+
+```text
+model (rewritten to served_model_name)
+messages
+tools
+add_generation_prompt
+continue_final_message
+add_special_tokens
+chat_template
+chat_template_kwargs
+mm_processor_kwargs
+```
+
+Generation-only fields (`max_tokens`, `temperature`, `stream`, …) are never
+sent to `/tokenize` and do not require parity.
+
+Unproven rendering-sensitive fields under an active `max_input_tokens`
+policy fail closed (do **not** silently omit and under-count):
+
+```text
+tool_choice
+documents
+reasoning_effort
+media_io_kwargs
+response_format
+truncate_prompt_tokens
+truncation_side
+```
+
+Token IDs are never logged or stored in InvocationLog token columns (those
+remain upstream inference usage only).
 
 Embeddings: `max_input_tokens` is **not** enforced in B4.
 
