@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import uuid
 from typing import Any
 
 from sqlalchemy import Select, func, or_, select
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.models import ClientApp, ClientRuntimePolicy
@@ -75,5 +77,47 @@ class ClientRuntimePolicyRepository:
 
     async def add(self, policy: ClientRuntimePolicy) -> ClientRuntimePolicy:
         self._session.add(policy)
+        await self._session.flush()
+        return policy
+
+    async def upsert_runtime_policy(
+        self,
+        *,
+        client_app_id: uuid.UUID,
+        is_enabled: bool,
+        max_input_tokens: int | None,
+        max_output_tokens: int | None,
+        max_concurrent_requests: int | None,
+        priority: int | None,
+        now: dt.datetime | None = None,
+    ) -> ClientRuntimePolicy:
+        """Atomic full-replacement upsert on UNIQUE(client_app_id).
+
+        INSERT uses server defaults for id/created_at/updated_at.
+        ON CONFLICT updates all policy fields and advances updated_at;
+        id and created_at remain unchanged.
+        """
+        updated_at = now or dt.datetime.now(tz=dt.UTC)
+        stmt = insert(ClientRuntimePolicy).values(
+            client_app_id=client_app_id,
+            is_enabled=is_enabled,
+            max_input_tokens=max_input_tokens,
+            max_output_tokens=max_output_tokens,
+            max_concurrent_requests=max_concurrent_requests,
+            priority=priority,
+        )
+        stmt = stmt.on_conflict_do_update(
+            constraint="uq_client_runtime_policy_client_app",
+            set_={
+                "is_enabled": stmt.excluded.is_enabled,
+                "max_input_tokens": stmt.excluded.max_input_tokens,
+                "max_output_tokens": stmt.excluded.max_output_tokens,
+                "max_concurrent_requests": stmt.excluded.max_concurrent_requests,
+                "priority": stmt.excluded.priority,
+                "updated_at": updated_at,
+            },
+        ).returning(ClientRuntimePolicy)
+        result = await self._session.execute(stmt)
+        policy = result.scalar_one()
         await self._session.flush()
         return policy

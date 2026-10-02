@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import uuid
 
@@ -203,3 +204,121 @@ async def test_deactivate_preserves_policy(client) -> None:
             )
         ).scalar_one()
         assert int(row) == 1
+
+
+@pytest.mark.anyio
+async def test_create_client_trims_before_length_validation(client) -> None:
+    """Strip whitespace before length checks; preserve exact case."""
+    c = client["client"]
+    # 120-char key with leading/trailing spaces would exceed Field(max_length=120)
+    # if strip ran after Pydantic length validation.
+    core_key = ("Ab" * 60)  # 120 chars, mixed case
+    assert len(core_key) == 120
+    core_name = ("Nm" * 127) + "X"  # 255 chars
+    assert len(core_name) == 255
+
+    create = await c.post(
+        "/api/v1/clients",
+        json={
+            "client_key": f"  {core_key}  ",
+            "display_name": f"  {core_name}  ",
+        },
+    )
+    assert create.status_code == 201, create.text
+    body = create.json()
+    assert body["client_key"] == core_key
+    assert len(body["client_key"]) == 120
+    assert body["display_name"] == core_name
+    assert len(body["display_name"]) == 255
+
+    whitespace_only = await c.post(
+        "/api/v1/clients",
+        json={"client_key": "   ", "display_name": "ok"},
+    )
+    assert whitespace_only.status_code == 422
+
+    whitespace_name = await c.post(
+        "/api/v1/clients",
+        json={"client_key": f"ws-{uuid.uuid4().hex[:8]}", "display_name": "  "},
+    )
+    assert whitespace_name.status_code == 422
+
+
+@pytest.mark.anyio
+async def test_concurrent_first_put_runtime_policy_is_atomic(client) -> None:
+    """Two concurrent first PUTs must both succeed with exactly one policy row."""
+    c = client["client"]
+    suffix = uuid.uuid4().hex[:8]
+    created = await c.post(
+        "/api/v1/clients",
+        json={
+            "client_key": f"race-{suffix}",
+            "display_name": f"Race {suffix}",
+        },
+    )
+    assert created.status_code == 201, created.text
+    client_id = created.json()["id"]
+
+    empty = await c.get(f"/api/v1/clients/{client_id}/runtime-policy")
+    assert empty.status_code == 200
+    assert empty.json()["policy"] is None
+
+    payload = {
+        "is_enabled": True,
+        "max_input_tokens": 8192,
+        "max_output_tokens": 2048,
+        "max_concurrent_requests": 4,
+        "priority": 0,
+    }
+
+    async def _put_once():
+        return await c.put(
+            f"/api/v1/clients/{client_id}/runtime-policy",
+            json=payload,
+        )
+
+    first, second = await asyncio.gather(_put_once(), _put_once())
+    assert first.status_code == 200, first.text
+    assert second.status_code == 200, second.text
+
+    body_a = first.json()
+    body_b = second.json()
+    assert body_a["id"] == body_b["id"]
+    for body in (body_a, body_b):
+        assert body["is_enabled"] is True
+        assert body["max_input_tokens"] == 8192
+        assert body["max_output_tokens"] == 2048
+        assert body["max_concurrent_requests"] == 4
+        assert body["priority"] == 0
+
+    async with client["session_factory"]() as session:
+        count = int(
+            (
+                await session.execute(
+                    text(
+                        "SELECT COUNT(*) FROM client_runtime_policy "
+                        "WHERE client_app_id = CAST(:id AS uuid)"
+                    ),
+                    {"id": client_id},
+                )
+            ).scalar_one()
+        )
+        row = (
+            await session.execute(
+                text(
+                    "SELECT id::text, is_enabled, max_input_tokens, "
+                    "max_output_tokens, max_concurrent_requests, priority "
+                    "FROM client_runtime_policy "
+                    "WHERE client_app_id = CAST(:id AS uuid)"
+                ),
+                {"id": client_id},
+            )
+        ).one()
+
+    assert count == 1
+    assert row[0] == body_a["id"]
+    assert bool(row[1]) is True
+    assert int(row[2]) == 8192
+    assert int(row[3]) == 2048
+    assert int(row[4]) == 4
+    assert int(row[5]) == 0

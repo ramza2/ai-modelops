@@ -176,27 +176,14 @@ class ClientService:
         )
         prio = _priority_or_null(priority)
 
-        existing = await self._policies.get_by_client_app_id(client_id)
-        now = dt.datetime.now(tz=dt.UTC)
-        if existing is None:
-            policy = ClientRuntimePolicy(
-                client_app_id=client.id,
-                is_enabled=is_enabled,
-                max_input_tokens=max_input,
-                max_output_tokens=max_output,
-                max_concurrent_requests=max_conc,
-                priority=prio,
-            )
-            await self._policies.add(policy)
-        else:
-            existing.is_enabled = is_enabled
-            existing.max_input_tokens = max_input
-            existing.max_output_tokens = max_output
-            existing.max_concurrent_requests = max_conc
-            existing.priority = prio
-            existing.updated_at = now
-            policy = existing
-
+        policy = await self._policies.upsert_runtime_policy(
+            client_app_id=client.id,
+            is_enabled=is_enabled,
+            max_input_tokens=max_input,
+            max_output_tokens=max_output,
+            max_concurrent_requests=max_conc,
+            priority=prio,
+        )
         await self._session.commit()
         await self._session.refresh(policy)
         return self._serialize_policy(policy, client)

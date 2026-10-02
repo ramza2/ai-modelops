@@ -20,6 +20,14 @@ class CreateClientRequest(BaseModel):
     display_name: str = Field(min_length=1, max_length=255)
     description: str | None = None
 
+    @field_validator("client_key", "display_name", mode="before")
+    @classmethod
+    def _strip_before_length(cls, value: Any) -> Any:
+        """Strip whitespace before min/max length checks; preserve case."""
+        if isinstance(value, str):
+            return value.strip()
+        return value
+
 
 class UpdateClientRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -29,6 +37,13 @@ class UpdateClientRequest(BaseModel):
     is_active: bool | None = None
     # Present solely so service can reject immutability attempts explicitly.
     client_key: str | None = None
+
+    @field_validator("display_name", mode="before")
+    @classmethod
+    def _strip_display_name(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return value.strip()
+        return value
 
 
 class PutRuntimePolicyRequest(BaseModel):
