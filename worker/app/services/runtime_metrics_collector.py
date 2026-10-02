@@ -382,8 +382,10 @@ _RUNTIME_CONFIG_FIELDS = (
     "gpu_memory_utilization",
     "dtype",
     "quantization",
+    "scheduling_policy",
 )
 _RUNTIME_CONFIG_ENTRYPOINTS = frozenset({"VLLM", "UNRECOGNIZED"})
+_SCHEDULING_POLICY_ALLOWED = frozenset({"fcfs", "priority"})
 
 
 def _sanitize_runtime_config(raw: Any) -> dict[str, Any] | None:
@@ -466,4 +468,9 @@ def _sanitize_config_value(field: str, value: Any) -> int | float | str | None:
     if field in {"dtype", "quantization"}:
         text = str(value).strip()
         return text if text else None
+    if field == "scheduling_policy":
+        if not isinstance(value, str):
+            return None
+        normalized = value.strip().lower()
+        return normalized if normalized in _SCHEDULING_POLICY_ALLOWED else None
     return None

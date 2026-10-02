@@ -129,6 +129,7 @@ def test_sanitize_allowlists_six_settings_only() -> None:
         "gpu_memory_utilization",
         "dtype",
         "quantization",
+        "scheduling_policy",
     }
     assert "extra_secret" not in out["values"]
     assert "extra_secret" not in out["explicit_fields"]

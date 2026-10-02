@@ -958,7 +958,7 @@ Returns:
 - GPU assignment list (per-GPU VRAM; never pooled as one device)
 - `configuration.settings` for allowlisted capacity fields:
   `max_model_len`, `max_num_seqs`, `tensor_parallel_size`,
-  `gpu_memory_utilization`, `dtype`, `quantization`
+  `gpu_memory_utilization`, `dtype`, `quantization`, `scheduling_policy`
   with `requested` / `requested_source` / `observed_explicit` / `comparison_status`
 - Latest sanitized `runtime_config` + `runtime_observation_sampled_at` when known
 - A1 invocation demand for this Deployment (same percentile definitions)
@@ -985,6 +985,14 @@ Important semantics:
   Existing containers are not automatically recreated/reconfigured; Capacity Profile
   continues to expose requested-vs-observed drift (`REQUESTED_NOT_OBSERVED` / `MISMATCH`)
   until a legitimate new container is created.
+- `scheduling_policy` (M6-B5-A) accepts only normalized `fcfs` | `priority`.
+  Worker emits `--scheduling-policy <value>` on new Managed vLLM creates when
+  configured. Explicit Deployment `null` is `INVALID_SCHEDULING_POLICY` (no
+  ModelVersion fallback). Unset omits the flag; absent observed argv is never
+  treated as `fcfs`. Requested config alone is **not** proof the runtime uses
+  priority scheduling — only observed CONTAINER_ARGV / VLLM /
+  `scheduling_policy == priority` will be trusted by future B5-B before Gateway
+  priority forwarding. Gateway does not forward priority in B5-A.
 - `max_model_len` is prompt+output context capacity; do not divide A1 input_tokens by it.
 - `gpu_memory_utilization` is per-runtime memory fraction.
 - No auto tuning / recommendations in this API.
@@ -996,7 +1004,9 @@ Notes:
 - M6-A1 = invocation-side telemetry; M6-A2 = cumulative runtime snapshots;
   M6-A3 = recent-window delta analytics; M6-A4 = capacity profile
   (requested vs observed_explicit + A1/A3 composition);
-  M6-A5 = emit `--max-num-seqs` on new Managed vLLM creates.
+  M6-A5 = emit `--max-num-seqs` on new Managed vLLM creates;
+  M6-B5-A = emit/observe `--scheduling-policy` + Capacity Profile comparison
+  (Gateway priority forwarding is M6-B5-B).
 - IMPORTED Deployment runtime metrics are deferred.
 - No Prometheus server or Grafana is introduced.
 

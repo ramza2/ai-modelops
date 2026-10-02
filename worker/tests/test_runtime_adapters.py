@@ -231,3 +231,123 @@ def test_generic_openai_unchanged_by_max_num_seqs() -> None:
     )
     assert "--max-num-seqs" not in spec.command
 
+
+# ---------------------------------------------------------------------------
+# M6-B5-A scheduling_policy
+# ---------------------------------------------------------------------------
+
+
+def test_vllm_scheduling_policy_deployment_priority_wins_runtime_fcfs() -> None:
+    spec = VLLMAdapter().build_create_spec(
+        RuntimeBuildInput(
+            runtime_image="vllm/vllm-openai:latest",
+            served_model_name="m",
+            model_path="/srv/models/x",
+            runtime_config={"scheduling_policy": "fcfs"},
+            deployment_config={"scheduling_policy": "priority"},
+        )
+    )
+    assert _flag_value(spec.command, "--scheduling-policy") == "priority"
+    assert spec.command.count("--scheduling-policy") == 1
+
+
+def test_vllm_scheduling_policy_deployment_fcfs_wins_runtime_priority() -> None:
+    spec = VLLMAdapter().build_create_spec(
+        RuntimeBuildInput(
+            runtime_image="vllm/vllm-openai:latest",
+            served_model_name="m",
+            model_path="/srv/models/x",
+            runtime_config={"scheduling_policy": "priority"},
+            deployment_config={"scheduling_policy": "fcfs"},
+        )
+    )
+    assert _flag_value(spec.command, "--scheduling-policy") == "fcfs"
+    assert spec.command.count("--scheduling-policy") == 1
+
+
+def test_vllm_scheduling_policy_runtime_fallback() -> None:
+    spec = VLLMAdapter().build_create_spec(
+        RuntimeBuildInput(
+            runtime_image="vllm/vllm-openai:latest",
+            served_model_name="m",
+            model_path="/srv/models/x",
+            runtime_config={"scheduling_policy": "priority"},
+            deployment_config={},
+        )
+    )
+    assert _flag_value(spec.command, "--scheduling-policy") == "priority"
+
+
+def test_vllm_scheduling_policy_unset_omitted() -> None:
+    spec = VLLMAdapter().build_create_spec(
+        RuntimeBuildInput(
+            runtime_image="vllm/vllm-openai:latest",
+            served_model_name="m",
+            model_path="/srv/models/x",
+        )
+    )
+    assert "--scheduling-policy" not in spec.command
+
+
+def test_vllm_scheduling_policy_explicit_null_override_no_fallback() -> None:
+    with pytest.raises(RuntimeAdapterError, match="scheduling_policy"):
+        VLLMAdapter().build_create_spec(
+            RuntimeBuildInput(
+                runtime_image="vllm/vllm-openai:latest",
+                served_model_name="m",
+                model_path="/srv/models/x",
+                runtime_config={"scheduling_policy": "priority"},
+                deployment_config={"scheduling_policy": None},
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        ("fcfs", "fcfs"),
+        ("FCFS", "fcfs"),
+        (" priority ", "priority"),
+        ("PRIORITY", "priority"),
+    ],
+)
+def test_vllm_scheduling_policy_case_whitespace_normalized(value, expected) -> None:
+    spec = VLLMAdapter().build_create_spec(
+        RuntimeBuildInput(
+            runtime_image="vllm/vllm-openai:latest",
+            served_model_name="m",
+            model_path="/srv/models/x",
+            deployment_config={"scheduling_policy": value},
+        )
+    )
+    assert _flag_value(spec.command, "--scheduling-policy") == expected
+    assert spec.command.count("--scheduling-policy") == 1
+
+
+@pytest.mark.parametrize(
+    "value",
+    [None, "", "fifo", "high", "0", 0, 1, True, False, [], {}],
+)
+def test_vllm_scheduling_policy_invalid_rejected(value) -> None:
+    with pytest.raises(RuntimeAdapterError, match="scheduling_policy"):
+        VLLMAdapter().build_create_spec(
+            RuntimeBuildInput(
+                runtime_image="vllm/vllm-openai:latest",
+                served_model_name="m",
+                model_path="/srv/models/x",
+                deployment_config={"scheduling_policy": value},
+            )
+        )
+
+
+def test_generic_openai_unchanged_by_scheduling_policy() -> None:
+    spec = GenericOpenAIAdapter().build_create_spec(
+        RuntimeBuildInput(
+            runtime_image="example/openai-runtime:tag",
+            served_model_name="embed-model",
+            model_path="/srv/ai-models/embed/rev",
+            deployment_config={"scheduling_policy": "priority"},
+        )
+    )
+    assert "--scheduling-policy" not in spec.command
+

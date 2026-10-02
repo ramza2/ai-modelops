@@ -24,6 +24,7 @@ CAPACITY_FIELDS = (
     "gpu_memory_utilization",
     "dtype",
     "quantization",
+    "scheduling_policy",
 )
 
 
