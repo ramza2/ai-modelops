@@ -665,12 +665,18 @@ ${DATABASE_URL}
      `PolicyStore` snapshot (periodic DB poll, LKG). Distribution
      only for token/priority fields — no priority forwarding, no
      token counting.
-   - **M6-B2 (current):** Process-local per-client concurrency
+   - **M6-B2 (done):** Process-local per-client concurrency
      admission (`ClientConcurrencyTracker`) enforcing only
      `max_concurrent_requests`. 429 `CLIENT_CONCURRENCY_LIMIT`
      before M5 Alias/Deployment inflight; fail-open when PolicyStore
      has no snapshot; LKG snapshot still enforced. No Redis /
-     distributed semaphore; no input/output/priority enforcement.
+     distributed semaphore.
+   - **M6-B3 (current):** Chat `max_output_tokens` enforcement —
+     explicit effective cap (`max_completion_tokens` >
+     `max_tokens`) above policy → 422 `CLIENT_OUTPUT_TOKEN_LIMIT`
+     (no silent clamp); absent → inject `max_completion_tokens` on
+     upstream copy; runs before B2/M5; Embeddings unaffected.
+     Still registry-only: `max_input_tokens`, `priority`.
 
 한 번에 모든 기능을 스캐폴딩만 하는 것보다 각 milestone을 end-to-end로 동작하게 완성하는 것을 우선한다.
 

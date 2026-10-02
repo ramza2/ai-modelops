@@ -2,6 +2,9 @@
 
 M6-B2: process-local per-client concurrency admission runs *before* M5
 Alias/Deployment InflightTracker so 429 rejects never touch route counts.
+
+M6-B3: Chat ``max_output_tokens`` policy runs *before* B2/M5 admission so
+422 rejects never consume client or route concurrency slots.
 """
 
 from __future__ import annotations
@@ -19,6 +22,11 @@ from fastapi import APIRouter, Request, Response
 from app.core.config import get_settings
 from app.core.enums import ApiType
 from app.core.errors import ErrorCode, GatewayError
+from app.policy.output_tokens import (
+    OutputTokenFieldInvalid,
+    OutputTokenPolicyExceeded,
+    apply_output_token_policy,
+)
 from app.policy.snapshot import ClientPolicyEntry
 from app.proxy.stats import ProxyCompletionStats
 from app.proxy.upstream import proxy_json_post, proxy_sse_post
@@ -91,6 +99,102 @@ def _lookup_client_policy(request: Request, client_key: str) -> ClientPolicyEntr
     return snap.get(client_key)
 
 
+def _schedule_rejection_log(
+    request: Request,
+    *,
+    client_key: str,
+    api_path: str,
+    is_streaming: bool,
+    http_status: int,
+    error_code: str,
+    request_bytes: int | None,
+    param: str | None = None,
+) -> None:
+    """Best-effort pre-admission rejection telemetry (entry=None)."""
+    started = finished = dt.datetime.now(tz=dt.UTC)
+    try:
+        _invocation_logs(request).schedule(
+            build_invocation_record(
+                request_id=_request_id(request),
+                started_at=started,
+                finished_at=finished,
+                entry=None,
+                api_path=api_path,
+                http_status=http_status,
+                is_streaming=is_streaming,
+                error_code=error_code,
+                raw_client_key=client_key,
+                request_bytes=request_bytes,
+                response_bytes=None,
+                input_tokens=None,
+                output_tokens=None,
+                total_tokens=None,
+            )
+        )
+    except Exception:  # noqa: BLE001 - telemetry must not flip reject → 500
+        logger.warning(
+            "Failed to schedule %s invocation log param=%s",
+            error_code,
+            param,
+            exc_info=True,
+        )
+
+
+def _apply_chat_output_token_policy(
+    request: Request,
+    *,
+    body: dict[str, Any],
+    client_key: str,
+    is_streaming: bool,
+    request_bytes: int | None,
+) -> dict[str, Any]:
+    """Apply max_output_tokens before B2/M5. Returns upstream body copy."""
+    policy = _lookup_client_policy(request, client_key)
+    limit = policy.max_output_tokens if policy is not None else None
+    try:
+        result = apply_output_token_policy(body, limit)
+    except OutputTokenPolicyExceeded as exc:
+        _schedule_rejection_log(
+            request,
+            client_key=client_key,
+            api_path="/v1/chat/completions",
+            is_streaming=is_streaming,
+            http_status=422,
+            error_code=ErrorCode.CLIENT_OUTPUT_TOKEN_LIMIT,
+            request_bytes=request_bytes,
+            param=exc.field,
+        )
+        raise GatewayError(
+            "Requested output token limit exceeds client policy.",
+            code=ErrorCode.CLIENT_OUTPUT_TOKEN_LIMIT,
+            http_status=422,
+            param=exc.field,
+            details={
+                "field": exc.field,
+                "requested": exc.requested,
+                "limit": exc.limit,
+            },
+        ) from exc
+    except OutputTokenFieldInvalid as exc:
+        _schedule_rejection_log(
+            request,
+            client_key=client_key,
+            api_path="/v1/chat/completions",
+            is_streaming=is_streaming,
+            http_status=422,
+            error_code=ErrorCode.VALIDATION_ERROR,
+            request_bytes=request_bytes,
+            param=exc.field,
+        )
+        raise GatewayError(
+            f"Request body field '{exc.field}' must be a non-negative integer.",
+            code=ErrorCode.VALIDATION_ERROR,
+            http_status=422,
+            param=exc.field,
+        ) from exc
+    return result.body
+
+
 @router.get("/v1/models")
 async def list_models(request: Request) -> dict[str, Any]:
     """List enabled aliases (MVP keeps MAINTENANCE aliases visible)."""
@@ -125,6 +229,14 @@ async def chat_completions(request: Request) -> Response:
             param="model",
         )
     client_key = _client_key(request)
+    # B3 output policy before B2/M5 so rejects never consume concurrency.
+    upstream_body = _apply_chat_output_token_policy(
+        request,
+        body=body,
+        client_key=client_key,
+        is_streaming=streaming,
+        request_bytes=request_bytes,
+    )
     client_admission = await _admit_client_concurrency(
         request,
         client_key=client_key,
@@ -140,7 +252,6 @@ async def chat_completions(request: Request) -> Response:
         await _release_client_only(request, client_admission)
         raise
     admissions = _RequestAdmissions(route=route_admission, client=client_admission)
-    upstream_body = dict(body)
     upstream_body["model"] = entry.upstream_model_name
     if streaming:
         return await _proxy_streaming_chat(
@@ -222,32 +333,15 @@ async def _admit_client_concurrency(
     try:
         return await tracker.admit(client_key, limit)
     except ClientConcurrencyLimitExceeded as exc:
-        # Best-effort rejection telemetry; never invent a RouteEntry.
-        started = finished = dt.datetime.now(tz=dt.UTC)
-        try:
-            _invocation_logs(request).schedule(
-                build_invocation_record(
-                    request_id=_request_id(request),
-                    started_at=started,
-                    finished_at=finished,
-                    entry=None,
-                    api_path=api_path,
-                    http_status=429,
-                    is_streaming=is_streaming,
-                    error_code=ErrorCode.CLIENT_CONCURRENCY_LIMIT,
-                    raw_client_key=client_key,
-                    request_bytes=request_bytes,
-                    response_bytes=None,
-                    input_tokens=None,
-                    output_tokens=None,
-                    total_tokens=None,
-                )
-            )
-        except Exception:  # noqa: BLE001 - telemetry must not flip 429 → 500
-            logger.warning(
-                "Failed to schedule CLIENT_CONCURRENCY_LIMIT invocation log",
-                exc_info=True,
-            )
+        _schedule_rejection_log(
+            request,
+            client_key=client_key,
+            api_path=api_path,
+            is_streaming=is_streaming,
+            http_status=429,
+            error_code=ErrorCode.CLIENT_CONCURRENCY_LIMIT,
+            request_bytes=request_bytes,
+        )
         raise GatewayError(
             "Client concurrency limit exceeded.",
             code=ErrorCode.CLIENT_CONCURRENCY_LIMIT,

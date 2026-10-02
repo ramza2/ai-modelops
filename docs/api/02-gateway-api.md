@@ -348,6 +348,7 @@ Retry-After: 10
 |---:|---|---|
 | 400 | MODEL_API_TYPE_MISMATCH | Chat/Embedding 타입 불일치 |
 | 404 | MODEL_ALIAS_NOT_FOUND | Alias 없음 |
+| 422 | CLIENT_OUTPUT_TOKEN_LIMIT | Chat explicit output cap exceeds client `max_output_tokens` |
 | 429 | CLIENT_CONCURRENCY_LIMIT | Client `max_concurrent_requests` 초과 (process-local) |
 | 503 | MODEL_ALIAS_DISABLED | Alias 비활성 |
 | 503 | MODEL_MAINTENANCE | MAINTENANCE |
@@ -654,11 +655,67 @@ Semantics:
 - `max_concurrent_requests = null` / no policy → unlimited (no tracker handle).
 - ClientConcurrencyTracker is separate from M5 `InflightTracker`.
 
-Still **not** enforced in B2:
+Still **not** enforced in B2 (see B3 for output tokens):
 
 - `max_input_tokens` (no tokenizer / byte estimation / truncation)
-- `max_output_tokens` (no `max_tokens` / `max_completion_tokens` rewrite)
 - `priority` (not forwarded to vLLM; no `--scheduling-policy priority`)
+
+### M6-B3 enforcement (Chat `max_output_tokens`)
+
+B3 enforces only `max_output_tokens` for `POST /v1/chat/completions`
+(stream and non-stream). Embeddings are unaffected.
+
+Effective field precedence (vLLM Chat protocol):
+
+```text
+max_completion_tokens (non-null) > max_tokens (non-null) > absent
+```
+
+| Case | Result |
+|---|---|
+| no policy / `max_output_tokens` null | forward unchanged |
+| PolicyStore snapshot absent | fail-open (unchanged) |
+| LKG snapshot with limit | enforce LKG |
+| explicit effective cap ≤ policy | allow; fields unchanged |
+| explicit effective cap > policy | HTTP 422 `CLIENT_OUTPUT_TOKEN_LIMIT` (no silent clamp) |
+| neither field present | inject `max_completion_tokens = policy` into **upstream copy only** |
+
+```json
+{
+  "error": {
+    "message": "Requested output token limit exceeds client policy.",
+    "type": "modelops_error",
+    "param": "max_completion_tokens",
+    "code": "CLIENT_OUTPUT_TOKEN_LIMIT"
+  }
+}
+```
+
+`param` is `max_tokens` when the legacy effective field is the violator.
+
+Ordering:
+
+```text
+parse → model validate → output-token policy → B2 concurrency → M5 admit → proxy
+```
+
+422 output-policy rejects do **not** consume ClientConcurrencyTracker or M5
+Alias/Deployment inflight. `request_bytes` remains the original client body
+size even when Gateway injects `max_completion_tokens`.
+
+Under an active output policy, malformed explicit caps (`true`, `"2048"`,
+`1.5`, negatives) are rejected locally as `VALIDATION_ERROR` with the
+offending field as `param`. Clients without an output policy keep existing
+passthrough / upstream-validation behavior.
+
+Current policy status:
+
+```text
+max_concurrent_requests → enforced process-locally (B2)
+max_output_tokens       → enforced for Chat (B3)
+max_input_tokens        → registry only
+priority                → registry only
+```
 
 ---
 
