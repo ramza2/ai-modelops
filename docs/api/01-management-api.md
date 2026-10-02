@@ -878,6 +878,7 @@ error_code
 error_message
 source                    # VLLM_PROMETHEUS
 runtime_instance          # {container_id, started_at, restart_count} or null
+runtime_config            # M6-A4 sanitized argv observation or null
 ```
 
 Does **not** trigger a live Node Agent scrape.
@@ -886,6 +887,10 @@ Unknown `deployment_id` → 404.
 
 `runtime_instance` is absent/null on pre-A3 rows. Complete identity for A3 deltas is
 `container_id` + `started_at` (`restart_count` is diagnostic only).
+
+`runtime_config` is absent/null on pre-A4 rows. When present it is **observed_explicit**
+allowlisted capacity argv only — not full effective vLLM configuration. Absent CLI
+flags are not filled with runtime defaults.
 
 ### GET /observability/runtime/deployments/{deployment_id}/history
 
@@ -903,7 +908,8 @@ limit  default 500; bounded 1..1000
 Ordering: `oldest_to_newest` (chart-friendly). When `limit` truncates, the newest
 samples within the window are kept.
 
-DB-only. Does not scrape Node Agent. Also exposes sanitized `runtime_instance` when present.
+DB-only. Does not scrape Node Agent. Also exposes sanitized `runtime_instance` and
+`runtime_config` when present.
 
 ### GET /observability/runtime/deployments/{deployment_id}/analytics
 
@@ -932,10 +938,61 @@ Semantics:
 - Safety cap: at most 25,000 snapshots; larger windows fail with validation error.
 - Old A2 rows without `runtime_instance` still contribute gauges; cumulative deltas excluded.
 
+### GET /observability/runtime/deployments/{deployment_id}/capacity-profile
+
+M6-A4 Capacity Profile — requested vs observed_explicit + A1/A3 composition (DB-only).
+
+```text
+GET /api/v1/observability/runtime/deployments/{deployment_id}/capacity-profile?hours=24
+```
+
+Query:
+
+```text
+hours  default 24; bounded 1..168
+```
+
+Returns:
+
+- Deployment + model metadata (no artifact paths / credentials)
+- GPU assignment list (per-GPU VRAM; never pooled as one device)
+- `configuration.settings` for allowlisted capacity fields:
+  `max_model_len`, `max_num_seqs`, `tensor_parallel_size`,
+  `gpu_memory_utilization`, `dtype`, `quantization`
+  with `requested` / `requested_source` / `observed_explicit` / `comparison_status`
+- Latest sanitized `runtime_config` + `runtime_observation_sampled_at` when known
+- A1 invocation demand for this Deployment (same percentile definitions)
+- A3 `runtime_analytics` for the same `hours` window
+
+Comparison statuses:
+
+```text
+MATCH | MISMATCH | REQUESTED_NOT_OBSERVED | OBSERVED_ONLY
+| UNSET | UNKNOWN | INVALID_REQUESTED | INVALID_OBSERVED
+```
+
+Important semantics:
+
+- `requested` follows current Worker/VLLM adapter precedence (not a cleaner invented order).
+- `observed_explicit` ≠ full effective vLLM config; absent flag ≠ known runtime default.
+- Pre-A4 snapshot (no `runtime_config`) → `UNKNOWN`, not `REQUESTED_NOT_OBSERVED`.
+- `runtime_config.entrypoint == "UNRECOGNIZED"` is diagnostic only and does **not**
+  prove flag absence → comparison `UNKNOWN` (same as no observation).
+- Only `entrypoint == "VLLM"` may yield `REQUESTED_NOT_OBSERVED` for missing flags.
+- Requested `max_num_seqs` is observability-only today — Worker adapter does not emit
+  `--max-num-seqs`, so expect `REQUESTED_NOT_OBSERVED` when requested but argv lacks it.
+- `max_model_len` is prompt+output context capacity; do not divide A1 input_tokens by it.
+- `max_num_seqs` is scheduler sequence capacity, not guaranteed simultaneous users.
+- `gpu_memory_utilization` is per-runtime memory fraction.
+- No auto tuning / recommendations in this API.
+- IMPORTED: metadata + invocations OK; observed argv = null / `UNKNOWN`.
+- Does **not** scrape Node Agent.
+
 Notes:
 
 - M6-A1 = invocation-side telemetry; M6-A2 = cumulative runtime snapshots;
-  M6-A3 = recent-window delta analytics.
+  M6-A3 = recent-window delta analytics; M6-A4 = capacity profile
+  (requested vs observed_explicit + A1/A3 composition).
 - IMPORTED Deployment runtime metrics are deferred.
 - No Prometheus server or Grafana is introduced.
 

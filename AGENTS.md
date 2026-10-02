@@ -651,6 +651,10 @@ ${DATABASE_URL}
      `GET /api/v1/observability/runtime/deployments/{id}/analytics`
      (classic histogram P50/P95 bucket estimates; reset/unknown-identity
      intervals excluded; DB-only).
+   - **M6-A4 (done):** Capacity Profile — requested ModelOps config vs
+     observed_explicit Managed vLLM argv + A1 invocation demand + A3
+     analytics; `GET .../capacity-profile` (DB-only, no auto tuning;
+     no runtime defaults synthesized; `--max-num-seqs` not emitted yet).
 
 한 번에 모든 기능을 스캐폴딩만 하는 것보다 각 milestone을 end-to-end로 동작하게 완성하는 것을 우선한다.
 

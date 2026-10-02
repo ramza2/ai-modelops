@@ -149,12 +149,18 @@ Node Agent는 Docker Container보다는 `systemd` Host Service를 우선 권장�
 
 Worker periodic collector (M6-A2) calls Node Agent for Managed+RUNNING+VLLM deployments
 and persists `deployment_runtime_metric_snapshot` (including sanitized
-`runtime_instance`). Backend observability GETs are DB-only.
+`runtime_instance` and, M6-A4, sanitized `runtime_config` from allowlisted argv).
+Backend observability GETs are DB-only.
 M6-A3 computes recent-window gauge/token/histogram analytics on read from those
 snapshots using runtime instance identity to exclude reset boundaries.
+M6-A4 Capacity Profile composes requested ModelOps config vs observed_explicit
+Managed container argv, plus A1 invocation demand and A3 analytics
+(`GET .../capacity-profile`). Observation-only — no auto tuning, no runtime
+defaults synthesized for absent flags, no live Node Agent scrape from the profile API.
 No Prometheus/Grafana server is introduced. A2 histogram scrapes are cumulative;
 A3 P50/P95 are classic bucket estimates over valid same-instance deltas only.
-IMPORTED runtime metrics are deferred.
+IMPORTED runtime metrics / argv observation are deferred (profile returns
+`UNKNOWN` for observed_explicit).
 
 ### 3.5 AI Gateway
 

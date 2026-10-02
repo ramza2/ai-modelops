@@ -532,6 +532,44 @@ instance remained stable, `runtime_instance` is still included when known.
 Incomplete identity (missing `started_at`) may still yield AVAILABLE/PARTIAL
 metrics, but A3 excludes cumulative deltas across incomplete pairs.
 
+### Observed explicit runtime config (M6-A4)
+
+After the same before→scrape→after stable-instance proof succeeds, Node Agent
+also returns sanitized allowlisted argv capacity flags:
+
+```json
+{
+  "runtime_config": {
+    "source": "CONTAINER_ARGV",
+    "entrypoint": "VLLM",
+    "values": {
+      "max_model_len": 8192,
+      "max_num_seqs": null,
+      "tensor_parallel_size": 2,
+      "gpu_memory_utilization": 0.8,
+      "dtype": "auto",
+      "quantization": "AWQ"
+    },
+    "explicit_fields": ["max_model_len", "tensor_parallel_size", "gpu_memory_utilization", "dtype", "quantization"],
+    "invalid_fields": []
+  }
+}
+```
+
+Rules:
+
+- Recognizes ModelOps entrypoint `python -m vllm.entrypoints.openai.api_server`
+  and modern `vllm serve ...`. Unrecognized → `entrypoint=UNRECOGNIZED`, empty values.
+- Supports `--flag value` and `--flag=value` for the allowlist only (optional `-tp`).
+- Last duplicate flag wins. Malformed values: field in `explicit_fields` +
+  `invalid_fields`, normalized value null — never raw malformed argv.
+- Does **not** return raw command, model path, or environment.
+- Absent flags stay null — no vLLM runtime defaults are synthesized.
+- Unrecognized argv must not turn metrics UNAVAILABLE.
+- On `RUNTIME_INSTANCE_CHANGED_DURING_SCRAPE`, omit `runtime_config` (mixed instance).
+- On stable instance + metrics scrape failure (`METRICS_*`), still return
+  `runtime_instance` + `runtime_config` when known.
+
 ---
 
 ## 16. Inference Probe
