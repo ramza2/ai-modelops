@@ -180,16 +180,21 @@ whose rendering inputs fit the supported `/tokenize` subset; unproven
 rendering-sensitive fields fail closed (`CLIENT_INPUT_TOKEN_CHECK_UNAVAILABLE`).
 Non-VLLM with an active input policy also fails closed. No local tokenizer /
 character estimation / truncation. One Chat request pins a single
-`ClientPolicyEntry` for B3/B2/B4. Embeddings input policy deferred.
+`ClientPolicyEntry` for B3/B2/B4/B5-B. Embeddings input policy deferred.
 M6-B5-A: Managed vLLM `--scheduling-policy` wiring + Capacity Profile
 requested/observed observability (`fcfs` | `priority`). Deployment config >
 ModelVersion runtime_config > UNSET. Explicit Deployment null is invalid (no
 fallback). Unset omits the flag — absent observed argv is never synthesized as
-`fcfs`. Existing containers are not recreated on config change. Gateway does
-**not** forward `ClientRuntimePolicy.priority` yet (B5-B). Future B5-B may trust
-priority capability only from observed CONTAINER_ARGV / VLLM /
-`scheduling_policy == priority` evidence — not from requested config alone.
-Priority remains registry-only on the Gateway path.
+`fcfs`. Existing containers are not recreated on config change.
+M6-B5-B: Gateway Chat forwards pinned `ClientRuntimePolicy.priority` (exact
+signed integer; lower = higher priority) only when the bound RouteEntry has
+trusted current-container evidence from RoutingSnapshot
+(`MANAGED`+`RUNNING`+container_id match + snapshot after `last_started_at` +
+CONTAINER_ARGV/`VLLM`/explicit `scheduling_policy=priority`). Caller JSON
+`priority` and `X-Vllm-Priority` are never forwarded as-is. Null/0 = strip
+only (no injection, no scheduler requirement). Non-zero without trust or
+during RoutingStore LKG → 503 `CLIENT_PRIORITY_SCHEDULER_UNAVAILABLE`.
+Requested config alone is never sufficient. Embeddings priority deferred.
 No Prometheus/Grafana server is introduced. A2 histogram scrapes are cumulative;
 A3 P50/P95 are classic bucket estimates over valid same-instance deltas only.
 IMPORTED runtime metrics / argv observation are deferred (profile returns

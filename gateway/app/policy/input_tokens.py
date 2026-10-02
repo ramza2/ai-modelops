@@ -78,6 +78,7 @@ GENERATION_ONLY_FIELDS: frozenset[str] = frozenset(
         "stop_token_ids",
         "logit_bias",
         "user",
+        "priority",
     }
 )
 

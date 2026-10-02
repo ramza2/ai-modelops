@@ -352,6 +352,7 @@ Retry-After: 10
 | 422 | CLIENT_OUTPUT_TOKEN_LIMIT | Chat explicit output cap exceeds client `max_output_tokens` |
 | 429 | CLIENT_CONCURRENCY_LIMIT | Client `max_concurrent_requests` 초과 (process-local) |
 | 503 | CLIENT_INPUT_TOKEN_CHECK_UNAVAILABLE | Active input policy but trusted VLLM tokenize unavailable |
+| 503 | CLIENT_PRIORITY_SCHEDULER_UNAVAILABLE | Non-zero Chat client priority but bound route lacks trusted priority scheduler evidence (or RoutingStore LKG) |
 | 503 | MODEL_ALIAS_DISABLED | Alias 비활성 |
 | 503 | MODEL_MAINTENANCE | MAINTENANCE |
 | 503 | ENDPOINT_DRAINING | DRAINING (신규 요청 차단) |
@@ -508,7 +509,10 @@ Query (optional):
   "drain_complete": false,
   "observed_deployment_id": "uuid",
   "observed_deployment_inflight_requests": 1,
-  "observed_deployment_idle": false
+  "observed_deployment_idle": false,
+  "priority_scheduler_trusted": true,
+  "priority_scheduler_evidence_reason": "TRUSTED_PRIORITY",
+  "priority_scheduler_evidence_sampled_at": "2026-10-02T08:00:00+00:00"
 }
 ```
 
@@ -523,6 +527,12 @@ Query (optional):
 | `observed_deployment_id` | Query `deployment_id`, else ACTIVE Deployment |
 | `observed_deployment_inflight_requests` | Global process-local count for that Deployment |
 | `observed_deployment_idle` | `observed_deployment_inflight_requests == 0` (diagnostic only) |
+| `priority_scheduler_trusted` | Snapshot-derived: bound ACTIVE Deployment has trusted current-container priority scheduler evidence |
+| `priority_scheduler_evidence_reason` | Narrow internal reason (`TRUSTED_PRIORITY`, `NO_RUNTIME_OBSERVATION`, …); no argv/raw config |
+| `priority_scheduler_evidence_sampled_at` | Sampled_at of the latest runtime observation used for evidence (or null) |
+
+This endpoint remains DB-free per request (in-memory RoutingSnapshot only).
+It does **not** expose `container_id`, raw `runtime_config`, or argv.
 
 Cold Switch Worker가 Drain 완료와 Route 적용 여부를 검증하는 핵심 API다.
 
@@ -657,9 +667,9 @@ Semantics:
 - `max_concurrent_requests = null` / no policy → unlimited (no tracker handle).
 - ClientConcurrencyTracker is separate from M5 `InflightTracker`.
 
-Still **not** enforced in B2 (see B3/B4 for token policies):
+Still **not** enforced in B2 (see B3/B4 for token policies; B5-B for priority):
 
-- `priority` (not forwarded to vLLM; no `--scheduling-policy priority`)
+- `priority` (Chat forwarding is B5-B; not part of B2 concurrency)
 
 ### M6-B3 enforcement (Chat `max_output_tokens`)
 
@@ -715,7 +725,7 @@ Current policy status:
 max_concurrent_requests → enforced process-locally (B2)
 max_output_tokens       → enforced for Chat (B3)
 max_input_tokens        → Chat enforced via trusted bound VLLM /tokenize (B4)
-priority                → registry only
+priority                → Chat forwarded only with trusted scheduler evidence (B5-B)
 ```
 
 ### M6-B4 enforcement (Chat `max_input_tokens` via trusted VLLM `/tokenize`)
@@ -740,16 +750,18 @@ Ordering:
 
 ```text
 B3 output policy
+→ strip caller Chat priority (upstream copy)
 → B2 client concurrency
 → M5 Alias admit + resolve + Deployment bind
 → B4 /tokenize on bound RouteEntry
+→ B5-B trusted priority check/injection
 → /v1/chat/completions on the SAME RouteEntry
 ```
 
 One Chat request pins a single `ClientPolicyEntry` immediately after
-`client_key` resolution and passes that immutable entry through B3, B2, and
-B4. Mid-request `PolicyStore` snapshot swaps must not remix policy versions
-for the in-flight request.
+`client_key` resolution and passes that immutable entry through B3, B2, B4,
+and B5-B. Mid-request `PolicyStore` snapshot swaps must not remix policy
+versions for the in-flight request.
 
 Semantics:
 
@@ -799,6 +811,69 @@ Token IDs are never logged or stored in InvocationLog token columns (those
 remain upstream inference usage only).
 
 Embeddings: `max_input_tokens` is **not** enforced in B4.
+
+### M6-B5-B enforcement (Chat trusted priority forwarding)
+
+B5-B forwards pinned `ClientRuntimePolicy.priority` to Chat inference
+**only** when the bound Deployment is proven (in RoutingSnapshot) to be the
+current Managed vLLM container running with explicit priority scheduling.
+
+Semantics (ModelOps): lower integer = higher priority. Gateway preserves the
+exact signed policy integer — no invert/offset/bucket/clamp.
+
+Caller ownership:
+
+```text
+caller Chat body priority → never forwarded as-is (stripped from upstream copy)
+incoming X-Vllm-Priority / x-vllm-priority → never forwarded
+```
+
+Original parsed client body is not mutated (B4 tokenization / `request_bytes`
+still see the original).
+
+| Policy priority | Bound evidence | Result |
+|---|---|---|
+| null | any | strip caller priority; no injection; proceed |
+| 0 | any (incl. Generic OpenAI / untrusted) | strip only; no injection; proceed (neutral) |
+| non-zero | trusted + RoutingStore fresh | inject exact policy int into upstream Chat body |
+| non-zero | untrusted / no observation / Generic / fcfs / requested-only | HTTP 503 `CLIENT_PRIORITY_SCHEDULER_UNAVAILABLE` |
+| non-zero | RoutingStore `using_last_known_good` | HTTP 503 (even if LKG RouteEntry was previously trusted) |
+
+PolicyStore LKG with a pinned non-zero priority **does** forward when the
+RoutingStore snapshot is fresh and trusted.
+
+Trusted evidence (snapshot load time, no per-request SQL):
+
+```text
+Deployment.deployment_type == MANAGED
+ModelVersion.runtime_type == VLLM
+Deployment.runtime_status == RUNNING
+container_id known + matches runtime_instance.container_id
+snapshot.sampled_at >= Deployment.last_started_at
+runtime_config.source == CONTAINER_ARGV
+runtime_config.entrypoint == VLLM
+scheduling_policy explicit, not invalid, value == "priority"
+```
+
+Requested DB/`deployment_config_json` alone is never sufficient.
+`availability == UNAVAILABLE` does not itself revoke argv evidence.
+Embeddings: priority is **not** forwarded in B5-B.
+
+```json
+{
+  "error": {
+    "message": "Priority scheduling is unavailable for this route.",
+    "type": "modelops_error",
+    "param": "priority",
+    "code": "CLIENT_PRIORITY_SCHEDULER_UNAVAILABLE"
+  }
+}
+```
+
+503 rejects after B2/M5/B4 must release all admissions (`_release_all()`).
+Best-effort InvocationLog uses `http_status=503` and
+`error_code=CLIENT_PRIORITY_SCHEDULER_UNAVAILABLE` (no caller priority value;
+token columns null).
 
 ---
 
