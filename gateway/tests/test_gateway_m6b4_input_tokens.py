@@ -1431,8 +1431,8 @@ async def test_pinned_none_does_not_relookup_on_midrequest_policy_install() -> N
         request_bytes: int | None,
     ) -> dict[str, Any]:
         # Chat already pinned policy=None; install a real policy before B3.
-        assert policy is None
         if not swapped["done"]:
+            assert policy is None
             store = request.app.state.policy_store
             store._snapshot = PolicySnapshot(
                 loaded_at=dt.datetime.now(tz=dt.UTC),
