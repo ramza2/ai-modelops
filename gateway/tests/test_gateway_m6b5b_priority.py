@@ -675,14 +675,15 @@ async def test_snapshot_stale_then_fresh_after_restart_boundary() -> None:
     )
     t2 = dt.datetime.now(tz=dt.UTC)
     t1 = t2 - dt.timedelta(minutes=10)
+    ctr = f"ctr-restart-{uuid.uuid4().hex[:8]}"
     seeded = await _seed_alias_route(
-        session_factory, last_started_at=t2, container_id="ctr-restart"
+        session_factory, last_started_at=t2, container_id=ctr
     )
     await _insert_runtime_snapshot(
         session_factory,
         deployment_id=seeded["deployment_id"],
         sampled_at=t1,
-        metrics_json=_priority_metrics(container_id="ctr-restart"),
+        metrics_json=_priority_metrics(container_id=ctr),
     )
     snap = await load_routing_snapshot(session_factory)
     entry = snap.get(seeded["alias"])
@@ -697,7 +698,7 @@ async def test_snapshot_stale_then_fresh_after_restart_boundary() -> None:
         session_factory,
         deployment_id=seeded["deployment_id"],
         sampled_at=t3,
-        metrics_json=_priority_metrics(container_id="ctr-restart"),
+        metrics_json=_priority_metrics(container_id=ctr),
     )
     snap2 = await load_routing_snapshot(session_factory)
     entry2 = snap2.get(seeded["alias"])
@@ -1312,20 +1313,22 @@ async def test_hot_deployment_evidence_isolation() -> None:
     alias = f"hot-alias-{uuid.uuid4().hex[:6]}"
     dep_a = uuid.uuid4()
     dep_b = uuid.uuid4()
+    ctr_a = f"ctr-a-{uuid.uuid4().hex[:8]}"
+    ctr_b = f"ctr-b-{uuid.uuid4().hex[:8]}"
     a = await _seed_alias_route(
-        session_factory, alias=alias, deployment_id=dep_a, container_id="ctr-a"
+        session_factory, alias=alias, deployment_id=dep_a, container_id=ctr_a
     )
     b = await _seed_alias_route(
         session_factory,
         alias=f"other-{uuid.uuid4().hex[:6]}",
         deployment_id=dep_b,
-        container_id="ctr-b",
+        container_id=ctr_b,
     )
     await _insert_runtime_snapshot(
         session_factory,
         deployment_id=str(dep_a),
         sampled_at=a["last_started_at"] + dt.timedelta(minutes=1),
-        metrics_json=_priority_metrics(container_id="ctr-a"),
+        metrics_json=_priority_metrics(container_id=ctr_a),
     )
     # B has no priority evidence.
     ctx = await _build_gw(
