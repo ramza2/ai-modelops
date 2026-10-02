@@ -169,7 +169,11 @@ M6-B2: Gateway enforces only `max_concurrent_requests` via process-local
 `ClientConcurrencyTracker` (separate from M5 `InflightTracker`). Admission runs
 before Alias/Deployment inflight so 429 rejects never touch route counters.
 `PolicyStore.snapshot is None` → fail-open; LKG snapshot with a limit → enforce LKG.
-Still not enforced: input/output token limits, priority forwarding.
+M6-B3: Chat `max_output_tokens` — explicit effective cap
+(`max_completion_tokens` > `max_tokens`) above policy → 422
+`CLIENT_OUTPUT_TOKEN_LIMIT` (no silent clamp); absent cap → inject
+`max_completion_tokens` on the upstream body copy; Embeddings unaffected.
+Still not enforced: `max_input_tokens`, priority forwarding.
 No Prometheus/Grafana server is introduced. A2 histogram scrapes are cumulative;
 A3 P50/P95 are classic bucket estimates over valid same-instance deltas only.
 IMPORTED runtime metrics / argv observation are deferred (profile returns
