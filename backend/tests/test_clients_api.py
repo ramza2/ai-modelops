@@ -213,11 +213,11 @@ async def test_create_client_trims_before_length_validation(client) -> None:
     # 120-char key with leading/trailing spaces would exceed Field(max_length=120)
     # if strip ran after Pydantic length validation.
     uniq = uuid.uuid4().hex  # 32 hex chars
-    # Mixed-case unique prefix + padding to exactly 120 chars.
-    core_key = ("Ab" + uniq + ("xY" * 43) + "z")[:120]
+    # Mixed-case unique prefix + padding to exactly 120 / 255 chars.
+    core_key = ("Ab" + uniq + ("xY" * 100))[:120]
     assert len(core_key) == 120
     assert core_key != core_key.lower() and core_key != core_key.upper()
-    core_name = (f"Nm{uniq}" + ("Cd" * 110))[:255]
+    core_name = ("Nm" + uniq + ("Cd" * 200))[:255]
     assert len(core_name) == 255
 
     create = await c.post(
