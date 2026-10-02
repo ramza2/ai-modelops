@@ -8,6 +8,7 @@ from app.runtime_adapters.base import (
     RuntimeCreateSpec,
     VolumeSpec,
     _merged_int,
+    _merged_positive_int,
     _require_model_path,
     _require_non_empty,
     resolve_health_path,
@@ -41,6 +42,7 @@ class VLLMAdapter:
         dtype = inp.dtype or cfg.get("dtype")
         quantization = inp.quantization or cfg.get("quantization")
         gpu_util = cfg.get("gpu_memory_utilization")
+        max_num_seqs = _merged_positive_int(cfg, "max_num_seqs")
 
         # argv list only — never a shell string.
         command: list[str] = [
@@ -66,6 +68,8 @@ class VLLMAdapter:
             command.extend(["--quantization", str(quantization)])
         if gpu_util is not None:
             command.extend(["--gpu-memory-utilization", str(gpu_util)])
+        if max_num_seqs is not None:
+            command.extend(["--max-num-seqs", str(max_num_seqs)])
 
         env = {
             "MODEL_OPS_SERVED_MODEL_NAME": served,

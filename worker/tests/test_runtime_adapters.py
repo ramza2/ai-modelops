@@ -124,3 +124,110 @@ def test_probe_type_rejects_invalid_override() -> None:
         GenericOpenAIAdapter().resolve_probe_type(
             model_type="LLM", deployment_config={"probe_type": "OTHER"}
         )
+
+
+def _flag_value(command: list[str], flag: str) -> str | None:
+    try:
+        idx = command.index(flag)
+    except ValueError:
+        return None
+    if idx + 1 >= len(command):
+        return None
+    return command[idx + 1]
+
+
+def test_vllm_max_num_seqs_deployment_wins() -> None:
+    spec = VLLMAdapter().build_create_spec(
+        RuntimeBuildInput(
+            runtime_image="vllm/vllm-openai:latest",
+            served_model_name="m",
+            model_path="/srv/models/x",
+            runtime_config={"max_num_seqs": 8},
+            deployment_config={"max_num_seqs": 4},
+        )
+    )
+    assert _flag_value(spec.command, "--max-num-seqs") == "4"
+    assert spec.command.count("--max-num-seqs") == 1
+
+
+def test_vllm_max_num_seqs_runtime_fallback() -> None:
+    spec = VLLMAdapter().build_create_spec(
+        RuntimeBuildInput(
+            runtime_image="vllm/vllm-openai:latest",
+            served_model_name="m",
+            model_path="/srv/models/x",
+            runtime_config={"max_num_seqs": 8},
+            deployment_config={},
+        )
+    )
+    assert _flag_value(spec.command, "--max-num-seqs") == "8"
+
+
+def test_vllm_max_num_seqs_unset_omitted() -> None:
+    spec = VLLMAdapter().build_create_spec(
+        RuntimeBuildInput(
+            runtime_image="vllm/vllm-openai:latest",
+            served_model_name="m",
+            model_path="/srv/models/x",
+        )
+    )
+    assert "--max-num-seqs" not in spec.command
+
+
+def test_vllm_max_num_seqs_explicit_null_override_no_fallback() -> None:
+    with pytest.raises(RuntimeAdapterError, match="max_num_seqs"):
+        VLLMAdapter().build_create_spec(
+            RuntimeBuildInput(
+                runtime_image="vllm/vllm-openai:latest",
+                served_model_name="m",
+                model_path="/srv/models/x",
+                runtime_config={"max_num_seqs": 8},
+                deployment_config={"max_num_seqs": None},
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    "value",
+    [4, "4", 4.0],
+)
+def test_vllm_max_num_seqs_accepted_normalized(value) -> None:
+    spec = VLLMAdapter().build_create_spec(
+        RuntimeBuildInput(
+            runtime_image="vllm/vllm-openai:latest",
+            served_model_name="m",
+            model_path="/srv/models/x",
+            deployment_config={"max_num_seqs": value},
+        )
+    )
+    assert _flag_value(spec.command, "--max-num-seqs") == "4"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [0, -1, True, False, 1.5, "4.5", "abc", float("nan"), float("inf")],
+)
+def test_vllm_max_num_seqs_invalid_rejected(value) -> None:
+    with pytest.raises(RuntimeAdapterError, match="max_num_seqs"):
+        VLLMAdapter().build_create_spec(
+            RuntimeBuildInput(
+                runtime_image="vllm/vllm-openai:latest",
+                served_model_name="m",
+                model_path="/srv/models/x",
+                deployment_config={"max_num_seqs": value},
+            )
+        )
+
+
+def test_generic_openai_unchanged_by_max_num_seqs() -> None:
+    """Generic OpenAI adapter must not emit --max-num-seqs."""
+    spec = GenericOpenAIAdapter().build_create_spec(
+        RuntimeBuildInput(
+            runtime_image="example/openai-runtime:tag",
+            served_model_name="embed-model",
+            model_path="/srv/ai-models/embed/rev",
+            deployment_config={"max_num_seqs": 4},
+        )
+    )
+    assert "--max-num-seqs" not in spec.command
+
