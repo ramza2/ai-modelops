@@ -1,4 +1,8 @@
-"""OpenAI-compatible Gateway routes (streaming + non-streaming)."""
+"""OpenAI-compatible Gateway routes (streaming + non-streaming).
+
+M6-B2: process-local per-client concurrency admission runs *before* M5
+Alias/Deployment InflightTracker so 429 rejects never touch route counts.
+"""
 
 from __future__ import annotations
 
@@ -6,6 +10,7 @@ import asyncio
 import datetime as dt
 import json
 import logging
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -14,11 +19,17 @@ from fastapi import APIRouter, Request, Response
 from app.core.config import get_settings
 from app.core.enums import ApiType
 from app.core.errors import ErrorCode, GatewayError
+from app.policy.snapshot import ClientPolicyEntry
 from app.proxy.stats import ProxyCompletionStats
 from app.proxy.upstream import proxy_json_post, proxy_sse_post
 from app.routing.resolve import resolve_route
 from app.routing.snapshot import RouteEntry
 from app.routing.store import RoutingStore
+from app.runtime.client_concurrency import (
+    ClientConcurrencyAdmission,
+    ClientConcurrencyLimitExceeded,
+    ClientConcurrencyTracker,
+)
 from app.runtime.inflight import InflightAdmission, InflightTracker
 from app.runtime.invocation_log import (
     InvocationLogWriter,
@@ -28,6 +39,14 @@ from app.runtime.usage import extract_token_usage_from_json_bytes
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["openai"])
+
+
+@dataclass(slots=True)
+class _RequestAdmissions:
+    """Paired client + M5 route admissions for a single accepted request."""
+
+    route: InflightAdmission
+    client: ClientConcurrencyAdmission | None = None
 
 
 def _store(request: Request) -> RoutingStore:
@@ -40,6 +59,10 @@ def _http_client(request: Request) -> httpx.AsyncClient:
 
 def _inflight(request: Request) -> InflightTracker:
     return request.app.state.inflight
+
+
+def _client_concurrency(request: Request) -> ClientConcurrencyTracker:
+    return request.app.state.client_concurrency
 
 
 def _invocation_logs(request: Request) -> InvocationLogWriter:
@@ -55,6 +78,17 @@ def _client_key(request: Request) -> str:
     if value and value.strip():
         return value.strip()
     return "unknown"
+
+
+def _lookup_client_policy(request: Request, client_key: str) -> ClientPolicyEntry | None:
+    """In-memory PolicyStore lookup only — never query DB on inference path."""
+    store = getattr(request.app.state, "policy_store", None)
+    if store is None:
+        return None
+    snap = store.snapshot
+    if snap is None:
+        return None
+    return snap.get(client_key)
 
 
 @router.get("/v1/models")
@@ -90,9 +124,22 @@ async def chat_completions(request: Request) -> Response:
             http_status=422,
             param="model",
         )
-    entry, admission = await _admit_resolve_bind(
-        request, alias=model, expected_api_type=ApiType.CHAT
+    client_key = _client_key(request)
+    client_admission = await _admit_client_concurrency(
+        request,
+        client_key=client_key,
+        api_path="/v1/chat/completions",
+        is_streaming=streaming,
+        request_bytes=request_bytes,
     )
+    try:
+        entry, route_admission = await _admit_resolve_bind(
+            request, alias=model, expected_api_type=ApiType.CHAT
+        )
+    except BaseException:
+        await _release_client_only(request, client_admission)
+        raise
+    admissions = _RequestAdmissions(route=route_admission, client=client_admission)
     upstream_body = dict(body)
     upstream_body["model"] = entry.upstream_model_name
     if streaming:
@@ -100,7 +147,7 @@ async def chat_completions(request: Request) -> Response:
             request,
             entry,
             upstream_body,
-            admission=admission,
+            admissions=admissions,
             request_bytes=request_bytes,
         )
     return await _proxy_nonstream(
@@ -109,7 +156,7 @@ async def chat_completions(request: Request) -> Response:
         api_path="/v1/chat/completions",
         body=upstream_body,
         is_streaming=False,
-        admission=admission,
+        admissions=admissions,
         request_bytes=request_bytes,
     )
 
@@ -125,9 +172,22 @@ async def embeddings(request: Request) -> Response:
             http_status=422,
             param="model",
         )
-    entry, admission = await _admit_resolve_bind(
-        request, alias=model, expected_api_type=ApiType.EMBEDDING
+    client_key = _client_key(request)
+    client_admission = await _admit_client_concurrency(
+        request,
+        client_key=client_key,
+        api_path="/v1/embeddings",
+        is_streaming=False,
+        request_bytes=request_bytes,
     )
+    try:
+        entry, route_admission = await _admit_resolve_bind(
+            request, alias=model, expected_api_type=ApiType.EMBEDDING
+        )
+    except BaseException:
+        await _release_client_only(request, client_admission)
+        raise
+    admissions = _RequestAdmissions(route=route_admission, client=client_admission)
     upstream_body = dict(body)
     upstream_body["model"] = entry.upstream_model_name
     return await _proxy_nonstream(
@@ -136,9 +196,86 @@ async def embeddings(request: Request) -> Response:
         api_path="/v1/embeddings",
         body=upstream_body,
         is_streaming=False,
-        admission=admission,
+        admissions=admissions,
         request_bytes=request_bytes,
     )
+
+
+async def _admit_client_concurrency(
+    request: Request,
+    *,
+    client_key: str,
+    api_path: str,
+    is_streaming: bool,
+    request_bytes: int | None,
+) -> ClientConcurrencyAdmission | None:
+    """Admit under PolicyStore max_concurrent_requests, or bypass.
+
+    Fail-open when PolicyStore.snapshot is None or no enforceable limit.
+    LKG snapshots with a limit are still enforced.
+    """
+    policy = _lookup_client_policy(request, client_key)
+    if policy is None or policy.max_concurrent_requests is None:
+        return None
+    limit = int(policy.max_concurrent_requests)
+    tracker = _client_concurrency(request)
+    try:
+        return await tracker.admit(client_key, limit)
+    except ClientConcurrencyLimitExceeded as exc:
+        # Best-effort rejection telemetry; never invent a RouteEntry.
+        started = finished = dt.datetime.now(tz=dt.UTC)
+        try:
+            _invocation_logs(request).schedule(
+                build_invocation_record(
+                    request_id=_request_id(request),
+                    started_at=started,
+                    finished_at=finished,
+                    entry=None,
+                    api_path=api_path,
+                    http_status=429,
+                    is_streaming=is_streaming,
+                    error_code=ErrorCode.CLIENT_CONCURRENCY_LIMIT,
+                    raw_client_key=client_key,
+                    request_bytes=request_bytes,
+                    response_bytes=None,
+                    input_tokens=None,
+                    output_tokens=None,
+                    total_tokens=None,
+                )
+            )
+        except Exception:  # noqa: BLE001 - telemetry must not flip 429 → 500
+            logger.warning(
+                "Failed to schedule CLIENT_CONCURRENCY_LIMIT invocation log",
+                exc_info=True,
+            )
+        raise GatewayError(
+            "Client concurrency limit exceeded.",
+            code=ErrorCode.CLIENT_CONCURRENCY_LIMIT,
+            http_status=429,
+            param=None,
+            details={
+                "client_key": exc.client_key,
+                "limit": exc.limit,
+                "current": exc.current,
+            },
+        ) from exc
+
+
+async def _release_client_only(
+    request: Request, admission: ClientConcurrencyAdmission | None
+) -> None:
+    if admission is None:
+        return
+    await asyncio.shield(_client_concurrency(request).release(admission))
+
+
+async def _release_all(
+    request: Request, admissions: _RequestAdmissions
+) -> None:
+    """Release M5 then client admission. Idempotent handles; never leak."""
+    await _inflight(request).release(admissions.route)
+    if admissions.client is not None:
+        await _client_concurrency(request).release(admissions.client)
 
 
 async def _admit_resolve_bind(
@@ -182,12 +319,11 @@ async def _proxy_nonstream(
     api_path: str,
     body: dict[str, Any],
     is_streaming: bool,
-    admission: InflightAdmission,
+    admissions: _RequestAdmissions,
     request_bytes: int | None,
 ) -> Response:
     started = dt.datetime.now(tz=dt.UTC)
     request_id = _request_id(request)
-    inflight = _inflight(request)
     http_status = 500
     error_code: str | None = None
     response_bytes: int | None = None
@@ -222,8 +358,8 @@ async def _proxy_nonstream(
         error_code = exc.code
         raise
     finally:
-        # Bound non-stream cancel must still clear Alias + Deployment counts.
-        await asyncio.shield(inflight.release(admission))
+        # Bound non-stream cancel must still clear Alias + Deployment + client.
+        await asyncio.shield(_release_all(request, admissions))
         finished = dt.datetime.now(tz=dt.UTC)
         _invocation_logs(request).schedule(
             build_invocation_record(
@@ -250,17 +386,17 @@ async def _proxy_streaming_chat(
     entry: RouteEntry,
     body: dict[str, Any],
     *,
-    admission: InflightAdmission,
+    admissions: _RequestAdmissions,
     request_bytes: int | None,
 ) -> Response:
-    """Stream chat completions. Admission is already bound to Deployment.
+    """Stream chat completions. Admissions stay active for the SSE lifetime.
 
-    Deployment inflight stays > 0 for the entire SSE lifetime and is released
-    only from the stream completion callback (EOF / error / timeout / cancel).
+    Deployment and client inflight stay > 0 for the entire SSE lifetime and
+    are released only from the stream completion callback
+    (EOF / error / timeout / cancel) or early failure before StreamingResponse.
     """
     started = dt.datetime.now(tz=dt.UTC)
     request_id = _request_id(request)
-    inflight = _inflight(request)
     completed = False
 
     async def _on_complete(stats: ProxyCompletionStats) -> None:
@@ -268,7 +404,7 @@ async def _proxy_streaming_chat(
         if completed:
             return
         completed = True
-        await inflight.release(admission)
+        await _release_all(request, admissions)
         finished = dt.datetime.now(tz=dt.UTC)
         _invocation_logs(request).schedule(
             build_invocation_record(
@@ -301,21 +437,37 @@ async def _proxy_streaming_chat(
         )
     except GatewayError as exc:
         if not completed:
-            await _on_complete(
-                ProxyCompletionStats(
-                    http_status=int(exc.http_status),
-                    response_bytes=None,
-                    error_code=exc.code,
+            await asyncio.shield(
+                _on_complete(
+                    ProxyCompletionStats(
+                        http_status=int(exc.http_status),
+                        response_bytes=None,
+                        error_code=exc.code,
+                    )
+                )
+            )
+        raise
+    except asyncio.CancelledError:
+        if not completed:
+            await asyncio.shield(
+                _on_complete(
+                    ProxyCompletionStats(
+                        http_status=499,
+                        response_bytes=None,
+                        error_code=ErrorCode.INTERNAL_ERROR,
+                    )
                 )
             )
         raise
     except Exception:
         if not completed:
-            await _on_complete(
-                ProxyCompletionStats(
-                    http_status=500,
-                    response_bytes=None,
-                    error_code=ErrorCode.INTERNAL_ERROR,
+            await asyncio.shield(
+                _on_complete(
+                    ProxyCompletionStats(
+                        http_status=500,
+                        response_bytes=None,
+                        error_code=ErrorCode.INTERNAL_ERROR,
+                    )
                 )
             )
         raise

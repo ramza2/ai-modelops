@@ -1,6 +1,8 @@
 """Client runtime policy snapshot types and DB loader (M6-B1).
 
-Registry distribution only — no inference enforcement.
+Policy distribution for Gateway. M6-B2 reads ``max_concurrent_requests`` from
+the in-memory snapshot for process-local admission; other fields remain
+registry-only until later milestones.
 """
 
 from __future__ import annotations

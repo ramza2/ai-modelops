@@ -121,8 +121,10 @@ async def reload_routes(request: Request) -> dict[str, Any]:
 
 @router.get("/policies/runtime")
 async def policies_runtime(request: Request) -> dict[str, Any]:
-    """Diagnostic PolicyStore status (M6-B1). Does not affect /ready."""
+    """Diagnostic PolicyStore status (M6-B1/B2). Does not affect /ready."""
     store = getattr(request.app.state, "policy_store", None)
+    tracker = getattr(request.app.state, "client_concurrency", None)
+    inflight_total = int(tracker.total()) if tracker is not None else 0
     if store is None:
         return {
             "status": "NOT_READY",
@@ -130,6 +132,7 @@ async def policies_runtime(request: Request) -> dict[str, Any]:
             "policy_count": 0,
             "database_connected": False,
             "using_last_known_good": False,
+            "client_concurrency_inflight_total": inflight_total,
         }
     snap = store.snapshot
     if snap is None:
@@ -139,6 +142,7 @@ async def policies_runtime(request: Request) -> dict[str, Any]:
             "policy_count": 0,
             "database_connected": bool(store.db_connected),
             "using_last_known_good": False,
+            "client_concurrency_inflight_total": inflight_total,
         }
     return {
         "status": "READY",
@@ -146,6 +150,36 @@ async def policies_runtime(request: Request) -> dict[str, Any]:
         "policy_count": len(snap.policies),
         "database_connected": bool(store.db_connected),
         "using_last_known_good": bool(snap.using_last_known_good),
+        "client_concurrency_inflight_total": inflight_total,
+    }
+
+
+@router.get("/policies/{client_key}/concurrency")
+async def policy_client_concurrency(
+    client_key: str, request: Request
+) -> dict[str, Any]:
+    """Process-local client concurrency diagnostic (M6-B2). DB-free."""
+    store = getattr(request.app.state, "policy_store", None)
+    tracker = getattr(request.app.state, "client_concurrency", None)
+    snap = store.snapshot if store is not None else None
+    loaded = snap is not None
+    loaded_at = (
+        snap.loaded_at.isoformat().replace("+00:00", "Z") if snap is not None else None
+    )
+    using_lkg = bool(snap.using_last_known_good) if snap is not None else False
+    entry = snap.get(client_key) if snap is not None else None
+    max_conc = entry.max_concurrent_requests if entry is not None else None
+    inflight = int(tracker.get(client_key)) if tracker is not None else 0
+    enforcing = bool(loaded and max_conc is not None)
+    return {
+        "client_key": client_key,
+        "scope": "PROCESS_LOCAL",
+        "policy_snapshot_loaded": loaded,
+        "using_last_known_good": using_lkg,
+        "max_concurrent_requests": max_conc,
+        "inflight_requests": inflight,
+        "enforcing": enforcing,
+        "loaded_at": loaded_at,
     }
 
 

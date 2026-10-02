@@ -348,6 +348,7 @@ Retry-After: 10
 |---:|---|---|
 | 400 | MODEL_API_TYPE_MISMATCH | Chat/Embedding 타입 불일치 |
 | 404 | MODEL_ALIAS_NOT_FOUND | Alias 없음 |
+| 429 | CLIENT_CONCURRENCY_LIMIT | Client `max_concurrent_requests` 초과 (process-local) |
 | 503 | MODEL_ALIAS_DISABLED | Alias 비활성 |
 | 503 | MODEL_MAINTENANCE | MAINTENANCE |
 | 503 | ENDPOINT_DRAINING | DRAINING (신규 요청 차단) |
@@ -554,7 +555,7 @@ other Alias when Deployments are shared.
 }
 ```
 
-### GET /internal/v1/policies/runtime (M6-B1)
+### GET /internal/v1/policies/runtime (M6-B1 / M6-B2)
 
 Diagnostic PolicyStore status. Does **not** affect Gateway `/ready`.
 
@@ -564,9 +565,13 @@ Diagnostic PolicyStore status. Does **not** affect Gateway `/ready`.
   "loaded_at": "...",
   "policy_count": 3,
   "database_connected": true,
-  "using_last_known_good": false
+  "using_last_known_good": false,
+  "client_concurrency_inflight_total": 2
 }
 ```
+
+`client_concurrency_inflight_total` is process-local (M6-B2) and optional for
+operators; it does not imply cluster-wide concurrency.
 
 ### GET /internal/v1/policies/{client_key} (M6-B1)
 
@@ -587,10 +592,73 @@ Exact `client_key` lookup (not lowercased). Active ClientApp + enabled policy on
 
 Unknown / inactive / disabled → HTTP 200 with `policy: null`.
 
-**B1 does not enforce policies.** Inference paths do not consult PolicyStore.
-`priority` is registered only — not sent to vLLM. `max_input_tokens` is not
-estimated from characters/bytes. `max_output_tokens` is not rewritten into
-request bodies. `max_concurrent_requests` does not modify M5 InflightTracker.
+### GET /internal/v1/policies/{client_key}/concurrency (M6-B2)
+
+DB-free process-local concurrency diagnostic.
+
+```json
+{
+  "client_key": "alzi",
+  "scope": "PROCESS_LOCAL",
+  "policy_snapshot_loaded": true,
+  "using_last_known_good": false,
+  "max_concurrent_requests": 4,
+  "inflight_requests": 2,
+  "enforcing": true,
+  "loaded_at": "..."
+}
+```
+
+### M6-B2 enforcement (process-local)
+
+B2 enforces only `max_concurrent_requests` at the AI Gateway.
+
+```text
+X-AI-Client (exact strip, case-sensitive)
+  → PolicyStore in-memory snapshot
+  → ClientConcurrencyTracker.admit
+  → existing M5 Alias/Deployment InflightTracker
+  → upstream
+```
+
+When the client limit is reached:
+
+```http
+HTTP/1.1 429 Too Many Requests
+```
+
+```json
+{
+  "error": {
+    "message": "Client concurrency limit exceeded.",
+    "type": "modelops_error",
+    "param": null,
+    "code": "CLIENT_CONCURRENCY_LIMIT"
+  }
+}
+```
+
+No `Retry-After`. Requests are not queued.
+
+Semantics:
+
+- Scope is **process-local** (single Gateway process / replica). Not cluster-wide.
+- No Redis / distributed semaphore / PostgreSQL locks.
+- `PolicyStore.snapshot is None` → fail-open (no client concurrency enforcement).
+- LKG snapshot with a limit → still enforce LKG (do not fail-open merely because DB is down).
+- 429 rejects happen **before** M5 Alias/Deployment admission — they do not change
+  alias total, unbound, or deployment inflight.
+- Concurrent Chat + Embeddings share the same per-`client_key` counter.
+- Cross-alias requests for the same client share the same counter.
+- Different exact client keys have independent counters.
+- `max_concurrent_requests = null` / no policy → unlimited (no tracker handle).
+- ClientConcurrencyTracker is separate from M5 `InflightTracker`.
+
+Still **not** enforced in B2:
+
+- `max_input_tokens` (no tokenizer / byte estimation / truncation)
+- `max_output_tokens` (no `max_tokens` / `max_completion_tokens` rewrite)
+- `priority` (not forwarded to vLLM; no `--scheduling-policy priority`)
 
 ---
 

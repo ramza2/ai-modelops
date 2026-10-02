@@ -1,4 +1,4 @@
-"""ModelOps AI Gateway entrypoint (Milestone 4-A / 4-B / M6-B1)."""
+"""ModelOps AI Gateway entrypoint (Milestone 4-A / 4-B / M6-B1 / M6-B2)."""
 
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ from app.core.errors import ErrorCode, GatewayError, error_envelope
 from app.policy.store import PolicyStore
 from app.routing.notify import RoutingNotifierListener
 from app.routing.store import RoutingStore
+from app.runtime.client_concurrency import ClientConcurrencyTracker
 from app.runtime.inflight import InflightTracker
 from app.runtime.invocation_log import InvocationLogWriter
 
@@ -38,6 +39,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         session_factory, poll_seconds=settings.policy_poll_seconds
     )
     inflight = InflightTracker()
+    client_concurrency = ClientConcurrencyTracker()
     invocation_logs = InvocationLogWriter(session_factory)
     http_client = httpx.AsyncClient()
 
@@ -53,6 +55,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.policy_store = policy_store
     app.state.http_client = http_client
     app.state.inflight = inflight
+    app.state.client_concurrency = client_concurrency
     app.state.invocation_logs = invocation_logs
     app.state.routing_listener = listener
     await store.start()
@@ -75,6 +78,7 @@ def create_app(
     invocation_logs: InvocationLogWriter | None = None,
     routing_listener: RoutingNotifierListener | None = None,
     policy_store: PolicyStore | None = None,
+    client_concurrency: ClientConcurrencyTracker | None = None,
 ) -> FastAPI:
     """Create the Gateway app.
 
@@ -91,6 +95,9 @@ def create_app(
         app.state.routing_store = routing_store
         app.state.http_client = http_client
         app.state.inflight = inflight or InflightTracker()
+        app.state.client_concurrency = (
+            client_concurrency or ClientConcurrencyTracker()
+        )
         app.state.invocation_logs = invocation_logs or InvocationLogWriter(None)
         app.state.routing_listener = routing_listener
         # Tests may inject a PolicyStore; default to an inert store (no poller).
