@@ -269,6 +269,91 @@ def test_parse_none_and_empty() -> None:
     assert parse_vllm_runtime_config([])["entrypoint"] == "UNRECOGNIZED"
 
 
+def test_parse_missing_value_followed_by_allowlisted_flag() -> None:
+    cmd = [
+        "python",
+        "-m",
+        "vllm.entrypoints.openai.api_server",
+        "--max-model-len",
+        "--max-num-seqs",
+        "4",
+    ]
+    result = parse_vllm_runtime_config(cmd)
+    assert result["entrypoint"] == "VLLM"
+    assert "max_model_len" in result["explicit_fields"]
+    assert "max_num_seqs" in result["explicit_fields"]
+    assert "max_model_len" in result["invalid_fields"]
+    assert result["values"]["max_model_len"] is None
+    assert result["values"]["max_num_seqs"] == 4
+    assert "max_num_seqs" not in result["invalid_fields"]
+
+
+def test_parse_string_flag_missing_value_before_next_flag() -> None:
+    cmd = [
+        "python",
+        "-m",
+        "vllm.entrypoints.openai.api_server",
+        "--quantization",
+        "--dtype",
+        "auto",
+    ]
+    result = parse_vllm_runtime_config(cmd)
+    assert "quantization" in result["explicit_fields"]
+    assert "quantization" in result["invalid_fields"]
+    assert result["values"]["quantization"] is None
+    assert result["values"]["dtype"] == "auto"
+    assert "dtype" in result["explicit_fields"]
+
+
+def test_parse_negative_numeric_value_not_treated_as_flag() -> None:
+    cmd = [
+        "python",
+        "-m",
+        "vllm.entrypoints.openai.api_server",
+        "--max-num-seqs",
+        "-1",
+        "--gpu-memory-utilization",
+        "0.8",
+    ]
+    result = parse_vllm_runtime_config(cmd)
+    assert "max_num_seqs" in result["explicit_fields"]
+    assert "max_num_seqs" in result["invalid_fields"]
+    assert result["values"]["max_num_seqs"] is None
+    assert result["values"]["gpu_memory_utilization"] == pytest.approx(0.8)
+
+
+def test_parse_equals_missing_value() -> None:
+    cmd = [
+        "python",
+        "-m",
+        "vllm.entrypoints.openai.api_server",
+        "--max-model-len=",
+    ]
+    result = parse_vllm_runtime_config(cmd)
+    assert "max_model_len" in result["explicit_fields"]
+    assert "max_model_len" in result["invalid_fields"]
+    assert result["values"]["max_model_len"] is None
+
+
+def test_parse_last_malformed_duplicate_wins() -> None:
+    cmd = [
+        "python",
+        "-m",
+        "vllm.entrypoints.openai.api_server",
+        "--max-num-seqs",
+        "4",
+        "--max-num-seqs",
+        "--dtype",
+        "auto",
+    ]
+    result = parse_vllm_runtime_config(cmd)
+    assert "max_num_seqs" in result["explicit_fields"]
+    assert "max_num_seqs" in result["invalid_fields"]
+    assert result["values"]["max_num_seqs"] is None
+    assert result["values"]["dtype"] == "auto"
+    assert "dtype" in result["explicit_fields"]
+
+
 # ---------------------------------------------------------------------------
 # Scrape attachment integration
 # ---------------------------------------------------------------------------

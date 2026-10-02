@@ -62,6 +62,7 @@ def parse_vllm_runtime_config(command: list[str] | None) -> dict[str, Any]:
             flag, _, value = token.partition("=")
             field = _FLAG_TO_FIELD.get(flag)
             if field is not None:
+                # --flag= / --flag=value — empty value is explicit+invalid.
                 raw_value = value
                 i += 1
             else:
@@ -77,7 +78,13 @@ def parse_vllm_runtime_config(command: list[str] | None) -> dict[str, Any]:
                 raw_by_field[field] = ""
                 i += 1
                 continue
-            raw_value = tokens[i + 1]
+            next_token = tokens[i + 1]
+            # Do not consume the next allowlisted flag as this flag's value.
+            if _is_allowlisted_flag_token(next_token):
+                raw_by_field[field] = ""
+                i += 1
+                continue
+            raw_value = next_token
             i += 2
 
         assert field is not None and raw_value is not None
@@ -113,6 +120,16 @@ def _empty_result(*, entrypoint: str) -> dict[str, Any]:
         "explicit_fields": [],
         "invalid_fields": [],
     }
+
+
+def _is_allowlisted_flag_token(token: str) -> bool:
+    """True only for recognized allowlisted flag tokens (not bare negatives)."""
+    if token in _FLAG_TO_FIELD:
+        return True
+    if "=" in token and token.startswith("-"):
+        flag = token.split("=", 1)[0]
+        return flag in _FLAG_TO_FIELD
+    return False
 
 
 def _detect_entrypoint(tokens: list[str]) -> str:

@@ -159,6 +159,33 @@ def test_sanitize_invalid_fields_preserved() -> None:
     assert out["values"]["max_num_seqs"] is None
 
 
+def test_sanitize_rejects_boolean_integers() -> None:
+    out = _sanitize_runtime_config(
+        {
+            "source": "CONTAINER_ARGV",
+            "entrypoint": "VLLM",
+            "values": {
+                "max_model_len": True,
+                "max_num_seqs": False,
+                "gpu_memory_utilization": True,
+                "tensor_parallel_size": 2,
+            },
+            "explicit_fields": [
+                "max_model_len",
+                "max_num_seqs",
+                "gpu_memory_utilization",
+                "tensor_parallel_size",
+            ],
+            "invalid_fields": [],
+        }
+    )
+    assert out is not None
+    assert out["values"]["max_model_len"] is None
+    assert out["values"]["max_num_seqs"] is None
+    assert out["values"]["gpu_memory_utilization"] is None
+    assert out["values"]["tensor_parallel_size"] == 2
+
+
 @pytest.mark.asyncio
 async def test_persist_runtime_config_sanitized(db) -> None:
     session_factory = db

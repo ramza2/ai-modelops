@@ -82,7 +82,13 @@ class CapacityProfileService:
         observed_config, observation_sampled_at, runtime_instance = (
             self._extract_observation(latest, deployment)
         )
-        observation_available = observed_config is not None
+        # Only a recognized VLLM argv observation can prove flag absence.
+        # UNRECOGNIZED / missing config → UNKNOWN, not REQUESTED_NOT_OBSERVED.
+        observation_available = (
+            observed_config is not None
+            and observed_config.get("source") == "CONTAINER_ARGV"
+            and observed_config.get("entrypoint") == "VLLM"
+        )
 
         settings = compare_capacity_settings(
             requested=requested,

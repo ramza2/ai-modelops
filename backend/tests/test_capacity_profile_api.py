@@ -94,6 +94,7 @@ async def _seed_profile(session_factory, **overrides) -> dict[str, Any]:
     availability = overrides.get("availability", "AVAILABLE")
     max_num_seqs = overrides.get("max_num_seqs", 4)
     default_max_model_len = overrides.get("default_max_model_len", 8192)
+    runtime_config_override = overrides.get("runtime_config_override")
 
     async with session_factory() as session:
         await session.execute(
@@ -276,10 +277,18 @@ async def _seed_profile(session_factory, **overrides) -> dict[str, Any]:
                 "runtime_instance": inst,
             }
             if include_runtime_config and sampled == t1:
-                mj["runtime_config"] = _runtime_config()
+                mj["runtime_config"] = (
+                    runtime_config_override
+                    if runtime_config_override is not None
+                    else _runtime_config()
+                )
             elif include_runtime_config and sampled == t0:
                 # older snapshot may also have it; latest matters for profile
-                mj["runtime_config"] = _runtime_config()
+                mj["runtime_config"] = (
+                    runtime_config_override
+                    if runtime_config_override is not None
+                    else _runtime_config()
+                )
 
             await session.execute(
                 text(
@@ -409,6 +418,39 @@ async def test_pre_a4_snapshot_yields_unknown(client) -> None:
     assert settings["max_model_len"]["comparison_status"] == "UNKNOWN"
     assert settings["max_num_seqs"]["comparison_status"] == "UNKNOWN"
     # Must not treat missing observation as REQUESTED_NOT_OBSERVED.
+    for field in settings.values():
+        assert field["comparison_status"] != "REQUESTED_NOT_OBSERVED"
+
+
+@pytest.mark.anyio
+async def test_unrecognized_entrypoint_yields_unknown(client) -> None:
+    """UNRECOGNIZED argv cannot prove flag absence → UNKNOWN for requested fields."""
+    unrecognized = {
+        "source": "CONTAINER_ARGV",
+        "entrypoint": "UNRECOGNIZED",
+        "values": {},
+        "explicit_fields": [],
+        "invalid_fields": [],
+    }
+    fixture = await _seed_profile(
+        client["session_factory"],
+        include_runtime_config=True,
+        runtime_config_override=unrecognized,
+    )
+    resp = await client["client"].get(
+        f"/api/v1/observability/runtime/deployments/{fixture['deployment_id']}"
+        f"/capacity-profile"
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    # Diagnostic object may still be present.
+    assert body["configuration"]["runtime_config"] is not None
+    assert body["configuration"]["runtime_config"]["entrypoint"] == "UNRECOGNIZED"
+    settings = body["configuration"]["settings"]
+    assert settings["max_model_len"]["requested"] == 8192
+    assert settings["max_model_len"]["comparison_status"] == "UNKNOWN"
+    assert settings["max_num_seqs"]["requested"] == 4
+    assert settings["max_num_seqs"]["comparison_status"] == "UNKNOWN"
     for field in settings.values():
         assert field["comparison_status"] != "REQUESTED_NOT_OBSERVED"
 

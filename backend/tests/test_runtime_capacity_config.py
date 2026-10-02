@@ -208,6 +208,22 @@ def test_compare_unknown_no_observation() -> None:
     assert settings["max_model_len"]["comparison_status"] != "REQUESTED_NOT_OBSERVED"
 
 
+def test_compare_unrecognized_entrypoint_is_unknown_not_absent() -> None:
+    """Caller must set observation_available=False for UNRECOGNIZED entrypoints."""
+    settings = compare_capacity_settings(
+        requested={
+            "max_model_len": _req(8192, "MODEL_VERSION_DEFAULT"),
+            "max_num_seqs": _req(4),
+        },
+        observed_config=_obs(values={}, explicit=[]),
+        observation_available=False,
+    )
+    assert settings["max_model_len"]["comparison_status"] == "UNKNOWN"
+    assert settings["max_num_seqs"]["comparison_status"] == "UNKNOWN"
+    assert settings["max_model_len"]["comparison_status"] != "REQUESTED_NOT_OBSERVED"
+    assert settings["max_num_seqs"]["comparison_status"] != "REQUESTED_NOT_OBSERVED"
+
+
 def test_compare_invalid_requested() -> None:
     settings = compare_capacity_settings(
         requested={

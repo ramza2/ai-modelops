@@ -976,6 +976,9 @@ Important semantics:
 - `requested` follows current Worker/VLLM adapter precedence (not a cleaner invented order).
 - `observed_explicit` ≠ full effective vLLM config; absent flag ≠ known runtime default.
 - Pre-A4 snapshot (no `runtime_config`) → `UNKNOWN`, not `REQUESTED_NOT_OBSERVED`.
+- `runtime_config.entrypoint == "UNRECOGNIZED"` is diagnostic only and does **not**
+  prove flag absence → comparison `UNKNOWN` (same as no observation).
+- Only `entrypoint == "VLLM"` may yield `REQUESTED_NOT_OBSERVED` for missing flags.
 - Requested `max_num_seqs` is observability-only today — Worker adapter does not emit
   `--max-num-seqs`, so expect `REQUESTED_NOT_OBSERVED` when requested but argv lacks it.
 - `max_model_len` is prompt+output context capacity; do not divide A1 input_tokens by it.

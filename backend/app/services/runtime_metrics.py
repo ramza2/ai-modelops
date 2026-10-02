@@ -217,12 +217,16 @@ def _sanitize_config_value(field: str, value: Any) -> int | float | str | None:
     if value is None:
         return None
     if field in {"max_model_len", "max_num_seqs", "tensor_parallel_size"}:
+        if isinstance(value, bool):
+            return None
         try:
             number = int(value)
         except (TypeError, ValueError):
             return None
         return number if number > 0 else None
     if field == "gpu_memory_utilization":
+        if isinstance(value, bool):
+            return None
         try:
             number = float(value)
         except (TypeError, ValueError):
