@@ -5,6 +5,9 @@ Alias/Deployment InflightTracker so 429 rejects never touch route counts.
 
 M6-B3: Chat ``max_output_tokens`` policy runs *before* B2/M5 admission so
 422 rejects never consume client or route concurrency slots.
+
+M6-B4: Chat ``max_input_tokens`` uses the bound Deployment's trusted vLLM
+``POST /tokenize`` after M5 bind; tokenize and inference share one RouteEntry.
 """
 
 from __future__ import annotations
@@ -22,6 +25,12 @@ from fastapi import APIRouter, Request, Response
 from app.core.config import get_settings
 from app.core.enums import ApiType
 from app.core.errors import ErrorCode, GatewayError
+from app.policy.input_tokens import (
+    InputTokenCheckUnavailable,
+    InputTokenLimitExceeded,
+    InputTokenRequestInvalid,
+    enforce_vllm_chat_input_token_limit,
+)
 from app.policy.output_tokens import (
     OutputTokenFieldInvalid,
     OutputTokenPolicyExceeded,
@@ -109,8 +118,9 @@ def _schedule_rejection_log(
     error_code: str,
     request_bytes: int | None,
     param: str | None = None,
+    entry: Any = None,
 ) -> None:
-    """Best-effort pre-admission rejection telemetry (entry=None)."""
+    """Best-effort rejection telemetry. Token columns stay NULL (not tokenizer)."""
     started = finished = dt.datetime.now(tz=dt.UTC)
     try:
         _invocation_logs(request).schedule(
@@ -118,7 +128,7 @@ def _schedule_rejection_log(
                 request_id=_request_id(request),
                 started_at=started,
                 finished_at=finished,
-                entry=None,
+                entry=entry,
                 api_path=api_path,
                 http_status=http_status,
                 is_streaming=is_streaming,
@@ -252,6 +262,16 @@ async def chat_completions(request: Request) -> Response:
         await _release_client_only(request, client_admission)
         raise
     admissions = _RequestAdmissions(route=route_admission, client=client_admission)
+    # B4: tokenize against the bound Deployment, then infer on the SAME entry.
+    await _enforce_chat_input_token_policy(
+        request,
+        entry=entry,
+        admissions=admissions,
+        original_body=body,
+        client_key=client_key,
+        is_streaming=streaming,
+        request_bytes=request_bytes,
+    )
     upstream_body["model"] = entry.upstream_model_name
     if streaming:
         return await _proxy_streaming_chat(
@@ -312,6 +332,140 @@ async def embeddings(request: Request) -> Response:
     )
 
 
+async def _enforce_chat_input_token_policy(
+    request: Request,
+    *,
+    entry: RouteEntry,
+    admissions: _RequestAdmissions,
+    original_body: dict[str, Any],
+    client_key: str,
+    is_streaming: bool,
+    request_bytes: int | None,
+) -> None:
+    """Trusted VLLM /tokenize against the already-bound RouteEntry (M6-B4).
+
+    Captures the visible policy limit once. On any reject/cancel after
+    admissions are held, releases both counters before raising.
+    """
+    policy = _lookup_client_policy(request, client_key)
+    limit = policy.max_input_tokens if policy is not None else None
+    if limit is None:
+        return
+
+    settings = get_settings()
+    model_name = entry.upstream_model_name
+    if not model_name or not entry.upstream_base_url:
+        await asyncio.shield(_release_all(request, admissions))
+        _schedule_rejection_log(
+            request,
+            client_key=client_key,
+            api_path="/v1/chat/completions",
+            is_streaming=is_streaming,
+            http_status=503,
+            error_code=ErrorCode.CLIENT_INPUT_TOKEN_CHECK_UNAVAILABLE,
+            request_bytes=request_bytes,
+            entry=entry,
+        )
+        raise GatewayError(
+            "Input token check unavailable for this route.",
+            code=ErrorCode.CLIENT_INPUT_TOKEN_CHECK_UNAVAILABLE,
+            http_status=503,
+            param="messages",
+            details={
+                "runtime_type": entry.runtime_type,
+                "deployment_id": entry.deployment_id,
+            },
+        )
+
+    try:
+        await enforce_vllm_chat_input_token_limit(
+            _http_client(request),
+            runtime_type=entry.runtime_type,
+            upstream_base_url=str(entry.upstream_base_url),
+            served_model_name=str(model_name),
+            request_body=original_body,
+            request_id=_request_id(request),
+            max_input_tokens=int(limit),
+            timeout_seconds=float(settings.input_tokenize_timeout_seconds),
+            max_response_bytes=int(settings.input_tokenize_max_response_bytes),
+        )
+    except asyncio.CancelledError:
+        await asyncio.shield(_release_all(request, admissions))
+        raise
+    except InputTokenLimitExceeded as exc:
+        await asyncio.shield(_release_all(request, admissions))
+        _schedule_rejection_log(
+            request,
+            client_key=client_key,
+            api_path="/v1/chat/completions",
+            is_streaming=is_streaming,
+            http_status=422,
+            error_code=ErrorCode.CLIENT_INPUT_TOKEN_LIMIT,
+            request_bytes=request_bytes,
+            param="messages",
+            entry=entry,
+        )
+        raise GatewayError(
+            "Input token count exceeds client policy.",
+            code=ErrorCode.CLIENT_INPUT_TOKEN_LIMIT,
+            http_status=422,
+            param="messages",
+            details={
+                "observed_input_tokens": exc.observed,
+                "max_input_tokens": exc.limit,
+                "runtime_type": entry.runtime_type,
+                "deployment_id": entry.deployment_id,
+            },
+        ) from exc
+    except InputTokenRequestInvalid as exc:
+        await asyncio.shield(_release_all(request, admissions))
+        _schedule_rejection_log(
+            request,
+            client_key=client_key,
+            api_path="/v1/chat/completions",
+            is_streaming=is_streaming,
+            http_status=422,
+            error_code=ErrorCode.VALIDATION_ERROR,
+            request_bytes=request_bytes,
+            param="messages",
+            entry=entry,
+        )
+        raise GatewayError(
+            str(exc.message),
+            code=ErrorCode.VALIDATION_ERROR,
+            http_status=422,
+            param="messages",
+            details={
+                "runtime_type": entry.runtime_type,
+                "deployment_id": entry.deployment_id,
+            },
+        ) from exc
+    except InputTokenCheckUnavailable as exc:
+        await asyncio.shield(_release_all(request, admissions))
+        _schedule_rejection_log(
+            request,
+            client_key=client_key,
+            api_path="/v1/chat/completions",
+            is_streaming=is_streaming,
+            http_status=503,
+            error_code=ErrorCode.CLIENT_INPUT_TOKEN_CHECK_UNAVAILABLE,
+            request_bytes=request_bytes,
+            param="messages",
+            entry=entry,
+        )
+        raise GatewayError(
+            "Input token check unavailable for this client policy.",
+            code=ErrorCode.CLIENT_INPUT_TOKEN_CHECK_UNAVAILABLE,
+            http_status=503,
+            param="messages",
+            details={
+                "reason": str(exc.message),
+                "runtime_type": entry.runtime_type,
+                "deployment_id": entry.deployment_id,
+            },
+        ) from exc
+
+
 async def _admit_client_concurrency(
     request: Request,
     *,
@@ -366,10 +520,12 @@ async def _release_client_only(
 async def _release_all(
     request: Request, admissions: _RequestAdmissions
 ) -> None:
-    """Release M5 then client admission. Idempotent handles; never leak."""
-    await _inflight(request).release(admissions.route)
-    if admissions.client is not None:
-        await _client_concurrency(request).release(admissions.client)
+    """Release M5 then client admission. Idempotent; never leak client slot."""
+    try:
+        await _inflight(request).release(admissions.route)
+    finally:
+        if admissions.client is not None:
+            await _client_concurrency(request).release(admissions.client)
 
 
 async def _admit_resolve_bind(

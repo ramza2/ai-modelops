@@ -348,8 +348,10 @@ Retry-After: 10
 |---:|---|---|
 | 400 | MODEL_API_TYPE_MISMATCH | Chat/Embedding 타입 불일치 |
 | 404 | MODEL_ALIAS_NOT_FOUND | Alias 없음 |
+| 422 | CLIENT_INPUT_TOKEN_LIMIT | Chat trusted input token count exceeds client `max_input_tokens` |
 | 422 | CLIENT_OUTPUT_TOKEN_LIMIT | Chat explicit output cap exceeds client `max_output_tokens` |
 | 429 | CLIENT_CONCURRENCY_LIMIT | Client `max_concurrent_requests` 초과 (process-local) |
+| 503 | CLIENT_INPUT_TOKEN_CHECK_UNAVAILABLE | Active input policy but trusted VLLM tokenize unavailable |
 | 503 | MODEL_ALIAS_DISABLED | Alias 비활성 |
 | 503 | MODEL_MAINTENANCE | MAINTENANCE |
 | 503 | ENDPOINT_DRAINING | DRAINING (신규 요청 차단) |
@@ -655,9 +657,8 @@ Semantics:
 - `max_concurrent_requests = null` / no policy → unlimited (no tracker handle).
 - ClientConcurrencyTracker is separate from M5 `InflightTracker`.
 
-Still **not** enforced in B2 (see B3 for output tokens):
+Still **not** enforced in B2 (see B3/B4 for token policies):
 
-- `max_input_tokens` (no tokenizer / byte estimation / truncation)
 - `priority` (not forwarded to vLLM; no `--scheduling-policy priority`)
 
 ### M6-B3 enforcement (Chat `max_output_tokens`)
@@ -713,9 +714,50 @@ Current policy status:
 ```text
 max_concurrent_requests → enforced process-locally (B2)
 max_output_tokens       → enforced for Chat (B3)
-max_input_tokens        → registry only
+max_input_tokens        → Chat enforced via trusted bound VLLM /tokenize (B4)
 priority                → registry only
 ```
+
+### M6-B4 enforcement (Chat `max_input_tokens` via trusted VLLM `/tokenize`)
+
+B4 enforces `max_input_tokens` for `POST /v1/chat/completions` only by calling
+the **already-bound** Deployment:
+
+```text
+POST {RouteEntry.upstream_base_url}/tokenize
+```
+
+Gateway does **not** load tokenizers, estimate characters/bytes, truncate
+prompts, or call `/v1/tokenize`.
+
+Ordering:
+
+```text
+B3 output policy
+→ B2 client concurrency
+→ M5 Alias admit + resolve + Deployment bind
+→ B4 /tokenize on bound RouteEntry
+→ /v1/chat/completions on the SAME RouteEntry
+```
+
+Semantics:
+
+| Case | Result |
+|---|---|
+| no policy / null `max_input_tokens` / PolicyStore snapshot absent | fail-open; `/tokenize` not called |
+| LKG snapshot with limit | enforce LKG |
+| `runtime_type == VLLM` and `count <= limit` | allow; exact equality allowed |
+| `count > limit` | HTTP 422 `CLIENT_INPUT_TOKEN_LIMIT` |
+| non-VLLM / missing runtime with active policy | HTTP 503 `CLIENT_INPUT_TOKEN_CHECK_UNAVAILABLE` (fail closed) |
+| tokenizer timeout / transport / 5xx / malformed / oversized | HTTP 503 `CLIENT_INPUT_TOKEN_CHECK_UNAVAILABLE` |
+| tokenizer 4xx (unrenderable Chat) | HTTP 422 `VALIDATION_ERROR` (`param=messages`) |
+
+Tokenizer request carries Chat **rendering** fields only (`messages`, `tools`,
+`tool_choice`, template kwargs, …). Generation fields (`max_tokens`,
+`temperature`, `stream`, …) are not sent. Token IDs are never logged or stored
+in InvocationLog token columns (those remain upstream inference usage only).
+
+Embeddings: `max_input_tokens` is **not** enforced in B4.
 
 ---
 

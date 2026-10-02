@@ -91,6 +91,7 @@ class ModelVersion(Base):
 
     id: Mapped[uuid.UUID] = _uuid_pk()
     served_model_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    runtime_type: Mapped[str | None] = mapped_column(String(32))
 
 
 class ClientApp(Base):
