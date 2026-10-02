@@ -85,6 +85,19 @@ class _RequestAdmissions:
     client: ClientConcurrencyAdmission | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class _BoundRoute:
+    """Immutable bind result: RouteEntry + admission + snapshot LKG bit.
+
+    ``routing_snapshot_lkg`` is pinned from the same RoutingSnapshot that
+    produced ``entry``. B5-B must not re-read RoutingStore for this bit.
+    """
+
+    entry: RouteEntry
+    admission: InflightAdmission
+    routing_snapshot_lkg: bool
+
+
 def _store(request: Request) -> RoutingStore:
     return request.app.state.routing_store
 
@@ -284,13 +297,14 @@ async def chat_completions(request: Request) -> Response:
         request_bytes=request_bytes,
     )
     try:
-        entry, route_admission = await _admit_resolve_bind(
+        bound = await _admit_resolve_bind(
             request, alias=model, expected_api_type=ApiType.CHAT
         )
     except BaseException:
         await _release_client_only(request, client_admission)
         raise
-    admissions = _RequestAdmissions(route=route_admission, client=client_admission)
+    entry = bound.entry
+    admissions = _RequestAdmissions(route=bound.admission, client=client_admission)
     # B4: tokenize against the bound Deployment, then infer on the SAME entry.
     await _enforce_chat_input_token_policy(
         request,
@@ -302,7 +316,7 @@ async def chat_completions(request: Request) -> Response:
         is_streaming=streaming,
         request_bytes=request_bytes,
     )
-    # B5-B: trusted priority injection on the SAME bound RouteEntry.
+    # B5-B: trusted priority on the SAME bound RouteEntry + pinned LKG bit.
     upstream_body = await _apply_chat_priority_policy(
         request,
         entry=entry,
@@ -312,6 +326,7 @@ async def chat_completions(request: Request) -> Response:
         policy=client_policy,
         is_streaming=streaming,
         request_bytes=request_bytes,
+        routing_snapshot_lkg=bound.routing_snapshot_lkg,
     )
     upstream_body["model"] = entry.upstream_model_name
     if streaming:
@@ -353,13 +368,14 @@ async def embeddings(request: Request) -> Response:
         request_bytes=request_bytes,
     )
     try:
-        entry, route_admission = await _admit_resolve_bind(
+        bound = await _admit_resolve_bind(
             request, alias=model, expected_api_type=ApiType.EMBEDDING
         )
     except BaseException:
         await _release_client_only(request, client_admission)
         raise
-    admissions = _RequestAdmissions(route=route_admission, client=client_admission)
+    entry = bound.entry
+    admissions = _RequestAdmissions(route=bound.admission, client=client_admission)
     upstream_body = dict(body)
     upstream_body["model"] = entry.upstream_model_name
     return await _proxy_nonstream(
@@ -518,21 +534,20 @@ async def _apply_chat_priority_policy(
     policy: ClientPolicyEntry | None,
     is_streaming: bool,
     request_bytes: int | None,
+    routing_snapshot_lkg: bool,
 ) -> dict[str, Any]:
     """Inject pinned client priority only with trusted current-container evidence.
 
-    RoutingStore LKG disables non-zero priority forwarding even if the LKG
-    RouteEntry previously carried trusted evidence.
+    ``routing_snapshot_lkg`` must come from the RoutingSnapshot that produced
+    ``entry`` at bind time — do not re-read RoutingStore here.
     """
-    snap = _store(request).snapshot
-    routing_lkg = bool(snap.using_last_known_good) if snap is not None else False
     policy_priority = policy.priority if policy is not None else None
     try:
         result = apply_client_priority_policy(
             upstream_body,
             policy_priority,
             priority_scheduler_trusted=bool(entry.priority_scheduler_trusted),
-            routing_snapshot_lkg=routing_lkg,
+            routing_snapshot_lkg=bool(routing_snapshot_lkg),
             evidence_reason=str(entry.priority_scheduler_evidence_reason),
         )
     except PrioritySchedulerUnavailable as exc:
@@ -549,7 +564,7 @@ async def _apply_chat_priority_policy(
             entry=entry,
         )
         reason = str(exc.reason or entry.priority_scheduler_evidence_reason)
-        if routing_lkg:
+        if routing_snapshot_lkg:
             reason = REASON_ROUTING_LKG
         sampled = entry.priority_scheduler_evidence_sampled_at
         raise GatewayError(
@@ -646,26 +661,34 @@ async def _admit_resolve_bind(
     *,
     alias: str,
     expected_api_type: ApiType,
-) -> tuple[RouteEntry, InflightAdmission]:
+) -> _BoundRoute:
     """Admit before resolve, then bind to the resolved Deployment.
 
     Order (Cold drain race + HOT Source retirement telemetry):
     1. admit(alias) — alias total + unbound
-    2. resolve against the current snapshot
+    2. resolve against the current snapshot (pin LKG bit with RouteEntry)
     3. bind(deployment_id) — unbound → deployment; alias total unchanged
     4. on any reject before bind completes, release the still-unbound admission
     """
     inflight = _inflight(request)
     admission = await inflight.admit(alias)
     try:
+        snap = _store(request).snapshot
+        routing_snapshot_lkg = (
+            bool(snap.using_last_known_good) if snap is not None else False
+        )
         entry = resolve_route(
-            _store(request).snapshot,
+            snap,
             alias=alias,
             expected_api_type=expected_api_type,
         )
         # resolve_route guarantees deployment_id is present on success.
         await inflight.bind(admission, str(entry.deployment_id))
-        return entry, admission
+        return _BoundRoute(
+            entry=entry,
+            admission=admission,
+            routing_snapshot_lkg=routing_snapshot_lkg,
+        )
     except asyncio.CancelledError:
         # Cancellation between admit and bind must not leak unbound inflight.
         await asyncio.shield(inflight.release(admission))

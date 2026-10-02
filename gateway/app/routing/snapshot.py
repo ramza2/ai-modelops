@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import uuid
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -93,9 +95,18 @@ async def load_routing_snapshot(
         )
         rows = (await session.execute(stmt)).all()
 
-        # Latest runtime metric snapshot per Deployment (DB-side).
+        # Only observe runtime metrics for non-retired Deployments that have
+        # an ACTIVE route. Deduplicate when multiple aliases share one Deployment.
+        deployment_ids: set[uuid.UUID] = set()
+        for _alias_row, _route_row, dep_row, _version_row in rows:
+            if dep_row is not None and dep_row.retired_at is None:
+                deployment_ids.add(dep_row.id)
+
+        # Latest runtime metric snapshot per relevant Deployment (DB-side).
         # Tie-break: sampled_at DESC, id DESC.
-        latest_obs = await _load_latest_runtime_observations(session)
+        latest_obs = await _load_latest_runtime_observations(
+            session, deployment_ids
+        )
 
     routes: dict[str, RouteEntry] = {}
     for alias_row, route_row, dep_row, version_row in rows:
@@ -180,11 +191,19 @@ async def load_routing_snapshot(
 
 async def _load_latest_runtime_observations(
     session: AsyncSession,
+    deployment_ids: Collection[uuid.UUID],
 ) -> dict[str, dict[str, Any]]:
-    """Newest runtime metric snapshot per deployment_id.
+    """Newest runtime metric snapshot per *relevant* deployment_id.
+
+    Filters ``deployment_id IN (...)`` in the ranked source query so history
+    for unrelated Deployments is never scanned. Empty ID set → ``{}``.
 
     Ordering: ``sampled_at DESC, id DESC`` via ``row_number`` window.
     """
+    if not deployment_ids:
+        return {}
+
+    ids = list(deployment_ids)
     rn = (
         func.row_number()
         .over(
@@ -202,6 +221,8 @@ async def _load_latest_runtime_observations(
             DeploymentRuntimeMetricSnapshot.sampled_at.label("sampled_at"),
             DeploymentRuntimeMetricSnapshot.metrics_json.label("metrics_json"),
             rn,
+        ).where(
+            DeploymentRuntimeMetricSnapshot.deployment_id.in_(ids)
         )
     ).subquery()
     stmt = select(

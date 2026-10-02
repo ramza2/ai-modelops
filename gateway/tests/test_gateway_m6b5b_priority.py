@@ -40,7 +40,10 @@ from app.routing.priority_evidence import (
     REASON_TRUSTED_PRIORITY,
     evaluate_priority_scheduler_evidence,
 )
-from app.routing.snapshot import load_routing_snapshot
+from app.routing.snapshot import (
+    _load_latest_runtime_observations,
+    load_routing_snapshot,
+)
 from app.routing.store import RoutingStore
 from app.runtime.client_concurrency import ClientConcurrencyTracker
 from app.runtime.inflight import InflightTracker
@@ -1486,4 +1489,439 @@ async def test_b4_before_b5b_ordering() -> None:
         assert resp.json()["error"]["code"] == ErrorCode.CLIENT_INPUT_TOKEN_LIMIT
     assert fake.chat_calls == []
     await http_client.aclose()
+    await engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# RoutingSnapshot LKG pin races + bounded observation query
+# ---------------------------------------------------------------------------
+
+
+def _holding_tokenize_upstream(
+    tokenize_entered: asyncio.Event,
+    tokenize_gate: asyncio.Event,
+    chat_calls: list[dict[str, Any]],
+) -> tuple[FakeUpstream, httpx.AsyncClient]:
+    """Fake upstream that pauses at /tokenize (after M5 bind, before B5-B)."""
+
+    class HoldingFake(FakeUpstream):
+        def as_client(self) -> httpx.AsyncClient:
+            upstream = self
+
+            async def tokenize(request: StarletteRequest) -> JSONResponse:
+                body = await request.json()
+                upstream.tokenize_calls.append(body)
+                tokenize_entered.set()
+                await tokenize_gate.wait()
+                return JSONResponse({"count": 1})
+
+            async def chat(request: StarletteRequest) -> JSONResponse:
+                body = await request.json()
+                upstream.chat_calls.append(body)
+                chat_calls.append(body)
+                return JSONResponse(
+                    {
+                        "id": "ok",
+                        "choices": [
+                            {
+                                "message": {"role": "assistant", "content": "x"},
+                                "finish_reason": "stop",
+                            }
+                        ],
+                        "usage": {
+                            "prompt_tokens": 1,
+                            "completion_tokens": 1,
+                            "total_tokens": 2,
+                        },
+                    }
+                )
+
+            app = Starlette(
+                routes=[
+                    Route("/tokenize", tokenize, methods=["POST"]),
+                    Route("/v1/chat/completions", chat, methods=["POST"]),
+                ]
+            )
+            return httpx.AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://upstream.test"
+            )
+
+    fake = HoldingFake()
+    return fake, fake.as_client()
+
+
+@pytest.mark.asyncio
+async def test_routing_lkg_to_fresh_swap_keeps_bound_lkg_reject() -> None:
+    """Bind under LKG A; mid-request store becomes fresh B → still 503."""
+    engine = create_async_engine(_database_url(), future=True)
+    session_factory = async_sessionmaker(
+        engine, expire_on_commit=False, autoflush=False
+    )
+    tokenize_entered = asyncio.Event()
+    tokenize_gate = asyncio.Event()
+    chat_calls: list[dict[str, Any]] = []
+    fake, http_client = _holding_tokenize_upstream(
+        tokenize_entered, tokenize_gate, chat_calls
+    )
+    client_key = f"lkg-race-{uuid.uuid4().hex[:6]}"
+    policy = _policy_store_with(
+        {
+            client_key: _policy_entry(
+                client_key, priority=-4, max_input_tokens=100, max_concurrent_requests=3
+            )
+        }
+    )
+    seeded = await _seed_alias_route(session_factory)
+    await _insert_runtime_snapshot(
+        session_factory,
+        deployment_id=seeded["deployment_id"],
+        sampled_at=seeded["last_started_at"] + dt.timedelta(minutes=1),
+        metrics_json=_priority_metrics(container_id=seeded["container_id"]),
+    )
+    ctx = await _build_gw(
+        policy_store=policy, http_client=http_client, session_factory=session_factory
+    )
+    store: RoutingStore = ctx["store"]
+    assert store.snapshot is not None
+    entry = store.snapshot.get(seeded["alias"])
+    assert entry is not None and entry.priority_scheduler_trusted is True
+    # Snapshot A is LKG at bind time.
+    store._snapshot = replace(store.snapshot, using_last_known_good=True)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=ctx["app"]), base_url="http://gw.test"
+    ) as ac:
+        task = asyncio.create_task(
+            ac.post(
+                "/v1/chat/completions",
+                headers={"X-AI-Client": client_key},
+                json={
+                    "model": seeded["alias"],
+                    "messages": [{"role": "user", "content": "hi"}],
+                },
+            )
+        )
+        await asyncio.wait_for(tokenize_entered.wait(), timeout=2.0)
+        # DB "recovers": store now holds fresh trusted snapshot B.
+        store._snapshot = replace(
+            store.snapshot,
+            using_last_known_good=False,
+            routing_version=store.snapshot.routing_version + 1,
+        )
+        tokenize_gate.set()
+        resp = await task
+        assert resp.status_code == 503
+        assert (
+            resp.json()["error"]["code"]
+            == ErrorCode.CLIENT_PRIORITY_SCHEDULER_UNAVAILABLE
+        )
+
+    assert chat_calls == []
+    assert fake.chat_calls == []
+    assert ctx["client_concurrency"].get(client_key) == 0
+    assert ctx["inflight"].snapshot() == {}
+    assert ctx["inflight"].get_unbound(seeded["alias"]) == 0
+    assert ctx["inflight"].get_deployment(seeded["deployment_id"]) == 0
+    await http_client.aclose()
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_routing_fresh_to_lkg_swap_keeps_bound_fresh_forward() -> None:
+    """Bind under fresh trusted A; mid-request store becomes LKG → still forward."""
+    engine = create_async_engine(_database_url(), future=True)
+    session_factory = async_sessionmaker(
+        engine, expire_on_commit=False, autoflush=False
+    )
+    tokenize_entered = asyncio.Event()
+    tokenize_gate = asyncio.Event()
+    chat_calls: list[dict[str, Any]] = []
+    fake, http_client = _holding_tokenize_upstream(
+        tokenize_entered, tokenize_gate, chat_calls
+    )
+    client_key = f"fresh-race-{uuid.uuid4().hex[:6]}"
+    policy = _policy_store_with(
+        {
+            client_key: _policy_entry(
+                client_key, priority=-6, max_input_tokens=100
+            )
+        }
+    )
+    seeded = await _seed_alias_route(session_factory)
+    await _insert_runtime_snapshot(
+        session_factory,
+        deployment_id=seeded["deployment_id"],
+        sampled_at=seeded["last_started_at"] + dt.timedelta(minutes=1),
+        metrics_json=_priority_metrics(container_id=seeded["container_id"]),
+    )
+    ctx = await _build_gw(
+        policy_store=policy, http_client=http_client, session_factory=session_factory
+    )
+    store: RoutingStore = ctx["store"]
+    assert store.snapshot is not None
+    assert store.snapshot.using_last_known_good is False
+    assert store.snapshot.get(seeded["alias"]).priority_scheduler_trusted is True
+
+    async with AsyncClient(
+        transport=ASGITransport(app=ctx["app"]), base_url="http://gw.test"
+    ) as ac:
+        task = asyncio.create_task(
+            ac.post(
+                "/v1/chat/completions",
+                headers={"X-AI-Client": client_key},
+                json={
+                    "model": seeded["alias"],
+                    "messages": [{"role": "user", "content": "hi"}],
+                },
+            )
+        )
+        await asyncio.wait_for(tokenize_entered.wait(), timeout=2.0)
+        # Store flips to LKG mid-request — bound pin must still forward.
+        store._snapshot = replace(store.snapshot, using_last_known_good=True)
+        tokenize_gate.set()
+        resp = await task
+        assert resp.status_code == 200, resp.text
+        assert chat_calls[0]["priority"] == -6
+
+        # Next request sees LKG and rejects non-zero priority.
+        resp2 = await ac.post(
+            "/v1/chat/completions",
+            headers={"X-AI-Client": client_key},
+            json={
+                "model": seeded["alias"],
+                "messages": [{"role": "user", "content": "next"}],
+            },
+        )
+        assert resp2.status_code == 503
+        assert (
+            resp2.json()["error"]["code"]
+            == ErrorCode.CLIENT_PRIORITY_SCHEDULER_UNAVAILABLE
+        )
+
+    assert len(chat_calls) == 1
+    await http_client.aclose()
+    await engine.dispose()
+
+
+async def _seed_unrelated_deployment(
+    session_factory: async_sessionmaker,
+) -> dict[str, Any]:
+    """Deployment with no ACTIVE route (excluded from observation query set)."""
+    suffix = uuid.uuid4().hex[:8]
+    node_id = uuid.uuid4()
+    model_id = uuid.uuid4()
+    version_id = uuid.uuid4()
+    dep_id = uuid.uuid4()
+    ctr = f"ctr-unrel-{suffix}"
+    started = dt.datetime.now(tz=dt.UTC) - dt.timedelta(minutes=5)
+    async with session_factory() as session:
+        await session.execute(
+            text(
+                """
+                INSERT INTO node (
+                  id, name, hostname, agent_base_url, environment, status, labels_json
+                ) VALUES (
+                  :id, :name, :hostname, 'http://127.0.0.1:8100', 'local', 'ONLINE', '{}'::jsonb
+                )
+                """
+            ),
+            {
+                "id": str(node_id),
+                "name": f"unrel-node-{suffix}",
+                "hostname": f"unrel-host-{suffix}",
+            },
+        )
+        await session.execute(
+            text(
+                """
+                INSERT INTO model (id, slug, name, model_type, source_type)
+                VALUES (:id, :slug, :name, 'LLM', 'LOCAL')
+                """
+            ),
+            {
+                "id": str(model_id),
+                "slug": f"unrel-model-{suffix}",
+                "name": f"Unrel {suffix}",
+            },
+        )
+        await session.execute(
+            text(
+                """
+                INSERT INTO model_version (
+                  id, model_id, version_label, runtime_type, runtime_image,
+                  served_model_name, runtime_config_json
+                ) VALUES (
+                  :id, :model_id, 'v1', 'VLLM', 'busybox:1.36',
+                  :served, '{}'::jsonb
+                )
+                """
+            ),
+            {
+                "id": str(version_id),
+                "model_id": str(model_id),
+                "served": f"unrel-served-{suffix}",
+            },
+        )
+        await session.execute(
+            text(
+                """
+                INSERT INTO deployment (
+                  id, name, model_version_id, node_id, deployment_type,
+                  desired_state, runtime_status, health_status,
+                  container_id, container_name, upstream_base_url, runtime_port,
+                  deployment_config_json, last_started_at
+                ) VALUES (
+                  :id, :name, :version_id, :node_id, 'MANAGED',
+                  'RUNNING', 'RUNNING', 'HEALTHY',
+                  :container_id, :container_name, 'http://unrelated.test', 8080,
+                  '{}'::jsonb, :last_started_at
+                )
+                """
+            ),
+            {
+                "id": str(dep_id),
+                "name": f"unrel-dep-{suffix}",
+                "version_id": str(version_id),
+                "node_id": str(node_id),
+                "container_id": ctr,
+                "container_name": f"unrel-ctr-{suffix}",
+                "last_started_at": started,
+            },
+        )
+        await session.commit()
+    return {
+        "deployment_id": str(dep_id),
+        "container_id": ctr,
+        "last_started_at": started,
+        "dep_uuid": dep_id,
+    }
+
+
+@pytest.mark.asyncio
+async def test_latest_observation_query_bounded_to_routed_deployments() -> None:
+    """Unrelated Deployment B history must not appear in observation map for A."""
+    engine = create_async_engine(_database_url(), future=True)
+    session_factory = async_sessionmaker(
+        engine, expire_on_commit=False, autoflush=False
+    )
+    a = await _seed_alias_route(session_factory)
+    b = await _seed_unrelated_deployment(session_factory)
+    t0 = a["last_started_at"]
+    # A: older priority observation.
+    await _insert_runtime_snapshot(
+        session_factory,
+        deployment_id=a["deployment_id"],
+        sampled_at=t0 + dt.timedelta(minutes=1),
+        metrics_json=_priority_metrics(
+            container_id=a["container_id"], scheduling_policy="priority"
+        ),
+    )
+    # B: many newer priority observations (must be ignored for A's evidence).
+    for i in range(5):
+        await _insert_runtime_snapshot(
+            session_factory,
+            deployment_id=b["deployment_id"],
+            sampled_at=t0 + dt.timedelta(minutes=10 + i),
+            metrics_json=_priority_metrics(
+                container_id=b["container_id"], scheduling_policy="priority"
+            ),
+        )
+
+    dep_a = uuid.UUID(a["deployment_id"])
+    dep_b = b["dep_uuid"]
+    async with session_factory() as session:
+        only_a = await _load_latest_runtime_observations(session, {dep_a})
+        empty = await _load_latest_runtime_observations(session, set())
+        both = await _load_latest_runtime_observations(session, {dep_a, dep_b})
+
+    assert a["deployment_id"] in only_a
+    assert b["deployment_id"] not in only_a
+    assert empty == {}
+    assert a["deployment_id"] in both and b["deployment_id"] in both
+
+    snap = await load_routing_snapshot(session_factory)
+    entry = snap.get(a["alias"])
+    assert entry is not None
+    assert entry.priority_scheduler_trusted is True
+    assert entry.priority_scheduler_evidence_reason == REASON_TRUSTED_PRIORITY
+    # B is not routed → not present as a route; A's trust unaffected by B history.
+    assert all(
+        r.deployment_id != b["deployment_id"] for r in snap.routes.values()
+    )
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_duplicate_alias_same_deployment_observation_dedup() -> None:
+    """Two ACTIVE aliases → same Deployment: observation ID set has one entry."""
+    engine = create_async_engine(_database_url(), future=True)
+    session_factory = async_sessionmaker(
+        engine, expire_on_commit=False, autoflush=False
+    )
+    a = await _seed_alias_route(session_factory)
+    # Second alias pointing at the same Deployment.
+    alias_b = f"dup-{uuid.uuid4().hex[:8]}"
+    endpoint_id = uuid.uuid4()
+    route_id = uuid.uuid4()
+    async with session_factory() as session:
+        await session.execute(
+            text(
+                """
+                INSERT INTO endpoint_alias (
+                  id, alias, display_name, api_type, traffic_state,
+                  description, is_enabled
+                ) VALUES (
+                  :id, :alias, :display_name, 'CHAT', 'SERVING',
+                  NULL, true
+                )
+                """
+            ),
+            {
+                "id": str(endpoint_id),
+                "alias": alias_b,
+                "display_name": alias_b,
+            },
+        )
+        await session.execute(
+            text(
+                """
+                INSERT INTO endpoint_route (
+                  id, endpoint_alias_id, deployment_id, status,
+                  rewrite_model_name, activated_at
+                ) VALUES (
+                  :id, :alias_id, :deployment_id, 'ACTIVE',
+                  NULL, now()
+                )
+                """
+            ),
+            {
+                "id": str(route_id),
+                "alias_id": str(endpoint_id),
+                "deployment_id": a["deployment_id"],
+            },
+        )
+        await session.execute(
+            text(
+                "UPDATE routing_state SET version = version + 1, updated_at = now() WHERE id = 1"
+            )
+        )
+        await session.commit()
+
+    await _insert_runtime_snapshot(
+        session_factory,
+        deployment_id=a["deployment_id"],
+        sampled_at=a["last_started_at"] + dt.timedelta(minutes=1),
+        metrics_json=_priority_metrics(container_id=a["container_id"]),
+    )
+    snap = await load_routing_snapshot(session_factory)
+    entry_a = snap.get(a["alias"])
+    entry_b = snap.get(alias_b)
+    assert entry_a is not None and entry_b is not None
+    assert entry_a.deployment_id == entry_b.deployment_id == a["deployment_id"]
+    assert entry_a.priority_scheduler_trusted is True
+    assert entry_b.priority_scheduler_trusted is True
+    assert (
+        entry_a.priority_scheduler_evidence_sampled_at
+        == entry_b.priority_scheduler_evidence_sampled_at
+    )
     await engine.dispose()
