@@ -195,6 +195,10 @@ CONTAINER_ARGV/`VLLM`/explicit `scheduling_policy=priority`). Caller JSON
 only (no injection, no scheduler requirement). Non-zero without trust or
 during RoutingStore LKG → 503 `CLIENT_PRIORITY_SCHEDULER_UNAVAILABLE`.
 Requested config alone is never sufficient. Embeddings priority deferred.
+M6-C1: Admin UI foundation (React + TypeScript + Vite) + read-only Dashboard.
+Browser uses same-origin `/api`, `/health`, `/ready` via Vite proxy (dev) or
+nginx (prod compose). Dashboard aggregates existing Management APIs plus
+`GET /api/v1/operations` list. No Admin SSO; trusted internal-network access.
 No Prometheus/Grafana server is introduced. A2 histogram scrapes are cumulative;
 A3 P50/P95 are classic bucket estimates over valid same-instance deltas only.
 IMPORTED runtime metrics / argv observation are deferred (profile returns

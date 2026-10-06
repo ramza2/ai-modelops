@@ -24,7 +24,11 @@ from app.core.errors import ConflictError, NotFoundError, ValidationError
 from app.core.serialize import isoformat_utc
 from app.domain.models import Deployment, Operation, OperationJob, OperationStep
 from app.repositories.deployments import DeploymentRepository
-from app.repositories.operations import OperationRepository
+from app.repositories.operations import (
+    ACTIVE_OPERATION_STATUSES,
+    TERMINAL_OPERATION_STATUSES,
+    OperationRepository,
+)
 
 # Step codes for Milestone 3B-2/3B-3 single-deployment lifecycle.
 STEP_PREPARE_ARTIFACTS = "PREPARE_ARTIFACTS"
@@ -159,6 +163,68 @@ class OperationService:
             )
         steps = await self._operations.list_steps(operation_id)
         return self._serialize_operation(operation, steps)
+
+    async def list_operations(
+        self,
+        *,
+        status: str | None = None,
+        operation_type: str | None = None,
+        active: bool | None = None,
+        page: int = 1,
+        page_size: int = 50,
+    ) -> dict[str, Any]:
+        """Paginated Operation summaries (no steps / metadata_json)."""
+        if status is not None and active is not None:
+            raise ValidationError(
+                "Provide either status or active, not both.",
+                details={"status": status, "active": active},
+            )
+
+        resolved_status: str | None = None
+        statuses: frozenset[str] | None = None
+        if status is not None:
+            try:
+                resolved_status = OperationStatus(status).value
+            except ValueError as exc:
+                raise ValidationError(
+                    "Invalid operation status.",
+                    details={
+                        "status": status,
+                        "allowed": [s.value for s in OperationStatus],
+                    },
+                ) from exc
+        elif active is True:
+            statuses = ACTIVE_OPERATION_STATUSES
+        elif active is False:
+            statuses = TERMINAL_OPERATION_STATUSES
+
+        resolved_type: str | None = None
+        if operation_type is not None:
+            try:
+                resolved_type = OperationType(operation_type).value
+            except ValueError as exc:
+                raise ValidationError(
+                    "Invalid operation_type.",
+                    details={
+                        "operation_type": operation_type,
+                        "allowed": [t.value for t in OperationType],
+                    },
+                ) from exc
+
+        offset = (page - 1) * page_size
+        rows, total = await self._operations.list_operations(
+            status=resolved_status,
+            operation_type=resolved_type,
+            statuses=statuses,
+            offset=offset,
+            limit=page_size,
+        )
+        return {
+            "items": [self._serialize_operation_summary(op) for op in rows],
+            "page": page,
+            "page_size": page_size,
+            "total": total,
+        }
 
     async def cancel_operation(
         self,
@@ -315,6 +381,43 @@ class OperationService:
             "finished_at": isoformat_utc(operation.finished_at),
             "error": error,
             "steps": [self._serialize_step(s) for s in steps],
+        }
+
+    def _serialize_operation_summary(self, operation: Operation) -> dict[str, Any]:
+        """List-item payload: no steps, no metadata_json."""
+        return {
+            "id": str(operation.id),
+            "operation_type": operation.operation_type,
+            "status": operation.status,
+            "switch_strategy": operation.switch_strategy,
+            "endpoint_alias_id": (
+                str(operation.endpoint_alias_id)
+                if operation.endpoint_alias_id
+                else None
+            ),
+            "source_deployment_id": (
+                str(operation.source_deployment_id)
+                if operation.source_deployment_id
+                else None
+            ),
+            "target_deployment_id": (
+                str(operation.target_deployment_id)
+                if operation.target_deployment_id
+                else None
+            ),
+            "requested_by": operation.requested_by,
+            "request_reason": operation.request_reason,
+            "error_code": operation.error_code,
+            "error_message": operation.error_message,
+            "cancel_requested_at": isoformat_utc(operation.cancel_requested_at),
+            "retry_of_operation_id": (
+                str(operation.retry_of_operation_id)
+                if operation.retry_of_operation_id
+                else None
+            ),
+            "created_at": isoformat_utc(operation.created_at),
+            "started_at": isoformat_utc(operation.started_at),
+            "finished_at": isoformat_utc(operation.finished_at),
         }
 
     @staticmethod

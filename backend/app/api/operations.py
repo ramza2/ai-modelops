@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, Header, Response, status
+from fastapi import APIRouter, Depends, Header, Query, Response, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -31,6 +31,25 @@ def get_switch_service(
     session: AsyncSession = Depends(get_session),
 ) -> SwitchService:
     return SwitchService(session)
+
+
+@router.get("/operations")
+async def list_operations(
+    status_filter: str | None = Query(default=None, alias="status"),
+    operation_type: str | None = Query(default=None),
+    active: bool | None = Query(default=None),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=200),
+    service: OperationService = Depends(get_operation_service),
+) -> dict:
+    """Paginated Operation list (M6-C1). Excludes steps and metadata_json."""
+    return await service.list_operations(
+        status=status_filter,
+        operation_type=operation_type,
+        active=active,
+        page=page,
+        page_size=page_size,
+    )
 
 
 @router.get("/operations/{operation_id}")
