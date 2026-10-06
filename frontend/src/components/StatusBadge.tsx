@@ -19,6 +19,8 @@ const LABELS: Record<string, string> = {
   ROLLED_BACK: '롤백됨',
   CANCELLED: '취소됨',
   MANUAL_INTERVENTION_REQUIRED: '수동 개입 필요',
+  AVAILABLE: '사용 가능',
+  UNAVAILABLE: '사용 불가',
 }
 
 const TONE: Record<string, string> = {
@@ -26,6 +28,7 @@ const TONE: Record<string, string> = {
   HEALTHY: 'ok',
   SERVING: 'ok',
   SUCCEEDED: 'ok',
+  AVAILABLE: 'ok',
   RUNNING: 'info',
   QUEUED: 'info',
   STARTING: 'info',
@@ -36,6 +39,7 @@ const TONE: Record<string, string> = {
   OFFLINE: 'bad',
   FAILED: 'bad',
   UNHEALTHY: 'bad',
+  UNAVAILABLE: 'bad',
   STOPPED: 'muted',
   CANCELLED: 'muted',
   ROLLED_BACK: 'muted',

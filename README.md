@@ -92,7 +92,7 @@ Docker가 설치·기동된 상태에서 repository root에서:
 
 성공 시 Backend는 `http://localhost:<BACKEND_PORT>` (기본 8000)이다.
 
-### Admin UI (M6-C1)
+### Admin UI (M6-C1 / M6-C2)
 
 ```bash
 cd frontend
@@ -107,6 +107,19 @@ Compose에 `frontend` 서비스가 포함된다 (`FRONTEND_PORT` 기본 3000).
 프로덕션 이미지는 nginx가 SPA를 서빙하고 같은 origin으로 Management API를
 프록시한다. Admin UI는 Gateway inference를 호출하지 않는다.
 C1은 신뢰된 내부망 접근을 가정하며 Admin SSO는 포함하지 않는다.
+
+C2 routes:
+
+```text
+/dashboard
+/nodes
+/nodes/:nodeId
+```
+
+Nodes list는 `GET /api/v1/nodes`만 사용한다 (row별 resource N+1 없음).
+Node detail의 AppShell `새로고침`은 DB 재조회이고, `리소스 갱신`만
+`POST /api/v1/nodes/{id}/resources/refresh`로 Node Agent를 호출한다.
+GPU free VRAM은 GPU별로만 표시하며 합산 capacity KPI를 만들지 않는다.
 
 ### Milestone 2 — Node Agent (host process)
 
@@ -240,6 +253,7 @@ Cloud Agent 환경(`.cursor/environment.json`)은 `scripts/cloud-install.sh`(ins
 - [x] Milestone 4 (Gateway): Alias routing, OpenAI-compatible proxy, streaming, traffic state, Last Known Good Route
 - [x] Milestone 5 (Switch): Resource Preflight, Cold/Hot Switch, rollback, cancel/retry, reconciliation
 - [x] Milestone 6A/B: Invocation capacity telemetry, runtime metrics/analytics, Capacity Profile, Client Runtime Policy + Gateway concurrency/token/priority enforcement
-- [ ] Milestone 6-C1 (current): Admin UI foundation + Dashboard (read-only; same-origin Management API proxy)
-- [ ] Milestone 6-C2+: Nodes/GPUs, Models, Deployments, Endpoints, Operations, Observability pages
+- [x] M6-C1 Admin UI Foundation + Dashboard
+- [ ] M6-C2 Nodes / GPUs — current
+- [ ] M6-C3+ Models, Deployments, Endpoints, Operations, Observability pages
 

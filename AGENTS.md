@@ -702,13 +702,18 @@ ${DATABASE_URL}
      RoutingStore LKG → 503
      `CLIENT_PRIORITY_SCHEDULER_UNAVAILABLE`. Requested config
      alone insufficient. Embeddings priority deferred.
-   - **M6-C1 (current):** Admin UI foundation (React + TypeScript +
+   - **M6-C1 (done):** Admin UI foundation (React + TypeScript +
      Vite) + Dashboard (Control Plane / Nodes / Deployments /
      Endpoints / Operations / 24h invocations). Same-origin nginx
      proxy to Management API. Read-only except manual refresh.
      Adds `GET /api/v1/operations` list. Trusted internal-network
      access assumed (no Admin SSO in C1).
-   - **M6-C2 (next):** Nodes / GPUs detail
+   - **M6-C2 (current):** Nodes / GPUs Operations UI (`/nodes`,
+     `/nodes/:nodeId`). List with status filter + pagination;
+     detail shows Host/GPU persisted snapshots. AppShell
+     `새로고침` = DB re-read; detail `리소스 갱신` =
+     `POST .../resources/refresh` via Management API (Node Agent).
+     Per-GPU VRAM only — never aggregate free VRAM across GPUs.
    - **M6-C3:** Models / Versions
    - **M6-C4:** Deployments
    - **M6-C5:** Endpoints

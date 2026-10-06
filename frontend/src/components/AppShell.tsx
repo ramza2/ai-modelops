@@ -9,6 +9,7 @@ type AppShellProps = {
   onRefresh: () => void
   refreshing: boolean
   lastUpdated: Date | null
+  refreshDisabled?: boolean
 }
 
 export function AppShell({
@@ -18,7 +19,9 @@ export function AppShell({
   onRefresh,
   refreshing,
   lastUpdated,
+  refreshDisabled = false,
 }: AppShellProps) {
+  const busy = refreshing || refreshDisabled
   return (
     <div className="shell">
       <header className="shell__top">
@@ -34,7 +37,7 @@ export function AppShell({
             type="button"
             className="btn btn--primary"
             onClick={onRefresh}
-            disabled={refreshing}
+            disabled={busy}
             aria-busy={refreshing}
           >
             {refreshing ? '갱신 중…' : '새로고침'}
@@ -53,11 +56,18 @@ export function AppShell({
             >
               Dashboard
             </NavLink>
+            <NavLink
+              to="/nodes"
+              className={({ isActive }) =>
+                isActive ? 'nav-link nav-link--active' : 'nav-link'
+              }
+            >
+              Nodes / GPUs
+            </NavLink>
           </nav>
           <div className="nav-section" aria-label="향후 메뉴">
             <p className="nav-section__label">Model Ops</p>
             <ul className="nav-future">
-              <li>Nodes / GPUs</li>
               <li>Models / Versions</li>
               <li>Deployments</li>
               <li>Endpoints</li>

@@ -102,31 +102,54 @@ function messageFromBody(body: unknown, fallback: string): {
 export type ApiFetchOptions = {
   query?: Record<string, string | number | boolean | null | undefined>
   signal?: AbortSignal
+  body?: unknown
+}
+
+async function apiRequest<T>(
+  method: string,
+  path: string,
+  options: ApiFetchOptions = {},
+): Promise<T> {
+  const url = buildApiUrl(API_BASE, path, options.query)
+  const headers: Record<string, string> = { Accept: 'application/json' }
+  let body: string | undefined
+  if (options.body !== undefined) {
+    headers['Content-Type'] = 'application/json'
+    body = JSON.stringify(options.body)
+  }
+  const response = await fetch(url, {
+    method,
+    headers,
+    body,
+    signal: options.signal,
+  })
+  const parsed = await parseBody(response)
+  if (!response.ok) {
+    const { message, code } = messageFromBody(
+      parsed,
+      `Request failed (${response.status})`,
+    )
+    throw new ApiError(message, {
+      status: response.status,
+      code,
+      body: parsed,
+    })
+  }
+  return parsed as T
 }
 
 export async function apiGet<T>(
   path: string,
   options: ApiFetchOptions = {},
 ): Promise<T> {
-  const url = buildApiUrl(API_BASE, path, options.query)
-  const response = await fetch(url, {
-    method: 'GET',
-    headers: { Accept: 'application/json' },
-    signal: options.signal,
-  })
-  const body = await parseBody(response)
-  if (!response.ok) {
-    const { message, code } = messageFromBody(
-      body,
-      `Request failed (${response.status})`,
-    )
-    throw new ApiError(message, {
-      status: response.status,
-      code,
-      body,
-    })
-  }
-  return body as T
+  return apiRequest<T>('GET', path, options)
+}
+
+export async function apiPost<T>(
+  path: string,
+  options: ApiFetchOptions = {},
+): Promise<T> {
+  return apiRequest<T>('POST', path, options)
 }
 
 /** @deprecated use buildApiUrl('', ...) — kept for older tests */

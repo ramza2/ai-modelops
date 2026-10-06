@@ -3,6 +3,7 @@ import {
   ApiError,
   __testBuildUrl,
   apiGet,
+  apiPost,
   buildApiUrl,
 } from '../api/client'
 
@@ -105,5 +106,88 @@ describe('api client', () => {
     const ac = new AbortController()
     await apiGet('/health', { signal: ac.signal })
     expect(fetchMock).toHaveBeenCalled()
+  })
+
+  it('POSTs without body and omits Content-Type', async () => {
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      expect(init?.method).toBe('POST')
+      expect(init?.body).toBeUndefined()
+      const headers = new Headers(init?.headers)
+      expect(headers.get('Content-Type')).toBeNull()
+      expect(headers.get('Accept')).toBe('application/json')
+      return new Response(
+        JSON.stringify({ node_id: 'n1', host: null, gpus: [] }),
+        {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        },
+      )
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const body = await apiPost<{ node_id: string }>(
+      '/api/v1/nodes/n1/resources/refresh',
+    )
+    expect(body.node_id).toBe('n1')
+  })
+
+  it('POSTs JSON body with Content-Type', async () => {
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      expect(init?.method).toBe('POST')
+      expect(init?.body).toBe(JSON.stringify({ name: 'x' }))
+      const headers = new Headers(init?.headers)
+      expect(headers.get('Content-Type')).toBe('application/json')
+      return new Response(JSON.stringify({ ok: true }), { status: 200 })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    await apiPost('/api/v1/example', { body: { name: 'x' } })
+    expect(fetchMock).toHaveBeenCalled()
+  })
+
+  it('parses ModelOps error envelope on POST', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(
+          JSON.stringify({
+            error: {
+              message: 'Node Agent unreachable.',
+              type: 'modelops_error',
+              code: 'UPSTREAM_UNAVAILABLE',
+            },
+          }),
+          { status: 502, headers: { 'Content-Type': 'application/json' } },
+        ),
+      ),
+    )
+    await expect(
+      apiPost('/api/v1/nodes/n1/resources/refresh'),
+    ).rejects.toMatchObject({
+      name: 'ApiError',
+      status: 502,
+      code: 'UPSTREAM_UNAVAILABLE',
+      message: 'Node Agent unreachable.',
+    } satisfies Partial<ApiError>)
+  })
+
+  it('propagates AbortSignal on POST', async () => {
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      expect(init?.signal).toBeDefined()
+      return new Response('{}', { status: 200 })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const ac = new AbortController()
+    await apiPost('/api/v1/nodes/n1/resources/refresh', {
+      signal: ac.signal,
+    })
+    expect(fetchMock).toHaveBeenCalled()
+  })
+
+  it('POSTs against absolute API base', async () => {
+    expect(
+      buildApiUrl(
+        'https://api.example.test',
+        '/api/v1/nodes/n1/resources/refresh',
+      ),
+    ).toBe('https://api.example.test/api/v1/nodes/n1/resources/refresh')
   })
 })
