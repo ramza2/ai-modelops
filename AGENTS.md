@@ -683,21 +683,25 @@ ${DATABASE_URL}
      `/tokenize` Chat subset and fails closed
      (`CLIENT_INPUT_TOKEN_CHECK_UNAVAILABLE`) on unproven
      rendering-sensitive fields. One Chat request pins a single
-     `ClientPolicyEntry` through B3/B2/B4. Non-VLLM with active
+     `ClientPolicyEntry` through B3/B2/B4/B5-B. Non-VLLM with active
      policy → 503. No local tokenizer / truncation / estimation.
      Embeddings input deferred.
-   - **M6-B5-A (current):** Managed vLLM `--scheduling-policy`
+   - **M6-B5-A (done):** Managed vLLM `--scheduling-policy`
      (`fcfs` | `priority`) create-time argv wiring + Node Agent
      observed argv + Capacity Profile requested/observed compare.
      Deployment config > ModelVersion runtime_config > UNSET;
      explicit Deployment null invalid (no fallback); unset omits
      flag (never synthesize `fcfs`). Existing containers are not
-     recreated on config change. Gateway does **not** forward
-     `ClientRuntimePolicy.priority` yet.
-   - **M6-B5-B (future):** Trusted observed-priority evidence on
-     the Gateway path before forwarding request priority
-     (`JSON priority` vs `X-Vllm-Priority` deferred). Requested
-     config alone is not sufficient proof.
+     recreated on config change.
+   - **M6-B5-B (current):** Gateway Chat forwards pinned
+     `ClientRuntimePolicy.priority` only with trusted
+     current-container RoutingSnapshot evidence (CONTAINER_ARGV /
+     VLLM / explicit `scheduling_policy=priority` after
+     `last_started_at`). Caller JSON/`X-Vllm-Priority` never
+     authoritative. Null/0 strip-only; non-zero untrusted or
+     RoutingStore LKG → 503
+     `CLIENT_PRIORITY_SCHEDULER_UNAVAILABLE`. Requested config
+     alone insufficient. Embeddings priority deferred.
 
 한 번에 모든 기능을 스캐폴딩만 하는 것보다 각 milestone을 end-to-end로 동작하게 완성하는 것을 우선한다.
 

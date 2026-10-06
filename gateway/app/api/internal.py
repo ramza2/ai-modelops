@@ -92,6 +92,7 @@ async def route_runtime(
     else:
         observed_inflight = int(tracker.get_deployment(observed_deployment_id))
 
+    sampled = entry.priority_scheduler_evidence_sampled_at
     return {
         "alias": entry.alias,
         "endpoint_id": entry.endpoint_id,
@@ -110,6 +111,13 @@ async def route_runtime(
         "observed_deployment_id": observed_deployment_id,
         "observed_deployment_inflight_requests": observed_inflight,
         "observed_deployment_idle": bool(observed_inflight == 0),
+        "priority_scheduler_trusted": bool(entry.priority_scheduler_trusted),
+        "priority_scheduler_evidence_reason": str(
+            entry.priority_scheduler_evidence_reason
+        ),
+        "priority_scheduler_evidence_sampled_at": (
+            sampled.isoformat().replace("+00:00", "Z") if sampled is not None else None
+        ),
     }
 
 

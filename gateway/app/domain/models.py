@@ -15,7 +15,7 @@ from sqlalchemy import (
     Text,
     text,
 )
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.db import Base
@@ -78,9 +78,14 @@ class Deployment(Base):
     model_version_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), nullable=False
     )
+    deployment_type: Mapped[str] = mapped_column(String(32), nullable=False)
     runtime_status: Mapped[str] = mapped_column(String(32), nullable=False)
     health_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    container_id: Mapped[str | None] = mapped_column(String(255))
     upstream_base_url: Mapped[str] = mapped_column(Text, nullable=False)
+    last_started_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
     retired_at: Mapped[dt.datetime | None] = mapped_column(
         DateTime(timezone=True)
     )
@@ -92,6 +97,21 @@ class ModelVersion(Base):
     id: Mapped[uuid.UUID] = _uuid_pk()
     served_model_name: Mapped[str] = mapped_column(String(255), nullable=False)
     runtime_type: Mapped[str | None] = mapped_column(String(32))
+
+
+class DeploymentRuntimeMetricSnapshot(Base):
+    """Read-only latest runtime metric observation for B5-B evidence."""
+
+    __tablename__ = "deployment_runtime_metric_snapshot"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    deployment_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), nullable=False
+    )
+    sampled_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    metrics_json: Mapped[dict] = mapped_column(JSONB, nullable=False)
 
 
 class ClientApp(Base):
@@ -119,4 +139,3 @@ class ClientRuntimePolicy(Base):
     max_output_tokens: Mapped[int | None] = mapped_column(Integer)
     max_concurrent_requests: Mapped[int | None] = mapped_column(Integer)
     priority: Mapped[int | None] = mapped_column(Integer)
-
