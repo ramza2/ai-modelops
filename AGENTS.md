@@ -708,13 +708,18 @@ ${DATABASE_URL}
      proxy to Management API. Read-only except manual refresh.
      Adds `GET /api/v1/operations` list. Trusted internal-network
      access assumed (no Admin SSO in C1).
-   - **M6-C2 (current):** Nodes / GPUs Operations UI (`/nodes`,
+   - **M6-C2 (done):** Nodes / GPUs Operations UI (`/nodes`,
      `/nodes/:nodeId`). List with status filter + pagination;
      detail shows Host/GPU persisted snapshots. AppShell
      `새로고침` = DB re-read; detail `리소스 갱신` =
      `POST .../resources/refresh` via Management API (Node Agent).
      Per-GPU VRAM only — never aggregate free VRAM across GPUs.
-   - **M6-C3:** Models / Versions
+   - **M6-C3 (current):** Models / Versions Registry UI
+     (`/models`, `/models/:modelId`, `/model-versions/:versionId`).
+     Read-only Model/Version/Artifact inspection. Version
+     `runtime_config` shown as stored definition only — not
+     Deployment effective / observed runtime. No Capacity Profile
+     or Deployment coupling.
    - **M6-C4:** Deployments
    - **M6-C5:** Endpoints
    - **M6-C6:** Operations

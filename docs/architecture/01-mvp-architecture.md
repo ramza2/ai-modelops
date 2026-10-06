@@ -199,12 +199,17 @@ M6-C1 (done): Admin UI foundation (React + TypeScript + Vite) + read-only Dashbo
 Browser uses same-origin `/api`, `/health`, `/ready` via Vite proxy (dev) or
 nginx (prod compose). Dashboard aggregates existing Management APIs plus
 `GET /api/v1/operations` list. No Admin SSO; trusted internal-network access.
-M6-C2 (current): Nodes / GPUs Operations UI at `/nodes` and `/nodes/:nodeId`.
+M6-C2 (done): Nodes / GPUs Operations UI at `/nodes` and `/nodes/:nodeId`.
 List uses paginated `GET /api/v1/nodes` with status filter (no per-row resource
 N+1). Detail loads Node metadata + `resources/latest` independently; explicit
 `리소스 갱신` calls `POST .../resources/refresh` (Management API → Node Agent).
 AppShell `새로고침` re-reads persisted DB only. Free VRAM is shown per GPU and
 never aggregated across GPUs into a deployable capacity KPI.
+M6-C3 (current): Models / Versions Registry UI at `/models`, `/models/:modelId`,
+and `/model-versions/:versionId`. Read-only Model metadata, Version history,
+allowlisted Version `runtime_config` definition fields, and Artifact list.
+Version config is stored definition only — not Deployment effective override or
+observed runtime (Capacity Profile / Deployments deferred to C4).
 No Prometheus/Grafana server is introduced. A2 histogram scrapes are cumulative;
 A3 P50/P95 are classic bucket estimates over valid same-instance deltas only.
 IMPORTED runtime metrics / argv observation are deferred (profile returns

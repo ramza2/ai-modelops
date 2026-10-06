@@ -4,7 +4,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MemoryRouter, Route, Routes, useSearchParams } from 'react-router-dom'
 import { ApiError } from '../api/client'
 import type { NodeSummary, Paginated } from '../api/types'
-import { NodesPage, __testParsePage } from '../pages/NodesPage'
+import { NodesPage } from '../pages/NodesPage'
+import { parsePositivePage } from '../utils/query'
 import * as nodesApi from '../api/nodes'
 
 function makeNode(
@@ -68,7 +69,7 @@ describe('parsePage strictness', () => {
     ['abc', 1],
     [String(Number.MAX_SAFE_INTEGER + 1), 1],
   ] as const)('parses %s → %s', (raw, expected) => {
-    expect(__testParsePage(raw)).toBe(expected)
+    expect(parsePositivePage(raw)).toBe(expected)
   })
 })
 

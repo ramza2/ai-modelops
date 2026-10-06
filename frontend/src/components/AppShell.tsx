@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react'
-import { NavLink } from 'react-router-dom'
+import { NavLink, useLocation } from 'react-router-dom'
 import { formatClock } from '../utils/date'
 
 type AppShellProps = {
@@ -22,6 +22,12 @@ export function AppShell({
   refreshDisabled = false,
 }: AppShellProps) {
   const busy = refreshing || refreshDisabled
+  const location = useLocation()
+  const modelsActive =
+    location.pathname === '/models' ||
+    location.pathname.startsWith('/models/') ||
+    location.pathname.startsWith('/model-versions/')
+
   return (
     <div className="shell">
       <header className="shell__top">
@@ -64,11 +70,18 @@ export function AppShell({
             >
               Nodes / GPUs
             </NavLink>
+            <NavLink
+              to="/models"
+              className={() =>
+                modelsActive ? 'nav-link nav-link--active' : 'nav-link'
+              }
+            >
+              Models / Versions
+            </NavLink>
           </nav>
           <div className="nav-section" aria-label="향후 메뉴">
             <p className="nav-section__label">Model Ops</p>
             <ul className="nav-future">
-              <li>Models / Versions</li>
               <li>Deployments</li>
               <li>Endpoints</li>
               <li>Operations</li>

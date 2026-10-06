@@ -10,6 +10,7 @@ import { SectionError } from '../components/SectionError'
 import { StatusBadge } from '../components/StatusBadge'
 import { formatApiDateTime } from '../utils/date'
 import { formatMemoryMb } from '../utils/number'
+import { parsePositivePage } from '../utils/query'
 
 const PAGE_SIZE = 20
 const KNOWN_STATUSES = new Set([
@@ -18,20 +19,6 @@ const KNOWN_STATUSES = new Set([
   'OFFLINE',
   'UNKNOWN',
 ])
-
-function parsePage(raw: string | null): number {
-  if (!raw) return 1
-  // Strict positive decimal integer only (reject parseInt prefix matches).
-  if (!/^\d+$/.test(raw)) return 1
-  const n = Number(raw)
-  if (!Number.isSafeInteger(n) || n < 1) return 1
-  return n
-}
-
-/** Exported for unit tests. */
-export function __testParsePage(raw: string | null): number {
-  return parsePage(raw)
-}
 
 function parseStatus(raw: string | null): string | null {
   if (!raw) return null
@@ -44,7 +31,7 @@ function parseStatus(raw: string | null): string | null {
 export function NodesPage() {
   const [searchParams, setSearchParams] = useSearchParams()
   const status = parseStatus(searchParams.get('status'))
-  const page = parsePage(searchParams.get('page'))
+  const page = parsePositivePage(searchParams.get('page'))
 
   const [items, setItems] = useState<NodeSummary[] | null>(null)
   const [total, setTotal] = useState(0)
@@ -79,7 +66,7 @@ export function NodesPage() {
       fixed.set('status', parsedStatus)
     }
 
-    const parsedPage = parsePage(rawPage)
+    const parsedPage = parsePositivePage(rawPage)
     if (rawPage !== null && String(parsedPage) !== rawPage) {
       needsFix = true
     }
