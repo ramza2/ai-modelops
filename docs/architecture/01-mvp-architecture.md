@@ -195,10 +195,16 @@ CONTAINER_ARGV/`VLLM`/explicit `scheduling_policy=priority`). Caller JSON
 only (no injection, no scheduler requirement). Non-zero without trust or
 during RoutingStore LKG → 503 `CLIENT_PRIORITY_SCHEDULER_UNAVAILABLE`.
 Requested config alone is never sufficient. Embeddings priority deferred.
-M6-C1: Admin UI foundation (React + TypeScript + Vite) + read-only Dashboard.
+M6-C1 (done): Admin UI foundation (React + TypeScript + Vite) + read-only Dashboard.
 Browser uses same-origin `/api`, `/health`, `/ready` via Vite proxy (dev) or
 nginx (prod compose). Dashboard aggregates existing Management APIs plus
 `GET /api/v1/operations` list. No Admin SSO; trusted internal-network access.
+M6-C2 (current): Nodes / GPUs Operations UI at `/nodes` and `/nodes/:nodeId`.
+List uses paginated `GET /api/v1/nodes` with status filter (no per-row resource
+N+1). Detail loads Node metadata + `resources/latest` independently; explicit
+`리소스 갱신` calls `POST .../resources/refresh` (Management API → Node Agent).
+AppShell `새로고침` re-reads persisted DB only. Free VRAM is shown per GPU and
+never aggregated across GPUs into a deployable capacity KPI.
 No Prometheus/Grafana server is introduced. A2 histogram scrapes are cumulative;
 A3 P50/P95 are classic bucket estimates over valid same-instance deltas only.
 IMPORTED runtime metrics / argv observation are deferred (profile returns
