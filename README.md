@@ -253,6 +253,7 @@ Cloud Agent 환경(`.cursor/environment.json`)은 `scripts/cloud-install.sh`(ins
 - [x] Milestone 4 (Gateway): Alias routing, OpenAI-compatible proxy, streaming, traffic state, Last Known Good Route
 - [x] Milestone 5 (Switch): Resource Preflight, Cold/Hot Switch, rollback, cancel/retry, reconciliation
 - [x] Milestone 6A/B: Invocation capacity telemetry, runtime metrics/analytics, Capacity Profile, Client Runtime Policy + Gateway concurrency/token/priority enforcement
-- [ ] Milestone 6-C1 (current): Admin UI foundation + Dashboard (read-only; same-origin Management API proxy)
-- [ ] Milestone 6-C2+: Nodes/GPUs, Models, Deployments, Endpoints, Operations, Observability pages
+- [x] M6-C1 Admin UI Foundation + Dashboard
+- [ ] M6-C2 Nodes / GPUs — current
+- [ ] M6-C3+ Models, Deployments, Endpoints, Operations, Observability pages
 

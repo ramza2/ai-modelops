@@ -99,7 +99,9 @@ describe('NodeDetailPage', () => {
 
     renderDetail()
 
-    expect(await screen.findByText('gpu-node-a')).toBeInTheDocument()
+    expect(
+      await screen.findByRole('heading', { level: 2, name: 'gpu-node-a' }),
+    ).toBeInTheDocument()
     expect(screen.getByText('host-a.example.test')).toBeInTheDocument()
     expect(screen.getByText(/온라인/)).toBeInTheDocument()
     expect(screen.getByText('CPU Utilization')).toBeInTheDocument()
@@ -152,8 +154,8 @@ describe('NodeDetailPage', () => {
     expect(await screen.findByText(/GPU 0 · GPU-A/)).toBeInTheDocument()
     expect(screen.getByText(/GPU 1 · GPU-B/)).toBeInTheDocument()
     expect(screen.getAllByText(/8\.0 GiB \/ 16\.0 GiB/).length).toBeGreaterThanOrEqual(2)
-    expect(screen.getByText('42.0 °C')).toBeInTheDocument()
-    expect(screen.getByText('80.5 W')).toBeInTheDocument()
+    expect(screen.getByText(/Temperature:\s*42\.0 °C/)).toBeInTheDocument()
+    expect(screen.getByText(/Power:\s*80\.5 W/)).toBeInTheDocument()
   })
 
   it('does not aggregate free VRAM across GPUs', async () => {
@@ -240,7 +242,9 @@ describe('NodeDetailPage', () => {
     )
 
     renderDetail()
-    expect(await screen.findByText('gpu-node-a')).toBeInTheDocument()
+    expect(
+      await screen.findByRole('heading', { level: 2, name: 'gpu-node-a' }),
+    ).toBeInTheDocument()
     expect(screen.getByText('resource down')).toBeInTheDocument()
   })
 
@@ -383,7 +387,9 @@ describe('NodeDetailPage', () => {
     )
 
     renderDetail()
-    expect(await screen.findByText(/FUTURE_STATUS/)).toBeInTheDocument()
+    expect(
+      await screen.findByTitle('FUTURE_STATUS'),
+    ).toBeInTheDocument()
   })
 
   it('shows empty host snapshot guidance', async () => {
