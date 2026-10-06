@@ -14,6 +14,23 @@ export function parseApiDate(value: string | null | undefined): Date | null {
   return Number.isNaN(d.getTime()) ? null : d
 }
 
+/** Format an API ISO timestamp in the browser local timezone. */
+export function formatApiDateTime(
+  value: string | null | undefined,
+): string {
+  const d = parseApiDate(value)
+  if (!d) return '—'
+  return new Intl.DateTimeFormat(undefined, {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  }).format(d)
+}
+
 export function formatDurationMs(ms: number): string {
   if (!Number.isFinite(ms) || ms < 0) return '—'
   const totalSec = Math.floor(ms / 1000)

@@ -233,4 +233,60 @@ describe('DashboardPage', () => {
       expect(screen.getAllByText(/WEIRD_NEW_STATUS/).length).toBeGreaterThan(0)
     })
   })
+
+  it('shows fatal unavailable on initial total outage', async () => {
+    vi.spyOn(dashboardApi, 'fetchDashboard').mockRejectedValue(
+      new dashboardApi.DashboardUnavailableError(),
+    )
+    renderPage()
+    await waitFor(() => {
+      expect(
+        screen.getByText('Management API를 사용할 수 없습니다'),
+      ).toBeInTheDocument()
+    })
+    expect(screen.getByText('마지막 갱신 —')).toBeInTheDocument()
+    // No successful KPI values (unknown stays "—", not numeric totals).
+    expect(screen.queryByText('15')).not.toBeInTheDocument()
+  })
+
+  it('preserves prior data and timestamp when refresh totally fails', async () => {
+    const first = baseSnap({
+      fetchedAt: new Date('2026-10-06T01:02:03Z'),
+    })
+    const spy = vi
+      .spyOn(dashboardApi, 'fetchDashboard')
+      .mockResolvedValueOnce(first)
+      .mockRejectedValueOnce(new dashboardApi.DashboardUnavailableError())
+    const user = userEvent.setup()
+    renderPage()
+    await waitFor(() => {
+      expect(screen.getByText('ONLINE Node')).toBeInTheDocument()
+    })
+    const stampBefore = screen.getByText(/마지막 갱신/).textContent
+    await user.click(screen.getByRole('button', { name: '새로고침' }))
+    await waitFor(() => {
+      expect(screen.getByText('최근 새로고침 실패')).toBeInTheDocument()
+    })
+    expect(spy).toHaveBeenCalledTimes(2)
+    expect(screen.getByText('ONLINE Node')).toBeInTheDocument()
+    expect(screen.getByText('15')).toBeInTheDocument()
+    expect(screen.getByText(/마지막 갱신/).textContent).toBe(stampBefore)
+  })
+
+  it('keeps partial success as a successful refresh', async () => {
+    vi.spyOn(dashboardApi, 'fetchDashboard').mockResolvedValue(
+      baseSnap({
+        invocations: null,
+        invocationsError: 'summary unavailable',
+        fetchedAt: new Date('2026-10-06T04:05:06Z'),
+      }),
+    )
+    renderPage()
+    await waitFor(() => {
+      expect(screen.getByText('summary unavailable')).toBeInTheDocument()
+    })
+    expect(screen.getByText('ONLINE Node')).toBeInTheDocument()
+    expect(screen.queryByText('최근 새로고침 실패')).not.toBeInTheDocument()
+    expect(screen.getByText(/마지막 갱신/)).not.toHaveTextContent('—')
+  })
 })

@@ -17,30 +17,57 @@ export class ApiError extends Error {
   }
 }
 
-function normalizeBase(base: string | undefined): string {
+export function normalizeApiBase(base: string | undefined | null): string {
   if (!base || base.trim() === '') {
     return ''
   }
-  return base.replace(/\/+$/, '')
+  return base.trim().replace(/\/+$/, '')
 }
 
-const API_BASE = normalizeBase(import.meta.env.VITE_MODELOPS_API_BASE_URL)
-
-function buildUrl(
+/**
+ * Build a fetch URL from an optional API base + path + query.
+ *
+ * - empty base → same-origin relative (`/api/...`)
+ * - absolute `http(s)://...` → full absolute URL
+ * - relative prefix (`/admin-api`) → prefixed relative path
+ */
+export function buildApiUrl(
+  base: string | undefined | null,
   path: string,
   query?: Record<string, string | number | boolean | null | undefined>,
 ): string {
+  const normalizedBase = normalizeApiBase(base)
   const normalizedPath = path.startsWith('/') ? path : `/${path}`
-  const url = new URL(`${API_BASE}${normalizedPath}`, 'http://local.invalid')
-  if (query) {
+
+  const applyQuery = (url: URL): void => {
+    if (!query) return
     for (const [key, value] of Object.entries(query)) {
       if (value === undefined || value === null) continue
       url.searchParams.set(key, String(value))
     }
   }
-  // Same-origin relative path (drop fake origin).
+
+  if (!normalizedBase) {
+    const url = new URL(normalizedPath, 'http://local.invalid')
+    applyQuery(url)
+    return `${url.pathname}${url.search}`
+  }
+
+  if (/^https?:\/\//i.test(normalizedBase)) {
+    const url = new URL(`${normalizedBase}${normalizedPath}`)
+    applyQuery(url)
+    return url.toString()
+  }
+
+  const prefix = normalizedBase.startsWith('/')
+    ? normalizedBase
+    : `/${normalizedBase}`
+  const url = new URL(`${prefix}${normalizedPath}`, 'http://local.invalid')
+  applyQuery(url)
   return `${url.pathname}${url.search}`
 }
+
+const API_BASE = normalizeApiBase(import.meta.env.VITE_MODELOPS_API_BASE_URL)
 
 async function parseBody(response: Response): Promise<unknown> {
   const text = await response.text()
@@ -81,7 +108,7 @@ export async function apiGet<T>(
   path: string,
   options: ApiFetchOptions = {},
 ): Promise<T> {
-  const url = buildUrl(path, options.query)
+  const url = buildApiUrl(API_BASE, path, options.query)
   const response = await fetch(url, {
     method: 'GET',
     headers: { Accept: 'application/json' },
@@ -102,10 +129,10 @@ export async function apiGet<T>(
   return body as T
 }
 
-/** Exposed for tests — builds relative URL with query encoding. */
+/** @deprecated use buildApiUrl('', ...) — kept for older tests */
 export function __testBuildUrl(
   path: string,
   query?: Record<string, string | number | boolean | null | undefined>,
 ): string {
-  return buildUrl(path, query)
+  return buildApiUrl('', path, query)
 }

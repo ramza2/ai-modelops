@@ -9,7 +9,7 @@ import { LoadingBlock } from '../components/LoadingBlock'
 import { SectionError } from '../components/SectionError'
 import { StatCard } from '../components/StatCard'
 import { StatusBadge } from '../components/StatusBadge'
-import { operationElapsed, shortId } from '../utils/date'
+import { formatApiDateTime, operationElapsed, shortId } from '../utils/date'
 import { formatInt, formatMs, formatPercent } from '../utils/number'
 
 const REFRESH_MS = 15_000
@@ -39,6 +39,7 @@ export function DashboardPage() {
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [fatal, setFatal] = useState<string | null>(null)
+  const [refreshError, setRefreshError] = useState<string | null>(null)
   const inFlight = useRef(false)
   const abortRef = useRef<AbortController | null>(null)
   const hasDataRef = useRef(false)
@@ -57,6 +58,7 @@ export function DashboardPage() {
         hasDataRef.current = true
         setData(snap)
         setFatal(null)
+        setRefreshError(null)
       }
     } catch (err) {
       if (ac.signal.aborted) return
@@ -64,6 +66,9 @@ export function DashboardPage() {
         err instanceof Error ? err.message : '대시보드를 불러오지 못했습니다.'
       if (!hasDataRef.current) {
         setFatal(message)
+      } else {
+        // Preserve prior data and last successful fetchedAt.
+        setRefreshError(message)
       }
     } finally {
       inFlight.current = false
@@ -108,7 +113,19 @@ export function DashboardPage() {
       lastUpdated={data?.fetchedAt ?? null}
     >
       {fatal && !data ? (
-        <SectionError message={fatal} onRetry={refresh} />
+        <SectionError
+          title="Management API를 사용할 수 없습니다"
+          message={fatal}
+          onRetry={refresh}
+        />
+      ) : null}
+
+      {refreshError && data ? (
+        <SectionError
+          title="최근 새로고침 실패"
+          message={refreshError}
+          onRetry={refresh}
+        />
       ) : null}
 
       <section className="panel" aria-labelledby="cp-heading">
@@ -297,11 +314,7 @@ export function DashboardPage() {
                         <StatusBadge status={op.status} />
                       </td>
                       <td title={target || undefined}>{shortId(target)}</td>
-                      <td>
-                        {(op.started_at || op.created_at || '')
-                          .replace('T', ' ')
-                          .slice(0, 19) || '—'}
-                      </td>
+                      <td>{formatApiDateTime(op.started_at || op.created_at)}</td>
                       <td>{operationElapsed(op)}</td>
                       <td title={op.error_message || undefined}>
                         {op.error_code || '—'}

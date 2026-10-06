@@ -10,6 +10,13 @@ import type {
   ReadyResponse,
 } from './types'
 
+export class DashboardUnavailableError extends Error {
+  constructor(message = 'Management API를 사용할 수 없습니다.') {
+    super(message)
+    this.name = 'DashboardUnavailableError'
+  }
+}
+
 export type DashboardSnapshot = {
   health: HealthResponse | null
   healthError: string | null
@@ -34,15 +41,24 @@ export type DashboardSnapshot = {
   fetchedAt: Date
 }
 
+function isAbortError(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false
+  const name = (err as { name?: string }).name
+  return name === 'AbortError'
+}
+
 async function settle<T>(
   promise: Promise<T>,
-): Promise<{ value: T | null; error: string | null }> {
+): Promise<{ value: T | null; error: string | null; ok: boolean }> {
   try {
-    return { value: await promise, error: null }
+    return { value: await promise, error: null, ok: true }
   } catch (err) {
+    if (isAbortError(err)) {
+      throw err
+    }
     const message =
       err instanceof Error ? err.message : '요청에 실패했습니다.'
-    return { value: null, error: message }
+    return { value: null, error: message, ok: false }
   }
 }
 
@@ -146,6 +162,26 @@ export async function fetchDashboard(
       ),
     ),
   ])
+
+  const settled = [
+    health,
+    ready,
+    nodesTotal,
+    nodesOnline,
+    depActive,
+    depRunning,
+    depHealthy,
+    epTotal,
+    epEnabled,
+    epServing,
+    opsActive,
+    opsRecent,
+    invocations,
+  ]
+  const successCount = settled.filter((s) => s.ok).length
+  if (successCount === 0) {
+    throw new DashboardUnavailableError()
+  }
 
   const nodesError = nodesTotal.error || nodesOnline.error
   const deploymentsError =

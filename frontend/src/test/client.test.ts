@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { ApiError, __testBuildUrl, apiGet } from '../api/client'
+import {
+  ApiError,
+  __testBuildUrl,
+  apiGet,
+  buildApiUrl,
+} from '../api/client'
 
 describe('api client', () => {
   afterEach(() => {
@@ -7,14 +12,39 @@ describe('api client', () => {
     vi.restoreAllMocks()
   })
 
-  it('encodes query parameters', () => {
-    const url = __testBuildUrl('/api/v1/nodes', {
-      status: 'ONLINE',
-      page: 1,
-      page_size: 1,
-      unused: null,
-    })
-    expect(url).toBe('/api/v1/nodes?status=ONLINE&page=1&page_size=1')
+  it('builds same-origin relative URL with no base', () => {
+    expect(
+      buildApiUrl('', '/api/v1/nodes', {
+        status: 'ONLINE',
+        page: 1,
+        page_size: 1,
+        unused: null,
+      }),
+    ).toBe('/api/v1/nodes?status=ONLINE&page=1&page_size=1')
+    expect(__testBuildUrl('/api/v1/nodes', { page: 1 })).toBe(
+      '/api/v1/nodes?page=1',
+    )
+  })
+
+  it('builds absolute URL from absolute base', () => {
+    expect(
+      buildApiUrl('https://example.test', '/api/v1/nodes', { page: 1 }),
+    ).toBe('https://example.test/api/v1/nodes?page=1')
+  })
+
+  it('strips trailing slash on absolute base (no //api)', () => {
+    expect(
+      buildApiUrl('https://example.test/', '/api/v1/nodes', { page: 2 }),
+    ).toBe('https://example.test/api/v1/nodes?page=2')
+  })
+
+  it('supports relative API prefix', () => {
+    expect(buildApiUrl('/admin-api', '/api/v1/nodes')).toBe(
+      '/admin-api/api/v1/nodes',
+    )
+    expect(buildApiUrl('/admin-api/', 'api/v1/nodes')).toBe(
+      '/admin-api/api/v1/nodes',
+    )
   })
 
   it('returns JSON on success', async () => {
