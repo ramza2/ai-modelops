@@ -604,16 +604,57 @@ Cold Switch 진행 중 Source Stop 이후 취소 요청은 내부적으로 Rollb
 
 ### GET /operations
 
-필터:
+Paginated Operation list (M6-C1). Does **not** include `steps` or
+`metadata_json` — use `GET /operations/{id}` for detail.
+
+Query:
 
 ```text
-operation_type
-status
-endpoint_id
-source_deployment_id
-target_deployment_id
-from
-to
+status            # exact OperationStatus (mutually exclusive with active)
+operation_type    # exact OperationType
+active            # true → QUEUED|RUNNING|ROLLING_BACK
+                  # false → terminal statuses
+page              # default 1
+page_size         # default 50, max 200
+```
+
+`status` and `active` together → `422 VALIDATION_ERROR`.
+Invalid enum values → `422 VALIDATION_ERROR`.
+
+Ordering:
+
+```text
+created_at DESC, id DESC
+```
+
+Response:
+
+```json
+{
+  "items": [
+    {
+      "id": "uuid",
+      "operation_type": "START",
+      "status": "RUNNING",
+      "switch_strategy": null,
+      "endpoint_alias_id": null,
+      "source_deployment_id": null,
+      "target_deployment_id": "uuid",
+      "requested_by": "operator",
+      "request_reason": null,
+      "error_code": null,
+      "error_message": null,
+      "cancel_requested_at": null,
+      "retry_of_operation_id": null,
+      "created_at": "...",
+      "started_at": "...",
+      "finished_at": null
+    }
+  ],
+  "page": 1,
+  "page_size": 50,
+  "total": 1
+}
 ```
 
 ### GET /operations/{operation_id}

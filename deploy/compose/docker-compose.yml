@@ -71,6 +71,18 @@ services:
       - modelops-control
       - modelops-model
 
+  frontend:
+    build:
+      context: ../../frontend
+      dockerfile: Dockerfile
+    depends_on:
+      backend:
+        condition: service_started
+    ports:
+      - "${FRONTEND_PORT:-3000}:80"
+    networks:
+      - modelops-control
+
 networks:
   modelops-control:
     name: modelops-control

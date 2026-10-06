@@ -6,7 +6,7 @@ import datetime as dt
 import uuid
 from typing import Any, Literal
 
-from sqlalchemy import select
+from sqlalchemy import Select, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.enums import (
@@ -47,6 +47,42 @@ class OperationRepository:
 
     async def get(self, operation_id: uuid.UUID) -> Operation | None:
         return await self._session.get(Operation, operation_id)
+
+    async def list_operations(
+        self,
+        *,
+        status: str | None = None,
+        operation_type: str | None = None,
+        statuses: frozenset[str] | None = None,
+        offset: int = 0,
+        limit: int = 50,
+    ) -> tuple[list[Operation], int]:
+        """Paginated Operation list. Does not load steps or jobs.
+
+        Ordering: ``created_at DESC, id DESC``.
+        """
+        filters: list[Any] = []
+        if status is not None:
+            filters.append(Operation.status == status)
+        if statuses is not None:
+            filters.append(Operation.status.in_(tuple(statuses)))
+        if operation_type is not None:
+            filters.append(Operation.operation_type == operation_type)
+
+        count_stmt: Select[Any] = select(func.count()).select_from(Operation)
+        stmt = select(Operation)
+        for f in filters:
+            count_stmt = count_stmt.where(f)
+            stmt = stmt.where(f)
+
+        total = int((await self._session.execute(count_stmt)).scalar_one())
+        stmt = (
+            stmt.order_by(Operation.created_at.desc(), Operation.id.desc())
+            .offset(offset)
+            .limit(limit)
+        )
+        rows = list((await self._session.execute(stmt)).scalars().all())
+        return rows, total
 
     async def get_by_idempotency_key(self, key: str) -> Operation | None:
         stmt = select(Operation).where(Operation.idempotency_key == key)

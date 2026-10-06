@@ -693,7 +693,7 @@ ${DATABASE_URL}
      explicit Deployment null invalid (no fallback); unset omits
      flag (never synthesize `fcfs`). Existing containers are not
      recreated on config change.
-   - **M6-B5-B (current):** Gateway Chat forwards pinned
+   - **M6-B5-B (done):** Gateway Chat forwards pinned
      `ClientRuntimePolicy.priority` only with trusted
      current-container RoutingSnapshot evidence (CONTAINER_ARGV /
      VLLM / explicit `scheduling_policy=priority` after
@@ -702,6 +702,18 @@ ${DATABASE_URL}
      RoutingStore LKG → 503
      `CLIENT_PRIORITY_SCHEDULER_UNAVAILABLE`. Requested config
      alone insufficient. Embeddings priority deferred.
+   - **M6-C1 (current):** Admin UI foundation (React + TypeScript +
+     Vite) + Dashboard (Control Plane / Nodes / Deployments /
+     Endpoints / Operations / 24h invocations). Same-origin nginx
+     proxy to Management API. Read-only except manual refresh.
+     Adds `GET /api/v1/operations` list. Trusted internal-network
+     access assumed (no Admin SSO in C1).
+   - **M6-C2 (next):** Nodes / GPUs detail
+   - **M6-C3:** Models / Versions
+   - **M6-C4:** Deployments
+   - **M6-C5:** Endpoints
+   - **M6-C6:** Operations
+   - **M6-C7:** Observability / Clients
 
 한 번에 모든 기능을 스캐폴딩만 하는 것보다 각 milestone을 end-to-end로 동작하게 완성하는 것을 우선한다.
 
