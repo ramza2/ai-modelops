@@ -21,9 +21,16 @@ const KNOWN_STATUSES = new Set([
 
 function parsePage(raw: string | null): number {
   if (!raw) return 1
-  const n = Number.parseInt(raw, 10)
-  if (!Number.isFinite(n) || n < 1) return 1
+  // Strict positive decimal integer only (reject parseInt prefix matches).
+  if (!/^\d+$/.test(raw)) return 1
+  const n = Number(raw)
+  if (!Number.isSafeInteger(n) || n < 1) return 1
   return n
+}
+
+/** Exported for unit tests. */
+export function __testParsePage(raw: string | null): number {
+  return parsePage(raw)
 }
 
 function parseStatus(raw: string | null): string | null {
@@ -105,9 +112,15 @@ export function NodesPage() {
         })
         if (controller.signal.aborted) return
 
-        // Filter change may leave page beyond total — reset to 1.
+        // Out-of-range page (including total=0) → canonical page 1; preserve status.
         const maxPage = Math.max(1, Math.ceil(result.total / PAGE_SIZE) || 1)
-        if (page > maxPage && result.total > 0) {
+        if (page > maxPage) {
+          if (result.total === 0) {
+            setItems([])
+            setTotal(0)
+            setLastUpdated(new Date())
+            hasLoadedRef.current = true
+          }
           syncUrl({ status, page: 1 })
           return
         }

@@ -1,10 +1,10 @@
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { MemoryRouter, Route, Routes } from 'react-router-dom'
+import { MemoryRouter, Route, Routes, useSearchParams } from 'react-router-dom'
 import { ApiError } from '../api/client'
 import type { NodeSummary, Paginated } from '../api/types'
-import { NodesPage } from '../pages/NodesPage'
+import { NodesPage, __testParsePage } from '../pages/NodesPage'
 import * as nodesApi from '../api/nodes'
 
 function makeNode(
@@ -39,15 +39,38 @@ function pageResult(
   }
 }
 
+function LocationProbe() {
+  const [params] = useSearchParams()
+  return <div data-testid="location-search">{params.toString()}</div>
+}
+
 function renderAt(path: string) {
   return render(
     <MemoryRouter initialEntries={[path]}>
+      <LocationProbe />
       <Routes>
         <Route path="/nodes" element={<NodesPage />} />
       </Routes>
     </MemoryRouter>,
   )
 }
+
+describe('parsePage strictness', () => {
+  it.each([
+    [null, 1],
+    ['1', 1],
+    ['2', 2],
+    ['002', 2],
+    ['0', 1],
+    ['-1', 1],
+    ['2.5', 1],
+    ['2abc', 1],
+    ['abc', 1],
+    [String(Number.MAX_SAFE_INTEGER + 1), 1],
+  ] as const)('parses %s → %s', (raw, expected) => {
+    expect(__testParsePage(raw)).toBe(expected)
+  })
+})
 
 describe('NodesPage', () => {
   beforeEach(() => {
@@ -217,5 +240,50 @@ describe('NodesPage', () => {
     for (const th of headers) {
       expect(th).toHaveAttribute('scope', 'col')
     }
+  })
+
+  it.each([
+    ['/nodes?page=2.5', ''],
+    ['/nodes?page=2abc', ''],
+    ['/nodes?page=0', ''],
+    ['/nodes?page=-1', ''],
+    ['/nodes?status=ONLINE&page=2abc', 'status=ONLINE'],
+    ['/nodes?page=002', 'page=2'],
+  ])('canonicalizes malformed page URL %s → %s', async (path, expectedSearch) => {
+    vi.mocked(nodesApi.listNodes).mockResolvedValue(pageResult([]))
+    renderAt(path)
+    await waitFor(() => {
+      expect(screen.getByTestId('location-search')).toHaveTextContent(
+        expectedSearch,
+      )
+    })
+  })
+
+  it('normalizes out-of-range page when total=0 to page 1', async () => {
+    vi.mocked(nodesApi.listNodes).mockImplementation(async (params) => {
+      return pageResult([], { page: params?.page ?? 1, total: 0 })
+    })
+    renderAt('/nodes?page=5')
+    await waitFor(() => {
+      expect(screen.getByTestId('location-search')).toHaveTextContent('')
+    })
+    expect(
+      await screen.findByText('등록된 Node가 없습니다.'),
+    ).toBeInTheDocument()
+  })
+
+  it('preserves status when normalizing filtered empty out-of-range page', async () => {
+    vi.mocked(nodesApi.listNodes).mockResolvedValue(
+      pageResult([], { page: 4, total: 0 }),
+    )
+    renderAt('/nodes?status=OFFLINE&page=4')
+    await waitFor(() => {
+      expect(screen.getByTestId('location-search')).toHaveTextContent(
+        'status=OFFLINE',
+      )
+    })
+    expect(
+      await screen.findByText('선택한 상태에 해당하는 Node가 없습니다.'),
+    ).toBeInTheDocument()
   })
 })

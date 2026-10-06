@@ -363,10 +363,100 @@ describe('NodeDetailPage', () => {
     const btn = screen.getByRole('button', { name: '리소스 갱신' })
     await user.click(btn)
     expect(await screen.findByRole('button', { name: '갱신 중…' })).toBeDisabled()
+    // AppShell DB refresh stays disabled during mutation.
+    expect(screen.getByRole('button', { name: '새로고침' })).toBeDisabled()
     await user.click(screen.getByRole('button', { name: '갱신 중…' }))
     expect(nodesApi.refreshNodeResources).toHaveBeenCalledTimes(1)
 
     resolveRefresh(makeResources())
+    await waitFor(() => {
+      expect(
+        screen.getByRole('button', { name: '리소스 갱신' }),
+      ).not.toBeDisabled()
+    })
+  })
+
+  it('disables resource refresh while initial GET is in flight', async () => {
+    const user = userEvent.setup()
+    let resolveResources!: (v: NodeResourcesLatest) => void
+    vi.mocked(nodesApi.getNode).mockResolvedValue(makeNode())
+    vi.mocked(nodesApi.getNodeResources).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveResources = resolve
+        }),
+    )
+    vi.mocked(nodesApi.refreshNodeResources).mockResolvedValue(makeResources())
+
+    renderDetail()
+    expect(
+      await screen.findByRole('heading', { level: 2, name: 'gpu-node-a' }),
+    ).toBeInTheDocument()
+
+    const refreshBtn = screen.getByRole('button', { name: '리소스 갱신' })
+    expect(refreshBtn).toBeDisabled()
+    await user.click(refreshBtn)
+    expect(nodesApi.refreshNodeResources).not.toHaveBeenCalled()
+
+    resolveResources(makeResources())
+    await waitFor(() => {
+      expect(
+        screen.getByRole('button', { name: '리소스 갱신' }),
+      ).not.toBeDisabled()
+    })
+    expect(await screen.findByText('12.5%')).toBeInTheDocument()
+  })
+
+  it('disables resource refresh while AppShell DB refresh is in flight', async () => {
+    const user = userEvent.setup()
+    let resolveSecondResources!: (v: NodeResourcesLatest) => void
+    let resourcesCalls = 0
+    vi.mocked(nodesApi.getNode).mockResolvedValue(makeNode())
+    vi.mocked(nodesApi.getNodeResources).mockImplementation(() => {
+      resourcesCalls += 1
+      if (resourcesCalls === 1) {
+        return Promise.resolve(makeResources())
+      }
+      return new Promise((resolve) => {
+        resolveSecondResources = resolve
+      })
+    })
+    vi.mocked(nodesApi.refreshNodeResources).mockResolvedValue(makeResources())
+
+    renderDetail()
+    expect(await screen.findByText('12.5%')).toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: '리소스 갱신' }),
+    ).not.toBeDisabled()
+
+    await user.click(screen.getByRole('button', { name: '새로고침' }))
+    await waitFor(() => {
+      expect(
+        screen.getByRole('button', { name: '리소스 갱신' }),
+      ).toBeDisabled()
+    })
+    await user.click(screen.getByRole('button', { name: '리소스 갱신' }))
+    expect(nodesApi.refreshNodeResources).not.toHaveBeenCalled()
+
+    resolveSecondResources(makeResources())
+    await waitFor(() => {
+      expect(
+        screen.getByRole('button', { name: '리소스 갱신' }),
+      ).not.toBeDisabled()
+    })
+  })
+
+  it('enables resource refresh after initial load even if resources GET failed', async () => {
+    vi.mocked(nodesApi.getNode).mockResolvedValue(makeNode())
+    vi.mocked(nodesApi.getNodeResources).mockRejectedValue(
+      new ApiError('resource down', { status: 503 }),
+    )
+
+    renderDetail()
+    expect(
+      await screen.findByRole('heading', { level: 2, name: 'gpu-node-a' }),
+    ).toBeInTheDocument()
+    expect(await screen.findByText('resource down')).toBeInTheDocument()
     await waitFor(() => {
       expect(
         screen.getByRole('button', { name: '리소스 갱신' }),

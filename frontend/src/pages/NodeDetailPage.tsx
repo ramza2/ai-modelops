@@ -46,6 +46,7 @@ export function NodeDetailPage() {
 
   const abortRef = useRef<AbortController | null>(null)
   const mutateLockRef = useRef(false)
+  const readLockRef = useRef(false)
 
   const load = useCallback(
     async (mode: 'initial' | 'refresh') => {
@@ -56,10 +57,13 @@ export function NodeDetailPage() {
         setNodeError('Node를 찾을 수 없습니다.')
         return
       }
+      // DB reads and Node Agent resource mutation are mutually exclusive.
+      if (mutateLockRef.current) return
 
       abortRef.current?.abort()
       const controller = new AbortController()
       abortRef.current = controller
+      readLockRef.current = true
 
       const isInitial = mode === 'initial'
       if (isInitial) {
@@ -74,61 +78,68 @@ export function NodeDetailPage() {
       setRefreshError(null)
       setNodeNotFound(false)
 
-      const nodePromise = getNode(nodeId, controller.signal)
-        .then((data) => {
-          if (controller.signal.aborted) return
-          setNode(data)
-          setNodeNotFound(false)
-          setLastUpdated(new Date())
-        })
-        .catch((err: unknown) => {
-          if (controller.signal.aborted) return
-          if (err instanceof DOMException && err.name === 'AbortError') return
-          if (err instanceof ApiError && err.status === 404) {
-            setNodeNotFound(true)
-            setNodeError('Node를 찾을 수 없습니다.')
-            return
-          }
-          const message =
-            err instanceof ApiError
-              ? err.message
-              : err instanceof Error
+      try {
+        const nodePromise = getNode(nodeId, controller.signal)
+          .then((data) => {
+            if (controller.signal.aborted) return
+            setNode(data)
+            setNodeNotFound(false)
+            setLastUpdated(new Date())
+          })
+          .catch((err: unknown) => {
+            if (controller.signal.aborted) return
+            if (err instanceof DOMException && err.name === 'AbortError') return
+            if (err instanceof ApiError && err.status === 404) {
+              setNodeNotFound(true)
+              setNodeError('Node를 찾을 수 없습니다.')
+              return
+            }
+            const message =
+              err instanceof ApiError
                 ? err.message
-                : 'Node 메타데이터를 불러오지 못했습니다.'
-          setNodeError(message)
-        })
-        .finally(() => {
-          if (!controller.signal.aborted) setNodeLoading(false)
-        })
+                : err instanceof Error
+                  ? err.message
+                  : 'Node 메타데이터를 불러오지 못했습니다.'
+            setNodeError(message)
+          })
+          .finally(() => {
+            if (!controller.signal.aborted) setNodeLoading(false)
+          })
 
-      const resourcePromise = getNodeResources(nodeId, controller.signal)
-        .then((data) => {
-          if (controller.signal.aborted) return
-          setResources(data)
-          setLastUpdated(new Date())
-        })
-        .catch((err: unknown) => {
-          if (controller.signal.aborted) return
-          if (err instanceof DOMException && err.name === 'AbortError') return
-          if (err instanceof ApiError && err.status === 404) {
-            // Node 404 is owned by metadata section.
-            return
-          }
-          const message =
-            err instanceof ApiError
-              ? err.message
-              : err instanceof Error
+        const resourcePromise = getNodeResources(nodeId, controller.signal)
+          .then((data) => {
+            if (controller.signal.aborted) return
+            setResources(data)
+            setLastUpdated(new Date())
+          })
+          .catch((err: unknown) => {
+            if (controller.signal.aborted) return
+            if (err instanceof DOMException && err.name === 'AbortError') return
+            if (err instanceof ApiError && err.status === 404) {
+              // Node 404 is owned by metadata section.
+              return
+            }
+            const message =
+              err instanceof ApiError
                 ? err.message
-                : '자원 스냅샷을 불러오지 못했습니다.'
-          setResourceError(message)
-        })
-        .finally(() => {
-          if (!controller.signal.aborted) setResourceLoading(false)
-        })
+                : err instanceof Error
+                  ? err.message
+                  : '자원 스냅샷을 불러오지 못했습니다.'
+            setResourceError(message)
+          })
+          .finally(() => {
+            if (!controller.signal.aborted) setResourceLoading(false)
+          })
 
-      await Promise.all([nodePromise, resourcePromise])
-      if (!controller.signal.aborted) {
-        setRefreshing(false)
+        await Promise.all([nodePromise, resourcePromise])
+        if (!controller.signal.aborted) {
+          setRefreshing(false)
+        }
+      } finally {
+        // Only the active read generation clears the lock (aborted loads keep it).
+        if (abortRef.current === controller) {
+          readLockRef.current = false
+        }
       }
     },
     [nodeId],
@@ -141,8 +152,24 @@ export function NodeDetailPage() {
     }
   }, [load])
 
+  const resourceActionDisabled =
+    mutating ||
+    nodeLoading ||
+    resourceLoading ||
+    refreshing ||
+    !nodeId
+
   const onResourceRefresh = async () => {
-    if (mutateLockRef.current || !nodeId) return
+    if (
+      mutateLockRef.current ||
+      readLockRef.current ||
+      nodeLoading ||
+      resourceLoading ||
+      refreshing ||
+      !nodeId
+    ) {
+      return
+    }
     mutateLockRef.current = true
     setMutating(true)
     setRefreshError(null)
@@ -292,7 +319,7 @@ export function NodeDetailPage() {
             type="button"
             className="btn btn--primary"
             onClick={() => void onResourceRefresh()}
-            disabled={mutating || !nodeId}
+            disabled={resourceActionDisabled}
             aria-busy={mutating}
           >
             {mutating ? '갱신 중…' : '리소스 갱신'}
