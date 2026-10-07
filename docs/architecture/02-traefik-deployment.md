@@ -4,14 +4,28 @@
 
 대상 GPU 서버는 Docker 서비스의 외부 노출을 Traefik label 기반으로 관리한다. ModelOps도 이 운영 방식을 유지한다.
 
+지원되는 Linux 서버 Control Plane 경로는 Compose overlay이다.
+
+```text
+deploy/compose/docker-compose.yml            # base Control Plane
+deploy/compose/docker-compose.server.yml     # Traefik + Linux host-gateway overlay
+./scripts/deploy-server.sh --env-file <server.env>
+```
+
+로컬 개발용 `./scripts/deploy.sh`는 host-port 기반이며 Traefik label을 붙이지 않는다.
+
 ## 2. 권장 역할 분리
 
 Traefik은 다음 책임에 집중한다.
 
 - HTTPS/TLS 종단
 - Domain/Host 기반 Routing
-- Admin UI / Management API 진입점
+- Admin UI 진입점 (Frontend)
 - AI Gateway 진입점
+
+표준 배포에서 Management API(Backend)용 Traefik router는 만들지 않는다.
+Admin Frontend nginx가 같은 origin으로 `/api`, `/health`, `/ready`를 Backend로
+프록시한다.
 
 실제 모델 Container는 원칙적으로 외부에 직접 공개하지 않는다.
 
@@ -21,12 +35,12 @@ Internal App
     ▼
 Traefik
     │
-    ▼
-AI Gateway
-    │
-    ├── LLM Container
-    ├── VLM Container
-    └── Embedding Container
+    ├── Admin Host  → frontend (:80) → nginx → backend (:8000)
+    └── Gateway Host → gateway (:8080)
+              │
+              ├── LLM Container
+              ├── VLM Container
+              └── Embedding Container
 ```
 
 ## 3. Network 원칙
@@ -34,15 +48,16 @@ AI Gateway
 권장 논리 Network:
 
 ```text
-traefik-public
+traefik-public   (external; name configurable via TRAEFIK_PUBLIC_NETWORK)
   ├── frontend
-  ├── management-api
   └── gateway
 
 modelops-control
-  ├── management-api
+  ├── postgres
+  ├── backend
   ├── worker
-  └── postgres
+  ├── gateway
+  └── frontend
 
 modelops-model
   ├── gateway
@@ -51,21 +66,29 @@ modelops-model
   └── managed-embedding
 ```
 
-`gateway`는 외부 진입용 Network와 모델 내부 Network를 모두 사용한다.
+- `postgres`, `backend`, `worker`는 Control Plane 내부만 사용한다.
+- `gateway`는 Traefik 외부 Network와 `modelops-model`을 모두 사용한다.
+- 서버 overlay는 PostgreSQL/Backend/Gateway/Frontend의 공개 host-port publish를
+  제거한다. Backend만 deploy 검증용으로 `127.0.0.1` loopback publish를 유지한다.
 
-## 4. Traefik Label 예시
+## 4. Traefik Label (server overlay)
 
-실제 Domain은 배포환경에서 확정한다.
+실제 hostname은 서버 env 파일에서만 확정한다. Repository에는 placeholder만 둔다.
+Certificate resolver 이름은 서버 Traefik 관례가 저장소에 정의되어 있지 않으므로
+하드코딩하지 않는다 (`tls=true` + entrypoint만 설정).
 
 ### AI Gateway
+
+Gateway 컨테이너 listen / Traefik service port는 **8080**이다 (8000 아님).
 
 ```yaml
 labels:
   - "traefik.enable=true"
-  - "traefik.http.routers.modelops-gateway.rule=Host(`${MODEL_GATEWAY_HOST}`)"
-  - "traefik.http.routers.modelops-gateway.entrypoints=websecure"
+  - "traefik.docker.network=${TRAEFIK_PUBLIC_NETWORK:-traefik-public}"
+  - "traefik.http.routers.modelops-gateway.rule=Host(`${MODELOPS_GATEWAY_HOST}`)"
+  - "traefik.http.routers.modelops-gateway.entrypoints=${TRAEFIK_ENTRYPOINT:-websecure}"
   - "traefik.http.routers.modelops-gateway.tls=true"
-  - "traefik.http.services.modelops-gateway.loadbalancer.server.port=8000"
+  - "traefik.http.services.modelops-gateway.loadbalancer.server.port=8080"
 ```
 
 ### Admin UI
@@ -73,15 +96,37 @@ labels:
 ```yaml
 labels:
   - "traefik.enable=true"
+  - "traefik.docker.network=${TRAEFIK_PUBLIC_NETWORK:-traefik-public}"
   - "traefik.http.routers.modelops-admin.rule=Host(`${MODELOPS_ADMIN_HOST}`)"
-  - "traefik.http.routers.modelops-admin.entrypoints=websecure"
+  - "traefik.http.routers.modelops-admin.entrypoints=${TRAEFIK_ENTRYPOINT:-websecure}"
   - "traefik.http.routers.modelops-admin.tls=true"
   - "traefik.http.services.modelops-admin.loadbalancer.server.port=80"
 ```
 
-## 5. Managed Model Container
+### Management API
 
-일반 Managed Model Container에는 기본적으로 외부 router label을 부여하지 않는다.
+표준 배포에서 Backend public Traefik router는 없다. Admin UI 동일 Host의
+`/api`·`/health`·`/ready`가 Frontend nginx → `backend:8000`으로 전달된다.
+
+## 5. Linux host Node Agent
+
+Node Agent는 Compose에 넣지 않는다 (Docker/NVML host process; systemd는 RB-05).
+
+서버 overlay는 Backend/Worker에 다음을 추가한다.
+
+```yaml
+extra_hosts:
+  - "host.docker.internal:host-gateway"
+```
+
+등록된 Node의 Agent URL이 `http://host.docker.internal:<port>`이면
+컨테이너에서 host Node Agent에 도달할 수 있다. Token은 env로만 주입하며
+repository에 실토큰을 커밋하지 않는다. Backend/Worker에 Docker socket/NVML을
+마운트하지 않는다.
+
+## 6. Managed Model Container
+
+일반 Managed Model Container에는 기본적으로 외부 Traefik router label을 부여하지 않는다.
 
 관리용 식별 label은 별도로 사용한다.
 
@@ -94,7 +139,7 @@ ai.modelops.node_id=<node-id>
 
 Node Agent는 `ai.modelops.managed=true`가 없는 Container를 lifecycle 제어 대상으로 취급하지 않는다.
 
-## 6. Imported Deployment
+## 7. Imported Deployment
 
 기존 모델이 이미 Traefik Endpoint를 통해 서비스되고 있다면 초기에는 그 Endpoint를 그대로 Imported Deployment upstream으로 등록할 수 있다.
 
@@ -110,10 +155,11 @@ Gateway -> Internal Docker Network -> Managed Model Container
 
 구조로 단순화한다.
 
-## 7. 주의사항
+## 8. 주의사항
 
 - ModelOps가 Traefik의 전체 동적 설정을 소유하려고 하지 않는다.
 - Traefik은 Ingress, ModelOps Gateway는 AI Model Routing을 담당한다.
 - `company-llm` 같은 Endpoint Alias 라우팅은 Traefik label이 아니라 Gateway의 Route Table에서 처리한다.
 - 모델 교체 때마다 Traefik 설정을 변경하지 않도록 한다.
 - Gateway를 통과하지 않는 직접 모델 Endpoint는 단계적으로 제거한다.
+- 서버 TLS/router 실동작 검증은 Gate I에서 대상 서버 증거로만 PASS 처리한다.

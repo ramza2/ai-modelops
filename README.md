@@ -96,6 +96,23 @@ Worker는 Compose 내부에서 `postgres:5432`와 `http://gateway:8080`을 사�
 Node Agent는 host process로 유지한다. Worker 기동/크래시 로그는
 `deploy.sh` 실패 진단과 `docker compose ... logs worker`로 확인한다.
 
+### Linux server (Traefik labels)
+
+대상 서버는 Traefik Host routing을 사용한다. base Compose + server overlay:
+
+```bash
+# server.env is outside Git and must set MODELOPS_ADMIN_HOST / MODELOPS_GATEWAY_HOST
+./scripts/deploy-server.sh --env-file /path/to/server.env
+```
+
+- overlay: `deploy/compose/docker-compose.server.yml`
+- 외부 노출: Frontend + Gateway만 Traefik public network
+- Management API: Admin Frontend nginx same-origin proxy (별도 Backend Traefik router 없음)
+- Gateway Traefik service port: **8080**
+- Backend health/ready 검증: `127.0.0.1` loopback only
+- Node Agent: host process + `host.docker.internal:host-gateway` (Backend/Worker)
+- 상세: `docs/architecture/02-traefik-deployment.md`
+
 ### Admin UI (M6-C1 / M6-C2 / M6-C3 / M6-C4 / M6-C5 / M6-C6 / M6-C7)
 
 ```bash

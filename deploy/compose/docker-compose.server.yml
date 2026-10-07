@@ -1,0 +1,68 @@
+# Linux server overlay for Traefik-label based ingress.
+#
+# Usage (from repository root, with a server env file outside Git):
+#   docker compose --env-file "${MODELOPS_ENV_FILE}" \
+#     -f deploy/compose/docker-compose.yml \
+#     -f deploy/compose/docker-compose.server.yml \
+#     config
+#   ./scripts/deploy-server.sh --env-file /path/to/server.env
+#
+# Reuses the base Control Plane services. This overlay:
+# - attaches frontend + gateway to an external Traefik network
+# - removes public host-port publishes that would bypass Traefik
+# - binds Backend health/ready to loopback only (deploy verification)
+# - adds Linux host-gateway so Backend/Worker can reach host Node Agent
+# - does not add Traefik routers for postgres/backend/worker or managed models
+#
+# Requires Docker Compose V2 with `!reset` support (Compose Spec).
+
+services:
+  postgres:
+    # No host publish — Control Plane internal only.
+    ports: !reset []
+
+  backend:
+    # Loopback-only publish for host-side /health + /ready during deploy.
+    # Not bound on all interfaces; Traefik does not route Backend directly.
+    ports: !reset
+      - "127.0.0.1:${BACKEND_PORT:-8000}:8000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  worker:
+    # Node Agent URL comes from registered Node rows (often
+    # http://host.docker.internal:<port>). Worker never mounts Docker/NVML.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  gateway:
+    ports: !reset []
+    networks:
+      modelops-control:
+      modelops-model:
+      traefik-public:
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=${TRAEFIK_PUBLIC_NETWORK:-traefik-public}"
+      - "traefik.http.routers.modelops-gateway.rule=Host(`${MODELOPS_GATEWAY_HOST}`)"
+      - "traefik.http.routers.modelops-gateway.entrypoints=${TRAEFIK_ENTRYPOINT:-websecure}"
+      - "traefik.http.routers.modelops-gateway.tls=true"
+      - "traefik.http.services.modelops-gateway.loadbalancer.server.port=8080"
+
+  frontend:
+    ports: !reset []
+    networks:
+      modelops-control:
+      traefik-public:
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=${TRAEFIK_PUBLIC_NETWORK:-traefik-public}"
+      - "traefik.http.routers.modelops-admin.rule=Host(`${MODELOPS_ADMIN_HOST}`)"
+      - "traefik.http.routers.modelops-admin.entrypoints=${TRAEFIK_ENTRYPOINT:-websecure}"
+      - "traefik.http.routers.modelops-admin.tls=true"
+      - "traefik.http.services.modelops-admin.loadbalancer.server.port=80"
+
+networks:
+  traefik-public:
+    external: true
+    name: ${TRAEFIK_PUBLIC_NETWORK:-traefik-public}
