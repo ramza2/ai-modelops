@@ -52,6 +52,7 @@ export function ObservabilityPage() {
     defaultValue: 24,
   })
   const groupBy = parseGroupBy(searchParams.get('group_by'))
+  const [draftHours, setDraftHours] = useState(String(hours))
 
   const [invocations, setInvocations] =
     useState<InvocationSummaryResponse | null>(null)
@@ -74,6 +75,10 @@ export function ObservabilityPage() {
   const invLoadedRef = useRef(false)
   const rtLoadedRef = useRef(false)
 
+  useEffect(() => {
+    setDraftHours(String(hours))
+  }, [hours])
+
   const syncUrl = useCallback(
     (next: { hours: number; groupBy: GroupBy }) => {
       const params = new URLSearchParams()
@@ -83,6 +88,16 @@ export function ObservabilityPage() {
     },
     [setSearchParams],
   )
+
+  const applyHours = useCallback(() => {
+    const nextHours = parseBoundedInt(draftHours, {
+      min: 1,
+      max: 720,
+      defaultValue: 24,
+    })
+    setDraftHours(String(nextHours))
+    syncUrl({ hours: nextHours, groupBy })
+  }, [draftHours, groupBy, syncUrl])
 
   useEffect(() => {
     const rawHours = searchParams.get('hours')
@@ -209,22 +224,26 @@ export function ObservabilityPage() {
       refreshing={refreshing}
       lastUpdated={lastUpdated}
     >
-      <div className="toolbar toolbar--wrap">
+      <form
+        className="toolbar toolbar--wrap"
+        onSubmit={(e) => {
+          e.preventDefault()
+          applyHours()
+        }}
+      >
         <label className="toolbar__field" htmlFor="obs-hours">
-          <span>Hours</span>
-          <select
+          <span>Hours (1–720)</span>
+          <input
             id="obs-hours"
-            value={String(hours)}
-            onChange={(e) =>
-              syncUrl({ hours: Number(e.target.value), groupBy })
-            }
-          >
-            {[1, 6, 12, 24, 48, 72, 168, 720].map((h) => (
-              <option key={h} value={h}>
-                {h}
-              </option>
-            ))}
-          </select>
+            type="number"
+            inputMode="numeric"
+            min={1}
+            max={720}
+            step={1}
+            value={draftHours}
+            onChange={(e) => setDraftHours(e.target.value)}
+            onBlur={applyHours}
+          />
         </label>
         <label className="toolbar__field" htmlFor="obs-group-by">
           <span>Group by</span>
@@ -240,12 +259,17 @@ export function ObservabilityPage() {
             <option value="deployment">deployment</option>
           </select>
         </label>
+        <div className="toolbar__actions">
+          <button type="submit" className="btn">
+            적용
+          </button>
+        </div>
         <p className="toolbar__hint">
-          hours는 1..720, group_by는 client|alias|deployment입니다. Token
-          percentile는 tokenized row만 사용하며 전체 요청 대비 토큰 커버리지를
-          함께 표시합니다.
+          hours는 1..720의 임의 정수, group_by는 client|alias|deployment입니다.
+          Token percentile는 tokenized row만 사용하며 전체 요청 대비 토큰
+          커버리지를 함께 표시합니다.
         </p>
-      </div>
+      </form>
 
       <section className="detail-panel" aria-labelledby="inv-summary-heading">
         <h2 id="inv-summary-heading">Invocation Summary</h2>

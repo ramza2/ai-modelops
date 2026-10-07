@@ -329,6 +329,10 @@ describe('DeploymentObservabilityPage', () => {
       '/observability/deployments/dep-a?hours=12&limit=100',
       'hours=12&limit=100',
     ],
+    [
+      '/observability/deployments/dep-a?hours=37&limit=777',
+      'hours=37&limit=777',
+    ],
     ['/observability/deployments/dep-a?hours=999', ''],
     ['/observability/deployments/dep-a?limit=0', ''],
     [
@@ -353,6 +357,41 @@ describe('DeploymentObservabilityPage', () => {
     await waitFor(() => {
       expect(screen.getByTestId('location-search')).toHaveTextContent(expected)
     })
+  })
+
+  it('applies arbitrary valid hours/limit through number controls', async () => {
+    const user = userEvent.setup()
+    vi.mocked(observabilityApi.getRuntimeLatest).mockResolvedValue(makeLatest())
+    vi.mocked(observabilityApi.getRuntimeHistory).mockResolvedValue(
+      makeHistory(),
+    )
+    vi.mocked(observabilityApi.getCapacityProfile).mockResolvedValue(
+      makeProfile(),
+    )
+    renderAt('/observability/deployments/dep-a')
+    await screen.findByText(/ctr-a/)
+    await user.clear(screen.getByLabelText(/Hours/))
+    await user.type(screen.getByLabelText(/Hours/), '37')
+    await user.clear(screen.getByLabelText(/History limit/))
+    await user.type(screen.getByLabelText(/History limit/), '777')
+    await user.click(screen.getByRole('button', { name: '적용' }))
+    await waitFor(() => {
+      expect(screen.getByTestId('location-search')).toHaveTextContent(
+        'hours=37&limit=777',
+      )
+    })
+    await waitFor(() => {
+      expect(observabilityApi.getRuntimeHistory).toHaveBeenCalledWith(
+        'dep-a',
+        expect.objectContaining({ hours: 37, limit: 777 }),
+      )
+      expect(observabilityApi.getCapacityProfile).toHaveBeenCalledWith(
+        'dep-a',
+        37,
+        expect.anything(),
+      )
+    })
+    expect(observabilityApi.getInvocationSummary).not.toHaveBeenCalled()
   })
 
   it('keeps same-id non-404 refresh snapshot and clears on identity change 500', async () => {
@@ -400,6 +439,50 @@ describe('DeploymentObservabilityPage', () => {
       await screen.findByText('Deployment를 찾을 수 없습니다.'),
     ).toBeInTheDocument()
     expect(screen.queryByText(/ctr-a/)).not.toBeInTheDocument()
+  })
+
+  it('treats any section 404 as authoritative and ignores delayed siblings', async () => {
+    const user = userEvent.setup()
+    let resolveHistory!: (value: RuntimeHistoryResponse) => void
+    let resolveProfile!: (value: CapacityProfile) => void
+    vi.mocked(observabilityApi.getRuntimeLatest)
+      .mockResolvedValueOnce(makeLatest())
+      .mockRejectedValueOnce(new ApiError('gone', { status: 404 }))
+    vi.mocked(observabilityApi.getRuntimeHistory)
+      .mockResolvedValueOnce(makeHistory())
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveHistory = resolve
+          }),
+      )
+    vi.mocked(observabilityApi.getCapacityProfile)
+      .mockResolvedValueOnce(makeProfile())
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveProfile = resolve
+          }),
+      )
+    renderAt('/observability/deployments/dep-a')
+    expect(await screen.findByText(/ctr-a/)).toBeInTheDocument()
+    expect(screen.getByText('chat-dep-a')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: '새로고침' }))
+    expect(
+      await screen.findByText('Deployment를 찾을 수 없습니다.'),
+    ).toBeInTheDocument()
+    expect(screen.queryByText(/ctr-a/)).not.toBeInTheDocument()
+    expect(screen.queryByText('chat-dep-a')).not.toBeInTheDocument()
+    resolveHistory(makeHistory())
+    resolveProfile(makeProfile())
+    await waitFor(() => {
+      expect(
+        screen.getByText('Deployment를 찾을 수 없습니다.'),
+      ).toBeInTheDocument()
+    })
+    expect(screen.queryByText(/ctr-a/)).not.toBeInTheDocument()
+    expect(screen.queryByText('chat-dep-a')).not.toBeInTheDocument()
+    expect(screen.queryByText(/PARTIAL/)).not.toBeInTheDocument()
   })
 
   it('renders history oldest→newest and capacity comparison statuses', async () => {

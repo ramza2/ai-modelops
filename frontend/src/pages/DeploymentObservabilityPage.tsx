@@ -78,7 +78,6 @@ export function DeploymentObservabilityPage() {
   const [latestEmpty, setLatestEmpty] = useState(false)
   const [latestLoading, setLatestLoading] = useState(true)
   const [latestError, setLatestError] = useState<string | null>(null)
-  const [latestNotFound, setLatestNotFound] = useState(false)
 
   const [history, setHistory] = useState<RuntimeSnapshot[] | null>(null)
   const [historyLoading, setHistoryLoading] = useState(true)
@@ -87,15 +86,26 @@ export function DeploymentObservabilityPage() {
   const [profile, setProfile] = useState<CapacityProfile | null>(null)
   const [profileLoading, setProfileLoading] = useState(true)
   const [profileError, setProfileError] = useState<string | null>(null)
-  const [profileNotFound, setProfileNotFound] = useState(false)
 
+  const [notFound, setNotFound] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
+  const [draftHours, setDraftHours] = useState(String(hours))
+  const [draftLimit, setDraftLimit] = useState(String(limit))
 
   const abortRef = useRef<AbortController | null>(null)
   const readGenRef = useRef(0)
+  /** Generations blocked after an authoritative 404 for that read wave. */
+  const goneGenRef = useRef(0)
   const activeIdRef = useRef(deploymentId)
   activeIdRef.current = deploymentId
+
+  useEffect(() => {
+    setDraftHours(String(hours))
+  }, [hours])
+  useEffect(() => {
+    setDraftLimit(String(limit))
+  }, [limit])
 
   const syncUrl = useCallback(
     (next: { hours: number; limit: number }) => {
@@ -129,16 +139,31 @@ export function DeploymentObservabilityPage() {
     if (needsFix) setSearchParams(fixed, { replace: true })
   }, [searchParams, setSearchParams])
 
+  const applyBounds = useCallback(() => {
+    const nextHours = parseBoundedInt(draftHours, {
+      min: 1,
+      max: 168,
+      defaultValue: 24,
+    })
+    const nextLimit = parseBoundedInt(draftLimit, {
+      min: 1,
+      max: 1000,
+      defaultValue: 500,
+    })
+    setDraftHours(String(nextHours))
+    setDraftLimit(String(nextLimit))
+    syncUrl({ hours: nextHours, limit: nextLimit })
+  }, [draftHours, draftLimit, syncUrl])
+
   const resetIdentity = useCallback(() => {
     setLatest(null)
     setLatestEmpty(false)
     setLatestError(null)
-    setLatestNotFound(false)
     setHistory(null)
     setHistoryError(null)
     setProfile(null)
     setProfileError(null)
-    setProfileNotFound(false)
+    setNotFound(false)
     setLastUpdated(null)
   }, [])
 
@@ -147,8 +172,7 @@ export function DeploymentObservabilityPage() {
       const requestId = deploymentId
       if (!requestId) {
         resetIdentity()
-        setLatestNotFound(true)
-        setProfileNotFound(true)
+        setNotFound(true)
         setLatestLoading(false)
         setHistoryLoading(false)
         setProfileLoading(false)
@@ -160,9 +184,8 @@ export function DeploymentObservabilityPage() {
       abortRef.current = controller
       const gen = ++readGenRef.current
       const isCurrent = () =>
-        !controller.signal.aborted &&
-        gen === readGenRef.current &&
-        activeIdRef.current === requestId
+        gen === readGenRef.current && activeIdRef.current === requestId
+      const canApply = () => isCurrent() && goneGenRef.current !== gen
 
       if (mode === 'initial') {
         resetIdentity()
@@ -171,16 +194,36 @@ export function DeploymentObservabilityPage() {
         setProfileLoading(true)
       } else {
         setRefreshing(true)
+        setNotFound(false)
+      }
+
+      const markAuthoritativeGone = () => {
+        if (!isCurrent()) return
+        goneGenRef.current = gen
+        setLatest(null)
+        setLatestEmpty(false)
+        setLatestError(null)
+        setHistory(null)
+        setHistoryError(null)
+        setProfile(null)
+        setProfileError(null)
+        setNotFound(true)
+        setLastUpdated(null)
+        setLatestLoading(false)
+        setHistoryLoading(false)
+        setProfileLoading(false)
+        setRefreshing(false)
+        // Stop sibling in-flight work; their success paths are also blocked by goneGen.
+        controller.abort()
       }
 
       const latestPromise = getRuntimeLatest(requestId, controller.signal)
         .then((data) => {
-          if (!isCurrent()) return
+          if (!canApply()) return
           const item = data.items[0] ?? null
           if (item && item.deployment_id !== requestId) return
           setLatest(item)
           setLatestEmpty(!item)
-          setLatestNotFound(false)
           setLatestError(null)
           setLastUpdated(new Date())
         })
@@ -188,12 +231,10 @@ export function DeploymentObservabilityPage() {
           if (!isCurrent()) return
           if (err instanceof DOMException && err.name === 'AbortError') return
           if (err instanceof ApiError && err.status === 404) {
-            setLatest(null)
-            setLatestEmpty(false)
-            setLatestNotFound(true)
-            setLatestError('Deployment runtime을 찾을 수 없습니다.')
+            markAuthoritativeGone()
             return
           }
+          if (!canApply()) return
           const message =
             err instanceof ApiError
               ? err.message
@@ -203,7 +244,7 @@ export function DeploymentObservabilityPage() {
           setLatestError(message)
         })
         .finally(() => {
-          if (isCurrent()) setLatestLoading(false)
+          if (canApply()) setLatestLoading(false)
         })
 
       const historyPromise = getRuntimeHistory(requestId, {
@@ -212,7 +253,7 @@ export function DeploymentObservabilityPage() {
         signal: controller.signal,
       })
         .then((data) => {
-          if (!isCurrent()) return
+          if (!canApply()) return
           if (data.deployment_id !== requestId) return
           setHistory(data.items)
           setHistoryError(null)
@@ -222,10 +263,10 @@ export function DeploymentObservabilityPage() {
           if (!isCurrent()) return
           if (err instanceof DOMException && err.name === 'AbortError') return
           if (err instanceof ApiError && err.status === 404) {
-            setHistory(null)
-            setHistoryError('Deployment history를 찾을 수 없습니다.')
+            markAuthoritativeGone()
             return
           }
+          if (!canApply()) return
           const message =
             err instanceof ApiError
               ? err.message
@@ -235,7 +276,7 @@ export function DeploymentObservabilityPage() {
           setHistoryError(message)
         })
         .finally(() => {
-          if (isCurrent()) setHistoryLoading(false)
+          if (canApply()) setHistoryLoading(false)
         })
 
       const profilePromise = getCapacityProfile(
@@ -244,10 +285,9 @@ export function DeploymentObservabilityPage() {
         controller.signal,
       )
         .then((data) => {
-          if (!isCurrent()) return
+          if (!canApply()) return
           if (data.deployment.id !== requestId) return
           setProfile(data)
-          setProfileNotFound(false)
           setProfileError(null)
           setLastUpdated(new Date())
         })
@@ -255,11 +295,10 @@ export function DeploymentObservabilityPage() {
           if (!isCurrent()) return
           if (err instanceof DOMException && err.name === 'AbortError') return
           if (err instanceof ApiError && err.status === 404) {
-            setProfile(null)
-            setProfileNotFound(true)
-            setProfileError('Capacity Profile을 찾을 수 없습니다.')
+            markAuthoritativeGone()
             return
           }
+          if (!canApply()) return
           const message =
             err instanceof ApiError
               ? err.message
@@ -269,11 +308,15 @@ export function DeploymentObservabilityPage() {
           setProfileError(message)
         })
         .finally(() => {
-          if (isCurrent()) setProfileLoading(false)
+          if (canApply()) setProfileLoading(false)
         })
 
-      await Promise.all([latestPromise, historyPromise, profilePromise])
-      if (isCurrent()) setRefreshing(false)
+      await Promise.allSettled([
+        latestPromise,
+        historyPromise,
+        profilePromise,
+      ])
+      if (canApply()) setRefreshing(false)
     },
     [deploymentId, hours, limit, resetIdentity],
   )
@@ -285,7 +328,6 @@ export function DeploymentObservabilityPage() {
     }
   }, [load])
 
-  const primaryNotFound = latestNotFound && profileNotFound
   const analytics: RuntimeAnalytics | null = profile?.runtime_analytics ?? null
   const displayLatest =
     latest && latest.deployment_id === deploymentId ? latest : null
@@ -293,7 +335,7 @@ export function DeploymentObservabilityPage() {
     profile && profile.deployment.id === deploymentId ? profile : null
   const displayHistory = history
 
-  if (primaryNotFound && !displayLatest && !displayProfile) {
+  if (notFound) {
     return (
       <AppShell
         title="Deployment Observability"
@@ -337,40 +379,51 @@ export function DeploymentObservabilityPage() {
         </Link>
       </p>
 
-      <div className="toolbar toolbar--wrap">
+      <form
+        className="toolbar toolbar--wrap"
+        onSubmit={(e) => {
+          e.preventDefault()
+          applyBounds()
+        }}
+      >
         <label className="toolbar__field" htmlFor="dep-obs-hours">
-          <span>Hours</span>
-          <select
+          <span>Hours (1–168)</span>
+          <input
             id="dep-obs-hours"
-            value={String(hours)}
-            onChange={(e) =>
-              syncUrl({ hours: Number(e.target.value), limit })
-            }
-          >
-            {[1, 6, 12, 24, 48, 72, 168].map((h) => (
-              <option key={h} value={h}>
-                {h}
-              </option>
-            ))}
-          </select>
+            type="number"
+            inputMode="numeric"
+            min={1}
+            max={168}
+            step={1}
+            value={draftHours}
+            onChange={(e) => setDraftHours(e.target.value)}
+            onBlur={applyBounds}
+          />
         </label>
         <label className="toolbar__field" htmlFor="dep-obs-limit">
-          <span>History limit</span>
-          <select
+          <span>History limit (1–1000)</span>
+          <input
             id="dep-obs-limit"
-            value={String(limit)}
-            onChange={(e) =>
-              syncUrl({ hours, limit: Number(e.target.value) })
-            }
-          >
-            {[50, 100, 250, 500, 1000].map((n) => (
-              <option key={n} value={n}>
-                {n}
-              </option>
-            ))}
-          </select>
+            type="number"
+            inputMode="numeric"
+            min={1}
+            max={1000}
+            step={1}
+            value={draftLimit}
+            onChange={(e) => setDraftLimit(e.target.value)}
+            onBlur={applyBounds}
+          />
         </label>
-      </div>
+        <div className="toolbar__actions">
+          <button type="submit" className="btn">
+            적용
+          </button>
+        </div>
+        <p className="toolbar__hint">
+          hours/limit는 Backend 계약 범위의 임의의 정수입니다. 잘못된 값은
+          기본값(hours=24, limit=500)으로 정규화됩니다.
+        </p>
+      </form>
 
       <section className="detail-panel" aria-labelledby="latest-heading">
         <h2 id="latest-heading">Latest runtime snapshot</h2>

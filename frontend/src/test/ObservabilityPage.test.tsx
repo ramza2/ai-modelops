@@ -114,6 +114,7 @@ describe('ObservabilityPage', () => {
 
   it.each([
     ['/observability?hours=48&group_by=alias', 'hours=48&group_by=alias'],
+    ['/observability?hours=13', 'hours=13'],
     ['/observability?hours=9999', ''],
     ['/observability?group_by=OTHER', ''],
     ['/observability?hours=024&group_by=DEPLOYMENT', 'group_by=deployment'],
@@ -127,6 +128,40 @@ describe('ObservabilityPage', () => {
     renderAt(path)
     await waitFor(() => {
       expect(screen.getByTestId('location-search')).toHaveTextContent(expected)
+    })
+  })
+
+  it('applies arbitrary valid hours through number control', async () => {
+    const user = userEvent.setup()
+    vi.mocked(observabilityApi.getInvocationSummary).mockResolvedValue(
+      summary({ items: [] }),
+    )
+    vi.mocked(observabilityApi.getRuntimeLatest).mockResolvedValue({
+      items: [],
+    })
+    renderAt('/observability?hours=13')
+    await waitFor(() => {
+      expect(screen.getByTestId('location-search')).toHaveTextContent(
+        'hours=13',
+      )
+    })
+    await waitFor(() => {
+      expect(observabilityApi.getInvocationSummary).toHaveBeenCalledWith(
+        expect.objectContaining({ hours: 13 }),
+      )
+    })
+    await user.clear(screen.getByLabelText(/Hours/))
+    await user.type(screen.getByLabelText(/Hours/), '37')
+    await user.click(screen.getByRole('button', { name: '적용' }))
+    await waitFor(() => {
+      expect(screen.getByTestId('location-search')).toHaveTextContent(
+        'hours=37',
+      )
+    })
+    await waitFor(() => {
+      expect(observabilityApi.getInvocationSummary).toHaveBeenCalledWith(
+        expect.objectContaining({ hours: 37 }),
+      )
     })
   })
 
