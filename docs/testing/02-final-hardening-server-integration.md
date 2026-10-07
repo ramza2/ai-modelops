@@ -162,7 +162,7 @@ Run models one at a time initially: Embedding -> VLM -> LLM.
 
 For each model:
 
-- [ ] PENDING — Model/Version metadata registered
+- [x] PASS — BGE-M3 Model/Version metadata registered with frozen HF revision, vLLM image digest, served name, dtype and production runtime settings
 - [ ] PENDING — MANAGED Deployment created on intended GPU(s)
 - [ ] PENDING — artifact/image prepare succeeds
 - [ ] PENDING — START Operation reaches SUCCEEDED
@@ -324,3 +324,4 @@ Append concise evidence as testing progresses.
 | 2026-10-07 | D / vLLM runner regression | PASS | Target server rebuilt the Worker image with `runner` support and executed `worker/tests/test_runtime_adapters.py` in an isolated one-shot container with dev requirements: **55 passed**. Initial `pytest not found` was due to the production Worker image intentionally excluding dev dependencies, not a code failure. Existing model runtimes were untouched. |
 | 2026-10-07 | D / Worker rollout | PASS | Recreated only the ModelOps Worker from the rebuilt image after the vLLM runner fix. Worker started normally and logs show job polling plus runtime metrics collector startup; PostgreSQL/Backend/Gateway/Frontend and all existing `vllm-*` runtimes were left untouched. |
 | 2026-10-07 | D / BGE-M3 artifact materialize | PASS | Confirmed HF `refs/main` = `5617a9f61b028005a4858fdac845db406aefb181`; materialized the 2.2 GiB snapshot to `/data/modelops/models/BAAI/bge-m3/5617a9f61b028005a4858fdac845db406aefb181` with symlinks resolved (`SYMLINKS=0`). `diff -qr` between source snapshot and ModelOps copy returned no differences. Existing embedding runtime remained running. |
+| 2026-10-07 | D / BGE-M3 registry | PASS | Registered `BAAI/bge-m3` as EMBEDDING (`cb68c59e-7136-441b-ba0c-191512cd86f2`) and version `prod-2026-10-07` (`5e61778f-7e5d-4e29-b9ce-084217f25f23`) with frozen source revision `5617a9f61b028005a4858fdac845db406aefb181`, vLLM image digest `sha256:251eba5c...`, float16, max model length 8192, `runner=pooling`, `max_num_seqs=4`, and GPU memory utilization 0.15. Existing runtime remained running. |
