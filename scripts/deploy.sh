@@ -232,6 +232,12 @@ print_failure_diagnostics() {
   echo "" >&2
   echo "--- backend logs (last 80 lines) ---" >&2
   compose logs --tail=80 backend >&2 || true
+  echo "" >&2
+  echo "--- worker logs (last 80 lines) ---" >&2
+  compose logs --tail=80 worker >&2 || true
+  echo "" >&2
+  echo "--- gateway logs (last 40 lines) ---" >&2
+  compose logs --tail=40 gateway >&2 || true
 }
 
 # --- main ---
@@ -288,13 +294,23 @@ if ! wait_for_http_ok "${READY_URL}" "Ready"; then
   exit 1
 fi
 
+echo ""
+echo "--- worker status ---"
+compose ps worker || true
+echo ""
+echo "--- worker logs (last 20 lines) ---"
+compose logs --tail=20 worker || true
+
 cat <<EOF
 
 ModelOps deployment completed
+Control Plane: PostgreSQL + Backend + Worker + Gateway + Frontend
 Backend: http://localhost:${BACKEND_PORT}
 Health: OK
 Ready: OK
 
 Note: Node Agent runs as a host process (not in Compose) so it can access
 Docker/NVML. See README "Milestone 2 — Node Agent".
+If lifecycle Operations stay QUEUED, inspect Worker logs:
+  docker compose --env-file .env -f deploy/compose/docker-compose.yml logs -f worker
 EOF

@@ -87,10 +87,14 @@ Docker가 설치·기동된 상태에서 repository root에서:
 
 - root `.env`가 없으면 interactive wizard로 생성한다.
 - 기존 `.env`가 있으면 재사용한다. 재설정: `./scripts/deploy.sh --configure`
-- Compose로 PostgreSQL + backend를 기동하고 `/health`, `/ready`를 확인한다.
+- Compose로 PostgreSQL + Backend + Worker + Gateway + Frontend를 기동하고
+  Backend `/health`, `/ready`를 확인한다.
 - 종료(볼륨 유지): `./scripts/deploy.sh --down`
 
 성공 시 Backend는 `http://localhost:<BACKEND_PORT>` (기본 8000)이다.
+Worker는 Compose 내부에서 `postgres:5432`와 `http://gateway:8080`을 사용하며,
+Node Agent는 host process로 유지한다. Worker 기동/크래시 로그는
+`deploy.sh` 실패 진단과 `docker compose ... logs worker`로 확인한다.
 
 ### Admin UI (M6-C1 / M6-C2 / M6-C3 / M6-C4 / M6-C5 / M6-C6 / M6-C7)
 
