@@ -37,7 +37,7 @@ Do not mark a server check PASS from code inspection alone.
 | RB-02 | PENDING | Gate A component suites executed on this branch; A3 fresh-DB migrate/health/ready and remaining A4 architecture spot-checks still open. | Gate A passes. |
 | RB-03 | PENDING | RTX A4000 server integration has not yet been executed. | Gates C-G pass on target server. |
 | RB-04 | PASS | Artifact/static exit met: `deploy/compose/docker-compose.server.yml` + `./scripts/deploy-server.sh` provide Traefik-label Admin/Gateway ingress (Gateway port 8080), external network placeholder, no Backend public router by default, no managed-model routers, Linux `host-gateway` for Node Agent reachability. Traefik/TLS/server networking runtime remains Gate I PENDING. | A documented server deployment path/overlay provides placeholder-only Traefik labels/networks for Admin/Gateway (and Management API only if required), without exposing managed model containers directly. |
-| RB-05 | BLOCKED | Repository systemd artifacts exist (`deploy/systemd/*`, `scripts/install-node-agent-service.sh`) with static/subcheck PASS, but original exit condition still requires target Linux validation (`systemctl`, Docker, NVML, `/health`/`/ready`). Runtime evidence PENDING/BLOCKED in agent env. | A safe parameterized systemd unit/install procedure exists and is validated on the target Linux host; no real internal address/token is committed. |
+| RB-05 | PASS | Target Linux validation completed: isolated Node Agent venv installed, systemd service enabled/running, restart succeeded, `/health` and `/ready` succeeded, and Docker/NVML both report AVAILABLE. | A safe parameterized systemd unit/install procedure exists and is validated on the target Linux host; no real internal address/token is committed. |
 
 GitHub Actions workflows are currently not present in the repository. Release
 verification is therefore based on the explicit commands below and recorded
@@ -131,17 +131,17 @@ Exit: B checks PASS before lifecycle server testing.
 
 Target: server with RTX A4000 x2.
 
-- [ ] PENDING — Node Agent installs in an isolated Python environment
-- [ ] PENDING — host service/systemd start succeeds
-- [ ] PENDING — service restart succeeds
-- [ ] PENDING — `/health` succeeds
-- [ ] PENDING — `/ready` succeeds
-- [ ] PENDING — Docker Engine adapter succeeds
-- [ ] PENDING — NVML adapter succeeds
-- [ ] PENDING — exactly two expected A4000 devices discovered
-- [ ] PENDING — GPU UUID/device index/model are stable
-- [ ] PENDING — per-GPU total/used/free VRAM is plausible
-- [ ] PENDING — utilization/temperature/power fields behave as supported
+- [x] PASS — Node Agent installed in isolated `node-agent/.venv` on target Linux host
+- [x] PASS — `modelops-node-agent.service` enabled and active on target host
+- [x] PASS — `systemctl restart modelops-node-agent` completed; new Uvicorn process started normally
+- [x] PASS — `/health` returned 200 during installer validation
+- [x] PASS — `/ready` returned `READY` after install and after service restart
+- [x] PASS — `/ready`: `docker=AVAILABLE`
+- [x] PASS — `/ready`: `nvml=AVAILABLE`
+- [x] PASS — `/internal/v1/resources` discovered exactly 2 × NVIDIA RTX A4000
+- [x] PASS — device indices 0/1 with stable NVIDIA GPU UUIDs and model `NVIDIA RTX A4000` observed
+- [x] PASS — each A4000 reported 16376 MiB total with independent used/free values; no pooled-VRAM interpretation
+- [x] PASS — target snapshot returned utilization, temperature, and power for both GPUs
 - [ ] PENDING — Docker/GPU process mapping works for a managed runtime
 - [ ] PENDING — Backend can reach Node Agent using configured server address/token
 - [ ] PENDING — Node resources refresh and Admin UI Nodes/GPUs agree
@@ -306,3 +306,6 @@ Append concise evidence as testing progresses.
 | 2026-10-07 | B1 | FAIL | Target Docker Compose v5.1.1 `config` accepted the server overlay, but Backend loopback publish disappeared because `ports: !reset` discarded the replacement value; `deploy-server.sh` health/ready probes would be unreachable. |
 | 2026-10-07 | B1 | PENDING | Server overlay fixed to replace Backend ports with `!override` while keeping PostgreSQL/Gateway/Frontend publishes reset; target `docker compose config` rerun required before PASS. |
 | 2026-10-07 | B1 | PASS | Target Docker Compose v5.1.1 server-overlay `config` PASS after `!override` fix; Backend publish resolves only to `127.0.0.1:8000`; Traefik network/resolver resolve from server env. Worker startup still required before RB-01 closes. |
+| 2026-10-07 | C / RB-05 | PASS | Target install: Node Agent venv created under `node-agent/.venv`; systemd unit enabled/running; installer `/health` and `/ready` OK. `/ready` reported Docker and NVML AVAILABLE. |
+| 2026-10-07 | C | PASS | `/internal/v1/resources`: exactly 2 × NVIDIA RTX A4000, 16376 MiB each, device indices 0/1, stable GPU UUIDs, per-GPU VRAM/utilization/temperature/power returned. Existing non-ModelOps vLLM GPU processes correctly remain unattributed (`container_id=null`, `deployment_id=null`). |
+| 2026-10-07 | C / RB-05 | PASS | `systemctl restart modelops-node-agent` succeeded; immediate curl raced startup once, journal showed clean shutdown/startup, subsequent `/ready` returned READY with Docker/NVML AVAILABLE. |
