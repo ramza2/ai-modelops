@@ -240,6 +240,35 @@ print_failure_diagnostics() {
   compose logs --tail=40 gateway >&2 || true
 }
 
+# Process-running gate for the full Control Plane. Does not invent health APIs
+# for Worker/Gateway/Frontend; Backend /health + /ready remain separate.
+wait_for_control_plane_running() {
+  local attempts="${1:-15}"
+  local sleep_s="${2:-2}"
+  local -a required=(postgres backend worker gateway frontend)
+  local i svc running
+  local -a missing
+
+  for ((i = 1; i <= attempts; i++)); do
+    missing=()
+    # Compose V2: list service names currently in running state (no jq).
+    running="$(compose ps --status running --services 2>/dev/null || true)"
+    for svc in "${required[@]}"; do
+      if ! printf '%s\n' "${running}" | grep -qx "${svc}"; then
+        missing+=("${svc}")
+      fi
+    done
+    if [[ ${#missing[@]} -eq 0 ]]; then
+      echo "Control Plane services: OK (postgres backend worker gateway frontend running)"
+      return 0
+    fi
+    echo "waiting for Control Plane services (${i}/${attempts}): not running: ${missing[*]}"
+    sleep "${sleep_s}"
+  done
+  echo "error: required Control Plane services not running: ${missing[*]-unknown}" >&2
+  return 1
+}
+
 # --- main ---
 
 require_docker
@@ -294,9 +323,14 @@ if ! wait_for_http_ok "${READY_URL}" "Ready"; then
   exit 1
 fi
 
+if ! wait_for_control_plane_running; then
+  print_failure_diagnostics
+  exit 1
+fi
+
 echo ""
-echo "--- worker status ---"
-compose ps worker || true
+echo "--- control plane status ---"
+compose ps postgres backend worker gateway frontend || true
 echo ""
 echo "--- worker logs (last 20 lines) ---"
 compose logs --tail=20 worker || true
@@ -308,6 +342,7 @@ Control Plane: PostgreSQL + Backend + Worker + Gateway + Frontend
 Backend: http://localhost:${BACKEND_PORT}
 Health: OK
 Ready: OK
+Services: postgres backend worker gateway frontend running
 
 Note: Node Agent runs as a host process (not in Compose) so it can access
 Docker/NVML. See README "Milestone 2 — Node Agent".
