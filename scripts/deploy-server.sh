@@ -20,10 +20,17 @@ usage() {
   cat <<'EOF'
 Usage: ./scripts/deploy-server.sh --env-file <path> [--down|--help]
 
-  --env-file PATH   Required server env file (not committed). Must define
-                    MODELOPS_ADMIN_HOST and MODELOPS_GATEWAY_HOST placeholders
-                    replaced with real hostnames only on the target server.
-  --down            Stop server Control Plane compose services (volumes kept)
+  --env-file PATH   Required server env file (not committed). For normal up,
+                    must set non-dev values for:
+                      MODELOPS_ENVIRONMENT (not "local")
+                      POSTGRES_PASSWORD (not the "modelops" dev default)
+                      MODELOPS_ADMIN_HOST
+                      MODELOPS_GATEWAY_HOST
+                      MODELOPS_NODE_AGENT_TOKEN
+                    Same secret must also be set as NODE_AGENT_TOKEN on the
+                    host Node Agent EnvironmentFile (separate namespace).
+  --down            Stop server Control Plane compose services (volumes kept).
+                    Does not re-validate production secrets.
   --help            Show this help
 
 Compose files:
@@ -104,10 +111,34 @@ require_env_value() {
     echo "error: required env var ${key} is missing or empty in ${ENV_FILE}" >&2
     exit 1
   fi
-  # Reject unresolved placeholder-looking empty Host() risk; allow any non-empty
-  # operator-supplied hostname. Do not embed real domains in this script.
-  if [[ "${value}" == *"\${"* ]]; then
+  # Reject unresolved placeholders. Never print the value (may be a secret).
+  if [[ "${value}" == *'${'* ]]; then
     echo "error: ${key} still contains an unresolved \${...} placeholder" >&2
+    exit 1
+  fi
+}
+
+require_server_up_env() {
+  local environment password
+
+  require_env_value MODELOPS_ENVIRONMENT
+  require_env_value POSTGRES_PASSWORD
+  require_env_value MODELOPS_ADMIN_HOST
+  require_env_value MODELOPS_GATEWAY_HOST
+  require_env_value MODELOPS_NODE_AGENT_TOKEN
+
+  environment="$(env_get MODELOPS_ENVIRONMENT)"
+  if [[ "${environment}" == "local" ]]; then
+    echo "error: MODELOPS_ENVIRONMENT=local is not allowed for server deploy" >&2
+    echo "Set a non-local value (for example production or staging) in ${ENV_FILE}." >&2
+    exit 1
+  fi
+
+  password="$(env_get POSTGRES_PASSWORD)"
+  if [[ "${password}" == "modelops" ]]; then
+    # Do not print the password value.
+    echo "error: POSTGRES_PASSWORD matches the known development default; refuse server up" >&2
+    echo "Set a unique server password in ${ENV_FILE}." >&2
     exit 1
   fi
 }
@@ -198,14 +229,15 @@ if [[ ! -f "${BASE_COMPOSE}" || ! -f "${SERVER_COMPOSE}" ]]; then
 fi
 
 if [[ "${DO_DOWN}" -eq 1 ]]; then
+  # Teardown only needs a readable env file for Compose project identity.
+  # Do not re-validate production secrets on --down.
   echo "Stopping ModelOps server Control Plane (volumes preserved)..."
   compose down
   echo "ModelOps server services stopped."
   exit 0
 fi
 
-require_env_value MODELOPS_ADMIN_HOST
-require_env_value MODELOPS_GATEWAY_HOST
+require_server_up_env
 
 BACKEND_PORT="$(env_get BACKEND_PORT)"
 BACKEND_PORT="${BACKEND_PORT:-8000}"

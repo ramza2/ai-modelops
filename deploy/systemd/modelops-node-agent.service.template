@@ -1,0 +1,42 @@
+# ModelOps Node Agent — systemd unit template (Linux Docker host).
+# Installed by scripts/install-node-agent-service.sh (do not embed secrets here).
+#
+# Placeholders replaced at install time:
+#   @@SERVICE_USER@@  @@SERVICE_GROUP@@  @@NODE_AGENT_DIR@@
+#   @@UVICORN@@  @@NODE_AGENT_HOST@@  @@NODE_AGENT_PORT@@  @@ENV_FILE@@
+
+[Unit]
+Description=ModelOps Node Agent (Docker/NVML host service)
+Documentation=file:@@NODE_AGENT_DIR@@/../deploy/systemd/README.md
+After=network-online.target docker.service
+Wants=network-online.target
+# docker.service may be absent on some hosts; Node Agent still starts and
+# reports Docker unavailable via /ready until the engine is reachable.
+
+[Service]
+Type=simple
+User=@@SERVICE_USER@@
+Group=@@SERVICE_GROUP@@
+WorkingDirectory=@@NODE_AGENT_DIR@@
+
+# Runtime settings (Bearer secret and bind-related keys) live only in
+# EnvironmentFile. Never put secrets on ExecStart / unit file / command line.
+EnvironmentFile=@@ENV_FILE@@
+
+ExecStart=@@UVICORN@@ app.main:app --host @@NODE_AGENT_HOST@@ --port @@NODE_AGENT_PORT@@
+
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+KillSignal=SIGTERM
+
+# Journald captures stdout/stderr; do not log secrets.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=modelops-node-agent
+
+# Compatible with Docker SDK + NVML; avoid aggressive device/filesystem sandboxing.
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

@@ -101,17 +101,34 @@ Node Agent는 host process로 유지한다. Worker 기동/크래시 로그는
 대상 서버는 Traefik Host routing을 사용한다. base Compose + server overlay:
 
 ```bash
-# server.env is outside Git and must set MODELOPS_ADMIN_HOST / MODELOPS_GATEWAY_HOST
+# server.env is outside Git. Normal up rejects missing secrets and known local defaults.
 ./scripts/deploy-server.sh --env-file /path/to/server.env
 ```
+
+Required in server env (non-empty; no unresolved `${...}`):
+
+- `MODELOPS_ENVIRONMENT` (not `local`)
+- `POSTGRES_PASSWORD` (not the `modelops` development default)
+- `MODELOPS_ADMIN_HOST` / `MODELOPS_GATEWAY_HOST`
+- `MODELOPS_NODE_AGENT_TOKEN` (must match host `NODE_AGENT_TOKEN`)
 
 - overlay: `deploy/compose/docker-compose.server.yml`
 - 외부 노출: Frontend + Gateway만 Traefik public network
 - Management API: Admin Frontend nginx same-origin proxy (별도 Backend Traefik router 없음)
 - Gateway Traefik service port: **8080**
 - Backend health/ready 검증: `127.0.0.1` loopback only
-- Node Agent: host process + `host.docker.internal:host-gateway` (Backend/Worker)
-- 상세: `docs/architecture/02-traefik-deployment.md`
+- Node Agent: host systemd process + Compose `host.docker.internal:host-gateway`
+- 상세: `docs/architecture/02-traefik-deployment.md`, `deploy/systemd/README.md`
+
+Node Agent host service (not in Compose, not behind Traefik):
+
+```bash
+sudo ./scripts/install-node-agent-service.sh \
+  --user <service-user> \
+  --env-file /etc/modelops/node-agent.env
+```
+
+Port 8100 must stay off the public internet (operator firewall; installer does not open ports).
 
 ### Admin UI (M6-C1 / M6-C2 / M6-C3 / M6-C4 / M6-C5 / M6-C6 / M6-C7)
 
@@ -185,7 +202,8 @@ Client mutation API는 현재 `Idempotency-Key` 계약이 없어 C7 UI에서 노
 
 ### Milestone 2 — Node Agent (host process)
 
-운영 권장 형태는 Node Agent를 **host `systemd` service**로 실행하는 것이다.
+운영 권장 형태는 Node Agent를 **host `systemd` service**로 실행하는 것이다
+(`deploy/systemd/`, `./scripts/install-node-agent-service.sh`).
 로컬에서도 Compose 안에 privileged Docker/NVML 마운트를 억지로 넣지 않고,
 Backend/PostgreSQL은 Compose(또는 venv)로 두고 Node Agent는 host process로 기동한다.
 

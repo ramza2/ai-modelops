@@ -110,7 +110,21 @@ labels:
 
 ## 5. Linux host Node Agent
 
-Node Agent는 Compose에 넣지 않는다 (Docker/NVML host process; systemd는 RB-05).
+Node Agent는 Compose에 넣지 않는다 (Docker/NVML host process).
+
+systemd 아티팩트:
+
+```text
+deploy/systemd/modelops-node-agent.service.template
+deploy/systemd/node-agent.env.example
+deploy/systemd/README.md
+./scripts/install-node-agent-service.sh
+```
+
+표준 bind는 `NODE_AGENT_HOST=0.0.0.0`, `NODE_AGENT_PORT=8100`이다.
+포트 8100은 공개 인터넷에 노출하지 말고 host firewall/network policy로
+제한한다. Installer는 firewall를 변경하지 않는다. Node Agent에 Traefik
+router를 붙이지 않는다.
 
 서버 overlay는 Backend/Worker에 다음을 추가한다.
 
@@ -120,9 +134,16 @@ extra_hosts:
 ```
 
 등록된 Node의 Agent URL이 `http://host.docker.internal:<port>`이면
-컨테이너에서 host Node Agent에 도달할 수 있다. Token은 env로만 주입하며
-repository에 실토큰을 커밋하지 않는다. Backend/Worker에 Docker socket/NVML을
-마운트하지 않는다.
+컨테이너에서 host Node Agent에 도달할 수 있다.
+
+토큰 계약 (네임스페이스를 애플리케이션 코드에서 합치지 않음):
+
+- Control Plane Compose/server env: `MODELOPS_NODE_AGENT_TOKEN`
+- Node Agent EnvironmentFile: `NODE_AGENT_TOKEN`
+- 대상 서버에서 두 값은 동일한 secret이어야 한다
+
+Token은 EnvironmentFile로만 주입하며 unit/command line/repository에
+실토큰을 두지 않는다. Backend/Worker에 Docker socket/NVML을 마운트하지 않는다.
 
 ## 6. Managed Model Container
 
