@@ -36,6 +36,8 @@ Do not mark a server check PASS from code inspection alone.
 | RB-01 | BLOCKED | `deploy/compose/docker-compose.yml` has PostgreSQL, Backend, Gateway, Frontend but no Orchestrator Worker; `worker/` also has no Dockerfile. `scripts/deploy.sh` therefore cannot deploy a complete lifecycle-capable Control Plane. | Worker is packaged and included in the supported deployment path; compose config + Worker startup/test evidence PASS. |
 | RB-02 | PENDING | Full repository verification has not yet been executed from this release branch. | Gate A passes. |
 | RB-03 | PENDING | RTX A4000 server integration has not yet been executed. | Gates C-G pass on target server. |
+| RB-04 | BLOCKED | Target architecture requires Traefik label-based server ingress, but `deploy/traefik/` currently contains no deploy artifact/overlay and the existing Compose file is explicitly local-development oriented. | A documented server deployment path/overlay provides placeholder-only Traefik labels/networks for Admin/Gateway (and Management API only if required), without exposing managed model containers directly. |
+| RB-05 | BLOCKED | Node Agent is documented as a host `systemd` service, but no unit/template/install artifact exists in the repository. | A safe parameterized systemd unit/install procedure exists and is validated on the target Linux host; no real internal address/token is committed. |
 
 GitHub Actions workflows are currently not present in the repository. Release
 verification is therefore based on the explicit commands below and recorded
@@ -285,5 +287,7 @@ Append concise evidence as testing progresses.
 |---|---|---|---|
 | 2026-10-07 | Baseline | PASS | M6-C7 merged; frozen baseline `d44ed4e8baf1aa07ed32a1e8601481b47c4264bd`. |
 | 2026-10-07 | B1 | BLOCKED | Static inspection: supported Compose contains no Worker service and `worker/` has no Dockerfile. RB-01 opened. |
+| 2026-10-07 | I | BLOCKED | `deploy/traefik/` is empty while target server deployment is Traefik-label based. RB-04 opened. |
+| 2026-10-07 | C | BLOCKED | Node Agent has no repository systemd unit/install artifact despite host-service deployment requirement. RB-05 opened. |
 | 2026-10-07 | CI | N/A | Repository currently contains no `.github/workflows`; explicit release commands/evidence required. |
 
