@@ -126,8 +126,9 @@ describe('OperationDetailPage', () => {
       'href',
       '/operations/parent-op',
     )
-    expect(screen.getByText('VALIDATE')).toBeInTheDocument()
-    expect(screen.getByText('DRAIN_TRAFFIC')).toBeInTheDocument()
+    const stepsTable = screen.getByRole('table')
+    expect(within(stepsTable).getByText('VALIDATE')).toBeInTheDocument()
+    expect(within(stepsTable).getByText('DRAIN_TRAFFIC')).toBeInTheDocument()
     expect(operationsApi.getOperation).toHaveBeenCalledTimes(1)
     expect(operationsApi.listOperations).not.toHaveBeenCalled()
     expect(document.querySelector('pre')).toBeNull()
@@ -280,7 +281,9 @@ describe('OperationDetailPage', () => {
     expect(
       screen.getByRole('heading', { level: 2, name: 'op-1' }),
     ).toBeInTheDocument()
-    expect(screen.getByText('DRAIN_TRAFFIC')).toBeInTheDocument()
+    expect(
+      within(screen.getByRole('table')).getByText('DRAIN_TRAFFIC'),
+    ).toBeInTheDocument()
   })
 
   it('mutually excludes refresh and mutation buttons while busy', async () => {

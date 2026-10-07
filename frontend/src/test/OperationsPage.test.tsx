@@ -81,6 +81,7 @@ describe('OperationsPage', () => {
           switch_strategy: null,
           endpoint_alias_id: null,
           source_deployment_id: null,
+          target_deployment_id: 'dddddddd-dddd-dddd-dddd-dddddddddddd',
         }),
       ]),
     )

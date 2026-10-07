@@ -12,11 +12,12 @@ describe('operations API client', () => {
   })
 
   it('lists operations with status/type/active filters', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      new Response(
-        JSON.stringify({ items: [], page: 1, page_size: 20, total: 0 }),
-        { status: 200, headers: { 'Content-Type': 'application/json' } },
-      ),
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(
+      async () =>
+        new Response(
+          JSON.stringify({ items: [], page: 1, page_size: 20, total: 0 }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        ),
     )
     await listOperations({
       status: 'RUNNING',
