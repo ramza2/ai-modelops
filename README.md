@@ -92,7 +92,7 @@ Docker가 설치·기동된 상태에서 repository root에서:
 
 성공 시 Backend는 `http://localhost:<BACKEND_PORT>` (기본 8000)이다.
 
-### Admin UI (M6-C1 / M6-C2 / M6-C3 / M6-C4 / M6-C5 / M6-C6)
+### Admin UI (M6-C1 / M6-C2 / M6-C3 / M6-C4 / M6-C5 / M6-C6 / M6-C7)
 
 ```bash
 cd frontend
@@ -123,6 +123,10 @@ Routes:
 /endpoints/:endpointId
 /operations
 /operations/:operationId
+/observability
+/observability/deployments/:deploymentId
+/clients
+/clients/:clientId
 ```
 
 Nodes list는 `GET /api/v1/nodes`만 사용한다 (row별 resource N+1 없음).
@@ -151,6 +155,12 @@ Explicit Retry를 제공한다. 목록은 status/operation_type/active 필터와
 사용하고 detail 응답에 포함된 steps를 재사용한다. Cancel은 기존 Operation-scoped
 server-side idempotent 계약을 따르며, Retry는 새 Operation을 생성하므로
 `Idempotency-Key`를 사용한다. 임의 metadata/detail JSON은 UI에 그대로 덤프하지 않는다.
+
+C7 Observability / Clients는 DB-only Invocation/Runtime/Capacity Profile과
+Client/Runtime Policy를 조회 전용으로 제공한다. Runtime detail은 latest/history/
+capacity-profile을 조합하고 Capacity Profile에 포함된 analytics를 재사용한다.
+GPU VRAM은 GPU별로만 표시하고 requested와 observed_explicit을 구분한다.
+Client mutation API는 현재 `Idempotency-Key` 계약이 없어 C7 UI에서 노출하지 않는다.
 
 ### Milestone 2 — Node Agent (host process)
 
@@ -290,5 +300,5 @@ Cloud Agent 환경(`.cursor/environment.json`)은 `scripts/cloud-install.sh`(ins
 - [x] M6-C4 Deployments
 - [x] M6-C5 Endpoints / Routing
 - [x] M6-C6 Operations
-- [ ] M6-C7 Observability / Clients
+- [x] M6-C7 Observability / Clients — current
 

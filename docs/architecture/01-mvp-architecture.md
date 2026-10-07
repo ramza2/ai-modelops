@@ -220,13 +220,19 @@ Switch UI may run standalone Resource Preflight preview, renders GPU-by-GPU deci
 and enqueues explicit HOT/COLD only with `Idempotency-Key`. Preview is advisory;
 Worker revalidates fresh resources before execution.
 M6-C6 (done): Operations UI at `/operations` and
-`/operations/:operationId`. Paginated list uses existing status/type/active filters
-without row-level detail N+1. Detail consumes the full Operation projection including
-ordered steps, links related Endpoint/Deployments, and exposes only existing Switch
-Safe Cancel / Explicit Retry mutations. Cancel follows the existing operation-scoped
-server-side idempotent contract; Retry creates a new Operation and uses
-`Idempotency-Key`. Arbitrary metadata/step detail JSON is not rendered wholesale.
-Runtime observability / Capacity Profile remain C7 scope.
+`/operations/:operationId`. Paginated list/detail + ordered Steps, existing Switch
+Safe Cancel, and Explicit Retry; retry creates a new Operation with
+`Idempotency-Key`.
+M6-C7 (done): read-only Observability / Clients UI at `/observability`,
+`/observability/deployments/:deploymentId`, `/clients`, and
+`/clients/:clientId`. Observability composes existing DB-only invocation summary,
+runtime latest/history, and Capacity Profile; Capacity Profile's embedded same-window
+runtime analytics is reused rather than issuing a duplicate analytics request.
+Requested configuration remains distinct from observed_explicit argv, runtime defaults
+are never synthesized, and per-GPU VRAM is never pooled. Client list/detail includes
+Runtime Policy inspection only. Client create/update/policy mutation UI is deferred
+because the current Backend routes do not consume `Idempotency-Key`. Frontend never
+calls Node Agent, Gateway internal APIs, Prometheus, or model runtimes.
 No Prometheus/Grafana server is introduced. A2 histogram scrapes are cumulative;
 A3 P50/P95 are classic bucket estimates over valid same-instance deltas only.
 IMPORTED runtime metrics / argv observation are deferred (profile returns

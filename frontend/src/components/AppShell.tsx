@@ -36,6 +36,12 @@ export function AppShell({
   const operationsActive =
     location.pathname === '/operations' ||
     location.pathname.startsWith('/operations/')
+  const observabilityActive =
+    location.pathname === '/observability' ||
+    location.pathname.startsWith('/observability/')
+  const clientsActive =
+    location.pathname === '/clients' ||
+    location.pathname.startsWith('/clients/')
 
   return (
     <div className="shell">
@@ -111,13 +117,23 @@ export function AppShell({
             >
               Operations
             </NavLink>
+            <NavLink
+              to="/observability"
+              className={() =>
+                observabilityActive ? 'nav-link nav-link--active' : 'nav-link'
+              }
+            >
+              Observability
+            </NavLink>
+            <NavLink
+              to="/clients"
+              className={() =>
+                clientsActive ? 'nav-link nav-link--active' : 'nav-link'
+              }
+            >
+              Clients
+            </NavLink>
           </nav>
-          <div className="nav-section" aria-label="향후 메뉴">
-            <p className="nav-section__label">Model Ops</p>
-            <ul className="nav-future">
-              <li>Observability</li>
-            </ul>
-          </div>
         </aside>
         <main className="shell__main">
           <header className="page-header">

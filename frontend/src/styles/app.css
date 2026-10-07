@@ -363,7 +363,8 @@ th {
 }
 
 .toolbar__field input[type='search'],
-.toolbar__field input[type='text'] {
+.toolbar__field input[type='text'],
+.toolbar__field input[type='number'] {
   min-width: 12rem;
   padding: 0.4rem 0.55rem;
   border: 1px solid var(--border);
