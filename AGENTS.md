@@ -741,7 +741,7 @@ ${DATABASE_URL}
      Steps, Switch Safe Cancel, and Explicit Retry. Retry creates a
      new Operation with `Idempotency-Key`; detail identity isolation
      prevents stale data crossing Operation ids.
-   - **M6-C7 (current):** Observability / Clients read-only Admin UI.
+   - **M6-C7 (done):** Observability / Clients read-only Admin UI.
      Routes: `/observability`,
      `/observability/deployments/:deploymentId`, `/clients`,
      `/clients/:clientId`.

@@ -300,5 +300,5 @@ Cloud Agent 환경(`.cursor/environment.json`)은 `scripts/cloud-install.sh`(ins
 - [x] M6-C4 Deployments
 - [x] M6-C5 Endpoints / Routing
 - [x] M6-C6 Operations
-- [ ] M6-C7 Observability / Clients — current
+- [x] M6-C7 Observability / Clients — current
 

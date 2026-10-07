@@ -347,14 +347,201 @@ export type InvocationSummaryItem = {
   success_count: number
   error_count: number
   tokenized_request_count: number
-  latency_ms_p95?: number | null
+  input_tokens_avg?: number | null
+  input_tokens_p50?: number | null
   input_tokens_p95?: number | null
+  input_tokens_max?: number | null
+  output_tokens_avg?: number | null
+  total_tokens_avg?: number | null
+  latency_ms_avg?: number | null
+  latency_ms_p50?: number | null
+  latency_ms_p95?: number | null
+  latency_ms_max?: number | null
 }
 
 export type InvocationSummaryResponse = {
   hours: number
   group_by: string
+  window_start?: string
+  window_end?: string
   items: InvocationSummaryItem[]
+}
+
+export type RuntimeInstance = {
+  container_id: string | null
+  started_at: string | null
+  restart_count: number | null
+}
+
+export type RuntimeSnapshot = {
+  deployment_id: string
+  deployment_name?: string | null
+  sampled_at: string | null
+  availability: string
+  kv_cache_usage_ratio: number | null
+  num_requests_running: number | null
+  num_requests_waiting: number | null
+  prompt_tokens_total: number | null
+  generation_tokens_total: number | null
+  missing_metrics?: string[]
+  error_code: string | null
+  error_message: string | null
+  source?: string | null
+  runtime_instance: RuntimeInstance | null
+}
+
+export type RuntimeLatestResponse = {
+  items: RuntimeSnapshot[]
+  deployment_id?: string
+}
+
+export type RuntimeHistoryResponse = {
+  deployment_id: string
+  hours: number
+  limit: number
+  ordering: string
+  window_start?: string
+  window_end?: string
+  items: RuntimeSnapshot[]
+}
+
+export type CapacitySettingRow = {
+  requested: string | number | null
+  requested_source: string
+  observed_explicit: string | number | null
+  comparison_status: string
+  requested_error?: string
+}
+
+export type GaugeSummary = {
+  sample_count: number
+  avg: number
+  max: number
+}
+
+export type TokenWindowAgg = {
+  delta: number
+  interval_count: number
+  covered_seconds: number
+  observed_tokens_per_second: number | null
+  counter_regression_interval_count: number
+}
+
+export type HistogramWindowAgg = {
+  observation_count: number
+  mean_seconds: number | null
+  p50_seconds: number | null
+  p95_seconds: number | null
+  interval_count: number
+  covered_seconds: number
+  histogram_regression_interval_count: number
+  bucket_schema_change_interval_count: number
+}
+
+export type RuntimeAnalytics = {
+  deployment_id: string
+  deployment_name?: string | null
+  window?: { hours: number; start: string; end: string }
+  snapshot_count: number
+  interval_count: number
+  boundaries: {
+    reset_boundary_count: number
+    identity_unknown_interval_count: number
+  }
+  gauges?: Partial<{
+    kv_cache_usage_ratio: GaugeSummary
+    num_requests_running: GaugeSummary
+    num_requests_waiting: GaugeSummary
+  }>
+  tokens?: Partial<{
+    prompt_tokens: TokenWindowAgg
+    generation_tokens: TokenWindowAgg
+  }>
+  histograms?: Partial<Record<string, HistogramWindowAgg>>
+}
+
+export type CapacityProfile = {
+  hours: number
+  window_start?: string
+  window_end?: string
+  deployment: {
+    id: string
+    name: string
+    deployment_type: string
+    runtime_status: string
+    health_status: string
+  }
+  model: {
+    model_id: string
+    model_name: string
+    model_version_id: string
+    version_label: string
+    runtime_type: string
+    runtime_image: string
+    served_model_name: string
+    expected_idle_vram_mb: number | null
+    expected_peak_vram_mb: number | null
+  }
+  gpu_count: number
+  gpu_assignments: Array<{
+    device_order: number
+    device_index: number | null
+    model_name: string | null
+    vram_total_mb: number | null
+    safety_margin_mb: number | null
+  }>
+  configuration: {
+    runtime_observation_sampled_at: string | null
+    runtime_instance: RuntimeInstance | null
+    settings: Record<string, CapacitySettingRow>
+  }
+  invocations: {
+    hours: number
+    request_count: number
+    success_count: number
+    error_count: number
+    tokenized_request_count: number
+    input_tokens_avg: number | null
+    input_tokens_p50: number | null
+    input_tokens_p95: number | null
+    input_tokens_max: number | null
+    output_tokens_avg: number | null
+    total_tokens_avg: number | null
+    latency_ms_avg: number | null
+    latency_ms_p50: number | null
+    latency_ms_p95: number | null
+    latency_ms_max: number | null
+  }
+  runtime_analytics: RuntimeAnalytics
+}
+
+export type ClientApp = {
+  id: string
+  client_key: string
+  display_name: string
+  description: string | null
+  is_active: boolean
+  created_at: string
+  updated_at: string
+}
+
+export type ClientRuntimePolicy = {
+  id: string
+  client_app_id: string
+  client_key: string
+  is_enabled: boolean
+  max_input_tokens: number | null
+  max_output_tokens: number | null
+  max_concurrent_requests: number | null
+  priority: number | null
+  created_at: string
+  updated_at: string
+}
+
+export type ClientRuntimePolicyResponse = {
+  client_id: string
+  client_key: string
+  policy: ClientRuntimePolicy | null
 }
 
 export type HealthResponse = {

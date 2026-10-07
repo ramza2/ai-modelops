@@ -223,7 +223,7 @@ M6-C6 (done): Operations UI at `/operations` and
 `/operations/:operationId`. Paginated list/detail + ordered Steps, existing Switch
 Safe Cancel, and Explicit Retry; retry creates a new Operation with
 `Idempotency-Key`.
-M6-C7 (current): read-only Observability / Clients UI at `/observability`,
+M6-C7 (done): read-only Observability / Clients UI at `/observability`,
 `/observability/deployments/:deploymentId`, `/clients`, and
 `/clients/:clientId`. Observability composes existing DB-only invocation summary,
 runtime latest/history, and Capacity Profile; Capacity Profile's embedded same-window
