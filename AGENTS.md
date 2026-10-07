@@ -729,44 +729,54 @@ ${DATABASE_URL}
      existing async lifecycle APIs; lifecycle POSTs send a unique
      `Idempotency-Key`, successful enqueue shows Operation
      identity/status, and the page then re-reads Deployment.
-   - **M6-C5 (current):** Endpoints / Routing UI
-     (`/endpoints`, `/endpoints/:endpointId`). List uses only
-     `GET /api/v1/endpoints` with URL-backed `q`, `api_type`,
-     `is_enabled`, `traffic_state`, and pagination; no per-row
-     detail/route/deployment N+1. Detail loads
-     `GET /api/v1/endpoints/{id}` and
-     `GET /api/v1/endpoints/{id}/routes` independently and links
-     ACTIVE/history Deployment ids to existing Deployment detail.
-     Endpoint detail may offer a switch workflow only when the
-     Endpoint is enabled and has an ACTIVE Source route. Target choices
-     come from existing Deployment list data without Model/Version
-     row-level N+1; Backend remains authoritative for API-type/model
-     compatibility and switch baseline validation.
-     `POST /api/v1/preflights` is preview/analysis only. Show the
-     overall result and every `gpu_results[]` row; never infer
-     feasibility from aggregate parent VRAM totals. Preserve the
-     explicit `preview_only` / `worker_must_revalidate` meaning.
-     HOT may be selected only from a current preview whose result is
-     `HOT_SWITCH_AVAILABLE`; COLD may be selected from
-     `HOT_SWITCH_AVAILABLE` or `COLD_SWITCH_ONLY`. Do not enqueue
-     when the preview is `RESOURCE_INSUFFICIENT`. Changing Target
-     invalidates the previous preview. A preview is not execution
-     approval: Worker performs fresh authoritative Preflight again.
-     Switch uses only executable `HOT` or `COLD`; never send
-     `AUTO` or `ALTERNATE_NODE`. Every
-     `POST /endpoints/{id}/switch` sends a unique
-     `Idempotency-Key`, displays returned Operation identity/status,
-     keeps the last successful Endpoint/Route snapshot on 409/422,
-     and mutually excludes refresh/preview/switch while switch enqueue
-     is in flight.
-     Do not expose Endpoint create/edit/enable-disable PATCH or direct
-     `POST /endpoints/{id}/route` in C5. Those synchronous mutations
-     do not currently have the same explicit idempotency contract as
-     Operation enqueue and are deferred rather than weakening the
-     project mutation-safety rule. Do not add Operation cancel/retry
-     (C6), runtime observability/Capacity Profile (C7), or direct
+   - **M6-C5 (done):** Endpoints / Routing UI
+     (`/endpoints`, `/endpoints/:endpointId`). List/detail +
+     Route history use existing Management APIs. Switch UI performs
+     advisory per-GPU Preflight preview and enqueues explicit HOT/COLD
+     only when Endpoint baseline permits it. Switch POSTs use unique
+     `Idempotency-Key`; Worker still performs fresh authoritative
+     Preflight before runtime mutation.
+   - **M6-C6 (current):** Operations UI (`/operations`,
+     `/operations/:operationId`). List uses only
+     `GET /api/v1/operations` with URL-backed `status`,
+     `operation_type`, `active`, and pagination. `status` and
+     `active` are mutually exclusive; canonicalize/omit invalid or
+     ALL values rather than sending an invalid pair. No row-level
+     detail/steps N+1.
+     Detail uses `GET /api/v1/operations/{id}` only; that payload
+     already includes ordered `steps`, so do not redundantly call
+     `/steps`. Show Operation identity/type/status/strategy,
+     current step, requested_by/reason, timestamps, cancel intent,
+     error, retry lineage, Endpoint/Source/Target links, and a Step
+     table with sequence/attempt/status/timestamps/error. Do not dump
+     arbitrary `metadata` or Step `detail` JSON wholesale; these
+     are implementation/runtime internals and may grow beyond a stable
+     Admin UI contract.
+     Safe Cancel is exposed only for HOT/COLD SWITCH Operations in
+     `QUEUED`, `RUNNING`, or `ROLLING_BACK`. The existing
+     `POST /operations/{id}/cancel` contract is operation-scoped and
+     server-side idempotent for repeated cancel semantics; it does not
+     currently consume `Idempotency-Key`, so Frontend must not invent
+     a fake idempotency guarantee. Optional reason is bounded by the
+     Backend contract. Backend remains authoritative for destructive
+     boundary / terminal-state handling.
+     Explicit Retry is exposed only as a coarse UI gate for HOT/COLD
+     SWITCH in `FAILED` or `ROLLED_BACK`; Backend remains
+     authoritative for destructive-boundary, current baseline, active
+     retry, and reconciliation checks. Every
+     `POST /operations/{id}/retry` sends a unique
+     `Idempotency-Key`. Retry creates a NEW Operation; show the
+     returned child Operation and link to its detail rather than
+     mutating/relabeling the original.
+     Cancel/Retry are mutually exclusive with refresh/other mutation
+     while a request is in flight. On successful mutation, re-read the
+     original Operation. 409/422 keeps the last successful Operation
+     and Steps visible with an error. Authoritative detail 404 clears
+     stale Operation context; non-404 refresh failures keep stale
+     data with a warning.
+     Do not add rollback endpoints that do not exist, Worker controls,
+     raw logs, runtime observability/Capacity Profile (C7), or direct
      Node Agent/Gateway calls.
-   - **M6-C6:** Operations
    - **M6-C7:** Observability / Clients
 
 한 번에 모든 기능을 스캐폴딩만 하는 것보다 각 milestone을 end-to-end로 동작하게 완성하는 것을 우선한다.

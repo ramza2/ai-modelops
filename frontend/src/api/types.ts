@@ -291,6 +291,55 @@ export type OperationSummary = {
   finished_at: string | null
 }
 
+export type OperationStep = {
+  id: string
+  sequence_no: number
+  step_code: string
+  status: string
+  attempt_no: number
+  started_at: string | null
+  finished_at: string | null
+  error: { code: string | null; message: string | null } | null
+  created_at: string
+}
+
+/** Full Operation detail from GET /operations/{id} (includes ordered steps). */
+export type OperationDetail = {
+  id: string
+  operation_type: string
+  status: string
+  switch_strategy: string | null
+  endpoint_alias_id: string | null
+  source_deployment_id: string | null
+  target_deployment_id: string | null
+  current_step: string | null
+  cancel_requested_at: string | null
+  retry_of_operation_id: string | null
+  requested_by: string | null
+  request_reason: string | null
+  created_at: string
+  started_at: string | null
+  finished_at: string | null
+  error: { code: string | null; message: string | null } | null
+  steps: OperationStep[]
+}
+
+/** Retry response creates a NEW Operation (may include steps). */
+export type RetryOperationResponse = {
+  id: string
+  operation_id?: string
+  operation_type: string
+  status: string
+  switch_strategy: string | null
+  endpoint_alias_id: string | null
+  source_deployment_id: string | null
+  target_deployment_id: string | null
+  retry_of_operation_id: string | null
+  current_step: string | null
+  created_at: string
+  error: { code: string | null; message: string | null } | null
+}
+
 export type InvocationSummaryItem = {
   group_key: string
   deployment_name?: string | null
