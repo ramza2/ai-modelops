@@ -340,6 +340,47 @@ def test_vllm_scheduling_policy_invalid_rejected(value) -> None:
         )
 
 
+
+def test_vllm_runner_pooling_runtime_fallback() -> None:
+    spec = VLLMAdapter().build_create_spec(
+        RuntimeBuildInput(
+            runtime_image="vllm/vllm-openai:v0.24.0",
+            served_model_name="BAAI/bge-m3",
+            model_path="/srv/models/bge-m3",
+            runtime_config={"runner": "pooling"},
+        )
+    )
+    assert _flag_value(spec.command, "--runner") == "pooling"
+    assert spec.command.count("--runner") == 1
+
+
+def test_vllm_runner_deployment_override_wins() -> None:
+    spec = VLLMAdapter().build_create_spec(
+        RuntimeBuildInput(
+            runtime_image="vllm/vllm-openai:v0.24.0",
+            served_model_name="m",
+            model_path="/srv/models/m",
+            runtime_config={"runner": "generate"},
+            deployment_config={"runner": "pooling"},
+        )
+    )
+    assert _flag_value(spec.command, "--runner") == "pooling"
+
+
+@pytest.mark.parametrize("value", [None, "", "auto", "draft", 1, True, [], {}])
+def test_vllm_runner_invalid_rejected(value) -> None:
+    with pytest.raises(RuntimeAdapterError, match="runner"):
+        VLLMAdapter().build_create_spec(
+            RuntimeBuildInput(
+                runtime_image="vllm/vllm-openai:v0.24.0",
+                served_model_name="m",
+                model_path="/srv/models/m",
+                deployment_config={"runner": value},
+            )
+        )
+
+
+
 def test_generic_openai_unchanged_by_scheduling_policy() -> None:
     spec = GenericOpenAIAdapter().build_create_spec(
         RuntimeBuildInput(

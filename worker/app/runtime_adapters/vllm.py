@@ -17,6 +17,9 @@ from app.runtime_adapters.base import (
 )
 
 _SCHEDULING_POLICY_ALLOWED = frozenset({"fcfs", "priority"})
+# Explicit runner is needed for pooling/embedding runtimes such as BGE-M3.
+# Keep this allowlist narrow; normal generation runtimes omit the flag.
+_RUNNER_ALLOWED = frozenset({"generate", "pooling"})
 
 
 class VLLMAdapter:
@@ -49,6 +52,7 @@ class VLLMAdapter:
         scheduling_policy = _merged_choice(
             cfg, "scheduling_policy", allowed=_SCHEDULING_POLICY_ALLOWED
         )
+        runner = _merged_choice(cfg, "runner", allowed=_RUNNER_ALLOWED)
 
         # argv list only — never a shell string.
         command: list[str] = [
@@ -78,6 +82,8 @@ class VLLMAdapter:
             command.extend(["--max-num-seqs", str(max_num_seqs)])
         if scheduling_policy is not None:
             command.extend(["--scheduling-policy", scheduling_policy])
+        if runner is not None:
+            command.extend(["--runner", runner])
 
         env = {
             "MODEL_OPS_SERVED_MODEL_NAME": served,
