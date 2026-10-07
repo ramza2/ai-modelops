@@ -9,6 +9,8 @@ import { ModelsPage } from './pages/ModelsPage'
 import { ModelVersionDetailPage } from './pages/ModelVersionDetailPage'
 import { NodeDetailPage } from './pages/NodeDetailPage'
 import { NodesPage } from './pages/NodesPage'
+import { OperationDetailPage } from './pages/OperationDetailPage'
+import { OperationsPage } from './pages/OperationsPage'
 
 export default function App() {
   return (
@@ -32,6 +34,11 @@ export default function App() {
       <Route
         path="/endpoints/:endpointId"
         element={<EndpointDetailPage />}
+      />
+      <Route path="/operations" element={<OperationsPage />} />
+      <Route
+        path="/operations/:operationId"
+        element={<OperationDetailPage />}
       />
       <Route path="*" element={<Navigate to="/dashboard" replace />} />
     </Routes>

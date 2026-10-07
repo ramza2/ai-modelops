@@ -219,7 +219,7 @@ M6-C5 (done): Endpoints / Routing UI at `/endpoints` and
 Switch UI may run standalone Resource Preflight preview, renders GPU-by-GPU decisions,
 and enqueues explicit HOT/COLD only with `Idempotency-Key`. Preview is advisory;
 Worker revalidates fresh resources before execution.
-M6-C6 (current): Operations UI at `/operations` and
+M6-C6 (done): Operations UI at `/operations` and
 `/operations/:operationId`. Paginated list uses existing status/type/active filters
 without row-level detail N+1. Detail consumes the full Operation projection including
 ordered steps, links related Endpoint/Deployments, and exposes only existing Switch
