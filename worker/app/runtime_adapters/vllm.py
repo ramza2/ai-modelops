@@ -54,12 +54,14 @@ class VLLMAdapter:
         )
         runner = _merged_choice(cfg, "runner", allowed=_RUNNER_ALLOWED)
 
-        # argv list only — never a shell string.
+        # The official vLLM OpenAI image already has ENTRYPOINT ["vllm"].
+        # Docker appends this argv as the command, so emit the vLLM CLI
+        # subcommand directly. Supplying "python -m ..." here would become
+        # "vllm python -m ..." and fail argument parsing.
+        #
+        # Model is positional for vLLM >= 0.24 ("--model" is deprecated).
         command: list[str] = [
-            "python",
-            "-m",
-            "vllm.entrypoints.openai.api_server",
-            "--model",
+            "serve",
             model_path,
             "--served-model-name",
             served,
