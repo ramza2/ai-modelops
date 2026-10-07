@@ -736,48 +736,70 @@ ${DATABASE_URL}
      only when Endpoint baseline permits it. Switch POSTs use unique
      `Idempotency-Key`; Worker still performs fresh authoritative
      Preflight before runtime mutation.
-   - **M6-C6 (current):** Operations UI (`/operations`,
-     `/operations/:operationId`). List uses only
-     `GET /api/v1/operations` with URL-backed `status`,
-     `operation_type`, `active`, and pagination. `status` and
-     `active` are mutually exclusive; canonicalize/omit invalid or
-     ALL values rather than sending an invalid pair. No row-level
-     detail/steps N+1.
-     Detail uses `GET /api/v1/operations/{id}` only; that payload
-     already includes ordered `steps`, so do not redundantly call
-     `/steps`. Show Operation identity/type/status/strategy,
-     current step, requested_by/reason, timestamps, cancel intent,
-     error, retry lineage, Endpoint/Source/Target links, and a Step
-     table with sequence/attempt/status/timestamps/error. Do not dump
-     arbitrary `metadata` or Step `detail` JSON wholesale; these
-     are implementation/runtime internals and may grow beyond a stable
-     Admin UI contract.
-     Safe Cancel is exposed only for HOT/COLD SWITCH Operations in
-     `QUEUED`, `RUNNING`, or `ROLLING_BACK`. The existing
-     `POST /operations/{id}/cancel` contract is operation-scoped and
-     server-side idempotent for repeated cancel semantics; it does not
-     currently consume `Idempotency-Key`, so Frontend must not invent
-     a fake idempotency guarantee. Optional reason is bounded by the
-     Backend contract. Backend remains authoritative for destructive
-     boundary / terminal-state handling.
-     Explicit Retry is exposed only as a coarse UI gate for HOT/COLD
-     SWITCH in `FAILED` or `ROLLED_BACK`; Backend remains
-     authoritative for destructive-boundary, current baseline, active
-     retry, and reconciliation checks. Every
-     `POST /operations/{id}/retry` sends a unique
-     `Idempotency-Key`. Retry creates a NEW Operation; show the
-     returned child Operation and link to its detail rather than
-     mutating/relabeling the original.
-     Cancel/Retry are mutually exclusive with refresh/other mutation
-     while a request is in flight. On successful mutation, re-read the
-     original Operation. 409/422 keeps the last successful Operation
-     and Steps visible with an error. Authoritative detail 404 clears
-     stale Operation context; non-404 refresh failures keep stale
-     data with a warning.
-     Do not add rollback endpoints that do not exist, Worker controls,
-     raw logs, runtime observability/Capacity Profile (C7), or direct
-     Node Agent/Gateway calls.
-   - **M6-C7:** Observability / Clients
+   - **M6-C6 (done):** Operations UI (`/operations`,
+     `/operations/:operationId`). Paginated list/detail + ordered
+     Steps, Switch Safe Cancel, and Explicit Retry. Retry creates a
+     new Operation with `Idempotency-Key`; detail identity isolation
+     prevents stale data crossing Operation ids.
+   - **M6-C7 (current):** Observability / Clients read-only Admin UI.
+     Routes: `/observability`,
+     `/observability/deployments/:deploymentId`, `/clients`,
+     `/clients/:clientId`.
+     Observability overview uses existing DB-only
+     `GET /api/v1/observability/invocations/summary` with URL-backed
+     `hours` (1..720) and `group_by=client|alias|deployment`,
+     plus `GET /api/v1/observability/runtime/latest`. Treat these
+     sections independently; no per-row Deployment/Model/Client N+1.
+     Invocation token percentiles exclude NULL-token rows; never imply
+     token coverage is 100%. Runtime latest is persisted snapshot data,
+     never a live scrape.
+     Deployment runtime detail uses the same Deployment id and
+     URL-backed `hours` (1..168) / history `limit` (1..1000).
+     Load `runtime/latest?deployment_id=...`,
+     `runtime/deployments/{id}/history`, and
+     `runtime/deployments/{id}/capacity-profile`. Do not separately
+     call `/analytics` in this page because Capacity Profile already
+     contains the same-window `runtime_analytics` composition.
+     Show latest availability/sample, KV cache ratio, running/waiting
+     requests, cumulative token counters, sanitized runtime instance,
+     bounded missing/error diagnostics; history as oldest→newest
+     stable-field table. No chart dependency is required in C7.
+     Capacity Profile must preserve requested vs `observed_explicit`
+     semantics. Render only the allowlisted settings
+     (`max_model_len`, `max_num_seqs`, `tensor_parallel_size`,
+     `gpu_memory_utilization`, `dtype`, `quantization`,
+     `scheduling_policy`) with requested/source/observed/status.
+     Never synthesize runtime defaults from absent argv. Show GPU
+     assignments per GPU only — never pool VRAM. `max_num_seqs` is
+     scheduler/runner sequence capacity, not guaranteed simultaneous
+     users. Runtime analytics may show stable gauge avg/max, token
+     deltas/rates, and histogram mean/P50/P95 summaries; explicitly
+     label P50/P95 as classic histogram bucket estimates and expose
+     reset/unknown-identity diagnostic counts. Do not dump raw
+     histogram buckets, `metric_sources`, raw `runtime_config`, or
+     arbitrary nested JSON.
+     Clients list uses only `GET /api/v1/clients` with URL-backed
+     `q`, `is_active`, pagination. Client detail uses
+     `GET /api/v1/clients/{id}` and
+     `GET /api/v1/clients/{id}/runtime-policy`; no list N+1. Policy
+     null means no policy row; nullable limits mean unrestricted.
+     Display policy enabled state and explicit token/concurrency/
+     priority values with wording that smaller priority means higher
+     priority intent. Do not claim requested priority is always
+     forwarded; Gateway enforcement still depends on trusted runtime
+     scheduler evidence.
+     C7 Client UI is intentionally read-only. Do not expose POST
+     Client, PATCH Client, or PUT Runtime Policy because those current
+     Backend routes do not consume `Idempotency-Key`; defer mutation
+     UI rather than weaken the project mutation-safety rule.
+     All C7 observability reads remain Management API/DB-only. Frontend
+     never calls Node Agent, Gateway internal APIs, Prometheus, or model
+     runtimes. Do not add Grafana/Prometheus/chart libraries, raw
+     invocation prompt/response views, auto-tuning, or recommendations.
+     For detail identity changes, never retain stale data from the
+     previous Deployment/Client id. Same-id non-404 refresh failures
+     may keep the last successful section snapshot with a warning;
+     authoritative primary 404 clears that identity.
 
 한 번에 모든 기능을 스캐폴딩만 하는 것보다 각 milestone을 end-to-end로 동작하게 완성하는 것을 우선한다.
 
