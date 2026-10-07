@@ -143,8 +143,8 @@ Target: server with RTX A4000 x2.
 - [x] PASS — each A4000 reported 16376 MiB total with independent used/free values; no pooled-VRAM interpretation
 - [x] PASS — target snapshot returned utilization, temperature, and power for both GPUs
 - [ ] PENDING — Docker/GPU process mapping works for a managed runtime
-- [ ] PENDING — Backend can reach Node Agent using configured server address/token
-- [ ] PENDING — Node resources refresh and Admin UI Nodes/GPUs agree
+- [x] PASS — Backend reached Node Agent via registered `http://host.docker.internal:8100` using the configured shared token
+- [ ] PENDING — Node resources refresh persisted both GPUs successfully; Admin UI Nodes/GPUs visual consistency still pending
 
 Never combine two GPU VRAM values into a fictional single deployable GPU.
 
@@ -315,3 +315,4 @@ Append concise evidence as testing progresses.
 | 2026-10-07 | I / Admin LAN HTTP | PASS | `curl -I http://192.168.10.104:18081/` returned HTTP 200 from nginx; Admin UI is reachable on the intended LAN-only bind. |
 | 2026-10-07 | I / Admin same-origin API | PASS | `curl -i http://192.168.10.104:18081/health` returned HTTP 200 with `{"status":"ok"}` through frontend nginx, confirming LAN Admin -> nginx -> Backend same-origin routing. |
 | 2026-10-07 | I / Admin same-origin ready | PASS | `curl -i http://192.168.10.104:18081/ready` returned HTTP 200 with database `ok`, confirming Frontend nginx -> Backend -> PostgreSQL readiness through the LAN Admin origin. |
+| 2026-10-07 | C / Backend→Node Agent | PASS | Registered target Node through Admin same-origin API using `http://host.docker.internal:8100`; Backend probe returned host identity/CPU/RAM/disk, proving container-to-host Node Agent connectivity/auth. First `/resources/refresh` persisted host snapshot plus both RTX A4000 devices/snapshots with stable UUIDs, 16376 MiB each and live utilization/temperature/power. |
