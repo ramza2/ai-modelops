@@ -1,4 +1,5 @@
 import { cleanup, render, screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { ApiError } from '../api/client'
@@ -253,6 +254,64 @@ describe('ModelVersionDetailPage', () => {
     expect(
       await screen.findByText('Model Version을 찾을 수 없습니다.'),
     ).toBeInTheDocument()
+    expect(
+      screen.getByRole('link', { name: '← Models / Versions' }),
+    ).toHaveAttribute('href', '/models')
+  })
+
+  it('keeps stale Version and shows refresh error on Version GET 500', async () => {
+    const user = userEvent.setup()
+    vi.mocked(modelsApi.getModelVersion)
+      .mockResolvedValueOnce(makeVersion())
+      .mockRejectedValueOnce(new ApiError('version refresh boom', { status: 500 }))
+    vi.mocked(modelsApi.getModel).mockResolvedValue(makeModel())
+    vi.mocked(modelsApi.listModelArtifacts).mockResolvedValue(
+      pageResult([makeArtifact({ id: 'a1' })]),
+    )
+    renderDetail()
+    expect(
+      await screen.findByRole('heading', { level: 2, name: '1.0.0' }),
+    ).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Chat A' })).toBeInTheDocument()
+    expect(screen.getByText('WEIGHTS')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: '새로고침' }))
+    await waitFor(() => {
+      expect(screen.getByText(/기존 Version 정보를 표시하고 있습니다/)).toBeInTheDocument()
+    })
+    expect(screen.getByText(/version refresh boom/)).toBeInTheDocument()
+    expect(
+      screen.getByRole('heading', { level: 2, name: '1.0.0' }),
+    ).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Chat A' })).toBeInTheDocument()
+    expect(screen.getByText('WEIGHTS')).toBeInTheDocument()
+    expect(
+      screen.queryByText('Model Version을 찾을 수 없습니다.'),
+    ).not.toBeInTheDocument()
+  })
+
+  it('clears stale Version and shows not-found on Version GET 404 refresh', async () => {
+    const user = userEvent.setup()
+    vi.mocked(modelsApi.getModelVersion)
+      .mockResolvedValueOnce(makeVersion())
+      .mockRejectedValueOnce(new ApiError('gone', { status: 404 }))
+    vi.mocked(modelsApi.getModel).mockResolvedValue(makeModel())
+    vi.mocked(modelsApi.listModelArtifacts)
+      .mockResolvedValueOnce(pageResult([makeArtifact({ id: 'a1' })]))
+      .mockRejectedValueOnce(new ApiError('gone', { status: 404 }))
+    renderDetail()
+    expect(
+      await screen.findByRole('heading', { level: 2, name: '1.0.0' }),
+    ).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: '새로고침' }))
+    expect(
+      await screen.findByText('Model Version을 찾을 수 없습니다.'),
+    ).toBeInTheDocument()
+    expect(
+      screen.queryByRole('heading', { level: 2, name: '1.0.0' }),
+    ).not.toBeInTheDocument()
+    expect(screen.queryByText('WEIGHTS')).not.toBeInTheDocument()
     expect(
       screen.getByRole('link', { name: '← Models / Versions' }),
     ).toHaveAttribute('href', '/models')

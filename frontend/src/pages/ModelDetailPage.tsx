@@ -58,7 +58,10 @@ export function ModelDetailPage() {
 
     if (rawArchived === 'true') {
       fixed.set('include_archived', 'true')
-    } else if (rawArchived !== null && rawArchived !== '' && rawArchived !== 'false') {
+    } else if (rawArchived === 'false') {
+      // Default false → omit from canonical URL
+      needsFix = true
+    } else if (rawArchived !== null && rawArchived !== '') {
       needsFix = true
     }
 
@@ -105,6 +108,10 @@ export function ModelDetailPage() {
           if (controller.signal.aborted || gen !== readGenRef.current) return
           if (err instanceof DOMException && err.name === 'AbortError') return
           if (err instanceof ApiError && err.status === 404) {
+            // Authoritative not-found: never keep a stale Model as current.
+            setModel(null)
+            setVersions(null)
+            setVersionTotal(0)
             setModelNotFound(true)
             setModelError('Model을 찾을 수 없습니다.')
             return
@@ -178,7 +185,7 @@ export function ModelDetailPage() {
     }
   }, [load])
 
-  if (modelNotFound && !model) {
+  if (modelNotFound) {
     return (
       <AppShell
         title="Models / Versions"

@@ -188,6 +188,47 @@ describe('ModelDetailPage', () => {
     ).toHaveAttribute('href', '/models')
   })
 
+  it('clears stale Model and shows not-found on Model GET 404 refresh', async () => {
+    const user = userEvent.setup()
+    vi.mocked(modelsApi.getModel)
+      .mockResolvedValueOnce(makeModel())
+      .mockRejectedValueOnce(new ApiError('missing', { status: 404 }))
+    vi.mocked(modelsApi.listModelVersions)
+      .mockResolvedValueOnce(
+        pageResult([makeVersion({ id: 'v1', version_label: 'keep-v' })]),
+      )
+      .mockRejectedValueOnce(new ApiError('missing', { status: 404 }))
+    renderDetail()
+    expect(
+      await screen.findByRole('heading', { level: 2, name: 'Chat A' }),
+    ).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'keep-v' })).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: '새로고침' }))
+    expect(
+      await screen.findByText('Model을 찾을 수 없습니다.'),
+    ).toBeInTheDocument()
+    expect(
+      screen.queryByRole('heading', { level: 2, name: 'Chat A' }),
+    ).not.toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: 'keep-v' })).not.toBeInTheDocument()
+    expect(
+      screen.getByRole('link', { name: '← Models / Versions' }),
+    ).toHaveAttribute('href', '/models')
+  })
+
+  it('omits include_archived=false from canonical URL', async () => {
+    vi.mocked(modelsApi.getModel).mockResolvedValue(makeModel())
+    vi.mocked(modelsApi.listModelVersions).mockResolvedValue(pageResult([]))
+    renderDetail('/models/m1?include_archived=false&page=2')
+    await waitFor(() => {
+      expect(screen.getByTestId('location-search')).toHaveTextContent('page=2')
+    })
+    expect(screen.getByTestId('location-search')).not.toHaveTextContent(
+      'include_archived',
+    )
+  })
+
   it('does not call Capacity Profile or Deployments APIs', async () => {
     vi.mocked(modelsApi.getModel).mockResolvedValue(makeModel())
     vi.mocked(modelsApi.listModelVersions).mockResolvedValue(pageResult([]))

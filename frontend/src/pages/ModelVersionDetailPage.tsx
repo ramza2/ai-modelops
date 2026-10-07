@@ -138,6 +138,11 @@ export function ModelVersionDetailPage() {
           if (controller.signal.aborted || gen !== readGenRef.current) return
           if (err instanceof DOMException && err.name === 'AbortError') return
           if (err instanceof ApiError && err.status === 404) {
+            // Authoritative not-found: never keep a stale Version as current.
+            setVersion(null)
+            setParentModel(null)
+            setArtifacts(null)
+            setArtifactTotal(0)
             setVersionNotFound(true)
             setVersionError('Model Version을 찾을 수 없습니다.')
             return
@@ -211,7 +216,7 @@ export function ModelVersionDetailPage() {
     }
   }, [load])
 
-  if (versionNotFound && !version) {
+  if (versionNotFound) {
     return (
       <AppShell
         title="Models / Versions"
@@ -276,8 +281,17 @@ export function ModelVersionDetailPage() {
         <LoadingBlock label="Model Version을 불러오는 중…" />
       ) : null}
 
-      {versionError && !versionNotFound && !version ? (
-        <SectionError title="Model Version 오류" message={versionError} />
+      {versionError && !versionNotFound ? (
+        <SectionError
+          title={
+            version ? 'Version 새로고침 실패' : 'Model Version 오류'
+          }
+          message={
+            version
+              ? `기존 Version 정보를 표시하고 있습니다. 새로고침 실패: ${versionError}`
+              : versionError
+          }
+        />
       ) : null}
 
       {version ? (

@@ -153,9 +153,16 @@ describe('ModelsPage', () => {
   it.each([
     ['/models?page=2abc', ''],
     ['/models?model_type=OTHER&page=1', ''],
+    ['/models?model_type=ALL', ''],
+    ['/models?model_type=llm', 'model_type=LLM'],
+    ['/models?model_type=VlM', 'model_type=VLM'],
     ['/models?active=TRUE', 'active=true'],
     ['/models?active=yes', ''],
     ['/models?model_type=llm&active=false&page=002', 'model_type=LLM&active=false&page=2'],
+    [
+      '/models?model_type=llm&active=true&q=qwen&page=2',
+      'model_type=LLM&active=true&q=qwen&page=2',
+    ],
   ])('canonicalizes URL %s', async (path, expected) => {
     vi.mocked(modelsApi.listModels).mockResolvedValue(pageResult([]))
     renderAt(path)

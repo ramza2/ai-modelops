@@ -94,10 +94,18 @@ export function ModelsPage() {
     const fixed = new URLSearchParams()
 
     const parsedType = parseModelType(rawType)
-    if (rawType && parsedType === null && rawType.toUpperCase() !== 'ALL') {
-      needsFix = true
-    } else if (parsedType) {
-      fixed.set('model_type', parsedType)
+    if (rawType) {
+      if (rawType.toUpperCase() === 'ALL') {
+        // Default ALL → omit model_type
+        needsFix = true
+      } else if (parsedType === null) {
+        needsFix = true
+      } else {
+        fixed.set('model_type', parsedType)
+        if (rawType !== parsedType) {
+          needsFix = true
+        }
+      }
     }
 
     const parsedActive = parseActiveQuery(rawActive)
