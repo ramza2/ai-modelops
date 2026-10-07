@@ -111,7 +111,7 @@ only to make this gate pass.
 - [x] PASS — Worker DB URL resolves to Compose PostgreSQL (`postgres:5432` in Compose env; static YAML check)
 - [x] PASS — Worker Node Agent URL/token are configurable (token/timeouts from env; Node URL from registered Node rows — no Docker/NVML on Worker)
 - [x] PASS — Worker Gateway control-plane URL resolves to Compose Gateway (not container localhost): `MODELOPS_GATEWAY_BASE_URL=http://gateway:8080`
-- [ ] BLOCKED — `docker compose ... config` succeeds (Docker Engine/Compose unavailable in agent environment; static YAML validation only)
+- [x] PASS — target Docker Compose v5.1.1 `config` succeeds with the server overlay; Backend resolves to loopback-only `127.0.0.1:8000`, Traefik public network/resolver are supplied by server env
 - [ ] BLOCKED — `./scripts/deploy.sh` starts the complete Control Plane (script now fails unless postgres/backend/worker/gateway/frontend are running after Backend health/ready; runtime evidence BLOCKED without Docker)
 - [ ] BLOCKED — `docker compose ps` shows expected services running
 - [ ] BLOCKED — Worker logs show polling without crash/restart loop
@@ -305,3 +305,4 @@ Append concise evidence as testing progresses.
 | 2026-10-07 | RB-05 | BLOCKED | Installer hardened: same `/etc/modelops/node-agent.env` source/dest enforces 0600 root:root without self-copy; service-user runtime path access validated before unit install/restart. Helper regression `deploy/systemd/test-installer-helpers.sh`. Runtime target-host evidence still required. |
 | 2026-10-07 | B1 | FAIL | Target Docker Compose v5.1.1 `config` accepted the server overlay, but Backend loopback publish disappeared because `ports: !reset` discarded the replacement value; `deploy-server.sh` health/ready probes would be unreachable. |
 | 2026-10-07 | B1 | PENDING | Server overlay fixed to replace Backend ports with `!override` while keeping PostgreSQL/Gateway/Frontend publishes reset; target `docker compose config` rerun required before PASS. |
+| 2026-10-07 | B1 | PASS | Target Docker Compose v5.1.1 server-overlay `config` PASS after `!override` fix; Backend publish resolves only to `127.0.0.1:8000`; Traefik network/resolver resolve from server env. Worker startup still required before RB-01 closes. |
