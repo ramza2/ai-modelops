@@ -68,8 +68,9 @@ modelops-model
 
 - `postgres`, `backend`, `worker`는 Control Plane 내부만 사용한다.
 - `gateway`는 Traefik 외부 Network와 `modelops-model`을 모두 사용한다.
-- 서버 overlay는 PostgreSQL/Backend/Gateway/Frontend의 공개 host-port publish를
-  제거한다. Backend만 deploy 검증용으로 `127.0.0.1` loopback publish를 유지한다.
+- 서버 overlay는 PostgreSQL/Gateway/Frontend의 host-port publish를 `!reset`으로
+  제거하고, Backend publish는 `!override`로 교체하여 deploy 검증용
+  `127.0.0.1` loopback bind만 유지한다.
 
 ## 4. Traefik Label (server overlay)
 

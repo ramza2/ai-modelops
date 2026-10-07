@@ -14,7 +14,7 @@
 # - adds Linux host-gateway so Backend/Worker can reach host Node Agent
 # - does not add Traefik routers for postgres/backend/worker or managed models
 #
-# Requires Docker Compose V2 with `!reset` support (Compose Spec).
+# Requires Docker Compose V2 with `!reset` and `!override` support (Compose Spec).
 
 services:
   postgres:
@@ -24,7 +24,7 @@ services:
   backend:
     # Loopback-only publish for host-side /health + /ready during deploy.
     # Not bound on all interfaces; Traefik does not route Backend directly.
-    ports: !reset
+    ports: !override
       - "127.0.0.1:${BACKEND_PORT:-8000}:8000"
     extra_hosts:
       - "host.docker.internal:host-gateway"
