@@ -43,13 +43,20 @@ export async function getDeployment(
   return apiGet<Deployment>(`/api/v1/deployments/${deploymentId}`, { signal })
 }
 
+function lifecycleOptions(signal?: AbortSignal) {
+  return {
+    signal,
+    headers: { 'Idempotency-Key': crypto.randomUUID() },
+  }
+}
+
 export async function startDeployment(
   deploymentId: string,
   signal?: AbortSignal,
 ): Promise<LifecycleOperation> {
   return apiPost<LifecycleOperation>(
     `/api/v1/deployments/${deploymentId}/start`,
-    { signal },
+    lifecycleOptions(signal),
   )
 }
 
@@ -59,7 +66,7 @@ export async function stopDeployment(
 ): Promise<LifecycleOperation> {
   return apiPost<LifecycleOperation>(
     `/api/v1/deployments/${deploymentId}/stop`,
-    { signal },
+    lifecycleOptions(signal),
   )
 }
 
@@ -69,6 +76,6 @@ export async function restartDeployment(
 ): Promise<LifecycleOperation> {
   return apiPost<LifecycleOperation>(
     `/api/v1/deployments/${deploymentId}/restart`,
-    { signal },
+    lifecycleOptions(signal),
   )
 }
