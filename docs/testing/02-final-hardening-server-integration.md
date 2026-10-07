@@ -264,7 +264,7 @@ Exit: H checks PASS.
 
 ## 11. Gate I — Traefik / backup / release closeout
 
-- [ ] PENDING — Gateway Traefik router/TLS matches server convention; Admin UI LAN-only bind is runtime-verified, browser/HTTP access verification still required
+- [ ] PENDING — Gateway Traefik router/TLS matches server convention; Admin UI LAN-only bind + HTTP 200 verified, same-origin Management API/browser regression still pending
 - [ ] PENDING — managed runtime network/labels do not bypass intended Gateway unnecessarily
 - [ ] PENDING — real secrets exist only in server configuration
 - [ ] PENDING — PostgreSQL backup created
@@ -312,3 +312,4 @@ Append concise evidence as testing progresses.
 | 2026-10-07 | A3 / B1 / RB-01 | PASS | First target server deploy completed: new PostgreSQL volume healthy; Backend migration/startup succeeded; `/health` + `/ready` OK via `127.0.0.1:18000`; postgres/backend/worker/gateway/frontend all running; Worker polling + runtime metrics collector started. |
 | 2026-10-07 | I | PENDING | Deployment policy refined for limited DNS records: Admin UI removed from Traefik and bound only to operator-supplied LAN IP/port; only AI Gateway remains eligible for external Traefik/TLS. Target runtime re-apply/verification required. |
 | 2026-10-07 | I / Admin LAN bind | PASS | Re-applied server overlay: Frontend publishes only `192.168.10.104:18081->80`, Backend remains `127.0.0.1:18000->8000`, all five Control Plane services running, Backend health/ready OK, Worker polling/metrics collector started. Admin Traefik router is no longer part of the server overlay. |
+| 2026-10-07 | I / Admin LAN HTTP | PASS | `curl -I http://192.168.10.104:18081/` returned HTTP 200 from nginx; Admin UI is reachable on the intended LAN-only bind. |
