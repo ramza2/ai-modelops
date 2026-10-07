@@ -25,6 +25,22 @@ import { formatMemoryMb } from '../utils/number'
 
 type SwitchStrategy = 'HOT' | 'COLD'
 
+/** Management API max page_size for Deployment list. */
+const TARGET_PAGE_SIZE = 200
+
+function switchWorkflowBlockedReason(endpoint: Endpoint): string | null {
+  if (!endpoint.is_enabled) {
+    return 'Disabled Endpoint에서는 Switch를 사용할 수 없습니다.'
+  }
+  if (!endpoint.active_route?.deployment_id) {
+    return 'ACTIVE Source Route가 있어야 Switch를 사용할 수 있습니다.'
+  }
+  if (endpoint.traffic_state !== 'SERVING') {
+    return `traffic_state가 ${endpoint.traffic_state}입니다. SERVING일 때만 Switch enqueue를 사용할 수 있습니다 (DRAINING/MAINTENANCE 불가).`
+  }
+  return null
+}
+
 export function EndpointDetailPage() {
   const { endpointId = '' } = useParams<{ endpointId: string }>()
 
@@ -60,9 +76,10 @@ export function EndpointDetailPage() {
   const readGenRef = useRef(0)
   const targetsAbortRef = useRef<AbortController | null>(null)
 
-  const sourceDeploymentId = endpoint?.active_route?.deployment_id ?? null
-  const canSwitchWorkflow =
-    Boolean(endpoint?.is_enabled) && Boolean(sourceDeploymentId)
+  const switchBlockedReason = endpoint
+    ? switchWorkflowBlockedReason(endpoint)
+    : null
+  const canSwitchWorkflow = switchBlockedReason === null
 
   const invalidatePreview = useCallback(() => {
     setPreview(null)
@@ -79,15 +96,33 @@ export function EndpointDetailPage() {
       setTargetsLoading(true)
       setTargetsError(null)
       try {
-        const result = await listDeployments({
-          retired: false,
-          page: 1,
-          pageSize: 100,
-          signal: controller.signal,
-        })
+        const collected: Deployment[] = []
+        let page = 1
+        let maxPage = 1
+        do {
+          const result = await listDeployments({
+            retired: false,
+            page,
+            pageSize: TARGET_PAGE_SIZE,
+            signal: controller.signal,
+          })
+          if (controller.signal.aborted || gen !== readGenRef.current) return
+          collected.push(...result.items)
+          maxPage = Math.max(
+            1,
+            Math.ceil(result.total / TARGET_PAGE_SIZE) || 1,
+          )
+          if (
+            result.items.length === 0 ||
+            result.items.length < TARGET_PAGE_SIZE
+          ) {
+            break
+          }
+          page += 1
+        } while (page <= maxPage)
+
         if (controller.signal.aborted || gen !== readGenRef.current) return
-        const items = result.items.filter((d) => d.id !== sourceId)
-        setTargets(items)
+        setTargets(collected.filter((d) => d.id !== sourceId))
       } catch (err) {
         if (controller.signal.aborted || gen !== readGenRef.current) return
         if (err instanceof DOMException && err.name === 'AbortError') return
@@ -135,10 +170,16 @@ export function EndpointDetailPage() {
       const endpointPromise = getEndpoint(endpointId, controller.signal)
         .then(async (data) => {
           if (controller.signal.aborted || gen !== readGenRef.current) return
+          // Successful re-read invalidates prior preview (including post-switch).
+          invalidatePreview()
           setEndpoint(data)
           setNotFound(false)
           setLastUpdated(new Date())
-          if (data.is_enabled && data.active_route?.deployment_id) {
+          if (
+            data.is_enabled &&
+            data.active_route?.deployment_id &&
+            data.traffic_state === 'SERVING'
+          ) {
             await loadTargets(data.active_route.deployment_id, gen)
           } else {
             setTargets(null)
@@ -152,10 +193,12 @@ export function EndpointDetailPage() {
             setRoutes(null)
             setTargets(null)
             setPreview(null)
+            setStrategy('')
             setNotFound(true)
             setError('Endpoint를 찾을 수 없습니다.')
             return
           }
+          // Non-404: keep stale Endpoint + visible preview.
           const message =
             err instanceof ApiError
               ? err.message
@@ -199,7 +242,7 @@ export function EndpointDetailPage() {
         setRefreshing(false)
       }
     },
-    [endpointId, loadTargets],
+    [endpointId, loadTargets, invalidatePreview],
   )
 
   useEffect(() => {
@@ -216,7 +259,7 @@ export function EndpointDetailPage() {
   }
 
   const runPreview = async () => {
-    if (!endpointId || !targetId || switching) return
+    if (!endpointId || !targetId || switching || !canSwitchWorkflow) return
     setPreviewing(true)
     setPreviewError(null)
     setSwitchError(null)
@@ -248,7 +291,7 @@ export function EndpointDetailPage() {
 
   const runSwitch = async () => {
     if (!endpointId || !targetId || !strategy || switching) return
-    if (!preview) return
+    if (!canSwitchWorkflow || !preview) return
     if (preview.result === 'RESOURCE_INSUFFICIENT') return
     if (strategy === 'HOT' && preview.result !== 'HOT_SWITCH_AVAILABLE') return
     if (
@@ -451,9 +494,7 @@ export function EndpointDetailPage() {
 
             {!canSwitchWorkflow ? (
               <p className="metric-line" role="status">
-                {!endpoint.is_enabled
-                  ? 'Disabled Endpoint에서는 Switch를 사용할 수 없습니다.'
-                  : 'ACTIVE Source Route가 있어야 Switch를 사용할 수 있습니다.'}
+                {switchBlockedReason}
               </p>
             ) : (
               <>
@@ -669,48 +710,44 @@ export function EndpointDetailPage() {
                     message={switchError}
                   />
                 ) : null}
-
-                {lastOperation ? (
-                  <div className="operation-result" role="status">
-                    <h3 className="section-subheading">
-                      최근 Switch Operation
-                    </h3>
-                    <dl className="meta-grid">
-                      <div>
-                        <dt>Operation ID</dt>
-                        <dd className="mono">
-                          {lastOperation.operation_id || lastOperation.id}
-                        </dd>
-                      </div>
-                      <div>
-                        <dt>Type</dt>
-                        <dd>{lastOperation.operation_type}</dd>
-                      </div>
-                      <div>
-                        <dt>Strategy</dt>
-                        <dd>{lastOperation.switch_strategy || '—'}</dd>
-                      </div>
-                      <div>
-                        <dt>Status</dt>
-                        <dd>
-                          <StatusBadge status={lastOperation.status} />
-                        </dd>
-                      </div>
-                      <div>
-                        <dt>Current Step</dt>
-                        <dd>{lastOperation.current_step || '—'}</dd>
-                      </div>
-                      <div>
-                        <dt>Created</dt>
-                        <dd>
-                          {formatApiDateTime(lastOperation.created_at)}
-                        </dd>
-                      </div>
-                    </dl>
-                  </div>
-                ) : null}
               </>
             )}
+
+            {lastOperation ? (
+              <div className="operation-result" role="status">
+                <h3 className="section-subheading">최근 Switch Operation</h3>
+                <dl className="meta-grid">
+                  <div>
+                    <dt>Operation ID</dt>
+                    <dd className="mono">
+                      {lastOperation.operation_id || lastOperation.id}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Type</dt>
+                    <dd>{lastOperation.operation_type}</dd>
+                  </div>
+                  <div>
+                    <dt>Strategy</dt>
+                    <dd>{lastOperation.switch_strategy || '—'}</dd>
+                  </div>
+                  <div>
+                    <dt>Status</dt>
+                    <dd>
+                      <StatusBadge status={lastOperation.status} />
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Current Step</dt>
+                    <dd>{lastOperation.current_step || '—'}</dd>
+                  </div>
+                  <div>
+                    <dt>Created</dt>
+                    <dd>{formatApiDateTime(lastOperation.created_at)}</dd>
+                  </div>
+                </dl>
+              </div>
+            ) : null}
           </section>
 
           <section

@@ -223,7 +223,7 @@ describe('EndpointDetailPage', () => {
     expect(deploymentsApi.getDeployment).not.toHaveBeenCalled()
   })
 
-  it('hides switch workflow when disabled or missing ACTIVE route', async () => {
+  it('hides switch workflow when disabled, missing ACTIVE route, or not SERVING', async () => {
     vi.mocked(endpointsApi.getEndpoint).mockResolvedValue(
       makeEndpoint({ is_enabled: false }),
     )
@@ -243,6 +243,128 @@ describe('EndpointDetailPage', () => {
     renderDetail()
     expect(
       await screen.findByText(/ACTIVE Source Route가 있어야/),
+    ).toBeInTheDocument()
+    cleanup()
+
+    vi.mocked(endpointsApi.getEndpoint).mockResolvedValue(
+      makeEndpoint({ traffic_state: 'DRAINING' }),
+    )
+    vi.mocked(endpointsApi.listEndpointRoutes).mockResolvedValue({
+      items: [makeRoute({ id: 'r1' })],
+      total: 1,
+    })
+    renderDetail()
+    expect(
+      await screen.findByText(/traffic_state가 DRAINING/),
+    ).toBeInTheDocument()
+    expect(screen.getByText(/SERVING일 때만 Switch enqueue/)).toBeInTheDocument()
+    expect(screen.queryByLabelText('Target Deployment')).not.toBeInTheDocument()
+    cleanup()
+
+    vi.mocked(endpointsApi.getEndpoint).mockResolvedValue(
+      makeEndpoint({ traffic_state: 'MAINTENANCE' }),
+    )
+    renderDetail()
+    expect(
+      await screen.findByText(/traffic_state가 MAINTENANCE/),
+    ).toBeInTheDocument()
+    expect(deploymentsApi.listDeployments).not.toHaveBeenCalled()
+  })
+
+  it('loads all non-retired Deployment pages for Target selector', async () => {
+    vi.mocked(endpointsApi.getEndpoint).mockResolvedValue(makeEndpoint())
+    vi.mocked(endpointsApi.listEndpointRoutes).mockResolvedValue({
+      items: [makeRoute({ id: 'r1' })],
+      total: 1,
+    })
+    vi.mocked(deploymentsApi.listDeployments).mockImplementation(
+      async (params) => {
+        const page = params?.page ?? 1
+        const pageSize = params?.pageSize ?? 200
+        expect(params?.retired).toBe(false)
+        expect(pageSize).toBe(200)
+        if (page === 1) {
+          return {
+            items: [
+              makeDeployment({ id: 'source-dep', name: 'source-prod' }),
+              ...Array.from({ length: 199 }, (_, i) =>
+                makeDeployment({
+                  id: `page1-${i}`,
+                  name: `target-p1-${i}`,
+                }),
+              ),
+            ],
+            page: 1,
+            page_size: 200,
+            total: 201,
+          }
+        }
+        return {
+          items: [makeDeployment({ id: 'page2-last', name: 'target-p2-last' })],
+          page: 2,
+          page_size: 200,
+          total: 201,
+        }
+      },
+    )
+    renderDetail()
+    const select = await screen.findByLabelText('Target Deployment')
+    await waitFor(() => {
+      expect(deploymentsApi.listDeployments).toHaveBeenCalledTimes(2)
+    })
+    expect(within(select).queryByText(/source-prod/)).not.toBeInTheDocument()
+    expect(within(select).getByText(/target-p1-0/)).toBeInTheDocument()
+    expect(within(select).getByText(/target-p2-last/)).toBeInTheDocument()
+    expect(modelsApi.getModelVersion).not.toHaveBeenCalled()
+    expect(deploymentsApi.getDeployment).not.toHaveBeenCalled()
+  })
+
+  it('invalidates preview on successful refresh but keeps it on non-404 failure', async () => {
+    const user = userEvent.setup()
+    vi.mocked(endpointsApi.getEndpoint)
+      .mockResolvedValueOnce(makeEndpoint())
+      .mockResolvedValueOnce(makeEndpoint())
+      .mockRejectedValueOnce(new ApiError('refresh boom', { status: 500 }))
+    vi.mocked(endpointsApi.listEndpointRoutes).mockResolvedValue({
+      items: [makeRoute({ id: 'r1' })],
+      total: 1,
+    })
+    vi.mocked(deploymentsApi.listDeployments).mockResolvedValue(
+      pageResult([makeDeployment({ id: 'target-dep', name: 'target-candidate' })]),
+    )
+    vi.mocked(endpointsApi.createPreflightPreview).mockResolvedValue(
+      makePreview(),
+    )
+    renderDetail()
+    await user.selectOptions(
+      await screen.findByLabelText('Target Deployment'),
+      'target-dep',
+    )
+    await user.click(screen.getByRole('button', { name: 'Preflight Preview' }))
+    expect(await screen.findByText('preview_only')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: '새로고침' }))
+    await waitFor(() => {
+      expect(screen.queryByText('preview_only')).not.toBeInTheDocument()
+    })
+    expect(
+      screen.queryByRole('button', { name: 'Switch Enqueue' }),
+    ).not.toBeInTheDocument()
+
+    await user.selectOptions(
+      screen.getByLabelText('Target Deployment'),
+      'target-dep',
+    )
+    await user.click(screen.getByRole('button', { name: 'Preflight Preview' }))
+    expect(await screen.findByText('preview_only')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: '새로고침' }))
+    await waitFor(() => {
+      expect(screen.getByText(/기존 Endpoint 정보를 표시/)).toBeInTheDocument()
+    })
+    expect(screen.getByText('preview_only')).toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: 'Switch Enqueue' }),
     ).toBeInTheDocument()
   })
 
@@ -397,6 +519,12 @@ describe('EndpointDetailPage', () => {
     await waitFor(() => {
       expect(endpointsApi.getEndpoint).toHaveBeenCalledTimes(2)
     })
+    // Successful re-read invalidates preview; DRAINING blocks further enqueue UI.
+    expect(screen.queryByText('preview_only')).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole('button', { name: 'Switch Enqueue' }),
+    ).not.toBeInTheDocument()
+    expect(screen.getByText(/traffic_state가 DRAINING/)).toBeInTheDocument()
   })
 
   it('mutually excludes refresh/preview/switch while enqueue is in flight', async () => {
@@ -436,8 +564,19 @@ describe('EndpointDetailPage', () => {
     ).toBeDisabled()
     resolveSwitch(makeOp())
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: 'Switch Enqueue' })).not.toBeDisabled()
+      expect(screen.getByText('op-sw')).toBeInTheDocument()
     })
+    // Post-switch re-read clears preview; enqueue controls are not left active.
+    await waitFor(() => {
+      expect(screen.queryByText('preview_only')).not.toBeInTheDocument()
+    })
+    expect(screen.getByRole('button', { name: '새로고침' })).not.toBeDisabled()
+    expect(
+      screen.getByRole('button', { name: 'Preflight Preview' }),
+    ).not.toBeDisabled()
+    expect(
+      screen.queryByRole('button', { name: 'Switch Enqueue' }),
+    ).not.toBeInTheDocument()
   })
 
   it('keeps Endpoint snapshot on switch 409', async () => {
