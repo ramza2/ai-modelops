@@ -801,6 +801,33 @@ ${DATABASE_URL}
      may keep the last successful section snapshot with a warning;
      authoritative primary 404 clears that identity.
 
+### Final Hardening / Server Integration — current
+
+M1 through M6-C7 feature development is frozen. The current release-hardening
+source of truth is `docs/testing/02-final-hardening-server-integration.md`.
+
+Rules for this phase:
+
+- Do not add product features unless a release blocker proves a design gap that
+  cannot be fixed safely otherwise.
+- Limit changes to regression fixes, deployability, integration, security,
+  operability, test coverage, and documentation proven by verification.
+- Treat target-server evidence separately from code inspection. Never mark an
+  RTX A4000/Docker/NVML/model-runtime check PASS without running it there.
+- The supported Control Plane deployment must include PostgreSQL, Backend,
+  Worker, Gateway, and Frontend. Node Agent remains a host service.
+- A Worker running in Compose must use Compose-reachable PostgreSQL/Gateway
+  addresses; container localhost must not be used for another service.
+- Preserve the architecture boundary: only Node Agent touches Docker/NVML.
+- Preserve per-GPU capacity semantics; never pool A4000 VRAM.
+- Existing direct-model deployment material remains rollback evidence until
+  server acceptance completes.
+- Any defect found during a gate is recorded as FAIL/BLOCKED with concrete
+  evidence before fixing it; rerun the affected gate after the fix.
+- Keep the hardening PR Draft until repository regression gates pass. Server-only
+  gates may remain explicitly PENDING/BLOCKED until executed on the target host.
+
+
 한 번에 모든 기능을 스캐폴딩만 하는 것보다 각 milestone을 end-to-end로 동작하게 완성하는 것을 우선한다.
 
 ---
