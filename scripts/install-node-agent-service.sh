@@ -167,25 +167,80 @@ validate_inputs() {
   fi
 }
 
+as_service_user() {
+  # Run a command as SERVICE_USER without a login shell. Never used for secrets.
+  if command -v runuser >/dev/null 2>&1; then
+    runuser -u "${SERVICE_USER}" -- "$@"
+  else
+    # Quote argv for su -c.
+    local cmd=""
+    local arg
+    for arg in "$@"; do
+      cmd+="$(printf '%q' "${arg}") "
+    done
+    su -s /bin/bash "${SERVICE_USER}" -c "${cmd}"
+  fi
+}
+
 require_docker_access() {
   if ! command -v docker >/dev/null 2>&1; then
     echo "error: docker CLI not found on PATH for service-user validation" >&2
     exit 1
   fi
-  local docker_ok=0
-  if command -v runuser >/dev/null 2>&1; then
-    if runuser -u "${SERVICE_USER}" -- docker info >/dev/null 2>&1; then
-      docker_ok=1
-    fi
-  elif su -s /bin/bash "${SERVICE_USER}" -c 'docker info' >/dev/null 2>&1; then
-    docker_ok=1
-  fi
-  if [[ "${docker_ok}" -ne 1 ]]; then
+  if ! as_service_user docker info >/dev/null 2>&1; then
     echo "error: service user '${SERVICE_USER}' cannot access Docker Engine" >&2
     echo "Grant Docker access (for example add the user to the docker group), then re-run." >&2
     echo "This installer does not modify group membership." >&2
     exit 1
   fi
+}
+
+fail_service_user_path_access() {
+  local path="$1"
+  echo "error: service user '${SERVICE_USER}' cannot access required path: ${path}" >&2
+  echo "Ensure that user can traverse parent directories and read/execute the Node Agent" >&2
+  echo "working tree and venv (for example install under a shared path readable by" >&2
+  echo "the service user). This installer does not chmod/chown the repository." >&2
+  exit 1
+}
+
+require_service_user_runtime_paths() {
+  # Validate systemd runtime paths before installing/restarting the unit.
+  local node_dir uvicorn_bin python_bin main_py
+  node_dir="$(cd "${REPO_ROOT}/node-agent" && pwd)"
+  uvicorn_bin="$(cd "${VENV_DIR}" && pwd)/bin/uvicorn"
+  python_bin="$(cd "${VENV_DIR}" && pwd)/bin/python"
+  main_py="${node_dir}/app/main.py"
+
+  if ! as_service_user test -x "${node_dir}"; then
+    fail_service_user_path_access "${node_dir}"
+  fi
+  if ! as_service_user test -r "${main_py}"; then
+    fail_service_user_path_access "${main_py}"
+  fi
+  if ! as_service_user test -x "${python_bin}"; then
+    fail_service_user_path_access "${python_bin}"
+  fi
+  if ! as_service_user test -x "${uvicorn_bin}"; then
+    fail_service_user_path_access "${uvicorn_bin}"
+  fi
+  # Confirm the working directory is usable as cwd (parent traversal included).
+  if ! as_service_user test -r "${node_dir}"; then
+    fail_service_user_path_access "${node_dir}"
+  fi
+}
+
+env_files_are_same() {
+  # True when source and protected destination refer to the same path/file.
+  local src="$1"
+  local dst="$2"
+  local src_norm dst_norm
+  if [[ -e "${dst}" && "${src}" -ef "${dst}" ]]; then
+    return 0
+  fi
+  src_norm="$(realpath -m "${src}")"
+  dst_norm="$(realpath -m "${dst}")"
+  [[ "${src_norm}" == "${dst_norm}" ]]
 }
 
 ensure_venv() {
@@ -211,7 +266,14 @@ ensure_venv() {
 
 install_env_file() {
   mkdir -p "${PROTECTED_ENV_DIR}"
-  # Copy operator file into a root-protected path; never print contents.
+  # Never print EnvironmentFile contents (contains token).
+  if env_files_are_same "${ENV_FILE}" "${PROTECTED_ENV_FILE}"; then
+    # Documented path is often already /etc/modelops/node-agent.env — do not
+    # install(1) a file onto itself; only enforce ownership/mode.
+    chown root:root "${PROTECTED_ENV_FILE}"
+    chmod 0600 "${PROTECTED_ENV_FILE}"
+    return 0
+  fi
   install -m 0600 -o root -g root "${ENV_FILE}" "${PROTECTED_ENV_FILE}"
 }
 
@@ -299,6 +361,7 @@ require_linux_systemd
 validate_inputs
 require_docker_access
 ensure_venv
+require_service_user_runtime_paths
 install_env_file
 write_unit
 

@@ -18,9 +18,14 @@ not receive a Traefik router.
    or modify groups/firewall.
 2. Copy `node-agent.env.example` to a protected path (for example
    `/etc/modelops/node-agent.env`) and set a real `NODE_AGENT_TOKEN`.
+   When `--env-file` is already that path, the installer does **not** copy the
+   file onto itself; it only enforces `root:root` mode `0600`.
 3. Set the **same** secret on the Control Plane server env as
    `MODELOPS_NODE_AGENT_TOKEN` (Worker/Backend client setting).
-4. Run:
+4. Ensure the service user can traverse/read the Node Agent repo working
+   directory and execute the venv `python`/`uvicorn` (installer validates this
+   and does not chmod/chown the repository).
+5. Run:
 
 ```bash
 sudo ./scripts/install-node-agent-service.sh \
