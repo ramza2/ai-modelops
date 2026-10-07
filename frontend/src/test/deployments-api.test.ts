@@ -86,11 +86,16 @@ describe('deployments API client', () => {
     await getDeployment('d1')
     const urls = fetchSpy.mock.calls.map((c) => String(c[0]))
     const methods = fetchSpy.mock.calls.map((c) => (c[1] as RequestInit).method)
+    const idempotencyKeys = fetchSpy.mock.calls.slice(0, 3).map((c) =>
+      new Headers((c[1] as RequestInit).headers).get('Idempotency-Key'),
+    )
     expect(urls[0]).toContain('/api/v1/deployments/d1/start')
     expect(urls[1]).toContain('/api/v1/deployments/d1/stop')
     expect(urls[2]).toContain('/api/v1/deployments/d1/restart')
     expect(urls[3]).toContain('/api/v1/deployments/d1')
     expect(methods.slice(0, 3)).toEqual(['POST', 'POST', 'POST'])
     expect(methods[3]).toBe('GET')
+    expect(idempotencyKeys.every(Boolean)).toBe(true)
+    expect(new Set(idempotencyKeys).size).toBe(3)
   })
 })
