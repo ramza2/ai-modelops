@@ -92,7 +92,7 @@ Docker가 설치·기동된 상태에서 repository root에서:
 
 성공 시 Backend는 `http://localhost:<BACKEND_PORT>` (기본 8000)이다.
 
-### Admin UI (M6-C1 / M6-C2 / M6-C3)
+### Admin UI (M6-C1 / M6-C2 / M6-C3 / M6-C4)
 
 ```bash
 cd frontend
@@ -117,6 +117,8 @@ Routes:
 /models
 /models/:modelId
 /model-versions/:versionId
+/deployments
+/deployments/:deploymentId
 ```
 
 Nodes list는 `GET /api/v1/nodes`만 사용한다 (row별 resource N+1 없음).
@@ -127,6 +129,12 @@ GPU free VRAM은 GPU별로만 표시하며 합산 capacity KPI를 만들지 않�
 C3 Models / Versions는 read-only Registry 조회다. Version
 `runtime_config`는 저장된 정의값이며 Deployment effective/observed 실행값과
 같지 않을 수 있다. Capacity Profile / Deployments API는 C3에서 호출하지 않는다.
+
+C4 Deployments는 기존 Management API의 list/detail과 MANAGED lifecycle
+Start/Stop/Restart enqueue를 연결한다. lifecycle은 비동기 Operation이며 Frontend가
+Node Agent/Gateway를 직접 호출하지 않는다. IMPORTED/retired Deployment에는
+lifecycle action을 노출하지 않는다. 현재 Backend에 없는
+`/deployments/{id}/resources/latest`, `/health`는 C4 UI에서 호출하지 않는다.
 
 ### Milestone 2 — Node Agent (host process)
 
@@ -262,6 +270,7 @@ Cloud Agent 환경(`.cursor/environment.json`)은 `scripts/cloud-install.sh`(ins
 - [x] Milestone 6A/B: Invocation capacity telemetry, runtime metrics/analytics, Capacity Profile, Client Runtime Policy + Gateway concurrency/token/priority enforcement
 - [x] M6-C1 Admin UI Foundation + Dashboard
 - [x] M6-C2 Nodes / GPUs
-- [ ] M6-C3 Models / Versions — current
-- [ ] M6-C4+ Deployments, Endpoints, Operations, Observability pages
+- [x] M6-C3 Models / Versions
+- [x] M6-C4 Deployments — current
+- [ ] M6-C5+ Endpoints, Operations, Observability pages
 

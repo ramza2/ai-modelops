@@ -27,6 +27,9 @@ export function AppShell({
     location.pathname === '/models' ||
     location.pathname.startsWith('/models/') ||
     location.pathname.startsWith('/model-versions/')
+  const deploymentsActive =
+    location.pathname === '/deployments' ||
+    location.pathname.startsWith('/deployments/')
 
   return (
     <div className="shell">
@@ -78,11 +81,18 @@ export function AppShell({
             >
               Models / Versions
             </NavLink>
+            <NavLink
+              to="/deployments"
+              className={() =>
+                deploymentsActive ? 'nav-link nav-link--active' : 'nav-link'
+              }
+            >
+              Deployments
+            </NavLink>
           </nav>
           <div className="nav-section" aria-label="향후 메뉴">
             <p className="nav-section__label">Model Ops</p>
             <ul className="nav-future">
-              <li>Deployments</li>
               <li>Endpoints</li>
               <li>Operations</li>
               <li>Observability</li>
