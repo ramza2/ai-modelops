@@ -264,7 +264,7 @@ Exit: H checks PASS.
 
 ## 11. Gate I — Traefik / backup / release closeout
 
-- [ ] PENDING — Gateway Traefik router/TLS matches server convention; Admin UI LAN-only bind + root HTTP 200 + same-origin `/health` proxy verified, `/ready`/browser regression still pending
+- [ ] PENDING — Gateway Traefik router/TLS matches server convention; Admin UI LAN-only bind + root HTTP 200 + same-origin `/health` and `/ready` verified, browser regression still pending
 - [ ] PENDING — managed runtime network/labels do not bypass intended Gateway unnecessarily
 - [ ] PENDING — real secrets exist only in server configuration
 - [ ] PENDING — PostgreSQL backup created
@@ -314,3 +314,4 @@ Append concise evidence as testing progresses.
 | 2026-10-07 | I / Admin LAN bind | PASS | Re-applied server overlay: Frontend publishes only `192.168.10.104:18081->80`, Backend remains `127.0.0.1:18000->8000`, all five Control Plane services running, Backend health/ready OK, Worker polling/metrics collector started. Admin Traefik router is no longer part of the server overlay. |
 | 2026-10-07 | I / Admin LAN HTTP | PASS | `curl -I http://192.168.10.104:18081/` returned HTTP 200 from nginx; Admin UI is reachable on the intended LAN-only bind. |
 | 2026-10-07 | I / Admin same-origin API | PASS | `curl -i http://192.168.10.104:18081/health` returned HTTP 200 with `{"status":"ok"}` through frontend nginx, confirming LAN Admin -> nginx -> Backend same-origin routing. |
+| 2026-10-07 | I / Admin same-origin ready | PASS | `curl -i http://192.168.10.104:18081/ready` returned HTTP 200 with database `ok`, confirming Frontend nginx -> Backend -> PostgreSQL readiness through the LAN Admin origin. |
