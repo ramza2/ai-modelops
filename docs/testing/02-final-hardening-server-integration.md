@@ -163,7 +163,7 @@ Run models one at a time initially: Embedding -> VLM -> LLM.
 For each model:
 
 - [x] PASS — BGE-M3 Model/Version metadata registered with frozen HF revision, vLLM image digest, served name, dtype and production runtime settings
-- [ ] PENDING — MANAGED Deployment created on intended GPU(s)
+- [x] PASS — BGE-M3 MANAGED Deployment metadata created on intended RTX A4000 GPU 1; initial state CREATED/STOPPED with no container created
 - [ ] PENDING — artifact/image prepare succeeds
 - [ ] PENDING — START Operation reaches SUCCEEDED
 - [ ] PENDING — container exists with expected image/argv/GPU assignment
@@ -325,3 +325,4 @@ Append concise evidence as testing progresses.
 | 2026-10-07 | D / Worker rollout | PASS | Recreated only the ModelOps Worker from the rebuilt image after the vLLM runner fix. Worker started normally and logs show job polling plus runtime metrics collector startup; PostgreSQL/Backend/Gateway/Frontend and all existing `vllm-*` runtimes were left untouched. |
 | 2026-10-07 | D / BGE-M3 artifact materialize | PASS | Confirmed HF `refs/main` = `5617a9f61b028005a4858fdac845db406aefb181`; materialized the 2.2 GiB snapshot to `/data/modelops/models/BAAI/bge-m3/5617a9f61b028005a4858fdac845db406aefb181` with symlinks resolved (`SYMLINKS=0`). `diff -qr` between source snapshot and ModelOps copy returned no differences. Existing embedding runtime remained running. |
 | 2026-10-07 | D / BGE-M3 registry | PASS | Registered `BAAI/bge-m3` as EMBEDDING (`cb68c59e-7136-441b-ba0c-191512cd86f2`) and version `prod-2026-10-07` (`5e61778f-7e5d-4e29-b9ce-084217f25f23`) with frozen source revision `5617a9f61b028005a4858fdac845db406aefb181`, vLLM image digest `sha256:251eba5c...`, float16, max model length 8192, `runner=pooling`, `max_num_seqs=4`, and GPU memory utilization 0.15. Existing runtime remained running. |
+| 2026-10-07 | D / BGE-M3 managed deployment metadata | PASS | Created MANAGED deployment `bge-m3-production` (`b5f3d54c-2eef-4c4f-8f44-9a5e25aee782`) on target Node, assigned GPU 1 (`fa692d12-4e59-43b3-8f9a-7f099f730a5f`), expected VRAM 2457 MiB, runtime port 8000, ModelOps-owned model path, and `modelops-model` network. Initial state is desired STOPPED / runtime CREATED / health UNKNOWN with `container_id=null`; existing `vllm-bge-m3` was not modified. |
