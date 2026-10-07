@@ -24,7 +24,7 @@ Usage: ./scripts/deploy-server.sh --env-file <path> [--down|--help]
                     must set non-dev values for:
                       MODELOPS_ENVIRONMENT (not "local")
                       POSTGRES_PASSWORD (not the "modelops" dev default)
-                      MODELOPS_ADMIN_HOST
+                      MODELOPS_ADMIN_BIND_IP
                       MODELOPS_GATEWAY_HOST
                       MODELOPS_NODE_AGENT_TOKEN
                       TRAEFIK_CERTRESOLVER
@@ -124,7 +124,7 @@ require_server_up_env() {
 
   require_env_value MODELOPS_ENVIRONMENT
   require_env_value POSTGRES_PASSWORD
-  require_env_value MODELOPS_ADMIN_HOST
+  require_env_value MODELOPS_ADMIN_BIND_IP
   require_env_value MODELOPS_GATEWAY_HOST
   require_env_value MODELOPS_NODE_AGENT_TOKEN
   require_env_value TRAEFIK_CERTRESOLVER
@@ -263,7 +263,7 @@ compose ps
 echo ""
 
 # Safe host/local verification via loopback Backend publish (see server overlay).
-# Public Admin/Gateway TLS checks remain Gate I on the target Traefik host.
+# Public Gateway TLS remains Gate I; Admin UI is LAN-only on the target host.
 HEALTH_URL="http://127.0.0.1:${BACKEND_PORT}/health"
 READY_URL="http://127.0.0.1:${BACKEND_PORT}/ready"
 
@@ -289,7 +289,9 @@ echo ""
 echo "--- worker logs (last 20 lines) ---"
 compose logs --tail=20 worker || true
 
-ADMIN_HOST="$(env_get MODELOPS_ADMIN_HOST)"
+ADMIN_BIND_IP="$(env_get MODELOPS_ADMIN_BIND_IP)"
+FRONTEND_PORT="$(env_get FRONTEND_PORT)"
+FRONTEND_PORT="${FRONTEND_PORT:-3000}"
 GATEWAY_HOST="$(env_get MODELOPS_GATEWAY_HOST)"
 
 cat <<EOF
@@ -300,9 +302,9 @@ Backend loopback health: http://127.0.0.1:${BACKEND_PORT}/health
 Backend loopback ready:  http://127.0.0.1:${BACKEND_PORT}/ready
 Services: postgres backend worker gateway frontend running
 
-Traefik Host placeholders (configured in env; TLS runtime = Gate I):
-  Admin UI:  https://${ADMIN_HOST}/  (Management API same-origin via frontend nginx)
-  AI Gateway: https://${GATEWAY_HOST}/
+Server access:
+  Admin UI:  http://${ADMIN_BIND_IP}:${FRONTEND_PORT}/  (LAN-only; Management API same-origin via frontend nginx)
+  AI Gateway: https://${GATEWAY_HOST}/  (Traefik/TLS runtime = Gate I)
 
 Note: Node Agent remains a host process (not in Compose). Register Node URLs
 that containers can reach (e.g. http://host.docker.internal:<port>).

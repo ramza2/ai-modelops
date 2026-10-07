@@ -20,8 +20,9 @@ Traefik은 다음 책임에 집중한다.
 
 - HTTPS/TLS 종단
 - Domain/Host 기반 Routing
-- Admin UI 진입점 (Frontend)
-- AI Gateway 진입점
+- AI Gateway 외부 진입점
+
+Admin UI는 서버 배포에서 Traefik/DNS에 노출하지 않고 운영자가 지정한 LAN IP/포트에만 bind한다.
 
 표준 배포에서 Management API(Backend)용 Traefik router는 만들지 않는다.
 Admin Frontend nginx가 같은 origin으로 `/api`, `/health`, `/ready`를 Backend로
@@ -30,12 +31,13 @@ Admin Frontend nginx가 같은 origin으로 `/api`, `/health`, `/ready`를 Backe
 실제 모델 Container는 원칙적으로 외부에 직접 공개하지 않는다.
 
 ```text
-Internal App
+Admin (LAN) → frontend (:80) → nginx → backend (:8000)
+
+External/Internal App
     │
     ▼
 Traefik
     │
-    ├── Admin Host  → frontend (:80) → nginx → backend (:8000)
     └── Gateway Host → gateway (:8080)
               │
               ├── LLM Container
@@ -49,7 +51,6 @@ Traefik
 
 ```text
 traefik-public   (external; name configurable via TRAEFIK_PUBLIC_NETWORK)
-  ├── frontend
   └── gateway
 
 modelops-control
@@ -68,9 +69,9 @@ modelops-model
 
 - `postgres`, `backend`, `worker`는 Control Plane 내부만 사용한다.
 - `gateway`는 Traefik 외부 Network와 `modelops-model`을 모두 사용한다.
-- 서버 overlay는 PostgreSQL/Gateway/Frontend의 host-port publish를 `!reset`으로
-  제거하고, Backend publish는 `!override`로 교체하여 deploy 검증용
-  `127.0.0.1` loopback bind만 유지한다.
+- `frontend`는 `modelops-control`에만 연결하고 `${MODELOPS_ADMIN_BIND_IP}:${FRONTEND_PORT}`로 LAN에만 publish한다.
+- 서버 overlay는 PostgreSQL/Gateway의 host-port publish를 `!reset`으로 제거하고,
+  Backend publish는 `!override`로 교체하여 deploy 검증용 `127.0.0.1` loopback bind만 유지한다.
 
 ## 4. Traefik Label (server overlay)
 
@@ -96,15 +97,13 @@ labels:
 
 ### Admin UI
 
+서버 배포의 Admin UI에는 Traefik router/label을 부여하지 않는다. 서버 env의
+`MODELOPS_ADMIN_BIND_IP`와 `FRONTEND_PORT`를 사용해 사내 LAN 인터페이스에만
+publish한다. 실제 사내 IP는 Public repository에 기록하지 않는다.
+
 ```yaml
-labels:
-  - "traefik.enable=true"
-  - "traefik.docker.network=${TRAEFIK_PUBLIC_NETWORK:-traefik-public}"
-  - "traefik.http.routers.modelops-admin.rule=Host(`${MODELOPS_ADMIN_HOST}`)"
-  - "traefik.http.routers.modelops-admin.entrypoints=${TRAEFIK_ENTRYPOINT:-websecure}"
-  - "traefik.http.routers.modelops-admin.tls=true"
-  - "traefik.http.routers.modelops-admin.tls.certresolver=${TRAEFIK_CERTRESOLVER}"
-  - "traefik.http.services.modelops-admin.loadbalancer.server.port=80"
+ports: !override
+  - "${MODELOPS_ADMIN_BIND_IP}:${FRONTEND_PORT:-3000}:80"
 ```
 
 ### Management API

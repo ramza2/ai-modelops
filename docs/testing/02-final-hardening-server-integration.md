@@ -36,7 +36,7 @@ Do not mark a server check PASS from code inspection alone.
 | RB-01 | PASS | Target-server Compose config and startup verified: PostgreSQL, Backend, Worker, Gateway, Frontend all running; Worker polling and runtime-metrics collector started without crash loop. | Worker is packaged and included in the supported deployment path; compose config + Worker startup/test evidence PASS. |
 | RB-02 | PENDING | Gate A component suites executed on this branch; A3 fresh-DB migrate/health/ready and remaining A4 architecture spot-checks still open. | Gate A passes. |
 | RB-03 | PENDING | RTX A4000 server integration has not yet been executed. | Gates C-G pass on target server. |
-| RB-04 | PASS | Artifact/static exit met: `deploy/compose/docker-compose.server.yml` + `./scripts/deploy-server.sh` provide Traefik-label Admin/Gateway ingress (Gateway port 8080), external network placeholder, no Backend public router by default, no managed-model routers, Linux `host-gateway` for Node Agent reachability. Traefik/TLS/server networking runtime remains Gate I PENDING. | A documented server deployment path/overlay provides placeholder-only Traefik labels/networks for Admin/Gateway (and Management API only if required), without exposing managed model containers directly. |
+| RB-04 | PASS | Server path provides LAN-only Admin publish plus Traefik-label Gateway ingress (Gateway port 8080), no Backend public router, no managed-model routers, and Linux `host-gateway` for Node Agent reachability. Gateway Traefik/TLS runtime remains Gate I PENDING. | A documented server deployment path keeps Admin LAN-only, exposes only Gateway through Traefik, and does not expose managed model containers directly. |
 | RB-05 | PASS | Target Linux validation completed: isolated Node Agent venv installed, systemd service enabled/running, restart succeeded, `/health` and `/ready` succeeded, and Docker/NVML both report AVAILABLE. | A safe parameterized systemd unit/install procedure exists and is validated on the target Linux host; no real internal address/token is committed. |
 
 GitHub Actions workflows are currently not present in the repository. Release
@@ -264,7 +264,7 @@ Exit: H checks PASS.
 
 ## 11. Gate I — Traefik / backup / release closeout
 
-- [ ] PENDING — Traefik router/TLS for Admin/Gateway matches server convention
+- [ ] PENDING — Gateway Traefik router/TLS matches server convention; Admin UI is reachable only through the configured LAN bind
 - [ ] PENDING — managed runtime network/labels do not bypass intended Gateway unnecessarily
 - [ ] PENDING — real secrets exist only in server configuration
 - [ ] PENDING — PostgreSQL backup created
@@ -310,3 +310,4 @@ Append concise evidence as testing progresses.
 | 2026-10-07 | C | PASS | `/internal/v1/resources`: exactly 2 × NVIDIA RTX A4000, 16376 MiB each, device indices 0/1, stable GPU UUIDs, per-GPU VRAM/utilization/temperature/power returned. Existing non-ModelOps vLLM GPU processes correctly remain unattributed (`container_id=null`, `deployment_id=null`). |
 | 2026-10-07 | C / RB-05 | PASS | `systemctl restart modelops-node-agent` succeeded; immediate curl raced startup once, journal showed clean shutdown/startup, subsequent `/ready` returned READY with Docker/NVML AVAILABLE. |
 | 2026-10-07 | A3 / B1 / RB-01 | PASS | First target server deploy completed: new PostgreSQL volume healthy; Backend migration/startup succeeded; `/health` + `/ready` OK via `127.0.0.1:18000`; postgres/backend/worker/gateway/frontend all running; Worker polling + runtime metrics collector started. |
+| 2026-10-07 | I | PENDING | Deployment policy refined for limited DNS records: Admin UI removed from Traefik and bound only to operator-supplied LAN IP/port; only AI Gateway remains eligible for external Traefik/TLS. Target runtime re-apply/verification required. |
