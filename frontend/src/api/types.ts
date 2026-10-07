@@ -1,3 +1,51 @@
+export type ModelSummary = {
+  id: string
+  slug: string
+  name: string
+  model_type: string
+  provider: string | null
+  source_type: string
+  license_name: string | null
+  description: string | null
+  is_active: boolean
+  created_at: string
+  updated_at: string
+}
+
+export type ModelDetail = ModelSummary
+
+export type ModelVersion = {
+  id: string
+  model_id: string
+  version_label: string
+  source_repository: string | null
+  source_revision: string | null
+  quantization: string | null
+  dtype: string | null
+  runtime_type: string
+  runtime_image: string
+  runtime_image_digest: string | null
+  served_model_name: string
+  expected_idle_vram_mb: number | null
+  expected_peak_vram_mb: number | null
+  default_max_model_len: number | null
+  runtime_config: Record<string, unknown> | null
+  archived_at: string | null
+  created_at: string
+  updated_at: string
+}
+
+export type ModelArtifact = {
+  id: string
+  model_version_id: string
+  artifact_type: string
+  source_uri: string
+  revision: string | null
+  checksum: string | null
+  size_bytes: number | null
+  created_at: string
+}
+
 export type Paginated<T> = {
   items: T[]
   page: number

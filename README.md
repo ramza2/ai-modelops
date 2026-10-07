@@ -92,7 +92,7 @@ Docker가 설치·기동된 상태에서 repository root에서:
 
 성공 시 Backend는 `http://localhost:<BACKEND_PORT>` (기본 8000)이다.
 
-### Admin UI (M6-C1 / M6-C2)
+### Admin UI (M6-C1 / M6-C2 / M6-C3)
 
 ```bash
 cd frontend
@@ -108,18 +108,25 @@ Compose에 `frontend` 서비스가 포함된다 (`FRONTEND_PORT` 기본 3000).
 프록시한다. Admin UI는 Gateway inference를 호출하지 않는다.
 C1은 신뢰된 내부망 접근을 가정하며 Admin SSO는 포함하지 않는다.
 
-C2 routes:
+Routes:
 
 ```text
 /dashboard
 /nodes
 /nodes/:nodeId
+/models
+/models/:modelId
+/model-versions/:versionId
 ```
 
 Nodes list는 `GET /api/v1/nodes`만 사용한다 (row별 resource N+1 없음).
 Node detail의 AppShell `새로고침`은 DB 재조회이고, `리소스 갱신`만
 `POST /api/v1/nodes/{id}/resources/refresh`로 Node Agent를 호출한다.
 GPU free VRAM은 GPU별로만 표시하며 합산 capacity KPI를 만들지 않는다.
+
+C3 Models / Versions는 read-only Registry 조회다. Version
+`runtime_config`는 저장된 정의값이며 Deployment effective/observed 실행값과
+같지 않을 수 있다. Capacity Profile / Deployments API는 C3에서 호출하지 않는다.
 
 ### Milestone 2 — Node Agent (host process)
 
@@ -254,6 +261,7 @@ Cloud Agent 환경(`.cursor/environment.json`)은 `scripts/cloud-install.sh`(ins
 - [x] Milestone 5 (Switch): Resource Preflight, Cold/Hot Switch, rollback, cancel/retry, reconciliation
 - [x] Milestone 6A/B: Invocation capacity telemetry, runtime metrics/analytics, Capacity Profile, Client Runtime Policy + Gateway concurrency/token/priority enforcement
 - [x] M6-C1 Admin UI Foundation + Dashboard
-- [ ] M6-C2 Nodes / GPUs — current
-- [ ] M6-C3+ Models, Deployments, Endpoints, Operations, Observability pages
+- [x] M6-C2 Nodes / GPUs
+- [ ] M6-C3 Models / Versions — current
+- [ ] M6-C4+ Deployments, Endpoints, Operations, Observability pages
 
