@@ -92,7 +92,7 @@ Docker가 설치·기동된 상태에서 repository root에서:
 
 성공 시 Backend는 `http://localhost:<BACKEND_PORT>` (기본 8000)이다.
 
-### Admin UI (M6-C1 / M6-C2 / M6-C3 / M6-C4)
+### Admin UI (M6-C1 / M6-C2 / M6-C3 / M6-C4 / M6-C5)
 
 ```bash
 cd frontend
@@ -119,6 +119,8 @@ Routes:
 /model-versions/:versionId
 /deployments
 /deployments/:deploymentId
+/endpoints
+/endpoints/:endpointId
 ```
 
 Nodes list는 `GET /api/v1/nodes`만 사용한다 (row별 resource N+1 없음).
@@ -135,6 +137,12 @@ Start/Stop/Restart enqueue를 연결한다. lifecycle은 비동기 Operation이�
 Node Agent/Gateway를 직접 호출하지 않는다. IMPORTED/retired Deployment에는
 lifecycle action을 노출하지 않는다. 현재 Backend에 없는
 `/deployments/{id}/resources/latest`, `/health`는 C4 UI에서 호출하지 않는다.
+
+C5 Endpoints는 Endpoint 목록/상세, ACTIVE Route와 Route 이력, Resource Preflight
+preview와 HOT/COLD Switch enqueue를 제공한다. Preview aggregate VRAM 합계만으로
+가능 여부를 추론하지 않고 GPU별 판정을 표시한다. Switch는 항상
+`Idempotency-Key`를 사용하며 Worker가 실행 직전 fresh Preflight를 다시 수행한다.
+Endpoint create/edit/enable-disable 및 직접 Route 변경은 C5에서 제공하지 않는다.
 
 ### Milestone 2 — Node Agent (host process)
 
@@ -271,6 +279,7 @@ Cloud Agent 환경(`.cursor/environment.json`)은 `scripts/cloud-install.sh`(ins
 - [x] M6-C1 Admin UI Foundation + Dashboard
 - [x] M6-C2 Nodes / GPUs
 - [x] M6-C3 Models / Versions
-- [x] M6-C4 Deployments — current
-- [ ] M6-C5+ Endpoints, Operations, Observability pages
+- [x] M6-C4 Deployments
+- [ ] M6-C5 Endpoints / Routing — current
+- [ ] M6-C6+ Operations, Observability pages
 
