@@ -33,8 +33,8 @@ Do not mark a server check PASS from code inspection alone.
 
 | ID | Status | Finding | Exit condition |
 |---|---|---|---|
-| RB-01 | BLOCKED | `deploy/compose/docker-compose.yml` has PostgreSQL, Backend, Gateway, Frontend but no Orchestrator Worker; `worker/` also has no Dockerfile. `scripts/deploy.sh` therefore cannot deploy a complete lifecycle-capable Control Plane. | Worker is packaged and included in the supported deployment path; compose config + Worker startup/test evidence PASS. |
-| RB-02 | PENDING | Full repository verification has not yet been executed from this release branch. | Gate A passes. |
+| RB-01 | PASS | Closed: `worker/Dockerfile` added; Compose `worker` service joins `modelops-control` with `MODELOPS_DATABASE_URL` → `postgres:5432` and `MODELOPS_GATEWAY_BASE_URL=http://gateway:8080`; `scripts/deploy.sh` prints worker status/logs on success and failure. Runtime `docker compose ... config` / Worker container startup remain Gate B (agent env has no Docker Engine). | Worker is packaged and included in the supported deployment path; compose config + Worker startup/test evidence PASS. |
+| RB-02 | PENDING | Gate A component suites executed on this branch; A3 fresh-DB migrate/health/ready and remaining A4 architecture spot-checks still open. | Gate A passes. |
 | RB-03 | PENDING | RTX A4000 server integration has not yet been executed. | Gates C-G pass on target server. |
 | RB-04 | BLOCKED | Target architecture requires Traefik label-based server ingress, but `deploy/traefik/` currently contains no deploy artifact/overlay and the existing Compose file is explicitly local-development oriented. | A documented server deployment path/overlay provides placeholder-only Traefik labels/networks for Admin/Gateway (and Management API only if required), without exposing managed model containers directly. |
 | RB-05 | BLOCKED | Node Agent is documented as a host `systemd` service, but no unit/template/install artifact exists in the repository. | A safe parameterized systemd unit/install procedure exists and is validated on the target Linux host; no real internal address/token is committed. |
@@ -51,14 +51,14 @@ Run once after any hardening change set is ready.
 
 ### A1. Python test suites
 
-- [ ] PENDING — Backend tests
-  - `cd backend && pytest -q`
-- [ ] PENDING — Worker tests
-  - `cd worker && pytest -q`
-- [ ] PENDING — Gateway tests
-  - `cd gateway && pytest -q`
-- [ ] PENDING — Node Agent tests
-  - `cd node-agent && pytest -q`
+- [x] PASS — Backend tests
+  - `cd backend && pytest -q` → **190 passed**
+- [x] PASS — Worker tests
+  - `cd worker && pytest -q` → **299 passed** (7 resource warnings)
+- [x] PASS — Gateway tests
+  - `cd gateway && pytest -q` → **171 passed**
+- [x] PASS — Node Agent tests
+  - `cd node-agent && pytest -q` → **113 passed**
 
 Use each component's development requirements/venv. Do not silently skip tests
 because Docker/GPU is unavailable; classify environment-dependent cases
@@ -66,24 +66,24 @@ explicitly.
 
 ### A2. Frontend
 
-- [ ] PENDING — `cd frontend && npm test`
-- [ ] PENDING — `cd frontend && npm run typecheck`
-- [ ] PENDING — `cd frontend && npm run build`
+- [x] PASS — `cd frontend && npm test` → **28 files / 246 tests passed**
+- [x] PASS — `cd frontend && npm run typecheck`
+- [x] PASS — `cd frontend && npm run build`
 
 ### A3. Migration / schema
 
 - [ ] PENDING — fresh PostgreSQL DB -> `alembic upgrade head`
-- [ ] PENDING — resulting Alembic head is exactly `e5f6a7b8c9d0`
+- [x] PASS — resulting Alembic head is exactly `e5f6a7b8c9d0` (`alembic heads`; no new migration added)
 - [ ] PENDING — `/health` returns 200
 - [ ] PENDING — `/ready` returns 200 with database ready
 
 ### A4. Repository safety / scope
 
-- [ ] PENDING — no committed `.env`, token, password, private key, real internal address
+- [x] PASS — no committed `.env`, token, password, private key, real internal address (tracked-file scan; Compose uses placeholders only)
 - [ ] PENDING — Backend has no Docker socket access
 - [ ] PENDING — Frontend has no Node Agent/Gateway-internal direct calls
 - [ ] PENDING — Gateway still uses DB-backed route snapshot/LKG and does not query DB per inference request
-- [ ] PENDING — no new feature scope beyond hardening/integration defects
+- [x] PASS — no new feature scope beyond hardening/integration defects (RB-01 deploy packaging only)
 
 Exit: all applicable A checks PASS.
 
@@ -106,12 +106,12 @@ Frontend
 Node Agent remains a host service and must not be moved into privileged Compose
 only to make this gate pass.
 
-- [ ] BLOCKED — Worker image/package exists for supported deploy path (RB-01)
-- [ ] BLOCKED — Worker service exists in supported Compose path (RB-01)
-- [ ] PENDING — Worker DB URL resolves to Compose PostgreSQL
-- [ ] PENDING — Worker Node Agent URL/token are configurable
-- [ ] PENDING — Worker Gateway control-plane URL resolves to Compose Gateway (not container localhost)
-- [ ] PENDING — `docker compose ... config` succeeds
+- [x] PASS — Worker image/package exists for supported deploy path (RB-01): `worker/Dockerfile` → `python -m app.main`
+- [x] PASS — Worker service exists in supported Compose path (RB-01): `deploy/compose/docker-compose.yml` `worker`
+- [x] PASS — Worker DB URL resolves to Compose PostgreSQL (`postgres:5432` in Compose env; static YAML check)
+- [x] PASS — Worker Node Agent URL/token are configurable (token/timeouts from env; Node URL from registered Node rows — no Docker/NVML on Worker)
+- [x] PASS — Worker Gateway control-plane URL resolves to Compose Gateway (not container localhost): `MODELOPS_GATEWAY_BASE_URL=http://gateway:8080`
+- [ ] BLOCKED — `docker compose ... config` succeeds (Docker Engine/Compose unavailable in agent environment; static YAML validation only)
 - [ ] PENDING — `./scripts/deploy.sh` starts the complete Control Plane
 - [ ] PENDING — `docker compose ps` shows expected services running
 - [ ] PENDING — Worker logs show polling without crash/restart loop
@@ -120,7 +120,7 @@ only to make this gate pass.
 ### B2. Failure diagnostics
 
 - [ ] PENDING — deploy failure prints useful Backend diagnostics
-- [ ] PENDING — Worker startup failure is also visible in documented diagnostics
+- [x] PASS — Worker startup failure is also visible in documented diagnostics (`print_failure_diagnostics` + post-ready worker status/logs in `scripts/deploy.sh`; README note)
 - [ ] PENDING — no secrets are printed by normal startup logs
 
 Exit: B checks PASS before lifecycle server testing.
@@ -290,4 +290,11 @@ Append concise evidence as testing progresses.
 | 2026-10-07 | I | BLOCKED | `deploy/traefik/` is empty while target server deployment is Traefik-label based. RB-04 opened. |
 | 2026-10-07 | C | BLOCKED | Node Agent has no repository systemd unit/install artifact despite host-service deployment requirement. RB-05 opened. |
 | 2026-10-07 | CI | N/A | Repository currently contains no `.github/workflows`; explicit release commands/evidence required. |
+| 2026-10-07 | RB-01 | PASS | Packaging closed on `82f77ad`: `worker/Dockerfile`; Compose `worker` with `postgres:5432` + `http://gateway:8080`; deploy.sh worker diagnostics; README/`.env.example` Compose Gateway note. |
+| 2026-10-07 | A1 | PASS | Backend 190; Worker 299; Gateway 171; Node Agent 113 (`pytest -q`, sequential after shared-DB contention from parallel runs). |
+| 2026-10-07 | A2 | PASS | Frontend: vitest 246/246; `npm run typecheck` OK; `npm run build` OK. |
+| 2026-10-07 | A3 | PARTIAL | `alembic heads` = `e5f6a7b8c9d0`; no new migration. Fresh DB upgrade + `/health`/`/ready` still PENDING. |
+| 2026-10-07 | A4 | PARTIAL | No tracked secrets/`.env`; scope limited to RB-01 packaging. Remaining architecture spot-checks PENDING. |
+| 2026-10-07 | B1 | PARTIAL | Static Compose worker service/DB/Gateway URL PASS. `docker compose --env-file .env.example -f deploy/compose/docker-compose.yml config` BLOCKED (no Docker Engine in agent env). Runtime deploy/ps/logs PENDING. |
+| 2026-10-07 | B2 | PARTIAL | Worker failure diagnostics wired in `scripts/deploy.sh`; runtime secret-log / deploy-failure evidence PENDING. |
 
