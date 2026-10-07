@@ -720,26 +720,52 @@ ${DATABASE_URL}
      `runtime_config` shown as stored definition only — not
      Deployment effective / observed runtime. No Capacity Profile
      or Deployment coupling.
-   - **M6-C4 (current):** Deployments UI (`/deployments`,
+   - **M6-C4 (done):** Deployments UI (`/deployments`,
      `/deployments/:deploymentId`). List uses existing
      `GET /api/v1/deployments` with URL-backed filters/pagination.
      Detail uses existing `GET /api/v1/deployments/{id}` and may
      link referenced Model Version / Node without row-level N+1.
      MANAGED, non-retired deployments expose Start/Stop/Restart via
-     existing async lifecycle APIs; successful enqueue shows the
-     returned Operation identity/status and then re-reads Deployment.
-     Mutation buttons are mutually exclusive while an enqueue is in
-     flight; API 409/422 errors remain visible and do not discard the
-     last successful Deployment snapshot. IMPORTED/retired deployments
-     do not expose lifecycle actions. Do not add Remove, Retire,
-     create/edit, Preflight, Capacity Profile, Endpoint/Switch,
-     runtime observability, or undocumented deployment resources/health
-     calls in C4. In particular, docs mention
-     `/deployments/{id}/resources/latest` and `/health`, but current
-     Backend routes do not implement them; Frontend must not assume
-     those endpoints exist. Lifecycle stays Management API → Operation
-     queue → Worker; Frontend never calls Node Agent/Gateway directly.
-   - **M6-C5:** Endpoints
+     existing async lifecycle APIs; lifecycle POSTs send a unique
+     `Idempotency-Key`, successful enqueue shows Operation
+     identity/status, and the page then re-reads Deployment.
+   - **M6-C5 (current):** Endpoints / Routing UI
+     (`/endpoints`, `/endpoints/:endpointId`). List uses only
+     `GET /api/v1/endpoints` with URL-backed `q`, `api_type`,
+     `is_enabled`, `traffic_state`, and pagination; no per-row
+     detail/route/deployment N+1. Detail loads
+     `GET /api/v1/endpoints/{id}` and
+     `GET /api/v1/endpoints/{id}/routes` independently and links
+     ACTIVE/history Deployment ids to existing Deployment detail.
+     Endpoint detail may offer a switch workflow only when the
+     Endpoint is enabled and has an ACTIVE Source route. Target choices
+     come from existing Deployment list data without Model/Version
+     row-level N+1; Backend remains authoritative for API-type/model
+     compatibility and switch baseline validation.
+     `POST /api/v1/preflights` is preview/analysis only. Show the
+     overall result and every `gpu_results[]` row; never infer
+     feasibility from aggregate parent VRAM totals. Preserve the
+     explicit `preview_only` / `worker_must_revalidate` meaning.
+     HOT may be selected only from a current preview whose result is
+     `HOT_SWITCH_AVAILABLE`; COLD may be selected from
+     `HOT_SWITCH_AVAILABLE` or `COLD_SWITCH_ONLY`. Do not enqueue
+     when the preview is `RESOURCE_INSUFFICIENT`. Changing Target
+     invalidates the previous preview. A preview is not execution
+     approval: Worker performs fresh authoritative Preflight again.
+     Switch uses only executable `HOT` or `COLD`; never send
+     `AUTO` or `ALTERNATE_NODE`. Every
+     `POST /endpoints/{id}/switch` sends a unique
+     `Idempotency-Key`, displays returned Operation identity/status,
+     keeps the last successful Endpoint/Route snapshot on 409/422,
+     and mutually excludes refresh/preview/switch while switch enqueue
+     is in flight.
+     Do not expose Endpoint create/edit/enable-disable PATCH or direct
+     `POST /endpoints/{id}/route` in C5. Those synchronous mutations
+     do not currently have the same explicit idempotency contract as
+     Operation enqueue and are deferred rather than weakening the
+     project mutation-safety rule. Do not add Operation cancel/retry
+     (C6), runtime observability/Capacity Profile (C7), or direct
+     Node Agent/Gateway calls.
    - **M6-C6:** Operations
    - **M6-C7:** Observability / Clients
 
