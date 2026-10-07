@@ -214,13 +214,19 @@ M6-C4 (done): Deployments UI at `/deployments` and `/deployments/:deploymentId`.
 List/detail via existing Management Deployment APIs; MANAGED non-retired
 Start/Stop/Restart enqueue only. Lifecycle requests use `Idempotency-Key`; Frontend
 never calls Node Agent or Gateway directly.
-M6-C5 (current): Endpoints / Routing UI at `/endpoints` and
+M6-C5 (done): Endpoints / Routing UI at `/endpoints` and
 `/endpoints/:endpointId`. List/detail + Route history use existing Management APIs.
 Switch UI may run standalone Resource Preflight preview, renders GPU-by-GPU decisions,
 and enqueues explicit HOT/COLD only with `Idempotency-Key`. Preview is advisory;
-Worker revalidates fresh resources before execution. Endpoint CRUD/enable toggle and
-direct Route mutation are deferred in C5; no Operation cancel/retry or runtime
-observability/Capacity Profile coupling.
+Worker revalidates fresh resources before execution.
+M6-C6 (current): Operations UI at `/operations` and
+`/operations/:operationId`. Paginated list uses existing status/type/active filters
+without row-level detail N+1. Detail consumes the full Operation projection including
+ordered steps, links related Endpoint/Deployments, and exposes only existing Switch
+Safe Cancel / Explicit Retry mutations. Cancel follows the existing operation-scoped
+server-side idempotent contract; Retry creates a new Operation and uses
+`Idempotency-Key`. Arbitrary metadata/step detail JSON is not rendered wholesale.
+Runtime observability / Capacity Profile remain C7 scope.
 No Prometheus/Grafana server is introduced. A2 histogram scrapes are cumulative;
 A3 P50/P95 are classic bucket estimates over valid same-instance deltas only.
 IMPORTED runtime metrics / argv observation are deferred (profile returns
