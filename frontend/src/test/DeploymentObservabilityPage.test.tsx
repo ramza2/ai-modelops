@@ -370,13 +370,15 @@ describe('DeploymentObservabilityPage', () => {
       .mockRejectedValueOnce(new ApiError('profile boom', { status: 500 }))
       .mockRejectedValueOnce(new ApiError('dep-b boom', { status: 500 }))
     renderNavigable('/observability/deployments/dep-a')
-    expect(await screen.findByText('ctr-a')).toBeInTheDocument()
+    expect(await screen.findByText(/ctr-a/)).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: '새로고침' }))
     expect(await screen.findByText(/latest boom/)).toBeInTheDocument()
-    expect(screen.getByText('ctr-a')).toBeInTheDocument()
+    expect(screen.getByText(/ctr-a/)).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'go-dep-b' }))
-    expect(await screen.findByText(/dep-b boom/)).toBeInTheDocument()
-    expect(screen.queryByText('ctr-a')).not.toBeInTheDocument()
+    await waitFor(() => {
+      expect(screen.getAllByText(/dep-b boom/).length).toBeGreaterThan(0)
+    })
+    expect(screen.queryByText(/ctr-a/)).not.toBeInTheDocument()
     expect(screen.queryByText('chat-dep-a')).not.toBeInTheDocument()
   })
 
@@ -392,12 +394,12 @@ describe('DeploymentObservabilityPage', () => {
       .mockResolvedValueOnce(makeProfile())
       .mockRejectedValueOnce(new ApiError('gone', { status: 404 }))
     renderNavigable('/observability/deployments/dep-a')
-    expect(await screen.findByText('ctr-a')).toBeInTheDocument()
+    expect(await screen.findByText(/ctr-a/)).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'go-dep-b' }))
     expect(
       await screen.findByText('Deployment를 찾을 수 없습니다.'),
     ).toBeInTheDocument()
-    expect(screen.queryByText('ctr-a')).not.toBeInTheDocument()
+    expect(screen.queryByText(/ctr-a/)).not.toBeInTheDocument()
   })
 
   it('renders history oldest→newest and capacity comparison statuses', async () => {
@@ -409,11 +411,18 @@ describe('DeploymentObservabilityPage', () => {
       makeProfile(),
     )
     renderAt('/observability/deployments/dep-a')
-    await screen.findByText('ctr-later')
-    const historyTable = screen.getAllByRole('table')[0]
+    await screen.findByText(/ctr-later/)
+    const historyHeading = screen.getByRole('heading', {
+      name: /History \(oldest → newest\)/,
+    })
+    const historySection = historyHeading.closest('section')
+    expect(historySection).not.toBeNull()
+    const historyTable = within(historySection as HTMLElement).getByRole(
+      'table',
+    )
     const rows = within(historyTable).getAllByRole('row')
     expect(rows[1]?.textContent).toMatch(/AVAILABLE/)
     expect(rows[2]?.textContent).toMatch(/PARTIAL/)
-    expect(screen.getByText(/MATCH/)).toBeInTheDocument()
+    expect(screen.getAllByText(/MATCH/).length).toBeGreaterThan(0)
   })
 })

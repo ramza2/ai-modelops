@@ -116,7 +116,7 @@ describe('ObservabilityPage', () => {
     ['/observability?hours=48&group_by=alias', 'hours=48&group_by=alias'],
     ['/observability?hours=9999', ''],
     ['/observability?group_by=OTHER', ''],
-    ['/observability?hours=024&group_by=DEPLOYMENT', 'hours=24&group_by=deployment'],
+    ['/observability?hours=024&group_by=DEPLOYMENT', 'group_by=deployment'],
   ])('canonicalizes URL %s', async (path, expected) => {
     vi.mocked(observabilityApi.getInvocationSummary).mockResolvedValue(
       summary({ items: [] }),

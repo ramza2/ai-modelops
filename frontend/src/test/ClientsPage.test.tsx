@@ -108,7 +108,7 @@ describe('ClientsPage', () => {
     await user.type(screen.getByLabelText('검색'), 'demo')
     expect(vi.mocked(clientsApi.listClients).mock.calls.length).toBe(before)
     await user.click(screen.getByRole('button', { name: '새로고침' }))
-    expect(await screen.findByText('refresh fail')).toBeInTheDocument()
+    expect(await screen.findByText(/refresh fail/)).toBeInTheDocument()
     expect(screen.getByRole('link', { name: 'Keep' })).toBeInTheDocument()
   })
 

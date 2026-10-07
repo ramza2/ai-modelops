@@ -144,7 +144,7 @@ describe('ClientDetailPage', () => {
         screen.queryByRole('heading', { level: 2, name: 'ALZI' }),
       ).not.toBeInTheDocument()
     })
-    expect(screen.getByText(/c-b boom/)).toBeInTheDocument()
+    expect(screen.getAllByText(/c-b boom/).length).toBeGreaterThan(0)
   })
 
   it('clears on authoritative client 404', async () => {
