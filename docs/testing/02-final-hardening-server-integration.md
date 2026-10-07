@@ -144,7 +144,7 @@ Target: server with RTX A4000 x2.
 - [x] PASS — target snapshot returned utilization, temperature, and power for both GPUs
 - [ ] PENDING — Docker/GPU process mapping works for a managed runtime
 - [x] PASS — Backend reached Node Agent via registered `http://host.docker.internal:8100` using the configured shared token
-- [ ] PENDING — Node resources refresh persisted both GPUs successfully; Admin UI Nodes/GPUs visual consistency still pending
+- [ ] PENDING — Node resources refresh persisted both GPUs successfully; Admin Nodes list matches API, GPU detail visual consistency still pending
 
 Never combine two GPU VRAM values into a fictional single deployable GPU.
 
@@ -317,3 +317,4 @@ Append concise evidence as testing progresses.
 | 2026-10-07 | I / Admin same-origin ready | PASS | `curl -i http://192.168.10.104:18081/ready` returned HTTP 200 with database `ok`, confirming Frontend nginx -> Backend -> PostgreSQL readiness through the LAN Admin origin. |
 | 2026-10-07 | C / Backend→Node Agent | PASS | Registered target Node through Admin same-origin API using `http://host.docker.internal:8100`; Backend probe returned host identity/CPU/RAM/disk, proving container-to-host Node Agent connectivity/auth. First `/resources/refresh` persisted host snapshot plus both RTX A4000 devices/snapshots with stable UUIDs, 16376 MiB each and live utilization/temperature/power. |
 | 2026-10-07 | C / Node ONLINE | PASS | After resource refresh, registered target Node reports `ONLINE` with heartbeat persisted; both RTX A4000 GPU rows are present as `AVAILABLE` with correct UUIDs, indices 0/1, compute capability 8.6, and 16376 MiB VRAM each. |
+| 2026-10-07 | C / Admin Nodes UI | PASS | Browser verification on LAN Admin UI `/nodes`: `openlink-Precision-7920-Tower` rendered as ONLINE with production environment, heartbeat, CPU and RAM matching persisted API data. GPU detail visual check still pending on the Node detail page. |
