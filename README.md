@@ -92,7 +92,7 @@ Docker가 설치·기동된 상태에서 repository root에서:
 
 성공 시 Backend는 `http://localhost:<BACKEND_PORT>` (기본 8000)이다.
 
-### Admin UI (M6-C1 / M6-C2 / M6-C3 / M6-C4 / M6-C5)
+### Admin UI (M6-C1 / M6-C2 / M6-C3 / M6-C4 / M6-C5 / M6-C6)
 
 ```bash
 cd frontend
@@ -121,6 +121,8 @@ Routes:
 /deployments/:deploymentId
 /endpoints
 /endpoints/:endpointId
+/operations
+/operations/:operationId
 ```
 
 Nodes list는 `GET /api/v1/nodes`만 사용한다 (row별 resource N+1 없음).
@@ -143,6 +145,12 @@ preview와 HOT/COLD Switch enqueue를 제공한다. Preview aggregate VRAM 합�
 가능 여부를 추론하지 않고 GPU별 판정을 표시한다. Switch는 항상
 `Idempotency-Key`를 사용하며 Worker가 실행 직전 fresh Preflight를 다시 수행한다.
 Endpoint create/edit/enable-disable 및 직접 Route 변경은 C5에서 제공하지 않는다.
+
+C6 Operations는 Operation 목록/상세와 Step 진행 이력, Switch Safe Cancel,
+Explicit Retry를 제공한다. 목록은 status/operation_type/active 필터와 pagination을
+사용하고 detail 응답에 포함된 steps를 재사용한다. Cancel은 기존 Operation-scoped
+server-side idempotent 계약을 따르며, Retry는 새 Operation을 생성하므로
+`Idempotency-Key`를 사용한다. 임의 metadata/detail JSON은 UI에 그대로 덤프하지 않는다.
 
 ### Milestone 2 — Node Agent (host process)
 
@@ -280,6 +288,7 @@ Cloud Agent 환경(`.cursor/environment.json`)은 `scripts/cloud-install.sh`(ins
 - [x] M6-C2 Nodes / GPUs
 - [x] M6-C3 Models / Versions
 - [x] M6-C4 Deployments
-- [x] M6-C5 Endpoints / Routing — current
-- [ ] M6-C6+ Operations, Observability pages
+- [x] M6-C5 Endpoints / Routing
+- [ ] M6-C6 Operations — current
+- [ ] M6-C7 Observability / Clients
 
