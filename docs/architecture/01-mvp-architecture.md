@@ -205,11 +205,16 @@ N+1). Detail loads Node metadata + `resources/latest` independently; explicit
 `리소스 갱신` calls `POST .../resources/refresh` (Management API → Node Agent).
 AppShell `새로고침` re-reads persisted DB only. Free VRAM is shown per GPU and
 never aggregated across GPUs into a deployable capacity KPI.
-M6-C3 (current): Models / Versions Registry UI at `/models`, `/models/:modelId`,
+M6-C3 (done): Models / Versions Registry UI at `/models`, `/models/:modelId`,
 and `/model-versions/:versionId`. Read-only Model metadata, Version history,
 allowlisted Version `runtime_config` definition fields, and Artifact list.
 Version config is stored definition only — not Deployment effective override or
-observed runtime (Capacity Profile / Deployments deferred to C4).
+observed runtime.
+M6-C4 (current): Deployments UI at `/deployments` and `/deployments/:deploymentId`.
+List/detail via existing Management Deployment APIs; MANAGED non-retired
+Start/Stop/Restart enqueue only. No undocumented `/resources/latest` or `/health`,
+no Remove/Retire/create/edit/Preflight/Capacity Profile/Endpoint/Switch/observability
+in C4. Frontend never calls Node Agent or Gateway directly.
 No Prometheus/Grafana server is introduced. A2 histogram scrapes are cumulative;
 A3 P50/P95 are classic bucket estimates over valid same-instance deltas only.
 IMPORTED runtime metrics / argv observation are deferred (profile returns

@@ -122,11 +122,57 @@ export type NodeResourcesLatest = {
   gpus: NodeGpuResource[]
 }
 
+export type DeploymentGpuAssignment = {
+  gpu_device_id: string
+  device_order: number
+  expected_vram_mb: number | null
+  created_at: string
+}
+
+/** Full Deployment payload from Management API list/detail. */
+export type Deployment = {
+  id: string
+  name: string
+  model_version_id: string
+  node_id: string | null
+  deployment_type: string
+  desired_state: string
+  runtime_status: string
+  health_status: string
+  container_id: string | null
+  container_name: string | null
+  upstream_base_url: string | null
+  runtime_port: number | null
+  deployment_config: Record<string, unknown> | null
+  gpu_assignments: DeploymentGpuAssignment[]
+  last_started_at: string | null
+  last_stopped_at: string | null
+  last_health_at: string | null
+  status_reason: string | null
+  created_at: string
+  updated_at: string
+  retired_at: string | null
+}
+
+/** Dashboard subset; list responses are full Deployment objects. */
 export type DeploymentSummary = {
   id: string
   name: string
   runtime_status: string
   health_status: string
+}
+
+/** Lifecycle enqueue response (202 Accepted). */
+export type LifecycleOperation = {
+  id: string
+  operation_type: string
+  status: string
+  target_deployment_id: string | null
+  current_step: string | null
+  created_at: string
+  started_at: string | null
+  finished_at: string | null
+  error: { code: string | null; message: string | null } | null
 }
 
 export type EndpointSummary = {

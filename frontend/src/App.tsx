@@ -1,5 +1,7 @@
 import { Navigate, Route, Routes } from 'react-router-dom'
 import { DashboardPage } from './pages/DashboardPage'
+import { DeploymentDetailPage } from './pages/DeploymentDetailPage'
+import { DeploymentsPage } from './pages/DeploymentsPage'
 import { ModelDetailPage } from './pages/ModelDetailPage'
 import { ModelsPage } from './pages/ModelsPage'
 import { ModelVersionDetailPage } from './pages/ModelVersionDetailPage'
@@ -18,6 +20,11 @@ export default function App() {
       <Route
         path="/model-versions/:versionId"
         element={<ModelVersionDetailPage />}
+      />
+      <Route path="/deployments" element={<DeploymentsPage />} />
+      <Route
+        path="/deployments/:deploymentId"
+        element={<DeploymentDetailPage />}
       />
       <Route path="*" element={<Navigate to="/dashboard" replace />} />
     </Routes>
