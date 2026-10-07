@@ -47,6 +47,7 @@ services:
       - "traefik.http.routers.modelops-gateway.rule=Host(`${MODELOPS_GATEWAY_HOST}`)"
       - "traefik.http.routers.modelops-gateway.entrypoints=${TRAEFIK_ENTRYPOINT:-websecure}"
       - "traefik.http.routers.modelops-gateway.tls=true"
+      - "traefik.http.routers.modelops-gateway.tls.certresolver=${TRAEFIK_CERTRESOLVER}"
       - "traefik.http.services.modelops-gateway.loadbalancer.server.port=8080"
 
   frontend:
@@ -60,6 +61,7 @@ services:
       - "traefik.http.routers.modelops-admin.rule=Host(`${MODELOPS_ADMIN_HOST}`)"
       - "traefik.http.routers.modelops-admin.entrypoints=${TRAEFIK_ENTRYPOINT:-websecure}"
       - "traefik.http.routers.modelops-admin.tls=true"
+      - "traefik.http.routers.modelops-admin.tls.certresolver=${TRAEFIK_CERTRESOLVER}"
       - "traefik.http.services.modelops-admin.loadbalancer.server.port=80"
 
 networks:

@@ -74,8 +74,9 @@ modelops-model
 ## 4. Traefik Label (server overlay)
 
 실제 hostname은 서버 env 파일에서만 확정한다. Repository에는 placeholder만 둔다.
-Certificate resolver 이름은 서버 Traefik 관례가 저장소에 정의되어 있지 않으므로
-하드코딩하지 않는다 (`tls=true` + entrypoint만 설정).
+Certificate resolver 이름은 서버별 Traefik 관례를 따르며 저장소에 실제 이름을
+하드코딩하지 않는다. 서버 env의 `TRAEFIK_CERTRESOLVER`로 명시하고,
+`deploy-server.sh`는 normal up에서 이 값이 비어 있으면 실패한다.
 
 ### AI Gateway
 
@@ -88,6 +89,7 @@ labels:
   - "traefik.http.routers.modelops-gateway.rule=Host(`${MODELOPS_GATEWAY_HOST}`)"
   - "traefik.http.routers.modelops-gateway.entrypoints=${TRAEFIK_ENTRYPOINT:-websecure}"
   - "traefik.http.routers.modelops-gateway.tls=true"
+  - "traefik.http.routers.modelops-gateway.tls.certresolver=${TRAEFIK_CERTRESOLVER}"
   - "traefik.http.services.modelops-gateway.loadbalancer.server.port=8080"
 ```
 
@@ -100,6 +102,7 @@ labels:
   - "traefik.http.routers.modelops-admin.rule=Host(`${MODELOPS_ADMIN_HOST}`)"
   - "traefik.http.routers.modelops-admin.entrypoints=${TRAEFIK_ENTRYPOINT:-websecure}"
   - "traefik.http.routers.modelops-admin.tls=true"
+  - "traefik.http.routers.modelops-admin.tls.certresolver=${TRAEFIK_CERTRESOLVER}"
   - "traefik.http.services.modelops-admin.loadbalancer.server.port=80"
 ```
 

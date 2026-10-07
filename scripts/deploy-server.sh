@@ -27,6 +27,7 @@ Usage: ./scripts/deploy-server.sh --env-file <path> [--down|--help]
                       MODELOPS_ADMIN_HOST
                       MODELOPS_GATEWAY_HOST
                       MODELOPS_NODE_AGENT_TOKEN
+                      TRAEFIK_CERTRESOLVER
                     Same secret must also be set as NODE_AGENT_TOKEN on the
                     host Node Agent EnvironmentFile (separate namespace).
   --down            Stop server Control Plane compose services (volumes kept).
@@ -126,6 +127,7 @@ require_server_up_env() {
   require_env_value MODELOPS_ADMIN_HOST
   require_env_value MODELOPS_GATEWAY_HOST
   require_env_value MODELOPS_NODE_AGENT_TOKEN
+  require_env_value TRAEFIK_CERTRESOLVER
 
   environment="$(env_get MODELOPS_ENVIRONMENT)"
   if [[ "${environment}" == "local" ]]; then
