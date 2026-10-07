@@ -33,7 +33,7 @@ Do not mark a server check PASS from code inspection alone.
 
 | ID | Status | Finding | Exit condition |
 |---|---|---|---|
-| RB-01 | BLOCKED | Packaging complete (`worker/Dockerfile`, Compose `worker` with `postgres:5432` + `http://gateway:8080`, deploy diagnostics, deploy.sh full Control Plane running-gate). Exit condition still requires Compose config + Worker startup evidence; agent environment has no Docker Engine/Compose, so runtime verification remains BLOCKED. | Worker is packaged and included in the supported deployment path; compose config + Worker startup/test evidence PASS. |
+| RB-01 | PASS | Target-server Compose config and startup verified: PostgreSQL, Backend, Worker, Gateway, Frontend all running; Worker polling and runtime-metrics collector started without crash loop. | Worker is packaged and included in the supported deployment path; compose config + Worker startup/test evidence PASS. |
 | RB-02 | PENDING | Gate A component suites executed on this branch; A3 fresh-DB migrate/health/ready and remaining A4 architecture spot-checks still open. | Gate A passes. |
 | RB-03 | PENDING | RTX A4000 server integration has not yet been executed. | Gates C-G pass on target server. |
 | RB-04 | PASS | Artifact/static exit met: `deploy/compose/docker-compose.server.yml` + `./scripts/deploy-server.sh` provide Traefik-label Admin/Gateway ingress (Gateway port 8080), external network placeholder, no Backend public router by default, no managed-model routers, Linux `host-gateway` for Node Agent reachability. Traefik/TLS/server networking runtime remains Gate I PENDING. | A documented server deployment path/overlay provides placeholder-only Traefik labels/networks for Admin/Gateway (and Management API only if required), without exposing managed model containers directly. |
@@ -72,10 +72,10 @@ explicitly.
 
 ### A3. Migration / schema
 
-- [ ] PENDING — fresh PostgreSQL DB -> `alembic upgrade head`
+- [x] PASS — first target-server Control Plane startup ran `alembic upgrade head` successfully against the new PostgreSQL volume
 - [x] PASS — resulting Alembic head is exactly `e5f6a7b8c9d0` (`alembic heads`; no new migration added)
-- [ ] PENDING — `/health` returns 200
-- [ ] PENDING — `/ready` returns 200 with database ready
+- [x] PASS — target Backend `/health` returned 200 through loopback `127.0.0.1:18000`
+- [x] PASS — target Backend `/ready` returned 200 with database ready
 
 ### A4. Repository safety / scope
 
@@ -112,9 +112,9 @@ only to make this gate pass.
 - [x] PASS — Worker Node Agent URL/token are configurable (token/timeouts from env; Node URL from registered Node rows — no Docker/NVML on Worker)
 - [x] PASS — Worker Gateway control-plane URL resolves to Compose Gateway (not container localhost): `MODELOPS_GATEWAY_BASE_URL=http://gateway:8080`
 - [x] PASS — target Docker Compose v5.1.1 `config` succeeds with the server overlay; Backend resolves to loopback-only `127.0.0.1:8000`, Traefik public network/resolver are supplied by server env
-- [ ] BLOCKED — `./scripts/deploy.sh` starts the complete Control Plane (script now fails unless postgres/backend/worker/gateway/frontend are running after Backend health/ready; runtime evidence BLOCKED without Docker)
-- [ ] BLOCKED — `docker compose ps` shows expected services running
-- [ ] BLOCKED — Worker logs show polling without crash/restart loop
+- [x] PASS — target `deploy-server.sh` started the complete Control Plane and reached completion
+- [x] PASS — target `docker compose ps` shows postgres/backend/worker/gateway/frontend running
+- [x] PASS — Worker logs show job polling and runtime metrics collector startup without crash/restart loop
 - [ ] PENDING — Control Plane restart preserves PostgreSQL volume
 
 ### B2. Failure diagnostics
@@ -309,3 +309,4 @@ Append concise evidence as testing progresses.
 | 2026-10-07 | C / RB-05 | PASS | Target install: Node Agent venv created under `node-agent/.venv`; systemd unit enabled/running; installer `/health` and `/ready` OK. `/ready` reported Docker and NVML AVAILABLE. |
 | 2026-10-07 | C | PASS | `/internal/v1/resources`: exactly 2 × NVIDIA RTX A4000, 16376 MiB each, device indices 0/1, stable GPU UUIDs, per-GPU VRAM/utilization/temperature/power returned. Existing non-ModelOps vLLM GPU processes correctly remain unattributed (`container_id=null`, `deployment_id=null`). |
 | 2026-10-07 | C / RB-05 | PASS | `systemctl restart modelops-node-agent` succeeded; immediate curl raced startup once, journal showed clean shutdown/startup, subsequent `/ready` returned READY with Docker/NVML AVAILABLE. |
+| 2026-10-07 | A3 / B1 / RB-01 | PASS | First target server deploy completed: new PostgreSQL volume healthy; Backend migration/startup succeeded; `/health` + `/ready` OK via `127.0.0.1:18000`; postgres/backend/worker/gateway/frontend all running; Worker polling + runtime metrics collector started. |
