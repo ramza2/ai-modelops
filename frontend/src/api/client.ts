@@ -103,6 +103,7 @@ export type ApiFetchOptions = {
   query?: Record<string, string | number | boolean | null | undefined>
   signal?: AbortSignal
   body?: unknown
+  headers?: Record<string, string>
 }
 
 async function apiRequest<T>(
@@ -111,7 +112,10 @@ async function apiRequest<T>(
   options: ApiFetchOptions = {},
 ): Promise<T> {
   const url = buildApiUrl(API_BASE, path, options.query)
-  const headers: Record<string, string> = { Accept: 'application/json' }
+  const headers: Record<string, string> = {
+    Accept: 'application/json',
+    ...options.headers,
+  }
   let body: string | undefined
   if (options.body !== undefined) {
     headers['Content-Type'] = 'application/json'
