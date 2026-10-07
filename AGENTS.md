@@ -714,13 +714,31 @@ ${DATABASE_URL}
      `새로고침` = DB re-read; detail `리소스 갱신` =
      `POST .../resources/refresh` via Management API (Node Agent).
      Per-GPU VRAM only — never aggregate free VRAM across GPUs.
-   - **M6-C3 (current):** Models / Versions Registry UI
+   - **M6-C3 (done):** Models / Versions Registry UI
      (`/models`, `/models/:modelId`, `/model-versions/:versionId`).
      Read-only Model/Version/Artifact inspection. Version
      `runtime_config` shown as stored definition only — not
      Deployment effective / observed runtime. No Capacity Profile
      or Deployment coupling.
-   - **M6-C4:** Deployments
+   - **M6-C4 (current):** Deployments UI (`/deployments`,
+     `/deployments/:deploymentId`). List uses existing
+     `GET /api/v1/deployments` with URL-backed filters/pagination.
+     Detail uses existing `GET /api/v1/deployments/{id}` and may
+     link referenced Model Version / Node without row-level N+1.
+     MANAGED, non-retired deployments expose Start/Stop/Restart via
+     existing async lifecycle APIs; successful enqueue shows the
+     returned Operation identity/status and then re-reads Deployment.
+     Mutation buttons are mutually exclusive while an enqueue is in
+     flight; API 409/422 errors remain visible and do not discard the
+     last successful Deployment snapshot. IMPORTED/retired deployments
+     do not expose lifecycle actions. Do not add Remove, Retire,
+     create/edit, Preflight, Capacity Profile, Endpoint/Switch,
+     runtime observability, or undocumented deployment resources/health
+     calls in C4. In particular, docs mention
+     `/deployments/{id}/resources/latest` and `/health`, but current
+     Backend routes do not implement them; Frontend must not assume
+     those endpoints exist. Lifecycle stays Management API → Operation
+     queue → Worker; Frontend never calls Node Agent/Gateway directly.
    - **M6-C5:** Endpoints
    - **M6-C6:** Operations
    - **M6-C7:** Observability / Clients
