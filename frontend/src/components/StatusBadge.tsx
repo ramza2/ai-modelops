@@ -21,6 +21,11 @@ const LABELS: Record<string, string> = {
   MANUAL_INTERVENTION_REQUIRED: '수동 개입 필요',
   AVAILABLE: '사용 가능',
   UNAVAILABLE: '사용 불가',
+  HOT_SWITCH_AVAILABLE: 'Hot 가능',
+  COLD_SWITCH_ONLY: 'Cold만 가능',
+  RESOURCE_INSUFFICIENT: '자원 부족',
+  ACTIVE: '활성',
+  INACTIVE: '비활성',
 }
 
 const TONE: Record<string, string> = {
@@ -29,9 +34,12 @@ const TONE: Record<string, string> = {
   SERVING: 'ok',
   SUCCEEDED: 'ok',
   AVAILABLE: 'ok',
+  HOT_SWITCH_AVAILABLE: 'ok',
+  ACTIVE: 'ok',
   RUNNING: 'info',
   QUEUED: 'info',
   STARTING: 'info',
+  COLD_SWITCH_ONLY: 'warn',
   DRAINING: 'warn',
   DEGRADED: 'warn',
   ROLLING_BACK: 'warn',
@@ -40,11 +48,13 @@ const TONE: Record<string, string> = {
   FAILED: 'bad',
   UNHEALTHY: 'bad',
   UNAVAILABLE: 'bad',
+  RESOURCE_INSUFFICIENT: 'bad',
   STOPPED: 'muted',
   CANCELLED: 'muted',
   ROLLED_BACK: 'muted',
   CREATED: 'muted',
   UNKNOWN: 'muted',
+  INACTIVE: 'muted',
   MANUAL_INTERVENTION_REQUIRED: 'bad',
 }
 

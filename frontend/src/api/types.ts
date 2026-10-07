@@ -175,6 +175,96 @@ export type LifecycleOperation = {
   error: { code: string | null; message: string | null } | null
 }
 
+export type EndpointActiveRouteDeployment = {
+  id: string
+  name: string
+  runtime_status: string
+  health_status: string
+  upstream_base_url: string | null
+  retired_at: string | null
+}
+
+export type EndpointActiveRoute = {
+  route_id: string
+  deployment_id: string
+  rewrite_model_name: string | null
+  activated_at: string | null
+  deployment: EndpointActiveRouteDeployment | null
+}
+
+/** Full Endpoint Alias payload from Management API list/detail. */
+export type Endpoint = {
+  id: string
+  alias: string
+  display_name: string
+  api_type: string
+  description: string | null
+  is_enabled: boolean
+  traffic_state: string
+  created_at: string
+  updated_at: string
+  active_route?: EndpointActiveRoute | null
+}
+
+export type EndpointRoute = {
+  id: string
+  endpoint_alias_id: string
+  deployment_id: string
+  status: string
+  rewrite_model_name: string | null
+  operation_id: string | null
+  activated_at: string | null
+  deactivated_at: string | null
+  created_at: string
+}
+
+export type PreflightGpuResult = {
+  gpu_device_id: string
+  free_vram_mb: number | null
+  reclaimable_vram_mb: number | null
+  required_vram_mb: number | null
+  available_hot_vram_mb: number | null
+  available_after_reclaim_mb: number | null
+  effective_available_mb: number | null
+  result: string
+  safety_margin_mb: number | null
+}
+
+export type PreflightPreview = {
+  id: string
+  operation_id: string | null
+  endpoint_id: string | null
+  node_id: string
+  target_model_version_id: string
+  source_deployment_id: string | null
+  target_deployment_id: string | null
+  result: string
+  required_peak_vram_mb: number | null
+  available_hot_vram_mb: number | null
+  reclaimable_vram_mb: number | null
+  available_after_reclaim_mb: number | null
+  safety_margin_mb: number | null
+  gpu_results: PreflightGpuResult[]
+  evaluated_at: string | null
+  preview_only: boolean
+  worker_must_revalidate: boolean
+}
+
+export type SwitchOperation = {
+  id: string
+  operation_id: string
+  operation_type: string
+  switch_strategy: string | null
+  status: string
+  endpoint_alias_id: string | null
+  source_deployment_id: string | null
+  target_deployment_id: string | null
+  current_step: string | null
+  created_at: string
+  error: { code: string | null; message: string | null } | null
+}
+
+/** Dashboard subset. */
 export type EndpointSummary = {
   id: string
   alias: string

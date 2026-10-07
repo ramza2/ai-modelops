@@ -2,6 +2,8 @@ import { Navigate, Route, Routes } from 'react-router-dom'
 import { DashboardPage } from './pages/DashboardPage'
 import { DeploymentDetailPage } from './pages/DeploymentDetailPage'
 import { DeploymentsPage } from './pages/DeploymentsPage'
+import { EndpointDetailPage } from './pages/EndpointDetailPage'
+import { EndpointsPage } from './pages/EndpointsPage'
 import { ModelDetailPage } from './pages/ModelDetailPage'
 import { ModelsPage } from './pages/ModelsPage'
 import { ModelVersionDetailPage } from './pages/ModelVersionDetailPage'
@@ -25,6 +27,11 @@ export default function App() {
       <Route
         path="/deployments/:deploymentId"
         element={<DeploymentDetailPage />}
+      />
+      <Route path="/endpoints" element={<EndpointsPage />} />
+      <Route
+        path="/endpoints/:endpointId"
+        element={<EndpointDetailPage />}
       />
       <Route path="*" element={<Navigate to="/dashboard" replace />} />
     </Routes>

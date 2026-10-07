@@ -210,11 +210,17 @@ and `/model-versions/:versionId`. Read-only Model metadata, Version history,
 allowlisted Version `runtime_config` definition fields, and Artifact list.
 Version config is stored definition only — not Deployment effective override or
 observed runtime.
-M6-C4 (current): Deployments UI at `/deployments` and `/deployments/:deploymentId`.
+M6-C4 (done): Deployments UI at `/deployments` and `/deployments/:deploymentId`.
 List/detail via existing Management Deployment APIs; MANAGED non-retired
-Start/Stop/Restart enqueue only. No undocumented `/resources/latest` or `/health`,
-no Remove/Retire/create/edit/Preflight/Capacity Profile/Endpoint/Switch/observability
-in C4. Frontend never calls Node Agent or Gateway directly.
+Start/Stop/Restart enqueue only. Lifecycle requests use `Idempotency-Key`; Frontend
+never calls Node Agent or Gateway directly.
+M6-C5 (current): Endpoints / Routing UI at `/endpoints` and
+`/endpoints/:endpointId`. List/detail + Route history use existing Management APIs.
+Switch UI may run standalone Resource Preflight preview, renders GPU-by-GPU decisions,
+and enqueues explicit HOT/COLD only with `Idempotency-Key`. Preview is advisory;
+Worker revalidates fresh resources before execution. Endpoint CRUD/enable toggle and
+direct Route mutation are deferred in C5; no Operation cancel/retry or runtime
+observability/Capacity Profile coupling.
 No Prometheus/Grafana server is introduced. A2 histogram scrapes are cumulative;
 A3 P50/P95 are classic bucket estimates over valid same-instance deltas only.
 IMPORTED runtime metrics / argv observation are deferred (profile returns
