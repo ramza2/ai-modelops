@@ -1,7 +1,12 @@
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { MemoryRouter, Route, Routes } from 'react-router-dom'
+import {
+  MemoryRouter,
+  Route,
+  Routes,
+  useNavigate,
+} from 'react-router-dom'
 import { ApiError } from '../api/client'
 import type {
   OperationDetail,
@@ -77,9 +82,33 @@ function makeRetry(
   }
 }
 
+function NavTo({ to, label }: { to: string; label: string }) {
+  const navigate = useNavigate()
+  return (
+    <button type="button" onClick={() => navigate(to)}>
+      {label}
+    </button>
+  )
+}
+
 function renderDetail(path = '/operations/op-1') {
   return render(
     <MemoryRouter initialEntries={[path]}>
+      <Routes>
+        <Route
+          path="/operations/:operationId"
+          element={<OperationDetailPage />}
+        />
+        <Route path="/operations" element={<div>Operations list</div>} />
+      </Routes>
+    </MemoryRouter>,
+  )
+}
+
+function renderNavigable(path: string) {
+  return render(
+    <MemoryRouter initialEntries={[path]}>
+      <NavTo to="/operations/op-b" label="go-op-b" />
       <Routes>
         <Route
           path="/operations/:operationId"
@@ -286,7 +315,7 @@ describe('OperationDetailPage', () => {
     ).toBeInTheDocument()
   })
 
-  it('mutually excludes refresh and mutation buttons while busy', async () => {
+  it('disables refresh while Cancel mutation is in flight', async () => {
     const user = userEvent.setup()
     let resolveCancel!: (value: OperationDetail) => void
     vi.mocked(operationsApi.getOperation).mockResolvedValue(makeOp())
@@ -310,6 +339,148 @@ describe('OperationDetailPage', () => {
         screen.queryByRole('button', { name: 'Cancel 중…' }),
       ).not.toBeInTheDocument()
     })
+  })
+
+  it('disables Cancel/Retry and reason while refresh is in flight', async () => {
+    const user = userEvent.setup()
+    let resolveRefresh!: (value: OperationDetail) => void
+    vi.mocked(operationsApi.getOperation)
+      .mockResolvedValueOnce(makeOp())
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveRefresh = resolve
+          }),
+      )
+    renderDetail()
+    await screen.findByRole('button', { name: 'Safe Cancel' })
+    await user.type(screen.getByLabelText(/Cancel Reason/), 'hold')
+    await user.click(screen.getByRole('button', { name: '새로고침' }))
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '갱신 중…' })).toBeDisabled()
+    })
+    expect(screen.getByRole('button', { name: 'Safe Cancel' })).toBeDisabled()
+    expect(screen.getByLabelText(/Cancel Reason/)).toBeDisabled()
+    await user.click(screen.getByRole('button', { name: 'Safe Cancel' }))
+    expect(operationsApi.cancelOperation).not.toHaveBeenCalled()
+    resolveRefresh(makeOp())
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Safe Cancel' })).not.toBeDisabled()
+    })
+  })
+
+  it('disables Explicit Retry while refresh is in flight', async () => {
+    const user = userEvent.setup()
+    let resolveRefresh!: (value: OperationDetail) => void
+    vi.mocked(operationsApi.getOperation)
+      .mockResolvedValueOnce(
+        makeOp({
+          status: 'FAILED',
+          finished_at: '2026-10-07T02:00:00Z',
+        }),
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveRefresh = resolve
+          }),
+      )
+    renderDetail()
+    await screen.findByRole('button', { name: 'Explicit Retry' })
+    await user.click(screen.getByRole('button', { name: '새로고침' }))
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '갱신 중…' })).toBeDisabled()
+    })
+    expect(screen.getByRole('button', { name: 'Explicit Retry' })).toBeDisabled()
+    await user.click(screen.getByRole('button', { name: 'Explicit Retry' }))
+    expect(operationsApi.retryOperation).not.toHaveBeenCalled()
+    resolveRefresh(
+      makeOp({
+        status: 'FAILED',
+        finished_at: '2026-10-07T02:00:00Z',
+      }),
+    )
+    await waitFor(() => {
+      expect(
+        screen.getByRole('button', { name: 'Explicit Retry' }),
+      ).not.toBeDisabled()
+    })
+  })
+
+  it('clears prior Operation when navigating to a new ID that fails with 500', async () => {
+    const user = userEvent.setup()
+    vi.mocked(operationsApi.getOperation)
+      .mockResolvedValueOnce(makeOp({ id: 'op-a' }))
+      .mockRejectedValueOnce(new ApiError('op-b boom', { status: 500 }))
+    renderNavigable('/operations/op-a')
+    expect(
+      await screen.findByRole('heading', { level: 2, name: 'op-a' }),
+    ).toBeInTheDocument()
+    await user.type(screen.getByLabelText(/Cancel Reason/), 'from-a')
+    await user.click(screen.getByRole('button', { name: 'go-op-b' }))
+    expect(await screen.findByText('op-b boom')).toBeInTheDocument()
+    expect(
+      screen.queryByRole('heading', { level: 2, name: 'op-a' }),
+    ).not.toBeInTheDocument()
+    expect(
+      screen.queryByText(/기존 Operation 정보를 표시하고 있습니다/),
+    ).not.toBeInTheDocument()
+    expect(screen.queryByLabelText(/Cancel Reason/)).not.toBeInTheDocument()
+    expect(screen.queryByDisplayValue('from-a')).not.toBeInTheDocument()
+  })
+
+  it('clears prior Operation when navigating to a new ID that 404s', async () => {
+    const user = userEvent.setup()
+    vi.mocked(operationsApi.getOperation)
+      .mockResolvedValueOnce(makeOp({ id: 'op-a' }))
+      .mockRejectedValueOnce(new ApiError('gone', { status: 404 }))
+    renderNavigable('/operations/op-a')
+    expect(
+      await screen.findByRole('heading', { level: 2, name: 'op-a' }),
+    ).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'go-op-b' }))
+    expect(
+      await screen.findByText('Operation을 찾을 수 없습니다.'),
+    ).toBeInTheDocument()
+    expect(
+      screen.queryByRole('heading', { level: 2, name: 'op-a' }),
+    ).not.toBeInTheDocument()
+  })
+
+  it('ignores a late prior-ID response after navigating to a new Operation', async () => {
+    const user = userEvent.setup()
+    let resolveA!: (value: OperationDetail) => void
+    vi.mocked(operationsApi.getOperation).mockImplementation((id) => {
+      if (id === 'op-a') {
+        return new Promise((resolve) => {
+          resolveA = resolve
+        })
+      }
+      return Promise.resolve(
+        makeOp({
+          id: 'op-b',
+          status: 'FAILED',
+          finished_at: '2026-10-07T02:00:00Z',
+          current_step: null,
+          steps: [],
+        }),
+      )
+    })
+    renderNavigable('/operations/op-a')
+    await screen.findByText('Operation을 불러오는 중…')
+    await user.click(screen.getByRole('button', { name: 'go-op-b' }))
+    expect(
+      await screen.findByRole('heading', { level: 2, name: 'op-b' }),
+    ).toBeInTheDocument()
+    resolveA(makeOp({ id: 'op-a', status: 'RUNNING' }))
+    await waitFor(() => {
+      expect(
+        screen.getByRole('heading', { level: 2, name: 'op-b' }),
+      ).toBeInTheDocument()
+    })
+    expect(
+      screen.queryByRole('heading', { level: 2, name: 'op-a' }),
+    ).not.toBeInTheDocument()
   })
 
   it('clears stale detail on authoritative 404 refresh', async () => {

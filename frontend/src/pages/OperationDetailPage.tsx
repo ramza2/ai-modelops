@@ -67,10 +67,27 @@ export function OperationDetailPage() {
 
   const abortRef = useRef<AbortController | null>(null)
   const readGenRef = useRef(0)
+  /** Latest Operation ID the page is authorized to display / mutate. */
+  const activeIdRef = useRef(operationId)
+  activeIdRef.current = operationId
+
+  const resetIdentityState = useCallback(() => {
+    setOperation(null)
+    setRetryChild(null)
+    setActionError(null)
+    setCancelReason('')
+    setMutating(null)
+    setError(null)
+    setNotFound(false)
+    setLastUpdated(null)
+    setRefreshing(false)
+  }, [])
 
   const load = useCallback(
     async (mode: 'initial' | 'refresh') => {
-      if (!operationId) {
+      const requestId = operationId
+      if (!requestId) {
+        resetIdentityState()
         setNotFound(true)
         setLoading(false)
         setError('Operation을 찾을 수 없습니다.')
@@ -83,6 +100,8 @@ export function OperationDetailPage() {
       const gen = ++readGenRef.current
 
       if (mode === 'initial') {
+        // New identity (or first mount): never keep prior Operation as stale.
+        resetIdentityState()
         setLoading(true)
       } else {
         setRefreshing(true)
@@ -90,14 +109,21 @@ export function OperationDetailPage() {
       setError(null)
       setNotFound(false)
 
+      const isCurrent = () =>
+        !controller.signal.aborted &&
+        gen === readGenRef.current &&
+        activeIdRef.current === requestId
+
       try {
-        const data = await getOperation(operationId, controller.signal)
-        if (controller.signal.aborted || gen !== readGenRef.current) return
+        const data = await getOperation(requestId, controller.signal)
+        if (!isCurrent()) return
+        // Reject mismatched payload for the requested identity.
+        if (data.id !== requestId) return
         setOperation(data)
         setNotFound(false)
         setLastUpdated(new Date())
       } catch (err) {
-        if (controller.signal.aborted || gen !== readGenRef.current) return
+        if (!isCurrent()) return
         if (err instanceof DOMException && err.name === 'AbortError') return
         if (err instanceof ApiError && err.status === 404) {
           setOperation(null)
@@ -114,13 +140,13 @@ export function OperationDetailPage() {
               : 'Operation을 불러오지 못했습니다.'
         setError(message)
       } finally {
-        if (!controller.signal.aborted && gen === readGenRef.current) {
+        if (isCurrent()) {
           setLoading(false)
           setRefreshing(false)
         }
       }
     },
-    [operationId],
+    [operationId, resetIdentityState],
   )
 
   useEffect(() => {
@@ -131,15 +157,25 @@ export function OperationDetailPage() {
   }, [load])
 
   const runCancel = async () => {
-    if (!operationId || mutating || !operation || !canSafeCancel(operation)) {
+    if (
+      !operationId ||
+      mutating ||
+      refreshing ||
+      !operation ||
+      operation.id !== operationId ||
+      !canSafeCancel(operation)
+    ) {
       return
     }
+    const requestId = operationId
     setMutating('cancel')
     setActionError(null)
     try {
-      await cancelOperation(operationId, cancelReason)
+      await cancelOperation(requestId, cancelReason)
+      if (activeIdRef.current !== requestId) return
       await load('refresh')
     } catch (err) {
+      if (activeIdRef.current !== requestId) return
       if (err instanceof DOMException && err.name === 'AbortError') return
       const message =
         err instanceof ApiError
@@ -149,21 +185,33 @@ export function OperationDetailPage() {
             : 'Cancel 요청에 실패했습니다.'
       setActionError(message)
     } finally {
-      setMutating(null)
+      if (activeIdRef.current === requestId) {
+        setMutating(null)
+      }
     }
   }
 
   const runRetry = async () => {
-    if (!operationId || mutating || !operation || !canRetryGate(operation)) {
+    if (
+      !operationId ||
+      mutating ||
+      refreshing ||
+      !operation ||
+      operation.id !== operationId ||
+      !canRetryGate(operation)
+    ) {
       return
     }
+    const requestId = operationId
     setMutating('retry')
     setActionError(null)
     try {
-      const child = await retryOperation(operationId)
+      const child = await retryOperation(requestId)
+      if (activeIdRef.current !== requestId) return
       setRetryChild(child)
       await load('refresh')
     } catch (err) {
+      if (activeIdRef.current !== requestId) return
       if (err instanceof DOMException && err.name === 'AbortError') return
       const message =
         err instanceof ApiError
@@ -173,9 +221,15 @@ export function OperationDetailPage() {
             : 'Retry 요청에 실패했습니다.'
       setActionError(message)
     } finally {
-      setMutating(null)
+      if (activeIdRef.current === requestId) {
+        setMutating(null)
+      }
     }
   }
+
+  // Only render Operation data that matches the current URL identity.
+  const displayOperation =
+    operation && operation.id === operationId ? operation : null
 
   if (notFound) {
     return (
@@ -197,46 +251,48 @@ export function OperationDetailPage() {
     )
   }
 
-  const busy = mutating !== null
-  const showCancel = operation ? canSafeCancel(operation) : false
-  const showRetry = operation ? canRetryGate(operation) : false
-  const steps = operation?.steps ?? []
+  const busy = mutating !== null || refreshing
+  const showCancel = displayOperation
+    ? canSafeCancel(displayOperation)
+    : false
+  const showRetry = displayOperation ? canRetryGate(displayOperation) : false
+  const steps = displayOperation?.steps ?? []
 
   return (
     <AppShell
       title={
-        operation
-          ? `Operation ${shortId(operation.id, 12)}`
+        displayOperation
+          ? `Operation ${shortId(displayOperation.id, 12)}`
           : 'Operation 상세'
       }
       description="Operation 진행 상태와 Step 이력입니다. Switch Safe Cancel / Explicit Retry만 제공하며, metadata·step detail JSON은 표시하지 않습니다."
       onRefresh={() => void load('refresh')}
       refreshing={refreshing}
       lastUpdated={lastUpdated}
-      refreshDisabled={busy}
+      refreshDisabled={mutating !== null}
     >
       <Link className="back-link" to="/operations">
         ← Operations
       </Link>
 
-      {loading && !operation ? (
+      {loading && !displayOperation ? (
         <LoadingBlock label="Operation을 불러오는 중…" />
       ) : null}
 
       {error && !notFound ? (
         <SectionError
           title={
-            operation ? 'Operation 새로고침 실패' : 'Operation 오류'
+            displayOperation ? 'Operation 새로고침 실패' : 'Operation 오류'
           }
           message={
-            operation
+            displayOperation
               ? `기존 Operation 정보를 표시하고 있습니다. 새로고침 실패: ${error}`
               : error
           }
         />
       ) : null}
 
-      {operation ? (
+      {displayOperation ? (
         <>
           <section
             className="detail-panel"
@@ -244,60 +300,64 @@ export function OperationDetailPage() {
           >
             <div className="detail-panel__header">
               <h2 id="operation-identity-heading" className="mono">
-                {operation.id}
+                {displayOperation.id}
               </h2>
-              <StatusBadge status={operation.status} />
+              <StatusBadge status={displayOperation.status} />
             </div>
             <dl className="meta-grid">
               <div>
                 <dt>Type</dt>
-                <dd>{operation.operation_type || '—'}</dd>
+                <dd>{displayOperation.operation_type || '—'}</dd>
               </div>
               <div>
                 <dt>Strategy</dt>
-                <dd>{operation.switch_strategy || '—'}</dd>
+                <dd>{displayOperation.switch_strategy || '—'}</dd>
               </div>
               <div>
                 <dt>Current Step</dt>
-                <dd className="mono">{operation.current_step || '—'}</dd>
+                <dd className="mono">
+                  {displayOperation.current_step || '—'}
+                </dd>
               </div>
               <div>
                 <dt>Requested By</dt>
-                <dd>{operation.requested_by || '—'}</dd>
+                <dd>{displayOperation.requested_by || '—'}</dd>
               </div>
               <div>
                 <dt>Request Reason</dt>
-                <dd>{operation.request_reason || '—'}</dd>
+                <dd>{displayOperation.request_reason || '—'}</dd>
               </div>
               <div>
                 <dt>Cancel Requested</dt>
-                <dd>{formatApiDateTime(operation.cancel_requested_at)}</dd>
+                <dd>
+                  {formatApiDateTime(displayOperation.cancel_requested_at)}
+                </dd>
               </div>
               <div>
                 <dt>Error</dt>
-                <dd>{formatError(operation.error)}</dd>
+                <dd>{formatError(displayOperation.error)}</dd>
               </div>
               <div>
                 <dt>Created</dt>
-                <dd>{formatApiDateTime(operation.created_at)}</dd>
+                <dd>{formatApiDateTime(displayOperation.created_at)}</dd>
               </div>
               <div>
                 <dt>Started</dt>
-                <dd>{formatApiDateTime(operation.started_at)}</dd>
+                <dd>{formatApiDateTime(displayOperation.started_at)}</dd>
               </div>
               <div>
                 <dt>Finished</dt>
-                <dd>{formatApiDateTime(operation.finished_at)}</dd>
+                <dd>{formatApiDateTime(displayOperation.finished_at)}</dd>
               </div>
               <div>
                 <dt>Endpoint</dt>
                 <dd>
-                  {operation.endpoint_alias_id ? (
+                  {displayOperation.endpoint_alias_id ? (
                     <Link
                       className="table-link mono"
-                      to={`/endpoints/${operation.endpoint_alias_id}`}
+                      to={`/endpoints/${displayOperation.endpoint_alias_id}`}
                     >
-                      {shortId(operation.endpoint_alias_id, 12)}
+                      {shortId(displayOperation.endpoint_alias_id, 12)}
                     </Link>
                   ) : (
                     '—'
@@ -307,12 +367,12 @@ export function OperationDetailPage() {
               <div>
                 <dt>Source Deployment</dt>
                 <dd>
-                  {operation.source_deployment_id ? (
+                  {displayOperation.source_deployment_id ? (
                     <Link
                       className="table-link mono"
-                      to={`/deployments/${operation.source_deployment_id}`}
+                      to={`/deployments/${displayOperation.source_deployment_id}`}
                     >
-                      {shortId(operation.source_deployment_id, 12)}
+                      {shortId(displayOperation.source_deployment_id, 12)}
                     </Link>
                   ) : (
                     '—'
@@ -322,12 +382,12 @@ export function OperationDetailPage() {
               <div>
                 <dt>Target Deployment</dt>
                 <dd>
-                  {operation.target_deployment_id ? (
+                  {displayOperation.target_deployment_id ? (
                     <Link
                       className="table-link mono"
-                      to={`/deployments/${operation.target_deployment_id}`}
+                      to={`/deployments/${displayOperation.target_deployment_id}`}
                     >
-                      {shortId(operation.target_deployment_id, 12)}
+                      {shortId(displayOperation.target_deployment_id, 12)}
                     </Link>
                   ) : (
                     '—'
@@ -337,12 +397,12 @@ export function OperationDetailPage() {
               <div>
                 <dt>Retry Of</dt>
                 <dd>
-                  {operation.retry_of_operation_id ? (
+                  {displayOperation.retry_of_operation_id ? (
                     <Link
                       className="table-link mono"
-                      to={`/operations/${operation.retry_of_operation_id}`}
+                      to={`/operations/${displayOperation.retry_of_operation_id}`}
                     >
-                      {shortId(operation.retry_of_operation_id, 12)}
+                      {shortId(displayOperation.retry_of_operation_id, 12)}
                     </Link>
                   ) : (
                     '—'
@@ -444,7 +504,7 @@ export function OperationDetailPage() {
                   <div>
                     <dt>Retry Of</dt>
                     <dd className="mono">
-                      {retryChild.retry_of_operation_id || operation.id}
+                      {retryChild.retry_of_operation_id || displayOperation.id}
                     </dd>
                   </div>
                 </dl>
