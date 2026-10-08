@@ -53,6 +53,62 @@ export type Paginated<T> = {
   total: number
 }
 
+/** M7-A Hugging Face catalog candidate (read-only; not a registered Model). */
+export type HfCatalogModel = {
+  repository_id: string
+  revision: string | null
+  pipeline_tag: string | null
+  model_type: string | null
+  architectures: string[]
+  tags: string[]
+  quantization_hint: string | null
+  dtype_hint: string | null
+  gated: boolean | null
+  private: boolean | null
+  downloads: number | null
+  likes: number | null
+  estimated_download_size_bytes: number | null
+  estimated_required_vram_mb: number | null
+  resource_fit?: ResourceFitSummary | null
+}
+
+export type ResourceFitGpuResult = {
+  gpu_device_id: string
+  gpu_index: number | null
+  name: string | null
+  vram_total_mb: number
+  vram_free_mb: number
+  safety_margin_mb: number
+  estimated_required_vram_mb: number | null
+  result: string
+  reasons: string[]
+}
+
+export type ResourceFitSummary = {
+  result: string
+  reasons?: string[]
+  warnings?: string[]
+}
+
+export type ResourceFitAnalysis = {
+  repository_id: string
+  revision: string | null
+  node_id: string
+  result: string
+  estimated_required_vram_mb: number | null
+  estimated_download_size_bytes: number | null
+  quantization_hint: string | null
+  dtype_hint: string | null
+  disk_free_mb: number | null
+  disk_ok: boolean | null
+  tensor_parallel: number
+  gpu_results: ResourceFitGpuResult[]
+  assumptions: string[]
+  warnings: string[]
+  reasons: string[]
+  advisory_only: boolean
+}
+
 export type NodeSummary = {
   id: string
   name: string

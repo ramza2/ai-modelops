@@ -801,32 +801,21 @@ ${DATABASE_URL}
      may keep the last successful section snapshot with a warning;
      authoritative primary 404 clears that identity.
 
-### Final Hardening / Server Integration — current
+### Final Hardening / Server Integration
 
-M1 through M6-C7 feature development is frozen. The current release-hardening
-source of truth is `docs/testing/02-final-hardening-server-integration.md`.
+M1 through M6-C7 feature development was frozen for release hardening.
+Source of truth for that phase: `docs/testing/02-final-hardening-server-integration.md`.
 
-Rules for this phase:
+### Milestone 7 — Model Onboarding — current
 
-- Do not add product features unless a release blocker proves a design gap that
-  cannot be fixed safely otherwise.
-- Limit changes to regression fixes, deployability, integration, security,
-  operability, test coverage, and documentation proven by verification.
-- Treat target-server evidence separately from code inspection. Never mark an
-  RTX A4000/Docker/NVML/model-runtime check PASS without running it there.
-- The supported Control Plane deployment must include PostgreSQL, Backend,
-  Worker, Gateway, and Frontend. Node Agent remains a host service.
-- A Worker running in Compose must use Compose-reachable PostgreSQL/Gateway
-  addresses; container localhost must not be used for another service.
-- Preserve the architecture boundary: only Node Agent touches Docker/NVML.
-- Preserve per-GPU capacity semantics; never pool A4000 VRAM.
-- Existing direct-model deployment material remains rollback evidence until
-  server acceptance completes.
-- Any defect found during a gate is recorded as FAIL/BLOCKED with concrete
-  evidence before fixing it; rerun the affected gate after the fix.
-- Keep the hardening PR Draft until repository regression gates pass. Server-only
-  gates may remain explicitly PENDING/BLOCKED until executed on the target host.
-
+- **M7-A (current):** Read-only Hugging Face Model Catalog + advisory Node
+  resource-fit (`GET /api/v1/catalog/huggingface/models`,
+  `POST /api/v1/catalog/huggingface/resource-fit`, Admin `/models/catalog`).
+  Uses official `huggingface_hub` (no HTML scraping). Per-GPU VRAM is never
+  pooled. FIT/TIGHT/INSUFFICIENT/UNKNOWN are advisory only. No Download/Deploy
+  lifecycle, no DB persistence of Hub credentials/catalog rows, no migration
+  unless strictly required. Contract: `docs/api/05-hf-catalog.md`.
+- **M7-B (future):** Download / register / deploy affordances from catalog.
 
 한 번에 모든 기능을 스캐폴딩만 하는 것보다 각 milestone을 end-to-end로 동작하게 완성하는 것을 우선한다.
 

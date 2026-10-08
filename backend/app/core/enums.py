@@ -152,6 +152,15 @@ class PreflightResult(StrEnum):
     RESOURCE_INSUFFICIENT = "RESOURCE_INSUFFICIENT"
 
 
+class ResourceFitResult(StrEnum):
+    """Advisory onboarding fit (M7-A). Not a Switch preflight result."""
+
+    FIT = "FIT"
+    TIGHT = "TIGHT"
+    INSUFFICIENT = "INSUFFICIENT"
+    UNKNOWN = "UNKNOWN"
+
+
 class HealthCheckType(StrEnum):
     HTTP = "HTTP"
     INFERENCE = "INFERENCE"

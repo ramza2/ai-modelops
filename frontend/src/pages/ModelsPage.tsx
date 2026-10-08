@@ -259,6 +259,15 @@ export function ModelsPage() {
       refreshing={refreshing}
       lastUpdated={lastUpdated}
     >
+      <div className="toolbar toolbar--wrap" style={{ marginBottom: '0.75rem' }}>
+        <Link className="btn btn--primary" to="/models/catalog">
+          Add Model / Catalog
+        </Link>
+        <span className="secondary-text">
+          Hugging Face 검색 · Node 자원 적합도(자문) · Download/Deploy는 다음 단계
+        </span>
+      </div>
+
       <form className="toolbar toolbar--wrap" onSubmit={onSubmitSearch}>
         <label className="toolbar__field" htmlFor="model-search-q">
           <span>검색</span>

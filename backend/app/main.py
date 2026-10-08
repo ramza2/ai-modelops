@@ -14,6 +14,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from app.api.catalog import router as catalog_router
 from app.api.deployments import router as deployments_router
 from app.api.endpoints import router as endpoints_router
 from app.api.clients import router as clients_router
@@ -72,6 +73,7 @@ def create_app() -> FastAPI:
     app.include_router(health_router)
     app.include_router(nodes_router)
     app.include_router(models_router)
+    app.include_router(catalog_router)
     app.include_router(deployments_router)
     app.include_router(operations_router)
     app.include_router(endpoints_router)
