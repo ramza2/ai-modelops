@@ -17,6 +17,9 @@ from app.runtime_adapters.base import (
 )
 
 _SCHEDULING_POLICY_ALLOWED = frozenset({"fcfs", "priority"})
+# Explicit runner is needed for pooling/embedding runtimes such as BGE-M3.
+# Keep this allowlist narrow; normal generation runtimes omit the flag.
+_RUNNER_ALLOWED = frozenset({"generate", "pooling"})
 
 
 class VLLMAdapter:
@@ -49,13 +52,16 @@ class VLLMAdapter:
         scheduling_policy = _merged_choice(
             cfg, "scheduling_policy", allowed=_SCHEDULING_POLICY_ALLOWED
         )
+        runner = _merged_choice(cfg, "runner", allowed=_RUNNER_ALLOWED)
 
-        # argv list only — never a shell string.
+        # The official vLLM OpenAI image already has ENTRYPOINT ["vllm"].
+        # Docker appends this argv as the command, so emit the vLLM CLI
+        # subcommand directly. Supplying "python -m ..." here would become
+        # "vllm python -m ..." and fail argument parsing.
+        #
+        # Model is positional for vLLM >= 0.24 ("--model" is deprecated).
         command: list[str] = [
-            "python",
-            "-m",
-            "vllm.entrypoints.openai.api_server",
-            "--model",
+            "serve",
             model_path,
             "--served-model-name",
             served,
@@ -78,6 +84,8 @@ class VLLMAdapter:
             command.extend(["--max-num-seqs", str(max_num_seqs)])
         if scheduling_policy is not None:
             command.extend(["--scheduling-policy", scheduling_policy])
+        if runner is not None:
+            command.extend(["--runner", runner])
 
         env = {
             "MODEL_OPS_SERVED_MODEL_NAME": served,

@@ -801,6 +801,22 @@ ${DATABASE_URL}
      may keep the last successful section snapshot with a warning;
      authoritative primary 404 clears that identity.
 
+### Final Hardening / Server Integration
+
+M1 through M6-C7 feature development was frozen for release hardening.
+Source of truth for that phase: `docs/testing/02-final-hardening-server-integration.md`.
+
+### Milestone 7 — Model Onboarding — current
+
+- **M7-A (current):** Read-only Hugging Face Model Catalog + advisory Node
+  resource-fit (`GET /api/v1/catalog/huggingface/models`,
+  `POST /api/v1/catalog/huggingface/resource-fit`, Admin `/models/catalog`).
+  Uses official `huggingface_hub` (no HTML scraping). Per-GPU VRAM is never
+  pooled. FIT/TIGHT/INSUFFICIENT/UNKNOWN are advisory only. No Download/Deploy
+  lifecycle, no DB persistence of Hub credentials/catalog rows, no migration
+  unless strictly required. Contract: `docs/api/05-hf-catalog.md`.
+- **M7-B (future):** Download / register / deploy affordances from catalog.
+
 한 번에 모든 기능을 스캐폴딩만 하는 것보다 각 milestone을 end-to-end로 동작하게 완성하는 것을 우선한다.
 
 ---

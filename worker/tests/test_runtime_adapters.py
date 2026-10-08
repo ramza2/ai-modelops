@@ -29,9 +29,11 @@ def test_vllm_create_spec_argv_and_gpus() -> None:
     )
     assert isinstance(spec.command, list)
     assert all(isinstance(part, str) for part in spec.command)
-    assert "python" in spec.command
-    assert "-m" in spec.command
-    assert "vllm.entrypoints.openai.api_server" in spec.command
+    assert spec.command[:2] == ["serve", "/models/current"]
+    assert "python" not in spec.command
+    assert "-m" not in spec.command
+    assert "vllm.entrypoints.openai.api_server" not in spec.command
+    assert "--model" not in spec.command
     assert "--served-model-name" in spec.command
     assert "example-model" in spec.command
     assert "--port" in spec.command
@@ -47,6 +49,22 @@ def test_vllm_create_spec_argv_and_gpus() -> None:
     assert payload["command"] == spec.command
     # No shell string join for execution.
     assert not any(";" in part or "&&" in part for part in spec.command)
+
+
+def test_vllm_official_image_entrypoint_contract() -> None:
+    spec = VLLMAdapter().build_create_spec(
+        RuntimeBuildInput(
+            runtime_image="vllm/vllm-openai:v0.24.0",
+            served_model_name="BAAI/bge-m3",
+            model_path="/srv/models/bge-m3",
+            runtime_config={"runner": "pooling"},
+        )
+    )
+    assert spec.command[0] == "serve"
+    assert spec.command[1] == "/models/current"
+    assert _flag_value(spec.command, "--runner") == "pooling"
+    assert "python" not in spec.command
+    assert "--model" not in spec.command
 
 
 def test_vllm_requires_model_path() -> None:
@@ -338,6 +356,47 @@ def test_vllm_scheduling_policy_invalid_rejected(value) -> None:
                 deployment_config={"scheduling_policy": value},
             )
         )
+
+
+
+def test_vllm_runner_pooling_runtime_fallback() -> None:
+    spec = VLLMAdapter().build_create_spec(
+        RuntimeBuildInput(
+            runtime_image="vllm/vllm-openai:v0.24.0",
+            served_model_name="BAAI/bge-m3",
+            model_path="/srv/models/bge-m3",
+            runtime_config={"runner": "pooling"},
+        )
+    )
+    assert _flag_value(spec.command, "--runner") == "pooling"
+    assert spec.command.count("--runner") == 1
+
+
+def test_vllm_runner_deployment_override_wins() -> None:
+    spec = VLLMAdapter().build_create_spec(
+        RuntimeBuildInput(
+            runtime_image="vllm/vllm-openai:v0.24.0",
+            served_model_name="m",
+            model_path="/srv/models/m",
+            runtime_config={"runner": "generate"},
+            deployment_config={"runner": "pooling"},
+        )
+    )
+    assert _flag_value(spec.command, "--runner") == "pooling"
+
+
+@pytest.mark.parametrize("value", [None, "", "auto", "draft", 1, True, [], {}])
+def test_vllm_runner_invalid_rejected(value) -> None:
+    with pytest.raises(RuntimeAdapterError, match="runner"):
+        VLLMAdapter().build_create_spec(
+            RuntimeBuildInput(
+                runtime_image="vllm/vllm-openai:v0.24.0",
+                served_model_name="m",
+                model_path="/srv/models/m",
+                deployment_config={"runner": value},
+            )
+        )
+
 
 
 def test_generic_openai_unchanged_by_scheduling_policy() -> None:

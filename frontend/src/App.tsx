@@ -7,6 +7,7 @@ import { DeploymentObservabilityPage } from './pages/DeploymentObservabilityPage
 import { DeploymentsPage } from './pages/DeploymentsPage'
 import { EndpointDetailPage } from './pages/EndpointDetailPage'
 import { EndpointsPage } from './pages/EndpointsPage'
+import { ModelCatalogPage } from './pages/ModelCatalogPage'
 import { ModelDetailPage } from './pages/ModelDetailPage'
 import { ModelsPage } from './pages/ModelsPage'
 import { ModelVersionDetailPage } from './pages/ModelVersionDetailPage'
@@ -24,6 +25,7 @@ export default function App() {
       <Route path="/nodes" element={<NodesPage />} />
       <Route path="/nodes/:nodeId" element={<NodeDetailPage />} />
       <Route path="/models" element={<ModelsPage />} />
+      <Route path="/models/catalog" element={<ModelCatalogPage />} />
       <Route path="/models/:modelId" element={<ModelDetailPage />} />
       <Route
         path="/model-versions/:versionId"

@@ -43,6 +43,11 @@ class Settings(BaseSettings):
     node_agent_timeout_seconds: float = 5.0
     default_gpu_safety_margin_mb: int = 1024
 
+    # M7-A: Hugging Face Hub catalog (read-only browsing; no credential persistence).
+    hf_hub_timeout_seconds: float = 10.0
+    # Optional Hub token from env for gated metadata; never stored in DB.
+    hf_hub_token: str = ""
+
     @property
     def sync_database_url(self) -> str:
         """Return a synchronous SQLAlchemy URL for Alembic migrations."""

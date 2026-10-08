@@ -36,6 +36,9 @@ const LABELS: Record<string, string> = {
   UNSET: '미설정',
   INVALID_REQUESTED: '요청 무효',
   INVALID_OBSERVED: '관측 무효',
+  FIT: '적합',
+  TIGHT: '빠듯',
+  INSUFFICIENT: '부족',
 }
 
 const TONE: Record<string, string> = {
@@ -47,6 +50,7 @@ const TONE: Record<string, string> = {
   HOT_SWITCH_AVAILABLE: 'ok',
   ACTIVE: 'ok',
   MATCH: 'ok',
+  FIT: 'ok',
   RUNNING: 'info',
   QUEUED: 'info',
   PENDING: 'info',
@@ -60,6 +64,7 @@ const TONE: Record<string, string> = {
   MISMATCH: 'warn',
   REQUESTED_NOT_OBSERVED: 'warn',
   OBSERVED_ONLY: 'warn',
+  TIGHT: 'warn',
   OFFLINE: 'bad',
   FAILED: 'bad',
   UNHEALTHY: 'bad',
@@ -67,6 +72,7 @@ const TONE: Record<string, string> = {
   RESOURCE_INSUFFICIENT: 'bad',
   INVALID_REQUESTED: 'bad',
   INVALID_OBSERVED: 'bad',
+  INSUFFICIENT: 'bad',
   STOPPED: 'muted',
   CANCELLED: 'muted',
   ROLLED_BACK: 'muted',

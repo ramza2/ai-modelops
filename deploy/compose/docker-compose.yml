@@ -1,7 +1,11 @@
-# Local development Control Plane compose (Milestone 1–4A).
+# Local development Control Plane compose.
 # Values come from the repo-root .env (via `./scripts/deploy.sh` or
 # `docker compose --env-file .env ...`). No secrets are committed here; only
 # safe local-dev defaults are used as fallbacks.
+#
+# Long-running Control Plane services: postgres, backend, worker, gateway,
+# frontend. Node Agent remains a host process (Docker/NVML) and is not
+# packaged here.
 
 services:
   postgres:
@@ -70,6 +74,54 @@ services:
     networks:
       - modelops-control
       - modelops-model
+
+  worker:
+    build:
+      context: ../../worker
+      dockerfile: Dockerfile
+    environment:
+      # Compose-reachable PostgreSQL / Gateway only — never container localhost.
+      MODELOPS_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-modelops}:${POSTGRES_PASSWORD:-modelops}@postgres:5432/${POSTGRES_DB:-modelops}
+      MODELOPS_GATEWAY_BASE_URL: http://gateway:8080
+      MODELOPS_WORKER_ID: ${MODELOPS_WORKER_ID:-worker-compose-1}
+      MODELOPS_WORKER_POLL_SECONDS: ${MODELOPS_WORKER_POLL_SECONDS:-1}
+      MODELOPS_WORKER_MAX_ATTEMPTS: ${MODELOPS_WORKER_MAX_ATTEMPTS:-3}
+      MODELOPS_WORKER_STALE_SECONDS: ${MODELOPS_WORKER_STALE_SECONDS:-60}
+      MODELOPS_WORKER_LOCK_REQUEUE_SECONDS: ${MODELOPS_WORKER_LOCK_REQUEUE_SECONDS:-2}
+      # Node Agent address comes from registered Node rows; token/timeouts are
+      # Worker client settings. Worker does not mount Docker/NVML.
+      MODELOPS_NODE_AGENT_TOKEN: ${MODELOPS_NODE_AGENT_TOKEN:-${NODE_AGENT_TOKEN:-}}
+      MODELOPS_NODE_AGENT_TIMEOUT_SECONDS: ${MODELOPS_NODE_AGENT_TIMEOUT_SECONDS:-30}
+      MODELOPS_NODE_AGENT_IMAGE_PULL_TIMEOUT_SECONDS: ${MODELOPS_NODE_AGENT_IMAGE_PULL_TIMEOUT_SECONDS:-300}
+      MODELOPS_PREPARE_HTTP_SAFETY_SECONDS: ${MODELOPS_PREPARE_HTTP_SAFETY_SECONDS:-30}
+      MODELOPS_HEALTH_TIMEOUT_SECONDS: ${MODELOPS_HEALTH_TIMEOUT_SECONDS:-120}
+      MODELOPS_HEALTH_POLL_INTERVAL_SECONDS: ${MODELOPS_HEALTH_POLL_INTERVAL_SECONDS:-1}
+      MODELOPS_PROBE_TIMEOUT_SECONDS: ${MODELOPS_PROBE_TIMEOUT_SECONDS:-60}
+      MODELOPS_VRAM_RELEASE_TIMEOUT_SECONDS: ${MODELOPS_VRAM_RELEASE_TIMEOUT_SECONDS:-60}
+      MODELOPS_VRAM_RELEASE_POLL_INTERVAL_MS: ${MODELOPS_VRAM_RELEASE_POLL_INTERVAL_MS:-200}
+      MODELOPS_GATEWAY_TIMEOUT_SECONDS: ${MODELOPS_GATEWAY_TIMEOUT_SECONDS:-10}
+      MODELOPS_GATEWAY_APPLY_TIMEOUT_SECONDS: ${MODELOPS_GATEWAY_APPLY_TIMEOUT_SECONDS:-30}
+      MODELOPS_DRAIN_TIMEOUT_SECONDS: ${MODELOPS_DRAIN_TIMEOUT_SECONDS:-60}
+      MODELOPS_GATEWAY_POLL_INTERVAL_SECONDS: ${MODELOPS_GATEWAY_POLL_INTERVAL_SECONDS:-0.5}
+      MODELOPS_DEFAULT_GPU_SAFETY_MARGIN_MB: ${MODELOPS_DEFAULT_GPU_SAFETY_MARGIN_MB:-1024}
+      MODELOPS_RECONCILE_BATCH_SIZE: ${MODELOPS_RECONCILE_BATCH_SIZE:-3}
+      MODELOPS_RECONCILE_MAX_ATTEMPTS: ${MODELOPS_RECONCILE_MAX_ATTEMPTS:-10}
+      MODELOPS_RECONCILE_COOLDOWN_SECONDS: ${MODELOPS_RECONCILE_COOLDOWN_SECONDS:-30}
+      MODELOPS_RECONCILE_COOLDOWN_MAX_SECONDS: ${MODELOPS_RECONCILE_COOLDOWN_MAX_SECONDS:-300}
+      MODELOPS_RUNTIME_METRICS_ENABLED: ${MODELOPS_RUNTIME_METRICS_ENABLED:-true}
+      MODELOPS_RUNTIME_METRICS_POLL_SECONDS: ${MODELOPS_RUNTIME_METRICS_POLL_SECONDS:-30}
+      MODELOPS_RUNTIME_METRICS_BATCH_SIZE: ${MODELOPS_RUNTIME_METRICS_BATCH_SIZE:-50}
+      MODELOPS_RUNTIME_METRICS_TIMEOUT_SECONDS: ${MODELOPS_RUNTIME_METRICS_TIMEOUT_SECONDS:-10}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      backend:
+        condition: service_started
+      gateway:
+        condition: service_started
+    networks:
+      - modelops-control
+    restart: unless-stopped
 
   frontend:
     build:
