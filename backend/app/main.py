@@ -19,6 +19,7 @@ from app.api.deployments import router as deployments_router
 from app.api.endpoints import router as endpoints_router
 from app.api.clients import router as clients_router
 from app.api.health import router as health_router
+from app.api.model_cache import router as model_cache_router
 from app.api.models import router as models_router
 from app.api.nodes import router as nodes_router
 from app.api.observability import router as observability_router
@@ -74,6 +75,7 @@ def create_app() -> FastAPI:
     app.include_router(nodes_router)
     app.include_router(models_router)
     app.include_router(catalog_router)
+    app.include_router(model_cache_router)
     app.include_router(deployments_router)
     app.include_router(operations_router)
     app.include_router(endpoints_router)

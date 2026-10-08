@@ -48,6 +48,12 @@ class Settings(BaseSettings):
     # Optional Hub token from env for gated metadata; never stored in DB.
     hf_hub_token: str = ""
 
+    # M7-B: placeholder runtime metadata when auto-registering catalog downloads.
+    # Deploy/start is M7-C; this image is not pulled by the download path.
+    default_hf_runtime_image: str = "vllm/vllm-openai:latest"
+    # Longer timeout for Node Agent download start/status round-trips.
+    node_agent_download_timeout_seconds: float = 30.0
+
     @property
     def sync_database_url(self) -> str:
         """Return a synchronous SQLAlchemy URL for Alembic migrations."""
