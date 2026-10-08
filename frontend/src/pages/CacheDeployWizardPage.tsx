@@ -49,23 +49,39 @@ const STEPS: Step[] = [
   'done',
 ]
 
-function defaultsForModelType(modelType: string | null | undefined): {
+/** Known-profile values for an existing BGE-M3 cache — not generic EMBEDDING defaults. */
+const BGE_M3_KNOWN_PROFILE: CacheDeployRuntimeConfig = {
+  runner: 'pooling',
+  max_model_len: 8192,
+  max_num_seqs: 4,
+  gpu_memory_utilization: 0.15,
+}
+
+/** Exported for unit tests — generic EMBEDDING must not ship BGE-only knobs. */
+export function defaultsForModelType(
+  modelType: string | null | undefined,
+  repositoryId?: string | null,
+): {
   runtime: CacheDeployRuntimeConfig
   servedHint: string
+  knownProfileLabel: string | null
 } {
   const t = (modelType || '').toUpperCase()
+  const repo = (repositoryId || '').trim()
   if (t === 'EMBEDDING') {
+    const isBgeM3 = repo === 'BAAI/bge-m3'
     return {
       runtime: {
         runner: 'pooling',
         probe_type: 'EMBEDDING',
-        max_model_len: 8192,
-        max_num_seqs: 4,
-        gpu_memory_utilization: 0.15,
         tensor_parallel_size: 1,
         health_path: '/health',
+        ...(isBgeM3 ? BGE_M3_KNOWN_PROFILE : {}),
       },
       servedHint: '',
+      knownProfileLabel: isBgeM3
+        ? 'BAAI/bge-m3 known profile (not a generic EMBEDDING default)'
+        : null,
     }
   }
   return {
@@ -75,6 +91,7 @@ function defaultsForModelType(modelType: string | null | undefined): {
       health_path: '/health',
     },
     servedHint: '',
+    knownProfileLabel: null,
   }
 }
 
@@ -116,6 +133,7 @@ export function CacheDeployWizardPage() {
   const [servedModelName, setServedModelName] = useState('')
   const [runtimePort, setRuntimePort] = useState(8000)
   const [runtime, setRuntime] = useState<CacheDeployRuntimeConfig>({})
+  const [knownProfileLabel, setKnownProfileLabel] = useState<string | null>(null)
   const [selectedGpuIds, setSelectedGpuIds] = useState<string[]>([])
   const [expectedVramMb, setExpectedVramMb] = useState<string>('')
   const [ackUnknown, setAckUnknown] = useState(false)
@@ -186,7 +204,8 @@ export function CacheDeployWizardPage() {
           const mod = await getModel(ver.model_id, controller.signal)
           if (controller.signal.aborted) return
           setModel(mod)
-          const d = defaultsForModelType(mod.model_type)
+          const d = defaultsForModelType(mod.model_type, entry.repository_id)
+          setKnownProfileLabel(d.knownProfileLabel)
           setRuntime((prev) => ({ ...d.runtime, ...prev }))
         }
         if (entry.node_id) {
@@ -453,6 +472,11 @@ export function CacheDeployWizardPage() {
       {step === 'runtime' ? (
         <section className="panel">
           <h2>2. Runtime</h2>
+          {knownProfileLabel ? (
+            <p className="muted" data-testid="known-profile-label">
+              Prefill: {knownProfileLabel}
+            </p>
+          ) : null}
           <div className="form-grid">
             <label>
               Deployment name

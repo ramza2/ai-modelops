@@ -1858,6 +1858,78 @@ async def test_probe_passes_served_model_name_from_version(db) -> None:
 
 
 @pytest.mark.asyncio
+async def test_probe_uses_deployment_served_model_name_override(db) -> None:
+    """Wizard override in deployment_config must win over Version served name."""
+    fake = FakeNodeAgent()
+    transport = httpx.MockTransport(fake.handler)
+    session_factory = db
+
+    async with session_factory() as session:
+        seeded = await _seed_deployment(
+            session,
+            runtime_status=RuntimeStatus.RUNNING.value,
+            container_id=f"ctr-probe-dep-{uuid.uuid4().hex[:8]}",
+        )
+        await session.execute(
+            __import__("sqlalchemy").text(
+                """
+                UPDATE model_version
+                SET served_model_name = :name
+                WHERE id = :id
+                """
+            ),
+            {"name": "old-name", "id": str(seeded["version_id"])},
+        )
+        await session.execute(
+            __import__("sqlalchemy").text(
+                """
+                UPDATE deployment
+                SET deployment_config_json =
+                  COALESCE(deployment_config_json, '{}'::jsonb)
+                  || jsonb_build_object('served_model_name', :served)
+                WHERE id = :id
+                """
+            ),
+            {"served": "new-name", "id": str(seeded["deployment_id"])},
+        )
+        fake.containers[str(seeded["deployment_id"])] = {
+            "deployment_id": str(seeded["deployment_id"]),
+            "container_id": seeded["container_id"],
+            "runtime_status": "RUNNING",
+        }
+        op_id, _ = await _enqueue(
+            session,
+            deployment_id=seeded["deployment_id"],
+            operation_type=OperationType.START.value,
+            steps=[STEP_PROBE_INFERENCE],
+            desired_state=DesiredState.RUNNING.value,
+        )
+
+    assert (
+        await JobRunner(
+            settings=_m3b3_settings(),
+            session_factory=session_factory,
+            transport=transport,
+        ).poll_once()
+        is True
+    )
+
+    probe_calls = [
+        c
+        for c in fake.calls
+        if c["method"] == "POST" and str(c["path"]).endswith("/probe")
+    ]
+    assert len(probe_calls) == 1
+    assert probe_calls[0]["body"]["served_model_name"] == "new-name"
+    assert probe_calls[0]["body"]["served_model_name"] != "old-name"
+
+    async with session_factory() as session:
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        assert op.status == OperationStatus.SUCCEEDED.value
+
+
+@pytest.mark.asyncio
 async def test_start_then_health_timeout_keeps_runtime_running(db) -> None:
     """START_CONTAINER success must persist RUNNING even if WAIT_HEALTH fails."""
     fake = FakeNodeAgent()

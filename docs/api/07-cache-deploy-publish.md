@@ -64,13 +64,20 @@ Requirements:
 - `tensor_parallel_size` equals selected GPU count
 - Fresh fit: `FIT`/`TIGHT` proceed; `INSUFFICIENT` blocks; `UNKNOWN` requires
   `acknowledge_unknown_fit=true`
+- Missing/unusable selected-GPU live free-VRAM → `UNKNOWN` (never fabricate
+  `free=0`); an explicit Node Agent free of `0` may still be `INSUFFICIENT`
 - Disk is not the main gate after cache READY
 - Creates **MANAGED** Deployment only (`auto_start` not used)
 - `deployment_config.model_path = cache.local_path`
 - `network_names = ["modelops-model"]`
 - No host port publish; upstream is internal container DNS
-- Idempotent on `source_cache_id` / container_name for non-retired deployments
+- Idempotent reuse only when create-critical spec matches (cache/node/version/
+  container/port/served name/path/networks/GPUs/order/TP/dtype/quant/runner/
+  max_model_len/max_num_seqs/gpu_memory_utilization). Same identity with a
+  different spec → `409 DEPLOYMENT_SPEC_CONFLICT`
 - Model / Version / Artifact rows stay immutable history
+- Effective `served_model_name`: Deployment config override → Version fallback
+  (create / probe / publish rewrite share this rule; Version is not mutated)
 
 ### Start (existing)
 
@@ -87,10 +94,19 @@ Initial Endpoint Alias + route after `desired_state=RUNNING`,
 `runtime_status=RUNNING`, `health_status=HEALTHY`.
 
 - Create new alias **or** reuse an existing alias with **no** active route
-- Alias with an active route → `409 ACTIVE_ROUTE_EXISTS` (use HOT/COLD Switch)
+- Uses `EndpointService.set_initial_route` (advisory locks + alias row lock);
+  after lock, if an ACTIVE route exists → `409 ACTIVE_ROUTE_EXISTS` without
+  deactivating/replacing it. General `set_route` / HOT/COLD Switch unchanged.
 - `LLM`/`VLM` → `CHAT`; `EMBEDDING` → `EMBEDDING`
-- `rewrite_model_name` defaults to Deployment/Version served model name
-- Optional Gateway verification against configured internal `MODELOPS_GATEWAY_BASE_URL`
+- `rewrite_model_name` defaults to Deployment override → Version served name
+- Optional Gateway verification against configured internal
+  `MODELOPS_GATEWAY_BASE_URL`:
+  1. Poll `GET /internal/v1/runtime` + `GET /internal/v1/routes/{alias}/runtime`
+     until READY, `applied_routing_version >=` publish version, alias present,
+     `active_deployment_id` matches, runtime RUNNING + HEALTHY
+  2. Only then run CHAT/EMBEDDING inference
+  Results: `PASSED` | `ROUTING_PENDING` | `ROUTE_MISMATCH` |
+  `GATEWAY_UNAVAILABLE` | `INFERENCE_FAILED` | `SKIPPED`
 
 ## Stale managed container reconciliation
 

@@ -1012,14 +1012,17 @@ class OperationExecutor:
                 f"Unsupported runtime_type: {version.runtime_type}",
                 code="UNSUPPORTED_RUNTIME",
             )
-        served = (version.served_model_name or "").strip()
+        # Same effective served name as create-spec: Deployment override → Version.
+        cfg = dict(deployment.deployment_config_json or {})
+        served = str(
+            cfg.get("served_model_name") or version.served_model_name or ""
+        ).strip()
         if not served:
             raise PermanentStepError(
-                "Model version is missing served_model_name.",
+                "Deployment/Version is missing served_model_name.",
                 code="SERVED_MODEL_NAME_REQUIRED",
             )
         model = await session.get(Model, version.model_id)
-        cfg = dict(deployment.deployment_config_json or {})
         try:
             probe_type = adapter.resolve_probe_type(
                 model_type=model.model_type if model else None,

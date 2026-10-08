@@ -163,6 +163,41 @@ class EndpointService:
         rewrite_model_name: str | None = None,
         reason: str | None = None,
     ) -> dict[str, Any]:
+        """Set ACTIVE route, deactivating any existing ACTIVE routes (Switch path)."""
+        return await self._activate_route(
+            endpoint_id,
+            deployment_id=deployment_id,
+            rewrite_model_name=rewrite_model_name,
+            reason=reason,
+            require_no_active=False,
+        )
+
+    async def set_initial_route(
+        self,
+        endpoint_id: uuid.UUID,
+        *,
+        deployment_id: uuid.UUID,
+        rewrite_model_name: str | None = None,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        """Initial publish: insert ACTIVE only when none exists (never replace)."""
+        return await self._activate_route(
+            endpoint_id,
+            deployment_id=deployment_id,
+            rewrite_model_name=rewrite_model_name,
+            reason=reason,
+            require_no_active=True,
+        )
+
+    async def _activate_route(
+        self,
+        endpoint_id: uuid.UUID,
+        *,
+        deployment_id: uuid.UUID,
+        rewrite_model_name: str | None,
+        reason: str | None,
+        require_no_active: bool,
+    ) -> dict[str, Any]:
         # Share Worker Switch advisory key namespace (xact-scoped, fail-closed).
         await self._acquire_route_mutation_locks(
             endpoint_id=endpoint_id,
@@ -184,7 +219,20 @@ class EndpointService:
         self._validate_route_target(alias, deployment, model)
 
         now = dt.datetime.now(tz=dt.UTC)
-        await self._repo.deactivate_active_routes(endpoint_id, now=now)
+        existing_active = await self._repo.get_active_route(endpoint_id)
+        if require_no_active and existing_active is not None:
+            raise ConflictError(
+                "Endpoint already has an active route. Use HOT/COLD Switch "
+                "instead of initial publish.",
+                code="ACTIVE_ROUTE_EXISTS",
+                details={
+                    "endpoint_id": str(endpoint_id),
+                    "active_route_id": str(existing_active.id),
+                    "active_deployment_id": str(existing_active.deployment_id),
+                },
+            )
+        if not require_no_active:
+            await self._repo.deactivate_active_routes(endpoint_id, now=now)
         route = EndpointRoute(
             endpoint_alias_id=alias.id,
             deployment_id=deployment.id,
