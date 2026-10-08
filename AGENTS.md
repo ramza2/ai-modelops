@@ -826,11 +826,16 @@ Source of truth for that phase: `docs/testing/02-final-hardening-server-integrat
   lifecycle (no second execution engine). Fresh pre-deploy GPU fit; stale
   stopped managed containers recreated on ENSURE_CONTAINER; active-route
   aliases redirect to Switch. Contract: `docs/api/07-cache-deploy-publish.md`.
-- **M7-D (current):** Safe decommission opposite of M7-C —
+- **M7-D (done):** Safe decommission opposite of M7-C —
   Unpublish → Stop → Remove managed container → Retire metadata →
   optional Cache Purge → optional Version/Model Archive. Preserves
   registry/audit history (no hard-delete). Contract:
   `docs/api/08-decommission-retirement.md`.
+- **M7-E1 (current):** Model Onboarding integrated Mock regression +
+  ops readiness checklist. Covers Download→Cache READY→Deploy→Start→
+  Publish→Unpublish→Stop→Remove→Retire→Purge/Archive with idempotency /
+  mismatch / unmanaged reuse. Server host evidence stays PENDING.
+  Checklist: `docs/testing/03-m7-onboarding-regression.md`.
 
 한 번에 모든 기능을 스캐폴딩만 하는 것보다 각 milestone을 end-to-end로 동작하게 완성하는 것을 우선한다.
 
