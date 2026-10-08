@@ -19,6 +19,8 @@ from app.core.labels import (
 from app.main import create_app
 from app.services.model_cache import (
     READY_MARKER,
+    ConflictError,
+    DockerStateUnavailableError,
     ModelCacheService,
     collect_managed_occupied_model_paths,
     sanitize_path_segment,
@@ -198,14 +200,13 @@ def test_duplicate_concurrency_dedupe_by_sha(tmp_path: Path) -> None:
     assert calls["n"] == 1
 
 
-def test_purge_blocked_by_managed_docker_mount(tmp_path: Path) -> None:
-    root = tmp_path / "models"
-    cache_path = root / "org" / "p" / "sha-p"
-    docker = FakeDockerAdapter(available=True)
-    docker._containers["ctr1"] = ContainerInfo(
+def _managed_running(
+    cache_path: Path, *, status: str = "running"
+) -> ContainerInfo:
+    return ContainerInfo(
         id="ctr1",
         name="modelops-dep",
-        status="running",
+        status=status,
         labels={
             LABEL_MANAGED: MANAGED_LABEL_VALUE,
             LABEL_DEPLOYMENT_ID: "d1",
@@ -220,6 +221,13 @@ def test_purge_blocked_by_managed_docker_mount(tmp_path: Path) -> None:
             )
         ],
     )
+
+
+def test_purge_blocked_by_managed_docker_mount(tmp_path: Path) -> None:
+    root = tmp_path / "models"
+    cache_path = root / "org" / "p" / "sha-p"
+    docker = FakeDockerAdapter(available=True)
+    docker._containers["ctr1"] = _managed_running(cache_path)
 
     occupied = collect_managed_occupied_model_paths(docker, root)
     assert str(cache_path.resolve()) in occupied
@@ -235,42 +243,84 @@ def test_purge_blocked_by_managed_docker_mount(tmp_path: Path) -> None:
     started = service.start_download(repository_id="org/p", revision="main")
     job = _wait_job(service, started["job_id"])
     assert job["status"] == "READY"
+    assert Path(job["local_path"]).exists()
 
-    with pytest.raises(Exception) as blocked:
+    with pytest.raises(ConflictError):
         service.purge(repository_id="org/p", revision="sha-p", force=False)
-    assert "deployment" in str(blocked.value).lower()
+    assert Path(job["local_path"]).exists()
 
-    with pytest.raises(Exception) as force_blocked:
+    with pytest.raises(ConflictError):
         service.purge(repository_id="org/p", revision="sha-p", force=True)
-    assert "force" in str(force_blocked.value).lower() or "deployment" in str(
-        force_blocked.value
-    ).lower()
+    assert Path(job["local_path"]).exists()
 
-    # Stopped container can purge.
-    docker._containers["ctr1"] = ContainerInfo(
-        id="ctr1",
-        name="modelops-dep",
-        status="exited",
-        labels={
-            LABEL_MANAGED: MANAGED_LABEL_VALUE,
-            LABEL_DEPLOYMENT_ID: "d1",
-            LABEL_MODEL_ID: "m1",
-            LABEL_NODE_ID: "n1",
-        },
-        volumes=[
-            VolumeMount(
-                host_path=str(cache_path),
-                container_path="/model",
-                read_only=True,
-            )
-        ],
-    )
+    # Verified Docker + stopped/no active mount → purge succeeds.
+    docker._containers["ctr1"] = _managed_running(cache_path, status="exited")
     result = service.purge(repository_id="org/p", revision="sha-p", force=False)
     assert result["purged"] is True
+    assert not Path(job["local_path"]).exists()
+
+
+def test_purge_fail_closed_when_docker_unavailable(tmp_path: Path) -> None:
+    root = tmp_path / "models"
+    docker = FakeDockerAdapter(available=False, reason="daemon down")
+
+    with pytest.raises(DockerStateUnavailableError) as excinfo:
+        collect_managed_occupied_model_paths(docker, root)
+    assert excinfo.value.code == "DOCKER_STATE_UNAVAILABLE"
+    assert excinfo.value.http_status == 503
+
+    service = ModelCacheService(
+        model_root=str(root),
+        resolve_revision_fn=lambda repo, rev: "sha-u",
+        snapshot_download_fn=_ok_download,
+        occupied_paths_provider=lambda: collect_managed_occupied_model_paths(
+            docker, root
+        ),
+    )
+    started = service.start_download(repository_id="org/u", revision="main")
+    job = _wait_job(service, started["job_id"])
+    assert job["status"] == "READY"
+    final = Path(job["local_path"])
+    assert final.exists()
+
+    with pytest.raises(DockerStateUnavailableError):
+        service.purge(repository_id="org/u", revision="sha-u", force=False)
+    assert final.exists()
+
+    with pytest.raises(DockerStateUnavailableError):
+        service.purge(repository_id="org/u", revision="sha-u", force=True)
+    assert final.exists()
+
+
+def test_purge_fail_closed_when_list_containers_raises(tmp_path: Path) -> None:
+    root = tmp_path / "models"
+
+    class _BoomDocker(FakeDockerAdapter):
+        def list_containers(self, *, all_containers: bool = False):
+            raise RuntimeError("list_containers exploded")
+
+    docker = _BoomDocker(available=True)
+    service = ModelCacheService(
+        model_root=str(root),
+        resolve_revision_fn=lambda repo, rev: "sha-boom",
+        snapshot_download_fn=_ok_download,
+        occupied_paths_provider=lambda: collect_managed_occupied_model_paths(
+            docker, root
+        ),
+    )
+    started = service.start_download(repository_id="org/boom", revision="main")
+    job = _wait_job(service, started["job_id"])
+    final = Path(job["local_path"])
+    assert final.exists()
+
+    with pytest.raises(DockerStateUnavailableError) as excinfo:
+        service.purge(repository_id="org/boom", revision="sha-boom", force=True)
+    assert excinfo.value.code == "DOCKER_STATE_UNAVAILABLE"
+    assert final.exists()
 
 
 @pytest.mark.asyncio
-async def test_http_resolve_and_purge_409(tmp_path: Path) -> None:
+async def test_http_resolve_and_purge_409_and_503(tmp_path: Path) -> None:
     root = tmp_path / "models"
     cache_path = root / "org" / "http" / "sha-http"
     docker = FakeDockerAdapter(available=True)
@@ -305,25 +355,9 @@ async def test_http_resolve_and_purge_409(tmp_path: Path) -> None:
                 break
             time.sleep(0.02)
         assert got.json()["status"] == "READY"
+        local_path = Path(got.json()["local_path"])
 
-        docker._containers["ctr1"] = ContainerInfo(
-            id="ctr1",
-            name="modelops-dep",
-            status="running",
-            labels={
-                LABEL_MANAGED: MANAGED_LABEL_VALUE,
-                LABEL_DEPLOYMENT_ID: "d1",
-                LABEL_MODEL_ID: "m1",
-                LABEL_NODE_ID: "n1",
-            },
-            volumes=[
-                VolumeMount(
-                    host_path=str(cache_path),
-                    container_path="/model",
-                    read_only=True,
-                )
-            ],
-        )
+        docker._containers["ctr1"] = _managed_running(cache_path)
         purged = await ac.request(
             "DELETE",
             "/internal/v1/model-cache/entries",
@@ -334,3 +368,20 @@ async def test_http_resolve_and_purge_409(tmp_path: Path) -> None:
             },
         )
         assert purged.status_code == 409
+        assert local_path.exists()
+
+        # Docker becomes unknown → 503, files remain.
+        docker._available = False
+        docker._reason = "daemon down"
+        unknown = await ac.request(
+            "DELETE",
+            "/internal/v1/model-cache/entries",
+            json={
+                "repository_id": "org/http",
+                "revision": "sha-http",
+                "force": True,
+            },
+        )
+        assert unknown.status_code == 503
+        assert unknown.json()["error"]["code"] == "DOCKER_STATE_UNAVAILABLE"
+        assert local_path.exists()

@@ -15,6 +15,7 @@ from app.core.errors import (
     DependencyUnavailableError,
     ErrorCode,
     NodeAgentJobNotFoundError,
+    NotFoundError,
 )
 
 
@@ -147,7 +148,9 @@ class NodeAgentClient:
                 err = details.get("error")
                 if isinstance(err, dict) and err.get("message"):
                     message = str(err["message"])
-                raise NodeAgentJobNotFoundError(message, details=details)
+                # Generic 404 — NOT NodeAgentJobNotFoundError. Job-lookup 404
+                # is translated only in get_model_cache_job().
+                raise NotFoundError(message, details=details)
             raise DependencyUnavailableError(
                 "Node Agent request failed.",
                 details=details,
@@ -205,11 +208,18 @@ class NodeAgentClient:
         *,
         timeout_seconds: float | None = None,
     ) -> dict[str, Any]:
-        return await self.request_json(
-            "GET",
-            f"/internal/v1/model-cache/jobs/{job_id}",
-            timeout_seconds=timeout_seconds,
-        )
+        """Fetch a download job; Agent 404 → NodeAgentJobNotFoundError only here."""
+        try:
+            return await self.request_json(
+                "GET",
+                f"/internal/v1/model-cache/jobs/{job_id}",
+                timeout_seconds=timeout_seconds,
+            )
+        except NotFoundError as exc:
+            raise NodeAgentJobNotFoundError(
+                exc.message,
+                details=exc.details,
+            ) from exc
 
     async def list_model_cache_entries(
         self,

@@ -34,6 +34,13 @@ class ConflictError(AppError):
     http_status = 409
 
 
+class DockerStateUnavailableError(AppError):
+    """Docker cannot be inspected reliably — destructive purge must fail closed."""
+
+    code = "DOCKER_STATE_UNAVAILABLE"
+    http_status = 503
+
+
 READY_MARKER = ".modelops_cache_ready"
 STAGING_DIRNAME = ".staging"
 HF_LOCAL_CACHE_DIR = Path(".cache") / "huggingface"
@@ -55,6 +62,8 @@ TERMINAL_STATUSES = frozenset({"READY", "FAILED", "CANCELED"})
 
 class _DockerLike(Protocol):
     def list_containers(self, *, all_containers: bool = False) -> list[Any]: ...
+
+    def status(self) -> Any: ...
 
 
 def utcnow() -> dt.datetime:
@@ -165,13 +174,43 @@ def collect_managed_occupied_model_paths(
     docker: _DockerLike,
     model_root: Path,
 ) -> set[str]:
-    """Host paths from ModelOps-managed containers that must not be purged."""
+    """Host paths from ModelOps-managed containers that must not be purged.
+
+    Returns an empty set only when Docker was inspected successfully and no
+    active managed mount exists. Never encodes Docker failure as an empty set —
+    raises :class:`DockerStateUnavailableError` instead so destructive purge
+    can fail closed.
+    """
     occupied: set[str] = set()
     root = model_root.resolve()
+
+    status_fn = getattr(docker, "status", None)
+    if callable(status_fn):
+        try:
+            st = status_fn()
+        except Exception as exc:  # noqa: BLE001
+            raise DockerStateUnavailableError(
+                "Docker state cannot be inspected for purge protection.",
+                details={"reason": f"{type(exc).__name__}: {exc}"},
+            ) from exc
+        if getattr(st, "available", None) is False:
+            raise DockerStateUnavailableError(
+                "Docker state cannot be inspected for purge protection.",
+                details={
+                    "reason": getattr(st, "reason", None) or "Docker unavailable"
+                },
+            )
+
     try:
         containers = docker.list_containers(all_containers=True)
-    except Exception:  # noqa: BLE001
-        return occupied
+    except DockerStateUnavailableError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise DockerStateUnavailableError(
+            "Docker state cannot be inspected for purge protection.",
+            details={"reason": f"{type(exc).__name__}: {exc}"},
+        ) from exc
+
     for info in containers:
         labels = getattr(info, "labels", None) or {}
         if labels.get(LABEL_MANAGED) != MANAGED_LABEL_VALUE:
@@ -723,9 +762,21 @@ class ModelCacheService:
                         details={"job_id": job.job_id, "status": job.status},
                     )
 
-        occupied = {
-            str(Path(p).resolve()) for p in self._occupied_paths_provider()
-        }
+        # Fail closed: DockerStateUnavailableError from the provider must
+        # propagate (503). force=true never bypasses unknown Docker state.
+        try:
+            occupied_raw = self._occupied_paths_provider()
+        except DockerStateUnavailableError:
+            raise
+        except AppError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise DockerStateUnavailableError(
+                "Docker state cannot be inspected for purge protection.",
+                details={"reason": f"{type(exc).__name__}: {exc}", "force": force},
+            ) from exc
+
+        occupied = {str(Path(p).resolve()) for p in occupied_raw}
         protected = any(_paths_overlap(path, Path(p)) for p in occupied)
         if protected:
             raise ConflictError(

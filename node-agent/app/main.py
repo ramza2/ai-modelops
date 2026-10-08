@@ -57,6 +57,8 @@ def create_app(
         model_root = settings.model_root
 
         def _occupied_paths() -> set[str]:
+            # Raises DockerStateUnavailableError when Docker cannot be verified.
+            # Empty set means inspected-and-clear — never "Docker unknown".
             from pathlib import Path
 
             return collect_managed_occupied_model_paths(docker, Path(model_root))

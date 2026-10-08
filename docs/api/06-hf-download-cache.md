@@ -142,17 +142,25 @@ When the Agent reports job NOT_FOUND:
 Allowed only when:
 
 1. Path is under configured ModelOps model root (Node Agent enforced).
-2. Cache is not referenced by a RUNNING / STARTING-equivalent managed
-   deployment (Node Agent derives occupied host paths from Docker labels;
-   Backend guard remains defense in depth and does not inspect Docker).
+2. Docker state was inspected successfully and the cache is not referenced by a
+   RUNNING / STARTING-equivalent managed deployment (Node Agent derives occupied
+   host paths from Docker labels; Backend guard remains defense in depth and
+   does not inspect Docker).
 3. No active download/materialization for the same cache.
+
+Destructive purge is fail-closed on Docker:
+
+| Docker inspection outcome | Purge result |
+|---|---|
+| Inspected; no active managed mount | Allowed |
+| Active managed mount | `409 CONFLICT` |
+| Docker unavailable / list-inspect failure | `503 DOCKER_STATE_UNAVAILABLE` (files untouched) |
+
+An empty occupied-path set means “inspected and clear”, never “Docker unknown”.
+`force=true` does not bypass 409 or 503.
 
 Default purge deletes materialized files, retains Model/Version/Artifact history,
 marks `node_model_cache` as `MISSING`.
-
-`force=true` still must not delete outside the model root, must not stop
-deployments, and must still return 409 when an active managed runtime occupies
-the path.
 
 ## Registry note
 
