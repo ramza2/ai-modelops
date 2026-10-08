@@ -12,6 +12,7 @@ from app.core.auth import require_agent_token
 from app.core.errors import ValidationError
 from app.services import NodeService
 from app.services.deployments import DeploymentLifecycleService
+from app.services.model_cache import ModelCacheService
 
 health_router = APIRouter(tags=["health"])
 internal_router = APIRouter(
@@ -28,6 +29,10 @@ def get_node_service() -> NodeService:
 
 def get_deployment_service() -> DeploymentLifecycleService:
     raise RuntimeError("DeploymentLifecycleService dependency is not configured")
+
+
+def get_model_cache_service() -> ModelCacheService:
+    raise RuntimeError("ModelCacheService dependency is not configured")
 
 
 class VolumeMountRequest(BaseModel):
@@ -95,6 +100,18 @@ class WaitVramReleaseRequest(BaseModel):
     minimum_free_vram_mb: int = Field(ge=0)
     timeout_seconds: float = Field(default=60.0, ge=0, le=600)
     poll_interval_ms: int = Field(default=1000, ge=50, le=10_000)
+
+
+class ModelCacheDownloadRequest(BaseModel):
+    repository_id: str = Field(min_length=3, max_length=255)
+    revision: str | None = Field(default=None, max_length=255)
+    target_root: str | None = Field(default=None, max_length=1024)
+
+
+class ModelCachePurgeRequest(BaseModel):
+    repository_id: str = Field(min_length=3, max_length=255)
+    revision: str = Field(min_length=1, max_length=255)
+    force: bool = False
 
 
 @health_router.get("/health")
@@ -340,3 +357,54 @@ async def remove_deployment(
     _ = (x_operation_id, x_step_id, x_request_id)
     service.remove(str(deployment_id))
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@internal_router.post(
+    "/model-cache/download",
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def start_model_cache_download(
+    body: ModelCacheDownloadRequest,
+    service: ModelCacheService = Depends(get_model_cache_service),
+    x_operation_id: str | None = Header(default=None, alias="X-Operation-ID"),
+    x_step_id: str | None = Header(default=None, alias="X-Step-ID"),
+    x_request_id: str | None = Header(default=None, alias="X-Request-ID"),
+) -> dict[str, Any]:
+    """Start (or dedupe) an HF snapshot download into the ModelOps model root."""
+    _ = (x_operation_id, x_step_id, x_request_id)
+    return service.start_download(
+        repository_id=body.repository_id,
+        revision=body.revision,
+        target_root=body.target_root,
+    )
+
+
+@internal_router.get("/model-cache/jobs/{job_id}")
+def get_model_cache_job(
+    job_id: uuid.UUID,
+    service: ModelCacheService = Depends(get_model_cache_service),
+) -> dict[str, Any]:
+    return service.get_job(str(job_id))
+
+
+@internal_router.get("/model-cache/entries")
+def list_model_cache_entries(
+    service: ModelCacheService = Depends(get_model_cache_service),
+) -> dict[str, Any]:
+    return service.list_entries()
+
+
+@internal_router.delete("/model-cache/entries")
+def purge_model_cache_entry(
+    body: ModelCachePurgeRequest,
+    service: ModelCacheService = Depends(get_model_cache_service),
+    x_operation_id: str | None = Header(default=None, alias="X-Operation-ID"),
+    x_step_id: str | None = Header(default=None, alias="X-Step-ID"),
+    x_request_id: str | None = Header(default=None, alias="X-Request-ID"),
+) -> dict[str, Any]:
+    _ = (x_operation_id, x_step_id, x_request_id)
+    return service.purge(
+        repository_id=body.repository_id,
+        revision=body.revision,
+        force=body.force,
+    )
