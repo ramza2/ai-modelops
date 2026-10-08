@@ -814,14 +814,18 @@ Source of truth for that phase: `docs/testing/02-final-hardening-server-integrat
   Uses official `huggingface_hub` (no HTML scraping). Per-GPU VRAM is never
   pooled. FIT/TIGHT/INSUFFICIENT/UNKNOWN are advisory only. Contract:
   `docs/api/05-hf-catalog.md`.
-- **M7-B (current):** HF Download / local cache / progress / purge.
+- **M7-B (done):** HF Download / local cache / progress / purge.
   Node Agent owns host filesystem + `snapshot_download` under
   `/data/modelops/models/{org}/{repo}/{commit_sha}` (staging + atomic rename,
   no final symlinks). Management API registers Model/Version/Artifact
   idempotently (`hf://…` URI, immutable SHA) and mirrors jobs/cache rows.
-  Admin: catalog Download + `/models/cache` purge. No Deploy/Start (M7-C).
+  Admin: catalog Download + `/models/cache` purge.
   HF tokens never persisted/returned. Contract: `docs/api/06-hf-download-cache.md`.
-- **M7-C (future):** Cache READY → Managed Deployment → Start → Gateway publish.
+- **M7-C (current):** Cache READY → Managed Deployment → Start → Gateway
+  initial publish. Orchestration reuses existing Deployment/Operation/Endpoint
+  lifecycle (no second execution engine). Fresh pre-deploy GPU fit; stale
+  stopped managed containers recreated on ENSURE_CONTAINER; active-route
+  aliases redirect to Switch. Contract: `docs/api/07-cache-deploy-publish.md`.
 
 한 번에 모든 기능을 스캐폴딩만 하는 것보다 각 milestone을 end-to-end로 동작하게 완성하는 것을 우선한다.
 
