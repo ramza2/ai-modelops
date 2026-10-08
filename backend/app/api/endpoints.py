@@ -41,6 +41,12 @@ class SetRouteRequest(BaseModel):
     reason: str | None = None
 
 
+class UnpublishEndpointRequest(BaseModel):
+    expected_deployment_id: uuid.UUID | None = None
+    reason: str | None = Field(default=None, max_length=500)
+    verify_gateway: bool = True
+
+
 class SwitchEndpointRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -150,6 +156,24 @@ async def set_endpoint_route(
         deployment_id=body.deployment_id,
         rewrite_model_name=body.rewrite_model_name,
         reason=body.reason,
+    )
+
+
+@router.post("/endpoints/{endpoint_id}/unpublish")
+async def unpublish_endpoint(
+    endpoint_id: uuid.UUID,
+    body: UnpublishEndpointRequest,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Safe unpublish: deactivate ACTIVE route only for expected Deployment."""
+    from app.services.decommission import DecommissionService
+
+    service = DecommissionService(session)
+    return await service.unpublish_and_verify(
+        endpoint_id,
+        expected_deployment_id=body.expected_deployment_id,
+        reason=body.reason,
+        verify_gateway=body.verify_gateway,
     )
 
 

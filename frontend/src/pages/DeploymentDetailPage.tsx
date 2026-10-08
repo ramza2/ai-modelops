@@ -450,6 +450,12 @@ export function DeploymentDetailPage() {
                 >
                   {mutating === 'restart' ? 'Enqueue 중…' : 'Restart'}
                 </button>
+                <Link
+                  className="btn"
+                  to={`/deployments/${deployment.id}/decommission`}
+                >
+                  Decommission
+                </Link>
               </div>
             ) : (
               <p className="metric-line" role="status">

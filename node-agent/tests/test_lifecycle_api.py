@@ -252,6 +252,10 @@ async def test_start_stop_restart_remove_flow(client) -> None:
     missing = await ac.get(f"/internal/v1/deployments/{dep}")
     assert missing.status_code == 404
 
+    # Missing container remove is idempotent success (M7-D).
+    again = await ac.delete(f"/internal/v1/deployments/{dep}")
+    assert again.status_code == 204
+
 
 @pytest.mark.asyncio
 async def test_unmanaged_lifecycle_rejected(client) -> None:

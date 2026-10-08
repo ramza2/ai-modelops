@@ -176,6 +176,10 @@ describe('DeploymentDetailPage', () => {
     expect(await screen.findByRole('button', { name: 'Start' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Stop' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Restart' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Decommission' })).toHaveAttribute(
+      'href',
+      '/deployments/d1/decommission',
+    )
     cleanup()
 
     vi.mocked(deploymentsApi.getDeployment).mockResolvedValue(

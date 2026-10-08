@@ -35,6 +35,12 @@ class Settings(BaseSettings):
     runtime_metrics_max_response_bytes: int = 2_097_152  # 2 MiB
     runtime_metrics_timeout_seconds: float = 5.0
 
+    # M7-B: Hugging Face model cache (host filesystem only; token never returned).
+    model_root: str = "/data/modelops/models"
+    hf_hub_token: str = ""
+    hf_download_timeout_seconds: float = 600.0
+    hf_max_download_concurrency: int = 2
+
 
 @lru_cache
 def get_settings() -> Settings:

@@ -2,11 +2,14 @@ import { Navigate, Route, Routes } from 'react-router-dom'
 import { ClientDetailPage } from './pages/ClientDetailPage'
 import { ClientsPage } from './pages/ClientsPage'
 import { DashboardPage } from './pages/DashboardPage'
+import { DecommissionWizardPage } from './pages/DecommissionWizardPage'
 import { DeploymentDetailPage } from './pages/DeploymentDetailPage'
 import { DeploymentObservabilityPage } from './pages/DeploymentObservabilityPage'
 import { DeploymentsPage } from './pages/DeploymentsPage'
 import { EndpointDetailPage } from './pages/EndpointDetailPage'
 import { EndpointsPage } from './pages/EndpointsPage'
+import { CacheDeployWizardPage } from './pages/CacheDeployWizardPage'
+import { ModelCachePage } from './pages/ModelCachePage'
 import { ModelCatalogPage } from './pages/ModelCatalogPage'
 import { ModelDetailPage } from './pages/ModelDetailPage'
 import { ModelsPage } from './pages/ModelsPage'
@@ -26,6 +29,11 @@ export default function App() {
       <Route path="/nodes/:nodeId" element={<NodeDetailPage />} />
       <Route path="/models" element={<ModelsPage />} />
       <Route path="/models/catalog" element={<ModelCatalogPage />} />
+      <Route path="/models/cache" element={<ModelCachePage />} />
+      <Route
+        path="/models/cache/:cacheId/deploy"
+        element={<CacheDeployWizardPage />}
+      />
       <Route path="/models/:modelId" element={<ModelDetailPage />} />
       <Route
         path="/model-versions/:versionId"
@@ -35,6 +43,10 @@ export default function App() {
       <Route
         path="/deployments/:deploymentId"
         element={<DeploymentDetailPage />}
+      />
+      <Route
+        path="/deployments/:deploymentId/decommission"
+        element={<DecommissionWizardPage />}
       />
       <Route path="/endpoints" element={<EndpointsPage />} />
       <Route

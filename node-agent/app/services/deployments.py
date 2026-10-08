@@ -236,8 +236,13 @@ class DeploymentLifecycleService:
         return self._action_payload(restarted)
 
     def remove(self, deployment_id: str) -> None:
+        """Remove managed container. Missing container is idempotent success."""
         self._require_docker()
-        container = self._require_managed_container(deployment_id)
+        try:
+            container = self._require_managed_container(deployment_id)
+        except ContainerNotFoundError:
+            # Already absent — safe success for DELETE / decommission resume.
+            return
         if map_docker_status_to_runtime(container.status) == "RUNNING":
             raise ContainerConflictError(
                 "Cannot remove a RUNNING managed container; stop it first.",

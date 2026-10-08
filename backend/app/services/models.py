@@ -320,12 +320,126 @@ class ModelService:
         return self._serialize_version(version)
 
     async def archive_version(self, version_id: uuid.UUID) -> dict[str, Any]:
+        """Archive Version history. Exact retry is idempotent."""
+        from app.domain.models import Deployment, ModelCacheDownloadJob
+        from app.core.enums import DownloadJobStatus
+        from sqlalchemy import select
+
         version = await self._require_version(version_id)
-        if version.archived_at is None:
-            version.archived_at = dt.datetime.now(tz=dt.UTC)
-            version.updated_at = dt.datetime.now(tz=dt.UTC)
-            await self._session.commit()
+        if version.archived_at is not None:
+            return self._serialize_version(version)
+
+        active_deps = await self._session.execute(
+            select(Deployment).where(
+                Deployment.model_version_id == version.id,
+                Deployment.retired_at.is_(None),
+            )
+        )
+        deps = list(active_deps.scalars().all())
+        if deps:
+            raise ConflictError(
+                "Cannot archive ModelVersion while non-retired Deployments "
+                "still reference it.",
+                code="ACTIVE_DEPLOYMENT_EXISTS",
+                details={
+                    "version_id": str(version_id),
+                    "deployment_ids": [str(d.id) for d in deps],
+                },
+            )
+
+        active_jobs = {
+            DownloadJobStatus.QUEUED.value,
+            DownloadJobStatus.RESOLVING.value,
+            DownloadJobStatus.DOWNLOADING.value,
+            DownloadJobStatus.MATERIALIZING.value,
+            DownloadJobStatus.VERIFYING.value,
+        }
+        job_rows = await self._session.execute(
+            select(ModelCacheDownloadJob)
+            .where(
+                ModelCacheDownloadJob.status.in_(sorted(active_jobs)),
+            )
+            .limit(20)
+        )
+        for job in job_rows.scalars().all():
+            # Jobs are keyed by artifact; block when artifact belongs to version.
+            from app.domain.models import ModelArtifact
+
+            artifact = await self._session.get(
+                ModelArtifact, job.model_artifact_id
+            )
+            if artifact is not None and uuid.UUID(
+                str(artifact.model_version_id)
+            ) == uuid.UUID(str(version.id)):
+                raise ConflictError(
+                    "Cannot archive ModelVersion while an active download/"
+                    "materialization job requires it.",
+                    code="ACTIVE_DOWNLOAD_JOB",
+                    details={
+                        "version_id": str(version_id),
+                        "job_id": str(job.id),
+                        "job_status": job.status,
+                    },
+                )
+
+        version.archived_at = dt.datetime.now(tz=dt.UTC)
+        version.updated_at = dt.datetime.now(tz=dt.UTC)
+        await self._session.commit()
         return self._serialize_version(version)
+
+    async def archive_model(self, model_id: uuid.UUID) -> dict[str, Any]:
+        """Deactivate Model when all Versions are archived and no Deployments remain.
+
+        Uses ``is_active=false`` (no Model.archived_at column). Exact retry OK.
+        """
+        from app.domain.models import Deployment, ModelVersion
+        from sqlalchemy import select
+
+        model = await self._require_model(model_id)
+        if not bool(model.is_active):
+            return self._serialize_model(model)
+
+        versions = list(
+            (
+                await self._session.execute(
+                    select(ModelVersion).where(ModelVersion.model_id == model.id)
+                )
+            ).scalars().all()
+        )
+        unarchived = [v for v in versions if v.archived_at is None]
+        if unarchived:
+            raise ConflictError(
+                "Cannot archive Model while unarchived Versions remain.",
+                code="UNARCHIVED_VERSIONS_EXIST",
+                details={
+                    "model_id": str(model_id),
+                    "version_ids": [str(v.id) for v in unarchived],
+                },
+            )
+
+        version_ids = [v.id for v in versions]
+        if version_ids:
+            dep_rows = await self._session.execute(
+                select(Deployment).where(
+                    Deployment.model_version_id.in_(version_ids),
+                    Deployment.retired_at.is_(None),
+                )
+            )
+            deps = list(dep_rows.scalars().all())
+            if deps:
+                raise ConflictError(
+                    "Cannot archive Model while non-retired Deployments remain.",
+                    code="ACTIVE_DEPLOYMENT_EXISTS",
+                    details={
+                        "model_id": str(model_id),
+                        "deployment_ids": [str(d.id) for d in deps],
+                    },
+                )
+
+        model.is_active = False
+        model.updated_at = dt.datetime.now(tz=dt.UTC)
+        await self._session.commit()
+        return self._serialize_model(model)
 
     # --------------------------------------------------------------- Artifact
 

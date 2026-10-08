@@ -808,14 +808,29 @@ Source of truth for that phase: `docs/testing/02-final-hardening-server-integrat
 
 ### Milestone 7 — Model Onboarding — current
 
-- **M7-A (current):** Read-only Hugging Face Model Catalog + advisory Node
+- **M7-A (done):** Read-only Hugging Face Model Catalog + advisory Node
   resource-fit (`GET /api/v1/catalog/huggingface/models`,
   `POST /api/v1/catalog/huggingface/resource-fit`, Admin `/models/catalog`).
   Uses official `huggingface_hub` (no HTML scraping). Per-GPU VRAM is never
-  pooled. FIT/TIGHT/INSUFFICIENT/UNKNOWN are advisory only. No Download/Deploy
-  lifecycle, no DB persistence of Hub credentials/catalog rows, no migration
-  unless strictly required. Contract: `docs/api/05-hf-catalog.md`.
-- **M7-B (future):** Download / register / deploy affordances from catalog.
+  pooled. FIT/TIGHT/INSUFFICIENT/UNKNOWN are advisory only. Contract:
+  `docs/api/05-hf-catalog.md`.
+- **M7-B (done):** HF Download / local cache / progress / purge.
+  Node Agent owns host filesystem + `snapshot_download` under
+  `/data/modelops/models/{org}/{repo}/{commit_sha}` (staging + atomic rename,
+  no final symlinks). Management API registers Model/Version/Artifact
+  idempotently (`hf://…` URI, immutable SHA) and mirrors jobs/cache rows.
+  Admin: catalog Download + `/models/cache` purge.
+  HF tokens never persisted/returned. Contract: `docs/api/06-hf-download-cache.md`.
+- **M7-C (done):** Cache READY → Managed Deployment → Start → Gateway
+  initial publish. Orchestration reuses existing Deployment/Operation/Endpoint
+  lifecycle (no second execution engine). Fresh pre-deploy GPU fit; stale
+  stopped managed containers recreated on ENSURE_CONTAINER; active-route
+  aliases redirect to Switch. Contract: `docs/api/07-cache-deploy-publish.md`.
+- **M7-D (current):** Safe decommission opposite of M7-C —
+  Unpublish → Stop → Remove managed container → Retire metadata →
+  optional Cache Purge → optional Version/Model Archive. Preserves
+  registry/audit history (no hard-delete). Contract:
+  `docs/api/08-decommission-retirement.md`.
 
 한 번에 모든 기능을 스캐폴딩만 하는 것보다 각 milestone을 end-to-end로 동작하게 완성하는 것을 우선한다.
 

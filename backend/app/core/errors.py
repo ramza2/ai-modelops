@@ -65,6 +65,13 @@ class DependencyUnavailableError(AppError):
     http_status = 503
 
 
+class NodeAgentJobNotFoundError(AppError):
+    """Node Agent download job is gone (e.g. agent restart). Not a network outage."""
+
+    code = "AGENT_JOB_NOT_FOUND"
+    http_status = 404
+
+
 def error_envelope(
     code: str,
     message: str,

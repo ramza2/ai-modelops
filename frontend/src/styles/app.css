@@ -215,6 +215,38 @@ a:focus-visible {
   background: transparent;
 }
 
+.btn--danger {
+  background: #b42318;
+  border-color: transparent;
+  color: #fff;
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  padding: 1rem;
+}
+
+.modal-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1.25rem;
+  max-width: 32rem;
+  width: 100%;
+  box-shadow: var(--shadow);
+}
+
+.modal-card h2 {
+  margin: 0 0 0.75rem;
+  font-size: 1.1rem;
+}
+
 .panel {
   background: var(--surface);
   border: 1px solid var(--border);

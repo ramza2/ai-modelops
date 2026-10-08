@@ -249,6 +249,15 @@ async def archive_version(
     return await service.archive_version(version_id)
 
 
+@router.post("/models/{model_id}/archive")
+async def archive_model(
+    model_id: uuid.UUID,
+    service: ModelService = Depends(get_model_service),
+) -> dict:
+    """Deactivate Model when all Versions are archived (M7-D)."""
+    return await service.archive_model(model_id)
+
+
 @router.get("/model-versions/{version_id}/artifacts")
 async def list_artifacts(
     version_id: uuid.UUID,

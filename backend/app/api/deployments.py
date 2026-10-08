@@ -217,6 +217,17 @@ async def retire_deployment(
     return await service.retire_deployment(deployment_id)
 
 
+@router.get("/deployments/{deployment_id}/decommission-status")
+async def get_decommission_status(
+    deployment_id: uuid.UUID,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Read-only decommission blockers / capability view (M7-D)."""
+    from app.services.decommission import DecommissionService
+
+    return await DecommissionService(session).get_decommission_status(deployment_id)
+
+
 @router.put("/deployments/{deployment_id}/gpu-assignments")
 async def replace_gpu_assignments(
     deployment_id: uuid.UUID,

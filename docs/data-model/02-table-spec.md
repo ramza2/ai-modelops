@@ -188,7 +188,39 @@ INDEX(node_id, status)
 
 ---
 
+## 7.1 model_cache_download_job (M7-B)
+
+| Column | Type | Null | 비고 |
+|---|---|---:|---|
+| id | UUID | N | PK |
+| node_id | UUID | N | FK node |
+| model_artifact_id | UUID | N | FK model_artifact |
+| node_model_cache_id | UUID | Y | FK node_model_cache |
+| agent_job_id | VARCHAR(64) | Y | Node Agent job id |
+| repository_id | TEXT | N | HF `org/repo` |
+| requested_revision | VARCHAR(255) | Y | branch/tag/sha as requested |
+| resolved_revision | VARCHAR(255) | Y | immutable commit SHA |
+| status | VARCHAR(32) | N | `QUEUED`…`READY`/`FAILED`/`CANCELED` |
+| bytes_downloaded | BIGINT | Y | optional |
+| total_bytes | BIGINT | Y | optional |
+| progress_percent | INTEGER | Y | only when reliable |
+| local_path | TEXT | Y | set when READY |
+| error_code | VARCHAR(64) | Y |  |
+| error_message | TEXT | Y |  |
+| started_at / finished_at | TIMESTAMPTZ | Y |  |
+| created_at / updated_at | TIMESTAMPTZ | N |  |
+
+### Indexes
+
+```text
+INDEX(node_id, status)
+INDEX(agent_job_id)
+```
+
+---
+
 ## 8. deployment
+
 
 | Column | Type | Null | 비고 |
 |---|---|---:|---|

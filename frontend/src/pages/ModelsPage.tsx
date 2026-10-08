@@ -263,8 +263,11 @@ export function ModelsPage() {
         <Link className="btn btn--primary" to="/models/catalog">
           Add Model / Catalog
         </Link>
+        <Link className="btn btn--ghost" to="/models/cache">
+          Model Cache
+        </Link>
         <span className="secondary-text">
-          Hugging Face 검색 · Node 자원 적합도(자문) · Download/Deploy는 다음 단계
+          Hugging Face 검색 · Download · Deploy는 M7-C
         </span>
       </div>
 

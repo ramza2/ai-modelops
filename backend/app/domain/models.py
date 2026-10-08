@@ -230,6 +230,47 @@ class NodeModelCache(Base):
     )
 
 
+class ModelCacheDownloadJob(Base):
+    """M7-B download job mirror (Node Agent performs the host-side work)."""
+
+    __tablename__ = "model_cache_download_job"
+
+    id: Mapped[str] = _uuid_pk()
+    node_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("node.id"), nullable=False
+    )
+    model_artifact_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("model_artifact.id"), nullable=False
+    )
+    node_model_cache_id: Mapped[str | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("node_model_cache.id"), nullable=True
+    )
+    agent_job_id: Mapped[str | None] = mapped_column(String(64))
+    repository_id: Mapped[str] = mapped_column(Text, nullable=False)
+    requested_revision: Mapped[str | None] = mapped_column(String(255))
+    resolved_revision: Mapped[str | None] = mapped_column(String(255))
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    bytes_downloaded: Mapped[int | None] = mapped_column(BigInteger)
+    total_bytes: Mapped[int | None] = mapped_column(BigInteger)
+    progress_percent: Mapped[int | None] = mapped_column(Integer)
+    local_path: Mapped[str | None] = mapped_column(Text)
+    error_code: Mapped[str | None] = mapped_column(String(64))
+    error_message: Mapped[str | None] = mapped_column(Text)
+    started_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    finished_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    created_at: Mapped[dt.datetime] = _created_at()
+    updated_at: Mapped[dt.datetime] = _updated_at()
+
+    __table_args__ = (
+        Index("ix_model_cache_download_job_node_status", "node_id", "status"),
+        Index("ix_model_cache_download_job_agent_job", "agent_job_id"),
+    )
+
+
 class Deployment(Base):
     __tablename__ = "deployment"
 
