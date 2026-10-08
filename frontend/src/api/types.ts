@@ -53,6 +53,15 @@ export type Paginated<T> = {
   total: number
 }
 
+/** M7-A HF catalog page — Hub has no reliable total; use has_more. */
+export type HfCatalogPage<T> = {
+  items: T[]
+  page: number
+  page_size: number
+  has_more: boolean
+  total: number | null
+}
+
 /** M7-A Hugging Face catalog candidate (read-only; not a registered Model). */
 export type HfCatalogModel = {
   repository_id: string
@@ -103,6 +112,7 @@ export type ResourceFitAnalysis = {
   disk_ok: boolean | null
   tensor_parallel: number
   gpu_results: ResourceFitGpuResult[]
+  suggested_gpu_device_ids?: string[]
   assumptions: string[]
   warnings: string[]
   reasons: string[]

@@ -81,6 +81,7 @@ class ResourceFitDecision:
     assumptions: list[str]
     warnings: list[str]
     reasons: list[str]
+    suggested_gpu_device_ids: list[str] = field(default_factory=list)
 
 
 def detect_quantization_hint(
@@ -294,6 +295,27 @@ def evaluate_gpu_fit(inp: GpuFitInput) -> GpuFitDecision:
     )
 
 
+def _headroom_mb(decision: GpuFitDecision) -> int:
+    if decision.estimated_required_vram_mb is None:
+        return -1
+    return int(
+        decision.vram_free_mb
+        - decision.estimated_required_vram_mb
+        - decision.safety_margin_mb
+    )
+
+
+def _rank_key(decision: GpuFitDecision) -> tuple[int, int]:
+    """Higher is better: FIT > TIGHT > UNKNOWN > INSUFFICIENT, then headroom."""
+    order = {
+        ResourceFitResult.FIT.value: 3,
+        ResourceFitResult.TIGHT.value: 2,
+        ResourceFitResult.UNKNOWN.value: 1,
+        ResourceFitResult.INSUFFICIENT.value: 0,
+    }
+    return (order.get(decision.result, 0), _headroom_mb(decision))
+
+
 def aggregate_resource_fit(
     *,
     gpu_inputs: list[GpuFitInput],
@@ -302,7 +324,7 @@ def aggregate_resource_fit(
     tensor_parallel: int,
     assumptions: list[str],
 ) -> ResourceFitDecision:
-    """Aggregate per-GPU advisory results without pooling VRAM."""
+    """Aggregate per-GPU advisory placement without pooling VRAM."""
     if tensor_parallel < 1:
         raise ValueError("tensor_parallel must be >= 1")
     if not gpu_inputs:
@@ -310,57 +332,106 @@ def aggregate_resource_fit(
 
     warnings: list[str] = list(assumptions)
     reasons: list[str] = []
+    suggested: list[str] = []
 
-    # Optional TP: split required across N GPUs when explicitly requested.
-    effective_inputs = gpu_inputs
-    if tensor_parallel > 1:
-        if len(gpu_inputs) < tensor_parallel:
-            warnings.append(
-                f"tensor_parallel={tensor_parallel} exceeds available GPU count "
-                f"{len(gpu_inputs)}; evaluating available GPUs only."
+    if tensor_parallel == 1:
+        gpu_results = [evaluate_gpu_fit(item) for item in gpu_inputs]
+        fits = [g for g in gpu_results if g.result == ResourceFitResult.FIT.value]
+        tights = [g for g in gpu_results if g.result == ResourceFitResult.TIGHT.value]
+        unknowns = [
+            g for g in gpu_results if g.result == ResourceFitResult.UNKNOWN.value
+        ]
+        if fits:
+            overall = ResourceFitResult.FIT.value
+            best = sorted(fits, key=_rank_key, reverse=True)[0]
+            suggested = [best.gpu_device_id]
+            reasons.append(
+                f"At least one GPU is FIT; suggested GPU {best.gpu_device_id}."
             )
-        tp_n = min(tensor_parallel, len(gpu_inputs))
-        warnings.append(
-            f"tensor_parallel={tp_n}: required VRAM split evenly across {tp_n} GPUs "
-            "(advisory; does not prove runtime TP support)."
-        )
-        sliced = gpu_inputs[:tp_n]
-        effective_inputs = []
-        for item in sliced:
-            req = item.required_vram_mb
-            split = None if req is None else max(1, (req + tp_n - 1) // tp_n)
-            effective_inputs.append(
-                GpuFitInput(
-                    gpu_device_id=item.gpu_device_id,
-                    gpu_index=item.gpu_index,
-                    name=item.name,
-                    vram_total_mb=item.vram_total_mb,
-                    vram_free_mb=item.vram_free_mb,
-                    safety_margin_mb=item.safety_margin_mb,
-                    required_vram_mb=split,
-                )
+        elif tights:
+            overall = ResourceFitResult.TIGHT.value
+            best = sorted(tights, key=_rank_key, reverse=True)[0]
+            suggested = [best.gpu_device_id]
+            reasons.append(
+                f"No FIT GPU; best TIGHT GPU is {best.gpu_device_id}."
             )
-
-    gpu_results = [evaluate_gpu_fit(item) for item in effective_inputs]
-    result_set = {g.result for g in gpu_results}
-
-    if ResourceFitResult.UNKNOWN.value in result_set and result_set <= {
-        ResourceFitResult.UNKNOWN.value
-    }:
-        overall = ResourceFitResult.UNKNOWN.value
-        reasons.append("VRAM fit unknown for all evaluated GPUs.")
-    elif ResourceFitResult.INSUFFICIENT.value in result_set:
-        overall = ResourceFitResult.INSUFFICIENT.value
-        reasons.append("At least one evaluated GPU is INSUFFICIENT (no VRAM pooling).")
-    elif ResourceFitResult.UNKNOWN.value in result_set:
-        overall = ResourceFitResult.UNKNOWN.value
-        reasons.append("Partial UNKNOWN GPU results; overall marked UNKNOWN.")
-    elif ResourceFitResult.TIGHT.value in result_set:
-        overall = ResourceFitResult.TIGHT.value
-        reasons.append("Tightest GPU is TIGHT.")
+        elif unknowns:
+            overall = ResourceFitResult.UNKNOWN.value
+            reasons.append(
+                "No FIT/TIGHT GPU; at least one GPU result is UNKNOWN."
+            )
+        else:
+            overall = ResourceFitResult.INSUFFICIENT.value
+            reasons.append(
+                "No GPU can hold the full required VRAM (no pooling across GPUs)."
+            )
     else:
-        overall = ResourceFitResult.FIT.value
-        reasons.append("All evaluated GPUs are FIT.")
+        n = tensor_parallel
+        warnings.append(
+            f"tensor_parallel={n}: required VRAM split evenly across exactly {n} "
+            "GPUs (advisory; does not prove runtime TP support)."
+        )
+        if len(gpu_inputs) < n:
+            gpu_results = [evaluate_gpu_fit(item) for item in gpu_inputs]
+            overall = ResourceFitResult.INSUFFICIENT.value
+            reasons.append(
+                f"Requested tensor_parallel={n} but only {len(gpu_inputs)} "
+                "GPU(s) are available; TP is not reduced."
+            )
+        else:
+            # Evaluate each GPU against its per-GPU share (ceil division).
+            split_inputs: list[GpuFitInput] = []
+            for item in gpu_inputs:
+                req = item.required_vram_mb
+                split = None if req is None else max(1, (req + n - 1) // n)
+                split_inputs.append(
+                    GpuFitInput(
+                        gpu_device_id=item.gpu_device_id,
+                        gpu_index=item.gpu_index,
+                        name=item.name,
+                        vram_total_mb=item.vram_total_mb,
+                        vram_free_mb=item.vram_free_mb,
+                        safety_margin_mb=item.safety_margin_mb,
+                        required_vram_mb=split,
+                    )
+                )
+            gpu_results = [evaluate_gpu_fit(item) for item in split_inputs]
+            if any(g.estimated_required_vram_mb is None for g in gpu_results):
+                overall = ResourceFitResult.UNKNOWN.value
+                reasons.append(
+                    "Required VRAM unknown; cannot form a TP placement."
+                )
+            else:
+                eligible = [
+                    g
+                    for g in gpu_results
+                    if g.result
+                    in (
+                        ResourceFitResult.FIT.value,
+                        ResourceFitResult.TIGHT.value,
+                    )
+                ]
+                if len(eligible) < n:
+                    overall = ResourceFitResult.INSUFFICIENT.value
+                    reasons.append(
+                        f"Fewer than {n} GPUs can hold the per-GPU TP share."
+                    )
+                else:
+                    chosen = sorted(eligible, key=_rank_key, reverse=True)[:n]
+                    suggested = [g.gpu_device_id for g in chosen]
+                    if all(
+                        g.result == ResourceFitResult.FIT.value for g in chosen
+                    ):
+                        overall = ResourceFitResult.FIT.value
+                        reasons.append(
+                            f"Selected {n}-GPU FIT placement: {', '.join(suggested)}."
+                        )
+                    else:
+                        overall = ResourceFitResult.TIGHT.value
+                        reasons.append(
+                            f"Selected {n}-GPU TIGHT placement: "
+                            f"{', '.join(suggested)}."
+                        )
 
     disk_ok: bool | None = None
     if download_size_bytes is None:
@@ -371,7 +442,6 @@ def aggregate_resource_fit(
         need_disk_mb = max(
             1, (int(download_size_bytes) + (1024 * 1024) - 1) // (1024 * 1024)
         )
-        # Keep a small free-disk cushion (1 GiB) after download.
         cushion_mb = 1024
         disk_ok = disk_free_mb >= (need_disk_mb + cushion_mb)
         if not disk_ok:
@@ -379,14 +449,13 @@ def aggregate_resource_fit(
                 f"Disk free {disk_free_mb} MiB < download ~{need_disk_mb} MiB "
                 f"+ cushion {cushion_mb} MiB."
             )
-            # Disk shortage cannot improve GPU FIT.
             if overall in (
                 ResourceFitResult.FIT.value,
                 ResourceFitResult.TIGHT.value,
+                ResourceFitResult.UNKNOWN.value,
             ):
                 overall = ResourceFitResult.INSUFFICIENT.value
-            elif overall == ResourceFitResult.UNKNOWN.value:
-                overall = ResourceFitResult.INSUFFICIENT.value
+                suggested = []
         else:
             reasons.append(
                 f"Disk free {disk_free_mb} MiB covers download ~{need_disk_mb} MiB."
@@ -406,6 +475,7 @@ def aggregate_resource_fit(
         assumptions=list(assumptions),
         warnings=warnings,
         reasons=reasons,
+        suggested_gpu_device_ids=suggested,
     )
 
 

@@ -58,7 +58,7 @@ export function ModelCatalogPage() {
   const [draftQ, setDraftQ] = useState(q)
   const [nodes, setNodes] = useState<NodeSummary[]>([])
   const [items, setItems] = useState<HfCatalogModel[] | null>(null)
-  const [total, setTotal] = useState(0)
+  const [hasMore, setHasMore] = useState(false)
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -123,7 +123,7 @@ export function ModelCatalogPage() {
         if (controller.signal.aborted || gen !== readGenRef.current) return
         setNodes(nodePage.items)
         setItems(catalog.items)
-        setTotal(catalog.total)
+        setHasMore(Boolean(catalog.has_more))
         setLastUpdated(new Date())
         hasLoadedRef.current = true
       } catch (err) {
@@ -134,7 +134,7 @@ export function ModelCatalogPage() {
           setError('Hugging Face 카탈로그를 불러오지 못했습니다.')
         }
         setItems([])
-        setTotal(0)
+        setHasMore(false)
       } finally {
         if (!controller.signal.aborted && gen === readGenRef.current) {
           setLoading(false)
@@ -378,7 +378,7 @@ export function ModelCatalogPage() {
           <Pagination
             page={page}
             pageSize={PAGE_SIZE}
-            total={total}
+            hasMore={hasMore}
             onPageChange={(next) =>
               syncUrl({
                 q,

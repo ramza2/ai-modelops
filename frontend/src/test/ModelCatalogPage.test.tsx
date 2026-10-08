@@ -3,20 +3,21 @@ import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { ApiError } from '../api/client'
-import type { HfCatalogModel, NodeSummary, Paginated } from '../api/types'
+import type { HfCatalogModel, HfCatalogPage, NodeSummary } from '../api/types'
 import { ModelCatalogPage } from '../pages/ModelCatalogPage'
 import * as catalogApi from '../api/catalog'
 import * as nodesApi from '../api/nodes'
 
 function pageResult(
   items: HfCatalogModel[],
-  opts: { page?: number; total?: number } = {},
-): Paginated<HfCatalogModel> {
+  opts: { page?: number; hasMore?: boolean } = {},
+): HfCatalogPage<HfCatalogModel> {
   return {
     items,
     page: opts.page ?? 1,
     page_size: 20,
-    total: opts.total ?? items.length,
+    has_more: opts.hasMore ?? false,
+    total: null,
   }
 }
 
@@ -121,7 +122,7 @@ describe('ModelCatalogPage', () => {
   })
 
   it('shows loading then error state', async () => {
-    let resolveCatalog: ((v: Paginated<HfCatalogModel>) => void) | null = null
+    let resolveCatalog: ((v: HfCatalogPage<HfCatalogModel>) => void) | null = null
     vi.mocked(catalogApi.listHfCatalog).mockImplementation(
       () =>
         new Promise((resolve) => {
@@ -182,6 +183,7 @@ describe('ModelCatalogPage', () => {
       disk_ok: true,
       tensor_parallel: 1,
       gpu_results: [],
+      suggested_gpu_device_ids: [],
       assumptions: [],
       warnings: [],
       reasons: ['Free VRAM too low'],
@@ -197,5 +199,33 @@ describe('ModelCatalogPage', () => {
     )
     expect(await screen.findByText(/부족/)).toBeInTheDocument()
     expect(screen.getByText('Free VRAM too low')).toBeInTheDocument()
+  })
+
+  it('enables Next when has_more is true and navigates to page 2', async () => {
+    vi.mocked(catalogApi.listHfCatalog).mockImplementation(async (params) => {
+      if ((params.page ?? 1) === 1) {
+        return pageResult([makeItem({ repository_id: 'org/page-1' })], {
+          page: 1,
+          hasMore: true,
+        })
+      }
+      return pageResult([makeItem({ repository_id: 'org/page-2' })], {
+        page: 2,
+        hasMore: false,
+      })
+    })
+
+    renderAt('/models/catalog')
+    expect(await screen.findByText('org/page-1')).toBeInTheDocument()
+    const next = screen.getByRole('button', { name: '다음' })
+    expect(next).not.toBeDisabled()
+    await userEvent.click(next)
+    expect(await screen.findByText('org/page-2')).toBeInTheDocument()
+    await waitFor(() => {
+      expect(catalogApi.listHfCatalog).toHaveBeenCalledWith(
+        expect.objectContaining({ page: 2 }),
+      )
+    })
+    expect(screen.getByRole('button', { name: '다음' })).toBeDisabled()
   })
 })

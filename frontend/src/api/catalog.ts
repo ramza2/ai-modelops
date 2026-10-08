@@ -1,7 +1,7 @@
 import { apiGet, apiPost } from './client'
 import type {
   HfCatalogModel,
-  Paginated,
+  HfCatalogPage,
   ResourceFitAnalysis,
 } from './types'
 
@@ -17,8 +17,8 @@ export type ListHfCatalogParams = {
 
 export async function listHfCatalog(
   params: ListHfCatalogParams = {},
-): Promise<Paginated<HfCatalogModel>> {
-  return apiGet<Paginated<HfCatalogModel>>(
+): Promise<HfCatalogPage<HfCatalogModel>> {
+  return apiGet<HfCatalogPage<HfCatalogModel>>(
     '/api/v1/catalog/huggingface/models',
     {
       query: {

@@ -2,6 +2,10 @@
 
 Uses the official ``huggingface_hub`` package. Credentials are never persisted;
 an optional token may be read from settings/env for gated metadata only.
+
+``HfApi`` (huggingface_hub 0.27.x) does **not** accept a constructor timeout.
+Call-level timeouts are passed where supported (e.g. ``model_info``); the
+service layer also bounds blocking Hub work with ``asyncio.wait_for``.
 """
 
 from __future__ import annotations
@@ -52,7 +56,14 @@ def _sibling_dicts(raw_siblings: Any) -> list[dict[str, Any]]:
         return out
     for item in raw_siblings:
         if isinstance(item, dict):
-            out.append(item)
+            out.append(
+                {
+                    "rfilename": str(
+                        item.get("rfilename") or item.get("path") or ""
+                    ),
+                    "size": item.get("size"),
+                }
+            )
             continue
         name = getattr(item, "rfilename", None) or getattr(item, "path", None)
         size = getattr(item, "size", None)
@@ -115,7 +126,7 @@ def _card_from_model_info(info: Any) -> HFModelCard:
 
 
 class HuggingFaceHubClient:
-    """Thin wrapper around ``huggingface_hub.HfApi`` with timeout mapping."""
+    """Thin wrapper around ``huggingface_hub.HfApi`` (sync; call via to_thread)."""
 
     def __init__(
         self,
@@ -133,6 +144,10 @@ class HuggingFaceHubClient:
         )
         self._api = api
 
+    @property
+    def timeout_seconds(self) -> float:
+        return self._timeout
+
     def _get_api(self) -> Any:
         if self._api is not None:
             return self._api
@@ -143,7 +158,8 @@ class HuggingFaceHubClient:
                 "huggingface_hub is not installed.",
                 details={"error": type(exc).__name__},
             ) from exc
-        return HfApi(token=self._token, timeout=self._timeout)
+        # huggingface_hub 0.27.x: HfApi.__init__ has no timeout parameter.
+        return HfApi(token=self._token)
 
     def list_models(
         self,
@@ -156,7 +172,7 @@ class HuggingFaceHubClient:
         try:
             iterator = api.list_models(
                 search=query or None,
-                filter=pipeline_tag,
+                pipeline_tag=pipeline_tag,
                 limit=limit,
                 sort="downloads",
                 direction=-1,
@@ -182,6 +198,7 @@ class HuggingFaceHubClient:
             info = api.model_info(
                 repository_id,
                 revision=revision,
+                timeout=self._timeout,
                 files_metadata=True,
             )
             return _card_from_model_info(info)

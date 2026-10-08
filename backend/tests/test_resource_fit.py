@@ -8,6 +8,7 @@ from app.domain.resource_fit import (
     aggregate_resource_fit,
     estimate_vram_from_repo,
     evaluate_gpu_fit,
+    pipeline_tags_for_model_type,
     sum_weight_file_bytes,
 )
 
@@ -132,6 +133,38 @@ def test_no_vram_pooling_across_gpus() -> None:
     assert all(
         g.result == ResourceFitResult.INSUFFICIENT.value for g in decision.gpu_results
     )
+    assert decision.suggested_gpu_device_ids == []
+
+
+def test_tp1_one_insufficient_one_fit_suggests_fit_gpu() -> None:
+    decision = aggregate_resource_fit(
+        gpu_inputs=[
+            GpuFitInput(
+                gpu_device_id="g0-weak",
+                gpu_index=0,
+                name="A4000",
+                vram_total_mb=16384,
+                vram_free_mb=3000,
+                safety_margin_mb=1024,
+                required_vram_mb=8000,
+            ),
+            GpuFitInput(
+                gpu_device_id="g1-strong",
+                gpu_index=1,
+                name="A4000",
+                vram_total_mb=16384,
+                vram_free_mb=15000,
+                safety_margin_mb=1024,
+                required_vram_mb=8000,
+            ),
+        ],
+        disk_free_mb=500_000,
+        download_size_bytes=5 * 1024 * 1024 * 1024,
+        tensor_parallel=1,
+        assumptions=[],
+    )
+    assert decision.result == ResourceFitResult.FIT.value
+    assert decision.suggested_gpu_device_ids == ["g1-strong"]
 
 
 def test_disk_insufficient_overrides_fit() -> None:
@@ -154,6 +187,7 @@ def test_disk_insufficient_overrides_fit() -> None:
     )
     assert decision.result == ResourceFitResult.INSUFFICIENT.value
     assert decision.disk_ok is False
+    assert decision.suggested_gpu_device_ids == []
 
 
 def test_tensor_parallel_splits_required() -> None:
@@ -188,3 +222,90 @@ def test_tensor_parallel_splits_required() -> None:
         ResourceFitResult.TIGHT.value,
     )
     assert decision.gpu_results[0].estimated_required_vram_mb == 7000
+    assert set(decision.suggested_gpu_device_ids) == {"g0", "g1"}
+
+
+def test_tp_greater_than_available_gpus_is_insufficient() -> None:
+    decision = aggregate_resource_fit(
+        gpu_inputs=[
+            GpuFitInput(
+                gpu_device_id="g0",
+                gpu_index=0,
+                name="A4000",
+                vram_total_mb=16384,
+                vram_free_mb=15000,
+                safety_margin_mb=1024,
+                required_vram_mb=4000,
+            ),
+            GpuFitInput(
+                gpu_device_id="g1",
+                gpu_index=1,
+                name="A4000",
+                vram_total_mb=16384,
+                vram_free_mb=15000,
+                safety_margin_mb=1024,
+                required_vram_mb=4000,
+            ),
+        ],
+        disk_free_mb=500_000,
+        download_size_bytes=1 * 1024 * 1024 * 1024,
+        tensor_parallel=3,
+        assumptions=[],
+    )
+    assert decision.result == ResourceFitResult.INSUFFICIENT.value
+    assert decision.suggested_gpu_device_ids == []
+    assert any("tensor_parallel=3" in r for r in decision.reasons)
+
+
+def test_tp_n_selects_only_feasible_n_gpu_set() -> None:
+    """With 3 GPUs where only two can hold the share, suggest those two."""
+    decision = aggregate_resource_fit(
+        gpu_inputs=[
+            GpuFitInput(
+                gpu_device_id="g0-ok",
+                gpu_index=0,
+                name="A4000",
+                vram_total_mb=16384,
+                vram_free_mb=10000,
+                safety_margin_mb=1024,
+                required_vram_mb=14000,  # per-GPU share 7000 → FIT/TIGHT
+            ),
+            GpuFitInput(
+                gpu_device_id="g1-weak",
+                gpu_index=1,
+                name="A4000",
+                vram_total_mb=16384,
+                vram_free_mb=2000,
+                safety_margin_mb=1024,
+                required_vram_mb=14000,  # share 7000 → INSUFFICIENT
+            ),
+            GpuFitInput(
+                gpu_device_id="g2-ok",
+                gpu_index=2,
+                name="A4000",
+                vram_total_mb=16384,
+                vram_free_mb=11000,
+                safety_margin_mb=1024,
+                required_vram_mb=14000,
+            ),
+        ],
+        disk_free_mb=500_000,
+        download_size_bytes=5 * 1024 * 1024 * 1024,
+        tensor_parallel=2,
+        assumptions=[],
+    )
+    assert decision.result in (
+        ResourceFitResult.FIT.value,
+        ResourceFitResult.TIGHT.value,
+    )
+    assert set(decision.suggested_gpu_device_ids) == {"g0-ok", "g2-ok"}
+    assert "g1-weak" not in decision.suggested_gpu_device_ids
+    assert len(decision.gpu_results) == 3
+
+
+def test_model_type_pipeline_tag_coverage() -> None:
+    assert "text-generation" in pipeline_tags_for_model_type("LLM")
+    assert "text2text-generation" in pipeline_tags_for_model_type("LLM")
+    assert len(pipeline_tags_for_model_type("VLM")) >= 2
+    assert "feature-extraction" in pipeline_tags_for_model_type("EMBEDDING")
+    assert "sentence-similarity" in pipeline_tags_for_model_type("EMBEDDING")

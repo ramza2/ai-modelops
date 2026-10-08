@@ -7,12 +7,13 @@ describe('catalog api', () => {
     vi.restoreAllMocks()
   })
 
-  it('lists catalog with filters', async () => {
+  it('lists catalog with filters and has_more contract', async () => {
     const payload = {
       items: [],
       page: 1,
       page_size: 20,
-      total: 0,
+      has_more: true,
+      total: null,
     }
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
@@ -21,7 +22,7 @@ describe('catalog api', () => {
       json: async () => payload,
     })
     vi.stubGlobal('fetch', fetchMock)
-    await listHfCatalog({
+    const result = await listHfCatalog({
       q: 'llama',
       modelType: 'LLM',
       fitOnly: true,
@@ -36,6 +37,8 @@ describe('catalog api', () => {
     expect(url).toContain('fit_only=true')
     expect(url).toContain('node_id=n1')
     expect(url).toContain('page=2')
+    expect(result.has_more).toBe(true)
+    expect(result.total).toBeNull()
   })
 
   it('posts resource-fit body', async () => {
@@ -44,6 +47,7 @@ describe('catalog api', () => {
       result: 'FIT',
       advisory_only: true,
       gpu_results: [],
+      suggested_gpu_device_ids: ['g0'],
       assumptions: [],
       warnings: [],
       reasons: [],
