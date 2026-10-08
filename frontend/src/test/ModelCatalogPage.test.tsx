@@ -202,7 +202,7 @@ describe('ModelCatalogPage', () => {
   })
 
   it('enables Next when has_more is true and navigates to page 2', async () => {
-    vi.mocked(catalogApi.listHfCatalog).mockImplementation(async (params) => {
+    vi.mocked(catalogApi.listHfCatalog).mockImplementation(async (params = {}) => {
       if ((params.page ?? 1) === 1) {
         return pageResult([makeItem({ repository_id: 'org/page-1' })], {
           page: 1,
