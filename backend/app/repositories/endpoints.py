@@ -97,6 +97,24 @@ class EndpointRepository:
         )
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
+    async def list_active_routes_for_deployment(
+        self, deployment_id: uuid.UUID
+    ) -> list[EndpointRoute]:
+        """ACTIVE routes currently targeting a Deployment (deterministic order)."""
+        stmt = (
+            select(EndpointRoute)
+            .where(
+                EndpointRoute.deployment_id == deployment_id,
+                EndpointRoute.status == "ACTIVE",
+            )
+            .order_by(
+                EndpointRoute.activated_at.asc(),
+                EndpointRoute.created_at.asc(),
+                EndpointRoute.id.asc(),
+            )
+        )
+        return list((await self._session.execute(stmt)).scalars().all())
+
     async def list_routes(
         self, endpoint_alias_id: uuid.UUID
     ) -> list[EndpointRoute]:

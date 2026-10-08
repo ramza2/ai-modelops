@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { ApiError } from '../api/client'
 import {
   createDeploymentFromCache,
+  getCacheDeployPublishStatus,
   getCacheEntry,
   previewCacheDeployFit,
   publishCacheDeployment,
@@ -151,6 +152,7 @@ export function CacheDeployWizardPage() {
   const [endpointId, setEndpointId] = useState('')
   const [rewriteModelName, setRewriteModelName] = useState('')
   const [publishResult, setPublishResult] = useState<PublishResult | null>(null)
+  const [publishStatusLoading, setPublishStatusLoading] = useState(false)
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
   const [refreshing, setRefreshing] = useState(false)
 
@@ -225,6 +227,42 @@ export function CacheDeployWizardPage() {
           const dep = await getDeployment(deploymentIdParam, controller.signal)
           if (controller.signal.aborted) return
           setDeployment(dep)
+
+          // Persist Done/Publish across browser refresh from DB ACTIVE route.
+          if (stepParam === 'done' || stepParam === 'publish') {
+            setPublishStatusLoading(true)
+            try {
+              const status = await getCacheDeployPublishStatus(
+                deploymentIdParam,
+                { verifyGateway: stepParam === 'done' },
+                controller.signal,
+              )
+              if (controller.signal.aborted) return
+              if (status.published) {
+                setPublishResult({
+                  endpoint: status.endpoint,
+                  route: status.route,
+                  routing_version: status.routing_version,
+                  gateway_verification: status.gateway_verification,
+                  note: status.note,
+                  reused: true,
+                })
+              } else {
+                setPublishResult(null)
+              }
+            } catch (pubErr) {
+              if (controller.signal.aborted) return
+              if (stepParam === 'done') {
+                setActionError(
+                  pubErr instanceof ApiError
+                    ? pubErr.message
+                    : 'Failed to load publish status.',
+                )
+              }
+            } finally {
+              if (!controller.signal.aborted) setPublishStatusLoading(false)
+            }
+          }
         }
         if (operationIdParam) {
           const op = await getOperation(operationIdParam, controller.signal)
@@ -240,22 +278,24 @@ export function CacheDeployWizardPage() {
     })()
     return () => controller.abort()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cacheId, deploymentIdParam, operationIdParam])
+  }, [cacheId, deploymentIdParam, operationIdParam, stepParam])
+
+  const uniqueGpuIds = Array.from(new Set(selectedGpuIds))
 
   const refreshFit = async () => {
-    if (!cacheId || selectedGpuIds.length === 0) return
+    if (!cacheId || uniqueGpuIds.length === 0) return
     setFitLoading(true)
     setActionError(null)
     try {
       const result = await previewCacheDeployFit(cacheId, {
-        gpuDeviceIds: selectedGpuIds,
-        tensorParallel: selectedGpuIds.length,
+        gpuDeviceIds: uniqueGpuIds,
+        tensorParallel: uniqueGpuIds.length,
         expectedVramMb: expectedVramMb ? Number(expectedVramMb) : null,
         dtype: runtime.dtype,
         quantization: runtime.quantization,
       })
       setFit(result)
-      setRuntime((r) => ({ ...r, tensor_parallel_size: selectedGpuIds.length }))
+      setRuntime((r) => ({ ...r, tensor_parallel_size: uniqueGpuIds.length }))
     } catch (err) {
       setActionError(
         err instanceof ApiError ? err.message : 'Fresh fit preview failed.',
@@ -273,14 +313,14 @@ export function CacheDeployWizardPage() {
       const created = await createDeploymentFromCache(cache.id, {
         name,
         containerName,
-        gpuDeviceIds: selectedGpuIds,
+        gpuDeviceIds: uniqueGpuIds,
         runtimePort,
         servedModelName,
         expectedVramMb: expectedVramMb ? Number(expectedVramMb) : null,
         acknowledgeUnknownFit: ackUnknown,
         runtimeConfig: {
           ...runtime,
-          tensor_parallel_size: selectedGpuIds.length,
+          tensor_parallel_size: uniqueGpuIds.length,
         },
       })
       setDeployment(created)
@@ -820,109 +860,166 @@ export function CacheDeployWizardPage() {
       {step === 'publish' && deployment ? (
         <section className="panel">
           <h2>7. Publish (initial route)</h2>
-          {!healthy ? (
-            <SectionError
-              title="Not healthy"
-              message="Publish requires desired RUNNING + runtime RUNNING + HEALTHY."
-            />
+          {publishStatusLoading ? (
+            <LoadingBlock label="Checking published state…" />
           ) : null}
-          <label>
-            <input
-              type="radio"
-              checked={publishMode === 'new'}
-              onChange={() => setPublishMode('new')}
-            />{' '}
-            Create new Endpoint Alias
-          </label>
-          <label>
-            <input
-              type="radio"
-              checked={publishMode === 'existing'}
-              onChange={() => {
-                setPublishMode('existing')
-                void loadEndpoints()
-              }}
-            />{' '}
-            Select existing Alias (no active route)
-          </label>
-          {publishMode === 'new' ? (
-            <label>
-              Alias
-              <input value={alias} onChange={(e) => setAlias(e.target.value)} />
-            </label>
-          ) : (
-            <label>
-              Endpoint
-              <select
-                value={endpointId}
-                onChange={(e) => setEndpointId(e.target.value)}
+          {publishResult ? (
+            <>
+              <p>
+                Already published to alias{' '}
+                <strong>{publishResult.endpoint.alias}</strong>. Refresh-safe
+                state restored from ACTIVE route.
+              </p>
+              <button
+                type="button"
+                className="btn"
+                onClick={() =>
+                  syncStep('done', { deploymentId: deployment.id })
+                }
               >
-                <option value="">Select…</option>
-                {endpoints.map((ep) => (
-                  <option
-                    key={ep.id}
-                    value={ep.id}
-                    disabled={!!ep.active_route}
+                Continue to Done
+              </button>
+            </>
+          ) : (
+            <>
+              {!healthy ? (
+                <SectionError
+                  title="Not healthy"
+                  message="Publish requires desired RUNNING + runtime RUNNING + HEALTHY."
+                />
+              ) : null}
+              <label>
+                <input
+                  type="radio"
+                  checked={publishMode === 'new'}
+                  onChange={() => setPublishMode('new')}
+                />{' '}
+                Create new Endpoint Alias
+              </label>
+              <label>
+                <input
+                  type="radio"
+                  checked={publishMode === 'existing'}
+                  onChange={() => {
+                    setPublishMode('existing')
+                    void loadEndpoints()
+                  }}
+                />{' '}
+                Select existing Alias (no active route)
+              </label>
+              {publishMode === 'new' ? (
+                <label>
+                  Alias
+                  <input
+                    value={alias}
+                    onChange={(e) => setAlias(e.target.value)}
+                  />
+                </label>
+              ) : (
+                <label>
+                  Endpoint
+                  <select
+                    value={endpointId}
+                    onChange={(e) => setEndpointId(e.target.value)}
                   >
-                    {ep.alias}
-                    {ep.active_route ? ' (has ACTIVE route → use Switch)' : ''}
-                  </option>
-                ))}
-              </select>
-            </label>
+                    <option value="">Select…</option>
+                    {endpoints.map((ep) => (
+                      <option
+                        key={ep.id}
+                        value={ep.id}
+                        disabled={!!ep.active_route}
+                      >
+                        {ep.alias}
+                        {ep.active_route
+                          ? ' (has ACTIVE route → use Switch)'
+                          : ''}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
+              <label>
+                rewrite_model_name
+                <input
+                  value={rewriteModelName}
+                  onChange={(e) => setRewriteModelName(e.target.value)}
+                />
+              </label>
+              <p className="secondary-text">
+                Gateway clients use the Alias; upstream receives the served model
+                name.
+              </p>
+              <button
+                type="button"
+                className="btn"
+                disabled={busy || !healthy || publishStatusLoading}
+                onClick={() => void onPublish()}
+              >
+                {busy ? 'Publishing…' : 'Publish + verify Gateway'}
+              </button>
+            </>
           )}
-          <label>
-            rewrite_model_name
-            <input
-              value={rewriteModelName}
-              onChange={(e) => setRewriteModelName(e.target.value)}
-            />
-          </label>
-          <p className="secondary-text">
-            Gateway clients use the Alias; upstream receives the served model
-            name.
-          </p>
-          <button
-            type="button"
-            className="btn"
-            disabled={busy || !healthy}
-            onClick={() => void onPublish()}
-          >
-            {busy ? 'Publishing…' : 'Publish + verify Gateway'}
-          </button>
         </section>
       ) : null}
 
-      {step === 'done' && publishResult ? (
+      {step === 'done' ? (
         <section className="panel">
           <h2>8. Gateway verification</h2>
-          <p>{publishResult.note}</p>
-          <p>
-            Endpoint{' '}
-            <Link to={`/endpoints/${publishResult.endpoint.id}`}>
-              {publishResult.endpoint.alias}
-            </Link>{' '}
-            ({publishResult.endpoint.api_type})
-          </p>
-          <p>
-            Verification:{' '}
-            <StatusBadge
-              status={publishResult.gateway_verification?.status || 'SKIPPED'}
-            />
-          </p>
-          {deployment ? (
-            <p>
-              Deployment{' '}
-              <Link to={`/deployments/${deployment.id}`}>{deployment.name}</Link>
-            </p>
-          ) : null}
-          <button
-            type="button"
-            className="btn"
-            onClick={() => navigate('/models/cache')}
-          >
-            Back to Model Cache
-          </button>
+          {publishStatusLoading ? (
+            <LoadingBlock label="Restoring published state…" />
+          ) : publishResult ? (
+            <>
+              <p>{publishResult.note}</p>
+              <p>
+                Endpoint{' '}
+                <Link to={`/endpoints/${publishResult.endpoint.id}`}>
+                  {publishResult.endpoint.alias}
+                </Link>{' '}
+                ({publishResult.endpoint.api_type})
+              </p>
+              <p>
+                Verification:{' '}
+                <StatusBadge
+                  status={
+                    publishResult.gateway_verification?.status || 'SKIPPED'
+                  }
+                />
+              </p>
+              {deployment ? (
+                <p>
+                  Deployment{' '}
+                  <Link to={`/deployments/${deployment.id}`}>
+                    {deployment.name}
+                  </Link>
+                </p>
+              ) : null}
+              <button
+                type="button"
+                className="btn"
+                onClick={() => navigate('/models/cache')}
+              >
+                Back to Model Cache
+              </button>
+            </>
+          ) : (
+            <>
+              <SectionError
+                title="Not published"
+                message="No ACTIVE route targets this Deployment yet. Return to Publish."
+              />
+              <button
+                type="button"
+                className="btn"
+                onClick={() =>
+                  syncStep('publish', {
+                    deploymentId: deploymentIdParam || deployment?.id,
+                  })
+                }
+              >
+                Back to Publish
+              </button>
+            </>
+          )}
         </section>
       ) : null}
     </AppShell>

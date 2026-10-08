@@ -810,14 +810,19 @@ async def test_publish_served_name_and_active_route_atomic() -> None:
         endpoint_id = body["endpoint"]["id"]
         active_route_id = body["route"]["id"]
 
-        conflict = await ac.post(
+        # Exact same publish retry → idempotent reuse (no route replace).
+        again = await ac.post(
             f"/api/v1/model-cache/deployments/{dep_id}/publish",
-            json={"endpoint_id": endpoint_id},
+            json={
+                "alias": f"alias-{seeded['suffix']}",
+                "verify_gateway": False,
+            },
         )
-        assert conflict.status_code == 409
-        assert conflict.json()["error"]["code"] == "ACTIVE_ROUTE_EXISTS"
+        assert again.status_code == 200, again.text
+        assert again.json()["reused"] is True
+        assert again.json()["route"]["id"] == active_route_id
 
-        # Existing ACTIVE route remains unchanged.
+        # Different rewrite on same alias → still 409 (never mutate).
         async with session_factory() as session:
             row = (
                 await session.execute(
@@ -834,7 +839,6 @@ async def test_publish_served_name_and_active_route_atomic() -> None:
             assert row.status == "ACTIVE"
             assert row.rewrite_model_name == "new-name"
 
-            # set_initial_route under lock still refuses when ACTIVE exists.
             svc = EndpointService(session)
             with pytest.raises(Exception) as excinfo:
                 await svc.set_initial_route(
@@ -858,6 +862,15 @@ async def test_publish_served_name_and_active_route_atomic() -> None:
                 )
             ).one()
             assert row2.rewrite_model_name == "new-name"
+
+        # Persisted publish-status reconstructs Done state.
+        status = await ac.get(
+            f"/api/v1/model-cache/deployments/{dep_id}/publish-status"
+        )
+        assert status.status_code == 200, status.text
+        assert status.json()["published"] is True
+        assert status.json()["route"]["id"] == active_route_id
+        assert status.json()["endpoint"]["id"] == endpoint_id
 
     await engine.dispose()
 
@@ -1066,5 +1079,163 @@ async def test_llm_maps_to_chat_api_type() -> None:
         assert pub.status_code == 200
         assert pub.json()["endpoint"]["api_type"] == "CHAT"
         assert pub.json()["gateway_verification"]["status"] == "PASSED"
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_publish_status_unpublished_and_other_deployment_conflict() -> None:
+    engine = create_async_engine(_database_url(), pool_pre_ping=True)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with session_factory() as session:
+        seeded_a = await _seed_ready_cache(session, model_type="LLM")
+        seeded_b = await _seed_ready_cache(session, model_type="LLM")
+
+    gw = FakeGatewayTransport(
+        applied_version_start=999,
+        applied_version_final=999,
+        inference_status=200,
+    )
+    fake = FakeResourcesAgent(
+        gpu_uuids=[seeded_a["gpu_uuid"], seeded_b["gpu_uuid"]],
+        free_mb=14000,
+    )
+    app = _mount(create_app(), session_factory, fake, gateway_transport=gw)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        created_a = await ac.post(
+            f"/api/v1/model-cache/{seeded_a['cache_id']}/deployment",
+            json={
+                "name": f"dep-a-{seeded_a['suffix']}",
+                "container_name": f"ctr-a-{seeded_a['suffix']}",
+                "gpu_device_ids": [str(seeded_a["gpu_id"])],
+                "expected_vram_mb": 2000,
+            },
+        )
+        dep_a = created_a.json()["id"]
+        unpublished = await ac.get(
+            f"/api/v1/model-cache/deployments/{dep_a}/publish-status"
+        )
+        assert unpublished.status_code == 200
+        assert unpublished.json() == {
+            "published": False,
+            "deployment_id": dep_a,
+        }
+
+        await _mark_healthy(session_factory, dep_a)
+        gw.expected_deployment_id = dep_a
+        gw.active_deployment_id = dep_a
+        alias = f"shared-{seeded_a['suffix']}"
+        pub_a = await ac.post(
+            f"/api/v1/model-cache/deployments/{dep_a}/publish",
+            json={"alias": alias, "verify_gateway": False},
+        )
+        assert pub_a.status_code == 200
+        endpoint_id = pub_a.json()["endpoint"]["id"]
+
+        created_b = await ac.post(
+            f"/api/v1/model-cache/{seeded_b['cache_id']}/deployment",
+            json={
+                "name": f"dep-b-{seeded_b['suffix']}",
+                "container_name": f"ctr-b-{seeded_b['suffix']}",
+                "gpu_device_ids": [str(seeded_b["gpu_id"])],
+                "expected_vram_mb": 2000,
+            },
+        )
+        dep_b = created_b.json()["id"]
+        await _mark_healthy(session_factory, dep_b)
+
+        conflict = await ac.post(
+            f"/api/v1/model-cache/deployments/{dep_b}/publish",
+            json={"endpoint_id": endpoint_id, "verify_gateway": False},
+        )
+        assert conflict.status_code == 409
+        assert conflict.json()["error"]["code"] == "ACTIVE_ROUTE_EXISTS"
+
+        # Original publication still targets A.
+        status_a = await ac.get(
+            f"/api/v1/model-cache/deployments/{dep_a}/publish-status"
+        )
+        assert status_a.json()["published"] is True
+        assert status_a.json()["route"]["deployment_id"] == dep_a
+        status_b = await ac.get(
+            f"/api/v1/model-cache/deployments/{dep_b}/publish-status"
+        )
+        assert status_b.json()["published"] is False
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_duplicate_gpu_ids_rejected_on_fit_and_create() -> None:
+    engine = create_async_engine(_database_url(), pool_pre_ping=True)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with session_factory() as session:
+        seeded = await _seed_ready_cache(session)
+        gpu_b = uuid.uuid4()
+        await session.execute(
+            text(
+                """
+                INSERT INTO gpu_device (
+                  id, node_id, gpu_uuid, device_index, model_name,
+                  vram_total_mb, safety_margin_mb, status
+                ) VALUES (
+                  :id, :node_id, :gpu_uuid, 1, 'FakeGPU1',
+                  16000, 1024, 'AVAILABLE'
+                )
+                """
+            ),
+            {
+                "id": str(gpu_b),
+                "node_id": str(seeded["node_id"]),
+                "gpu_uuid": f"GPU-B-{seeded['suffix']}",
+            },
+        )
+        await session.commit()
+
+    fake = FakeResourcesAgent(
+        gpu_uuids=[seeded["gpu_uuid"], f"GPU-B-{seeded['suffix']}"],
+        free_mb=14000,
+    )
+    app = _mount(create_app(), session_factory, fake)
+    transport = ASGITransport(app=app)
+    dup = [str(seeded["gpu_id"]), str(seeded["gpu_id"])]
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        fit = await ac.post(
+            f"/api/v1/model-cache/{seeded['cache_id']}/fit-preview",
+            json={"gpu_device_ids": dup, "tensor_parallel": 2},
+        )
+        assert fit.status_code == 422, fit.text
+        assert "unique" in fit.json()["error"]["message"].lower()
+        assert fit.json()["error"]["details"]["duplicate_gpu_device_ids"] == [
+            str(seeded["gpu_id"])
+        ]
+
+        create = await ac.post(
+            f"/api/v1/model-cache/{seeded['cache_id']}/deployment",
+            json={
+                "name": f"dep-dup-{seeded['suffix']}",
+                "container_name": f"ctr-dup-{seeded['suffix']}",
+                "gpu_device_ids": dup,
+                "runtime_config": {"tensor_parallel_size": 2},
+                "expected_vram_mb": 2000,
+            },
+        )
+        assert create.status_code == 422, create.text
+        assert "unique" in create.json()["error"]["message"].lower()
+
+        # Unique A,B TP=2 still valid (and wrong-node regression covered elsewhere).
+        ok = await ac.post(
+            f"/api/v1/model-cache/{seeded['cache_id']}/deployment",
+            json={
+                "name": f"dep-tp2-{seeded['suffix']}",
+                "container_name": f"ctr-tp2-{seeded['suffix']}",
+                "gpu_device_ids": [str(seeded["gpu_id"]), str(gpu_b)],
+                "runtime_config": {"tensor_parallel_size": 2},
+                "expected_vram_mb": 2000,
+            },
+        )
+        assert ok.status_code == 201, ok.text
+        assert ok.json()["deployment_config"]["tensor_parallel_size"] == 2
 
     await engine.dispose()

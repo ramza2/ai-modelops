@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import * as client from '../api/client'
 import {
   createDeploymentFromCache,
+  getCacheDeployPublishStatus,
   previewCacheDeployFit,
   publishCacheDeployment,
 } from '../api/cacheDeploy'
@@ -67,6 +68,32 @@ describe('cacheDeploy API', () => {
           alias: 'demo',
           rewrite_model_name: 'org/demo',
         }),
+      }),
+    )
+  })
+
+  it('gets publish-status with verify_gateway query', async () => {
+    const spy = vi.spyOn(client, 'apiGet').mockResolvedValue({
+      published: true,
+      deployment_id: 'dep-1',
+      endpoint: { id: 'ep-1', alias: 'demo', api_type: 'CHAT' },
+      route: {
+        id: 'rt-1',
+        deployment_id: 'dep-1',
+        rewrite_model_name: 'org/demo',
+        status: 'ACTIVE',
+      },
+      routing_version: 3,
+      gateway_verification: null,
+    })
+    const status = await getCacheDeployPublishStatus('dep-1', {
+      verifyGateway: true,
+    })
+    expect(status.published).toBe(true)
+    expect(spy).toHaveBeenCalledWith(
+      '/api/v1/model-cache/deployments/dep-1/publish-status',
+      expect.objectContaining({
+        query: expect.objectContaining({ verify_gateway: true }),
       }),
     )
   })

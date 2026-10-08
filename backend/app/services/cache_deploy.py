@@ -138,6 +138,8 @@ class CacheDeployService:
         if node is None:
             raise NotFoundError("Node not found for cache.")
 
+        gpu_device_ids = self._require_unique_gpu_ids(gpu_device_ids)
+
         cfg = dict(runtime_config or {})
         tp = int(cfg.get("tensor_parallel_size") or max(1, len(gpu_device_ids)))
         if tp != len(gpu_device_ids):
@@ -315,13 +317,27 @@ class CacheDeployService:
                 raise ValidationError(
                     "alias is required when endpoint_id is not provided."
                 )
-            created_ep = await self._endpoints.create_endpoint(
-                alias=alias.strip(),
-                display_name=(display_name or alias).strip(),
-                api_type=api_type,
-                description="Created by M7-C cache deploy publish wizard.",
-            )
-            endpoint_id = uuid.UUID(str(created_ep["id"]))
+            # Exact retry: reuse existing alias when present (create is not
+            # idempotent on alias uniqueness).
+            existing_ep = await self._endpoints.get_endpoint_by_alias(alias.strip())
+            if existing_ep is not None:
+                if existing_ep.get("api_type") != api_type:
+                    raise ValidationError(
+                        "Endpoint api_type is incompatible with model type.",
+                        details={
+                            "endpoint_api_type": existing_ep.get("api_type"),
+                            "required_api_type": api_type,
+                        },
+                    )
+                endpoint_id = uuid.UUID(str(existing_ep["id"]))
+            else:
+                created_ep = await self._endpoints.create_endpoint(
+                    alias=alias.strip(),
+                    display_name=(display_name or alias).strip(),
+                    api_type=api_type,
+                    description="Created by M7-C cache deploy publish wizard.",
+                )
+                endpoint_id = uuid.UUID(str(created_ep["id"]))
             route_result = await self._endpoints.set_initial_route(
                 endpoint_id,
                 deployment_id=deployment_id,
@@ -342,6 +358,63 @@ class CacheDeployService:
             "endpoint": route_result["endpoint"],
             "route": route_result["route"],
             "routing_version": route_result.get("routing_version"),
+            "gateway_verification": verification,
+            "reused": bool(route_result.get("reused")),
+            "note": "Downloaded ≠ Deployed ≠ Published.",
+        }
+
+    async def get_publish_status(
+        self,
+        deployment_id: uuid.UUID,
+        *,
+        verify_gateway: bool = False,
+    ) -> dict[str, Any]:
+        """Read-only: ACTIVE route currently targeting this Deployment, if any."""
+        deployment = await self._session.get(Deployment, deployment_id)
+        if deployment is None:
+            raise NotFoundError(
+                "Deployment not found.",
+                details={"deployment_id": str(deployment_id)},
+            )
+
+        publication = await self._endpoints.get_active_publication_for_deployment(
+            deployment_id
+        )
+        if publication is None:
+            return {
+                "published": False,
+                "deployment_id": str(deployment_id),
+            }
+
+        verification: dict[str, Any] | None = None
+        if verify_gateway:
+            version = await self._session.get(
+                ModelVersion, deployment.model_version_id
+            )
+            model = (
+                await self._session.get(Model, version.model_id)
+                if version
+                else None
+            )
+            api_type = (
+                ApiType.EMBEDDING.value
+                if model is not None
+                and str(model.model_type).upper() == ModelType.EMBEDDING.value
+                else ApiType.CHAT.value
+            )
+            verification = await self._verify_gateway(
+                alias=str(publication["endpoint"]["alias"]),
+                api_type=api_type,
+                expected_deployment_id=str(deployment_id),
+                routing_version=publication.get("routing_version"),
+            )
+
+        return {
+            "published": True,
+            "deployment_id": str(deployment_id),
+            "endpoint": publication["endpoint"],
+            "route": publication["route"],
+            "routing_version": publication.get("routing_version"),
             "gateway_verification": verification,
             "note": "Downloaded ≠ Deployed ≠ Published.",
         }
@@ -370,6 +443,7 @@ class CacheDeployService:
         node = await self._session.get(Node, cache.node_id)
         if node is None:
             raise NotFoundError("Node not found.")
+        gpu_device_ids = self._require_unique_gpu_ids(gpu_device_ids)
         tp = int(tensor_parallel or max(1, len(gpu_device_ids)))
         return await self._fresh_selected_gpu_fit(
             node=node,
@@ -383,6 +457,32 @@ class CacheDeployService:
         )
 
     # ---------------------------------------------------------------- helpers
+
+    @staticmethod
+    def _require_unique_gpu_ids(
+        gpu_device_ids: list[uuid.UUID],
+    ) -> list[uuid.UUID]:
+        """Reject duplicate GPU IDs; preserve caller order when unique."""
+        seen: set[uuid.UUID] = set()
+        ordered: list[uuid.UUID] = []
+        duplicates: list[str] = []
+        for gpu_id in gpu_device_ids:
+            if gpu_id in seen:
+                duplicates.append(str(gpu_id))
+                continue
+            seen.add(gpu_id)
+            ordered.append(gpu_id)
+        if duplicates:
+            raise ValidationError(
+                "gpu_device_ids must be unique physical GPU devices.",
+                details={
+                    "field": "gpu_device_ids",
+                    "duplicate_gpu_device_ids": sorted(set(duplicates)),
+                    "gpu_count": len(gpu_device_ids),
+                    "unique_gpu_count": len(ordered),
+                },
+            )
+        return ordered
 
     @staticmethod
     def _apply_model_type_defaults(cfg: dict[str, Any], model_type: str) -> None:

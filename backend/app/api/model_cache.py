@@ -151,3 +151,16 @@ async def publish_cache_deployment(
         reason=body.reason,
         verify_gateway=body.verify_gateway,
     )
+
+
+@router.get("/deployments/{deployment_id}/publish-status")
+async def get_cache_deployment_publish_status(
+    deployment_id: uuid.UUID,
+    verify_gateway: bool = Query(default=False),
+    service: CacheDeployService = Depends(get_cache_deploy_service),
+) -> dict[str, Any]:
+    """Read-only published state derived from ACTIVE route targeting Deployment."""
+    return await service.get_publish_status(
+        deployment_id,
+        verify_gateway=verify_gateway,
+    )

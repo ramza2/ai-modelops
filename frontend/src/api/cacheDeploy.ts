@@ -61,8 +61,19 @@ export type PublishResult = {
     alias?: string
     api_type?: string
   } | null
+  reused?: boolean
   note?: string
 }
+
+export type PublishStatusResult =
+  | {
+      published: false
+      deployment_id: string
+    }
+  | (PublishResult & {
+      published: true
+      deployment_id: string
+    })
 
 export type FreshFitResult = {
   result: string
@@ -166,6 +177,22 @@ export async function publishCacheDeployment(
         rewrite_model_name: body.rewriteModelName ?? null,
         reason: body.reason ?? null,
         verify_gateway: body.verifyGateway ?? true,
+      },
+    },
+  )
+}
+
+export async function getCacheDeployPublishStatus(
+  deploymentId: string,
+  body?: { verifyGateway?: boolean },
+  signal?: AbortSignal,
+): Promise<PublishStatusResult> {
+  return apiGet<PublishStatusResult>(
+    `/api/v1/model-cache/deployments/${deploymentId}/publish-status`,
+    {
+      signal,
+      query: {
+        verify_gateway: body?.verifyGateway ?? false,
       },
     },
   )

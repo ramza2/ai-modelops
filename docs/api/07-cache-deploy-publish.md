@@ -62,6 +62,7 @@ Requirements:
 - Cache Node = Deployment Node
 - GPUs belong to that Node
 - `tensor_parallel_size` equals selected GPU count
+- `gpu_device_ids` must be unique physical GPUs (duplicates → 422)
 - Fresh fit: `FIT`/`TIGHT` proceed; `INSUFFICIENT` blocks; `UNKNOWN` requires
   `acknowledge_unknown_fit=true`
 - Missing/unusable selected-GPU live free-VRAM → `UNKNOWN` (never fabricate
@@ -97,6 +98,9 @@ Initial Endpoint Alias + route after `desired_state=RUNNING`,
 - Uses `EndpointService.set_initial_route` (advisory locks + alias row lock);
   after lock, if an ACTIVE route exists → `409 ACTIVE_ROUTE_EXISTS` without
   deactivating/replacing it. General `set_route` / HOT/COLD Switch unchanged.
+- Exact retry: ACTIVE route already targeting the **same** Deployment with the
+  **same** effective rewrite → idempotent reuse (`reused=true`). ACTIVE to a
+  different Deployment still returns `409 ACTIVE_ROUTE_EXISTS` (use Switch).
 - `LLM`/`VLM` → `CHAT`; `EMBEDDING` → `EMBEDDING`
 - `rewrite_model_name` defaults to Deployment override → Version served name
 - Optional Gateway verification against configured internal
@@ -107,6 +111,22 @@ Initial Endpoint Alias + route after `desired_state=RUNNING`,
   2. Only then run CHAT/EMBEDDING inference
   Results: `PASSED` | `ROUTING_PENDING` | `ROUTE_MISMATCH` |
   `GATEWAY_UNAVAILABLE` | `INFERENCE_FAILED` | `SKIPPED`
+
+### `GET /api/v1/model-cache/deployments/{deployment_id}/publish-status`
+
+Read-only resume helper for the Deploy wizard Done/Publish steps.
+
+- `published=true` only when an ACTIVE route currently targets this Deployment
+- Never inferred from Deployment HEALTHY alone
+- Multiple ACTIVE routes targeting the same Deployment →
+  `409 AMBIGUOUS_ACTIVE_ROUTES`
+- Optional `verify_gateway=true` runs a fresh Gateway verification
+
+### GPU selection
+
+`gpu_device_ids` must be unique physical devices (fit-preview and create).
+Duplicates → `422` (`duplicate_gpu_device_ids` in details). Caller order is
+preserved when unique.
 
 ## Stale managed container reconciliation
 
