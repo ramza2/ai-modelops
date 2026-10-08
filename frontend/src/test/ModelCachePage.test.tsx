@@ -107,8 +107,10 @@ describe('ModelCachePage', () => {
     renderAt('/models/cache')
     expect(await screen.findByText('org/model')).toBeInTheDocument()
     expect(
-      screen.getByText(/Downloaded cache는 실행 중인 Deployment가 아닙니다/),
+      screen.getByText(/Downloaded ≠ Deployed ≠ Published/),
     ).toBeInTheDocument()
+    const deploy = screen.getByRole('link', { name: 'Deploy' })
+    expect(deploy).toHaveAttribute('href', '/models/cache/cache-1/deploy')
 
     await userEvent.click(screen.getByRole('button', { name: 'Purge' }))
     expect(
@@ -119,6 +121,19 @@ describe('ModelCachePage', () => {
     await waitFor(() => {
       expect(downloadsApi.purgeModelCache).toHaveBeenCalledWith('cache-1')
     })
+  })
+
+  it('disables Deploy for non-READY caches', async () => {
+    vi.mocked(downloadsApi.listModelCaches).mockResolvedValue(
+      cachePage([makeCache({ id: 'cache-prep', status: 'PREPARING' })]),
+    )
+    renderAt('/models/cache')
+    const deploy = await screen.findByRole('link', { name: 'Deploy' })
+    expect(deploy).toHaveAttribute('aria-disabled', 'true')
+    expect(deploy).toHaveAttribute(
+      'title',
+      'Deploy requires READY cache',
+    )
   })
 
   it('shows purge error and keeps dialog open', async () => {

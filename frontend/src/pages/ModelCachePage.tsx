@@ -138,7 +138,7 @@ export function ModelCachePage() {
   return (
     <AppShell
       title="Model Cache"
-      description="Node에 다운로드된 Hugging Face 아티팩트 캐시입니다. Downloaded cache는 실행 중인 Deployment가 아닙니다 (Deploy는 M7-C)."
+      description="Node에 다운로드된 Hugging Face 아티팩트 캐시입니다. Downloaded ≠ Deployed ≠ Published."
       onRefresh={() => void load('refresh')}
       refreshing={refreshing}
       lastUpdated={lastUpdated}
@@ -227,16 +227,38 @@ export function ModelCachePage() {
                       {formatApiDateTime(row.updated_at)}
                     </td>
                     <td>
-                      <button
-                        type="button"
-                        className="btn btn--danger"
-                        onClick={() => {
-                          setPurgeError(null)
-                          setPurgeTarget(row)
-                        }}
-                      >
-                        Purge
-                      </button>
+                      <div className="toolbar__actions">
+                        <Link
+                          className="btn"
+                          to={`/models/cache/${row.id}/deploy`}
+                          aria-disabled={row.status !== 'READY'}
+                          onClick={(e) => {
+                            if (row.status !== 'READY') e.preventDefault()
+                          }}
+                          title={
+                            row.status === 'READY'
+                              ? 'Deploy READY cache'
+                              : 'Deploy requires READY cache'
+                          }
+                          style={
+                            row.status !== 'READY'
+                              ? { pointerEvents: 'none', opacity: 0.5 }
+                              : undefined
+                          }
+                        >
+                          Deploy
+                        </Link>
+                        <button
+                          type="button"
+                          className="btn btn--danger"
+                          onClick={() => {
+                            setPurgeError(null)
+                            setPurgeTarget(row)
+                          }}
+                        >
+                          Purge
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))}
