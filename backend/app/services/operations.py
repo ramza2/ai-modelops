@@ -15,9 +15,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.enums import (
     DeploymentType,
     DesiredState,
+    HealthStatus,
     JobStatus,
     OperationStatus,
     OperationType,
+    RuntimeStatus,
     StepStatus,
 )
 from app.core.errors import ConflictError, NotFoundError, ValidationError
@@ -105,6 +107,9 @@ class OperationService:
                     "active_status": active.status,
                 },
             )
+
+        if operation_type == OperationType.DELETE.value:
+            await self._require_safe_for_remove(deployment)
 
         now = dt.datetime.now(tz=dt.UTC)
         metadata: dict[str, Any] = {}
@@ -333,6 +338,40 @@ class OperationService:
                 details={"deployment_id": str(deployment_id)},
             )
         return deployment
+
+    async def _require_safe_for_remove(self, deployment: Deployment) -> None:
+        """DELETE/Remove must not run while routed or still RUNNING/STARTING."""
+        from app.services.endpoints import EndpointService
+
+        publication = await EndpointService(
+            self._session
+        ).get_active_publication_for_deployment(uuid.UUID(str(deployment.id)))
+        if publication is not None:
+            raise ConflictError(
+                "Cannot remove managed container while an ACTIVE Endpoint "
+                "route targets this Deployment. Unpublish first.",
+                code="ACTIVE_ROUTE_EXISTS",
+                details={
+                    "deployment_id": str(deployment.id),
+                    "endpoint_id": publication["endpoint"]["id"],
+                    "route_id": publication["route"]["id"],
+                },
+            )
+        runtime = str(deployment.runtime_status or "")
+        health = str(deployment.health_status or "")
+        if runtime == RuntimeStatus.RUNNING.value or health == (
+            HealthStatus.STARTING.value
+        ):
+            raise ConflictError(
+                "Cannot remove managed container while runtime is "
+                "RUNNING/STARTING. Stop first.",
+                code="RUNTIME_STILL_RUNNING",
+                details={
+                    "deployment_id": str(deployment.id),
+                    "runtime_status": runtime,
+                    "health_status": health,
+                },
+            )
 
     def _serialize_operation(
         self,

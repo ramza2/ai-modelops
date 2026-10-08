@@ -189,6 +189,98 @@ class EndpointService:
             require_no_active=True,
         )
 
+    async def unpublish(
+        self,
+        endpoint_id: uuid.UUID,
+        *,
+        expected_deployment_id: uuid.UUID | None = None,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        """Deactivate ACTIVE route only when it targets expected Deployment.
+
+        Idempotent when no ACTIVE route exists (``changed=false``). Never
+        removes another Deployment's ACTIVE route (``409 ROUTE_TARGET_CHANGED``).
+        Keeps Endpoint Alias and route history.
+        """
+        # When no expected id yet, still need a lock key; use endpoint alone
+        # plus a sentinel deployment key only if expected is provided.
+        if expected_deployment_id is not None:
+            await self._acquire_route_mutation_locks(
+                endpoint_id=endpoint_id,
+                deployment_id=expected_deployment_id,
+            )
+        else:
+            # Endpoint-only busy check (Switch may still hold endpoint lock).
+            result = await self._session.execute(
+                text("SELECT pg_try_advisory_xact_lock(hashtext(:key))"),
+                {"key": endpoint_lock_key(endpoint_id)},
+            )
+            if not bool(result.scalar_one()):
+                await self._session.rollback()
+                raise ConflictError(
+                    "Route mutation is busy; a Switch Worker holds advisory locks.",
+                    code="ROUTE_MUTATION_BUSY",
+                    details={"lock_key": endpoint_lock_key(endpoint_id)},
+                )
+
+        alias = await self._repo.lock_alias_for_update(endpoint_id)
+        if alias is None:
+            raise NotFoundError(
+                f"Endpoint '{endpoint_id}' not found.",
+                details={"endpoint_id": str(endpoint_id)},
+            )
+        existing_active = await self._repo.get_active_route(endpoint_id)
+        if existing_active is None:
+            routing_version = await self._repo.get_routing_version()
+            _ = reason
+            return {
+                "endpoint": await self._serialize_alias(
+                    alias, None, include_active=True
+                ),
+                "previous_route": None,
+                "routing_version": routing_version,
+                "changed": False,
+            }
+
+        active_dep = uuid.UUID(str(existing_active.deployment_id))
+        if expected_deployment_id is None:
+            raise ValidationError(
+                "expected_deployment_id is required when an ACTIVE route exists.",
+                details={
+                    "endpoint_id": str(endpoint_id),
+                    "active_deployment_id": str(active_dep),
+                },
+            )
+        if active_dep != expected_deployment_id:
+            raise ConflictError(
+                "ACTIVE route targets a different Deployment than expected.",
+                code="ROUTE_TARGET_CHANGED",
+                details={
+                    "endpoint_id": str(endpoint_id),
+                    "expected_deployment_id": str(expected_deployment_id),
+                    "active_deployment_id": str(active_dep),
+                    "active_route_id": str(existing_active.id),
+                },
+            )
+
+        # Also hold the active deployment lock if we only locked expected
+        # (they match). Already acquired above when expected was provided.
+        now = dt.datetime.now(tz=dt.UTC)
+        previous = self._serialize_route(existing_active)
+        await self._repo.deactivate_active_routes(endpoint_id, now=now)
+        new_version = await self._repo.bump_routing_version(now=now)
+        _ = reason
+        await self._session.commit()
+        await self._session.refresh(alias)
+        return {
+            "endpoint": await self._serialize_alias(
+                alias, None, include_active=True
+            ),
+            "previous_route": previous,
+            "routing_version": new_version,
+            "changed": True,
+        }
+
     async def _activate_route(
         self,
         endpoint_id: uuid.UUID,

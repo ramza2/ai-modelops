@@ -2,6 +2,7 @@ import { Navigate, Route, Routes } from 'react-router-dom'
 import { ClientDetailPage } from './pages/ClientDetailPage'
 import { ClientsPage } from './pages/ClientsPage'
 import { DashboardPage } from './pages/DashboardPage'
+import { DecommissionWizardPage } from './pages/DecommissionWizardPage'
 import { DeploymentDetailPage } from './pages/DeploymentDetailPage'
 import { DeploymentObservabilityPage } from './pages/DeploymentObservabilityPage'
 import { DeploymentsPage } from './pages/DeploymentsPage'
@@ -42,6 +43,10 @@ export default function App() {
       <Route
         path="/deployments/:deploymentId"
         element={<DeploymentDetailPage />}
+      />
+      <Route
+        path="/deployments/:deploymentId/decommission"
+        element={<DecommissionWizardPage />}
       />
       <Route path="/endpoints" element={<EndpointsPage />} />
       <Route

@@ -352,36 +352,83 @@ class HFDownloadService:
             raise NotFoundError("Node not found.")
 
         if version is not None:
+            # Block purge while any non-retired Deployment on this node/version
+            # still has a live runtime OR a managed container that has not been
+            # removed (desired REMOVED + runtime STOPPED + no container is OK).
             dep_rows = await self._session.execute(
                 select(Deployment).where(
                     Deployment.node_id == cache.node_id,
                     Deployment.model_version_id == version.id,
-                    Deployment.runtime_status.in_(
-                        [
-                            RuntimeStatus.RUNNING.value,
-                            RuntimeStatus.CREATED.value,
-                        ]
-                    ),
+                    Deployment.retired_at.is_(None),
                 )
             )
             deps = list(dep_rows.scalars().all())
-            blocking = [
-                d
-                for d in deps
-                if d.runtime_status == RuntimeStatus.RUNNING.value
-                or (
-                    d.health_status == "STARTING"
-                    and d.desired_state == "RUNNING"
-                )
-            ]
+            blocking: list[Deployment] = []
+            for d in deps:
+                runtime = str(d.runtime_status or "")
+                health = str(d.health_status or "")
+                desired = str(d.desired_state or "")
+                if runtime == RuntimeStatus.RUNNING.value or (
+                    health == "STARTING" and desired == "RUNNING"
+                ):
+                    blocking.append(d)
+                    continue
+                # Prefer block while container may still exist on host.
+                if (
+                    d.deployment_type == "MANAGED"
+                    and d.container_id is not None
+                    and desired != "REMOVED"
+                ):
+                    blocking.append(d)
+                    continue
+                if (
+                    d.deployment_type == "MANAGED"
+                    and runtime
+                    in {
+                        RuntimeStatus.CREATED.value,
+                        RuntimeStatus.RUNNING.value,
+                    }
+                ):
+                    blocking.append(d)
             if blocking:
                 raise ConflictError(
-                    "Cache is referenced by an active managed deployment.",
+                    "Cache is referenced by an active managed deployment "
+                    "or a container that has not been removed.",
                     details={
                         "deployment_ids": [str(d.id) for d in blocking],
                         "force": force,
                     },
                 )
+
+            # Also block when another Deployment's config shares the same
+            # local_path and is still non-retired with a container/runtime.
+            if cache.local_path:
+                known_ids = {uuid.UUID(str(d.id)) for d in deps}
+                path_rows = await self._session.execute(
+                    select(Deployment).where(
+                        Deployment.node_id == cache.node_id,
+                        Deployment.retired_at.is_(None),
+                    )
+                )
+                for d in path_rows.scalars().all():
+                    if uuid.UUID(str(d.id)) in known_ids:
+                        continue
+                    cfg = dict(d.deployment_config_json or {})
+                    if str(cfg.get("model_path") or "") != str(cache.local_path):
+                        continue
+                    if d.runtime_status == RuntimeStatus.RUNNING.value or (
+                        d.container_id is not None
+                        and d.desired_state != "REMOVED"
+                    ):
+                        raise ConflictError(
+                            "Cache local_path is still referenced by another "
+                            "Deployment that has not been fully removed.",
+                            details={
+                                "deployment_id": str(d.id),
+                                "local_path": cache.local_path,
+                                "force": force,
+                            },
+                        )
 
         active_job = await self._session.execute(
             select(ModelCacheDownloadJob)

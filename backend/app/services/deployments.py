@@ -228,13 +228,67 @@ class DeploymentService:
         return self._serialize_deployment(deployment, assignments)
 
     async def retire_deployment(self, deployment_id: uuid.UUID) -> dict[str, Any]:
+        """Retire metadata only. Exact retry is idempotent when already retired."""
+        from app.repositories.operations import OperationRepository
+        from app.services.endpoints import EndpointService
+
         deployment = await self._require_deployment(deployment_id)
-        if deployment.retired_at is None:
-            now = dt.datetime.now(tz=dt.UTC)
-            deployment.retired_at = now
-            deployment.desired_state = DesiredState.REMOVED.value
-            deployment.updated_at = now
-            await self._session.commit()
+        if deployment.retired_at is not None:
+            assignments = await self._deployments.list_gpu_assignments(deployment_id)
+            return self._serialize_deployment(deployment, assignments)
+
+        endpoints = EndpointService(self._session)
+        publication = await endpoints.get_active_publication_for_deployment(
+            deployment_id
+        )
+        if publication is not None:
+            raise ConflictError(
+                "Cannot retire Deployment while an ACTIVE Endpoint route "
+                "targets it. Unpublish first.",
+                code="ACTIVE_ROUTE_EXISTS",
+                details={
+                    "deployment_id": str(deployment_id),
+                    "endpoint_id": publication["endpoint"]["id"],
+                    "route_id": publication["route"]["id"],
+                },
+            )
+
+        if deployment.deployment_type == DeploymentType.MANAGED.value:
+            runtime = str(deployment.runtime_status or "")
+            health = str(deployment.health_status or "")
+            if runtime == RuntimeStatus.RUNNING.value or health == (
+                HealthStatus.STARTING.value
+            ):
+                raise ConflictError(
+                    "Cannot retire MANAGED Deployment while runtime is "
+                    "RUNNING/STARTING. Stop and Remove container first.",
+                    code="RUNTIME_STILL_RUNNING",
+                    details={
+                        "deployment_id": str(deployment_id),
+                        "runtime_status": runtime,
+                        "health_status": health,
+                    },
+                )
+
+        active = await OperationRepository(
+            self._session
+        ).find_active_for_deployment(deployment_id)
+        if active is not None:
+            raise ConflictError(
+                "Cannot retire Deployment while a lifecycle Operation is active.",
+                code="ACTIVE_LIFECYCLE_OPERATION",
+                details={
+                    "deployment_id": str(deployment_id),
+                    "active_operation_id": str(active.id),
+                    "active_status": active.status,
+                },
+            )
+
+        now = dt.datetime.now(tz=dt.UTC)
+        deployment.retired_at = now
+        deployment.desired_state = DesiredState.REMOVED.value
+        deployment.updated_at = now
+        await self._session.commit()
         assignments = await self._deployments.list_gpu_assignments(deployment_id)
         return self._serialize_deployment(deployment, assignments)
 

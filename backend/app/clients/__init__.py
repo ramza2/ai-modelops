@@ -251,6 +251,22 @@ class NodeAgentClient:
             timeout_seconds=timeout_seconds,
         )
 
+    async def get_deployment(
+        self,
+        deployment_id: str,
+        *,
+        timeout_seconds: float | None = None,
+    ) -> dict[str, Any] | None:
+        """Inspect managed deployment container state (Node Agent only)."""
+        try:
+            return await self.request_json(
+                "GET",
+                f"/internal/v1/deployments/{deployment_id}",
+                timeout_seconds=timeout_seconds,
+            )
+        except NotFoundError:
+            return None
+
 
 def build_node_agent_client(base_url: str | None = None) -> NodeAgentClient:
     settings = get_settings()
