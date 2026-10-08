@@ -7,6 +7,7 @@ import { DeploymentObservabilityPage } from './pages/DeploymentObservabilityPage
 import { DeploymentsPage } from './pages/DeploymentsPage'
 import { EndpointDetailPage } from './pages/EndpointDetailPage'
 import { EndpointsPage } from './pages/EndpointsPage'
+import { CacheDeployWizardPage } from './pages/CacheDeployWizardPage'
 import { ModelCachePage } from './pages/ModelCachePage'
 import { ModelCatalogPage } from './pages/ModelCatalogPage'
 import { ModelDetailPage } from './pages/ModelDetailPage'
@@ -28,6 +29,10 @@ export default function App() {
       <Route path="/models" element={<ModelsPage />} />
       <Route path="/models/catalog" element={<ModelCatalogPage />} />
       <Route path="/models/cache" element={<ModelCachePage />} />
+      <Route
+        path="/models/cache/:cacheId/deploy"
+        element={<CacheDeployWizardPage />}
+      />
       <Route path="/models/:modelId" element={<ModelDetailPage />} />
       <Route
         path="/model-versions/:versionId"

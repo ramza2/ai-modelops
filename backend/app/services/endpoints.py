@@ -163,6 +163,41 @@ class EndpointService:
         rewrite_model_name: str | None = None,
         reason: str | None = None,
     ) -> dict[str, Any]:
+        """Set ACTIVE route, deactivating any existing ACTIVE routes (Switch path)."""
+        return await self._activate_route(
+            endpoint_id,
+            deployment_id=deployment_id,
+            rewrite_model_name=rewrite_model_name,
+            reason=reason,
+            require_no_active=False,
+        )
+
+    async def set_initial_route(
+        self,
+        endpoint_id: uuid.UUID,
+        *,
+        deployment_id: uuid.UUID,
+        rewrite_model_name: str | None = None,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        """Initial publish: insert ACTIVE only when none exists (never replace)."""
+        return await self._activate_route(
+            endpoint_id,
+            deployment_id=deployment_id,
+            rewrite_model_name=rewrite_model_name,
+            reason=reason,
+            require_no_active=True,
+        )
+
+    async def _activate_route(
+        self,
+        endpoint_id: uuid.UUID,
+        *,
+        deployment_id: uuid.UUID,
+        rewrite_model_name: str | None,
+        reason: str | None,
+        require_no_active: bool,
+    ) -> dict[str, Any]:
         # Share Worker Switch advisory key namespace (xact-scoped, fail-closed).
         await self._acquire_route_mutation_locks(
             endpoint_id=endpoint_id,
@@ -184,14 +219,47 @@ class EndpointService:
         self._validate_route_target(alias, deployment, model)
 
         now = dt.datetime.now(tz=dt.UTC)
-        await self._repo.deactivate_active_routes(endpoint_id, now=now)
+        existing_active = await self._repo.get_active_route(endpoint_id)
+        requested_rewrite = (
+            rewrite_model_name.strip() if rewrite_model_name else None
+        )
+        if require_no_active and existing_active is not None:
+            same_deployment = uuid.UUID(
+                str(existing_active.deployment_id)
+            ) == deployment_id
+            existing_rewrite = (
+                existing_active.rewrite_model_name.strip()
+                if existing_active.rewrite_model_name
+                else None
+            )
+            # Exact retry: same Deployment + same effective rewrite → reuse.
+            if same_deployment and existing_rewrite == requested_rewrite:
+                routing_version = await self._repo.get_routing_version()
+                return {
+                    "endpoint": await self._serialize_alias(
+                        alias, existing_active, include_active=True
+                    ),
+                    "route": self._serialize_route(existing_active),
+                    "routing_version": routing_version,
+                    "reused": True,
+                }
+            raise ConflictError(
+                "Endpoint already has an active route. Use HOT/COLD Switch "
+                "instead of initial publish.",
+                code="ACTIVE_ROUTE_EXISTS",
+                details={
+                    "endpoint_id": str(endpoint_id),
+                    "active_route_id": str(existing_active.id),
+                    "active_deployment_id": str(existing_active.deployment_id),
+                },
+            )
+        if not require_no_active:
+            await self._repo.deactivate_active_routes(endpoint_id, now=now)
         route = EndpointRoute(
             endpoint_alias_id=alias.id,
             deployment_id=deployment.id,
             status=RouteStatus.ACTIVE.value,
-            rewrite_model_name=(
-                rewrite_model_name.strip() if rewrite_model_name else None
-            ),
+            rewrite_model_name=requested_rewrite,
             operation_id=None,
             activated_at=now,
             deactivated_at=None,
@@ -210,6 +278,50 @@ class EndpointService:
             ),
             "route": self._serialize_route(route),
             "routing_version": new_version,
+            "reused": False,
+        }
+
+    async def get_endpoint_by_alias(self, alias: str) -> dict[str, Any] | None:
+        """Lookup endpoint by canonical alias name (None when missing)."""
+        canonical = self._canonicalize_alias(alias)
+        row = await self._repo.get_alias_by_name(canonical)
+        if row is None:
+            return None
+        active = await self._repo.get_active_route(uuid.UUID(str(row.id)))
+        return await self._serialize_alias(row, active, include_active=True)
+
+    async def get_active_publication_for_deployment(
+        self, deployment_id: uuid.UUID
+    ) -> dict[str, Any] | None:
+        """Return ACTIVE publication targeting Deployment, or None.
+
+        Raises ConflictError when multiple ACTIVE routes target it.
+        """
+        routes = await self._repo.list_active_routes_for_deployment(deployment_id)
+        if not routes:
+            return None
+        if len(routes) > 1:
+            raise ConflictError(
+                "Multiple ACTIVE routes target this Deployment; "
+                "resolve before treating as published.",
+                code="AMBIGUOUS_ACTIVE_ROUTES",
+                details={
+                    "deployment_id": str(deployment_id),
+                    "route_ids": [str(r.id) for r in routes],
+                    "endpoint_alias_ids": [
+                        str(r.endpoint_alias_id) for r in routes
+                    ],
+                },
+            )
+        route = routes[0]
+        alias = await self._require_alias(uuid.UUID(str(route.endpoint_alias_id)))
+        routing_version = await self._repo.get_routing_version()
+        return {
+            "endpoint": await self._serialize_alias(
+                alias, route, include_active=True
+            ),
+            "route": self._serialize_route(route),
+            "routing_version": routing_version,
         }
 
     async def _acquire_route_mutation_locks(

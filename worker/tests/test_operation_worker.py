@@ -122,13 +122,36 @@ class FakeNodeAgent:
             return httpx.Response(200, json=ctr)
 
         if method == "POST" and action == "create":
-            if deployment_id in self.containers:
-                return httpx.Response(200, json=self.containers[deployment_id])
+            existing = self.containers.get(deployment_id)
+            if existing is not None:
+                # Mirror Node Agent: compatible create is idempotent; drift → 409.
+                prev_cmd = existing.get("command")
+                new_cmd = (body or {}).get("command")
+                if prev_cmd is not None and new_cmd is not None and prev_cmd != new_cmd:
+                    return httpx.Response(
+                        409,
+                        json={
+                            "error": {
+                                "code": "CONTAINER_CONFLICT",
+                                "message": (
+                                    "Managed container already exists for "
+                                    "deployment with different config."
+                                ),
+                            }
+                        },
+                    )
+                return httpx.Response(200, json=existing)
             ctr = {
                 "deployment_id": deployment_id,
                 "container_id": f"ctr-{uuid.uuid4().hex[:12]}",
                 "container_name": (body or {}).get("container_name"),
                 "runtime_status": "CREATED",
+                "command": (body or {}).get("command"),
+                "runtime_image": (body or {}).get("runtime_image"),
+                "volumes": (body or {}).get("volumes"),
+                "gpu_device_indices": (body or {}).get("gpu_device_indices"),
+                "network_names": (body or {}).get("network_names"),
+                "runtime_port": (body or {}).get("runtime_port"),
             }
             self.containers[deployment_id] = ctr
             return httpx.Response(201, json=ctr)
@@ -1827,6 +1850,80 @@ async def test_probe_passes_served_model_name_from_version(db) -> None:
     assert body["served_model_name"] == "actual-vllm-served-name"
     assert body["served_model_name"] != "modelops-probe"
     assert "modelops-probe" not in json.dumps(body)
+
+    async with session_factory() as session:
+        op = await session.get(Operation, op_id)
+        assert op is not None
+        assert op.status == OperationStatus.SUCCEEDED.value
+
+
+@pytest.mark.asyncio
+async def test_probe_uses_deployment_served_model_name_override(db) -> None:
+    """Wizard override in deployment_config must win over Version served name."""
+    fake = FakeNodeAgent()
+    transport = httpx.MockTransport(fake.handler)
+    session_factory = db
+
+    async with session_factory() as session:
+        seeded = await _seed_deployment(
+            session,
+            runtime_status=RuntimeStatus.RUNNING.value,
+            container_id=f"ctr-probe-dep-{uuid.uuid4().hex[:8]}",
+        )
+        await session.execute(
+            __import__("sqlalchemy").text(
+                """
+                UPDATE model_version
+                SET served_model_name = :name
+                WHERE id = :id
+                """
+            ),
+            {"name": "old-name", "id": str(seeded["version_id"])},
+        )
+        await session.execute(
+            __import__("sqlalchemy").text(
+                """
+                UPDATE deployment
+                SET deployment_config_json =
+                  COALESCE(deployment_config_json, '{}'::jsonb)
+                  || jsonb_build_object(
+                       'served_model_name', CAST(:served AS text)
+                     )
+                WHERE id = CAST(:id AS uuid)
+                """
+            ),
+            {"served": "new-name", "id": str(seeded["deployment_id"])},
+        )
+        fake.containers[str(seeded["deployment_id"])] = {
+            "deployment_id": str(seeded["deployment_id"]),
+            "container_id": seeded["container_id"],
+            "runtime_status": "RUNNING",
+        }
+        op_id, _ = await _enqueue(
+            session,
+            deployment_id=seeded["deployment_id"],
+            operation_type=OperationType.START.value,
+            steps=[STEP_PROBE_INFERENCE],
+            desired_state=DesiredState.RUNNING.value,
+        )
+
+    assert (
+        await JobRunner(
+            settings=_m3b3_settings(),
+            session_factory=session_factory,
+            transport=transport,
+        ).poll_once()
+        is True
+    )
+
+    probe_calls = [
+        c
+        for c in fake.calls
+        if c["method"] == "POST" and str(c["path"]).endswith("/probe")
+    ]
+    assert len(probe_calls) == 1
+    assert probe_calls[0]["body"]["served_model_name"] == "new-name"
+    assert probe_calls[0]["body"]["served_model_name"] != "old-name"
 
     async with session_factory() as session:
         op = await session.get(Operation, op_id)
