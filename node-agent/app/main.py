@@ -14,6 +14,7 @@ from app.adapters.host import HostAdapter
 from app.adapters.nvml import RealNvmlAdapter
 from app.api import (
     get_deployment_service,
+    get_model_cache_service,
     get_node_service,
     health_router,
     internal_router,
@@ -22,6 +23,10 @@ from app.core.config import get_settings
 from app.core.errors import AppError, ErrorCode, error_envelope
 from app.services import NodeService
 from app.services.deployments import DeploymentLifecycleService
+from app.services.model_cache import (
+    ModelCacheService,
+    collect_managed_occupied_model_paths,
+)
 
 REQUEST_ID_HEADER = "X-Request-ID"
 
@@ -39,11 +44,26 @@ def create_app(
     *,
     service: NodeService | None = None,
     deployment_service: DeploymentLifecycleService | None = None,
+    model_cache_service: ModelCacheService | None = None,
 ) -> FastAPI:
     settings = get_settings()
     app = FastAPI(title=settings.app_name)
     node_service = service or build_default_service()
     lifecycle = deployment_service or DeploymentLifecycleService(node_service.docker)
+    if model_cache_service is not None:
+        cache_service = model_cache_service
+    else:
+        docker = node_service.docker
+        model_root = settings.model_root
+
+        def _occupied_paths() -> set[str]:
+            # Raises DockerStateUnavailableError when Docker cannot be verified.
+            # Empty set means inspected-and-clear — never "Docker unknown".
+            from pathlib import Path
+
+            return collect_managed_occupied_model_paths(docker, Path(model_root))
+
+        cache_service = ModelCacheService(occupied_paths_provider=_occupied_paths)
 
     def _service_override() -> NodeService:
         return node_service
@@ -51,8 +71,12 @@ def create_app(
     def _deployment_override() -> DeploymentLifecycleService:
         return lifecycle
 
+    def _model_cache_override() -> ModelCacheService:
+        return cache_service
+
     app.dependency_overrides[get_node_service] = _service_override
     app.dependency_overrides[get_deployment_service] = _deployment_override
+    app.dependency_overrides[get_model_cache_service] = _model_cache_override
 
     @app.middleware("http")
     async def request_id_middleware(request: Request, call_next):

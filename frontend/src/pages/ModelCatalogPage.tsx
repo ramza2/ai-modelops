@@ -2,9 +2,15 @@ import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { ApiError } from '../api/client'
 import { analyzeHfResourceFit, listHfCatalog } from '../api/catalog'
+import {
+  getHfDownload,
+  isActiveDownloadStatus,
+  startHfDownload,
+} from '../api/downloads'
 import { listNodes } from '../api/nodes'
 import type {
   HfCatalogModel,
+  HfDownloadJob,
   NodeSummary,
   ResourceFitAnalysis,
 } from '../api/types'
@@ -13,9 +19,12 @@ import { LoadingBlock } from '../components/LoadingBlock'
 import { Pagination } from '../components/Pagination'
 import { SectionError } from '../components/SectionError'
 import { StatusBadge } from '../components/StatusBadge'
+import { TruncatedValue } from '../components/TruncatedValue'
+import { abbreviateMiddle } from '../utils/format'
 import { parsePositivePage } from '../utils/query'
 
 const PAGE_SIZE = 20
+const POLL_MS = 2000
 const KNOWN_TYPES = new Set(['LLM', 'VLM', 'EMBEDDING'])
 
 function parseModelType(raw: string | null): string | null {
@@ -47,6 +56,33 @@ function fitReason(item: HfCatalogModel, detail?: ResourceFitAnalysis | null): s
   return 'Node를 선택하면 자원 적합도를 분석합니다.'
 }
 
+function isDiskInsufficientForDownload(
+  detail?: ResourceFitAnalysis | null,
+): boolean {
+  if (!detail) return false
+  return detail.disk_ok === false
+}
+
+function resolveDownloadModelType(
+  item: HfCatalogModel,
+  override: string | undefined,
+): string | null {
+  const raw = (override || item.model_type || '').toUpperCase()
+  if (raw === 'LLM' || raw === 'VLM' || raw === 'EMBEDDING') return raw
+  return null
+}
+
+function downloadDisabledReason(
+  nodeId: string,
+  detail?: ResourceFitAnalysis | null,
+): string | undefined {
+  if (!nodeId) return 'Node를 선택하세요.'
+  if (isDiskInsufficientForDownload(detail)) {
+    return '디스크 공간이 부족합니다.'
+  }
+  return undefined
+}
+
 export function ModelCatalogPage() {
   const [searchParams, setSearchParams] = useSearchParams()
   const modelType = parseModelType(searchParams.get('model_type'))
@@ -65,6 +101,13 @@ export function ModelCatalogPage() {
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
   const [fitByRepo, setFitByRepo] = useState<Record<string, ResourceFitAnalysis>>({})
   const [fitLoading, setFitLoading] = useState<string | null>(null)
+  const [downloadByRepo, setDownloadByRepo] = useState<
+    Record<string, HfDownloadJob>
+  >({})
+  const [downloadTypeByRepo, setDownloadTypeByRepo] = useState<
+    Record<string, string>
+  >({})
+  const [downloadStarting, setDownloadStarting] = useState<string | null>(null)
   const abortRef = useRef<AbortController | null>(null)
   const hasLoadedRef = useRef(false)
   const readGenRef = useRef(0)
@@ -152,6 +195,36 @@ export function ModelCatalogPage() {
     }
   }, [load])
 
+  useEffect(() => {
+    const active = Object.values(downloadByRepo).filter((j) =>
+      isActiveDownloadStatus(j.status),
+    )
+    if (active.length === 0) return
+
+    let cancelled = false
+    const poll = async () => {
+      for (const job of active) {
+        try {
+          const updated = await getHfDownload(job.job_id)
+          if (cancelled) return
+          setDownloadByRepo((prev) => ({
+            ...prev,
+            [job.repository_id]: updated,
+          }))
+        } catch {
+          /* keep last known job; user can refresh */
+        }
+      }
+    }
+
+    const timer = window.setInterval(() => void poll(), POLL_MS)
+    void poll()
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+    }
+  }, [downloadByRepo])
+
   const onSubmitSearch = (event: FormEvent) => {
     event.preventDefault()
     syncUrl({
@@ -185,10 +258,109 @@ export function ModelCatalogPage() {
     }
   }
 
+  const onDownload = async (item: HfCatalogModel) => {
+    if (!nodeId) return
+    const existing = downloadByRepo[item.repository_id]
+    if (existing && isActiveDownloadStatus(existing.status)) return
+    if (downloadStarting === item.repository_id) return
+    const modelType = resolveDownloadModelType(
+      item,
+      downloadTypeByRepo[item.repository_id],
+    )
+    if (!modelType) {
+      setError(
+        `${item.repository_id}: model type is unknown. Select LLM/VLM/EMBEDDING before Download.`,
+      )
+      return
+    }
+
+    setDownloadStarting(item.repository_id)
+    setError(null)
+    try {
+      const job = await startHfDownload({
+        repositoryId: item.repository_id,
+        revision: item.revision,
+        nodeId,
+        modelType,
+      })
+      setDownloadByRepo((prev) => ({ ...prev, [item.repository_id]: job }))
+    } catch (err) {
+      setError(
+        err instanceof ApiError
+          ? err.message
+          : '다운로드를 시작하지 못했습니다.',
+      )
+    } finally {
+      setDownloadStarting(null)
+    }
+  }
+
+  const renderDownloadState = (item: HfCatalogModel) => {
+    const job = downloadByRepo[item.repository_id]
+    if (!job) return null
+
+    const status = job.status.toUpperCase()
+    if (status === 'READY') {
+      return (
+        <div className="secondary-text" style={{ marginTop: '0.35rem' }}>
+          <StatusBadge status={job.status} />
+          <div>
+            {job.resolved_revision ? `rev ${job.resolved_revision}` : null}
+            {job.size_bytes != null ? ` · ${formatBytes(job.size_bytes)}` : null}
+          </div>
+          {job.local_path ? (
+            <TruncatedValue
+              className="mono"
+              value={job.local_path}
+              abbreviated={abbreviateMiddle(job.local_path, 28, 12)}
+            />
+          ) : null}
+        </div>
+      )
+    }
+
+    if (status === 'FAILED') {
+      return (
+        <div style={{ marginTop: '0.35rem' }}>
+          <StatusBadge status={job.status} />
+          {job.error_message ? (
+            <div className="secondary-text">{job.error_message}</div>
+          ) : null}
+          <button
+            type="button"
+            className="btn"
+            style={{ marginTop: '0.25rem' }}
+            disabled={!nodeId || downloadStarting === item.repository_id}
+            onClick={() => void onDownload(item)}
+          >
+            Retry download
+          </button>
+        </div>
+      )
+    }
+
+    if (isActiveDownloadStatus(job.status)) {
+      const pct =
+        job.progress_percent != null ? `${job.progress_percent}%` : '…'
+      return (
+        <div className="secondary-text" style={{ marginTop: '0.35rem' }}>
+          <StatusBadge status={job.status} />
+          <div>Progress {pct}</div>
+        </div>
+      )
+    }
+
+    return (
+      <div style={{ marginTop: '0.35rem' }}>
+        <StatusBadge status={job.status} />
+      </div>
+    )
+  }
+
   return (
     <AppShell
       title="Model Catalog"
-      description="Hugging Face 모델을 검색하고 현재 Node 자원과의 적합도를 자문합니다. Download/Deploy는 다음 단계에서 제공됩니다."
+      description="Hugging Face 모델을 검색하고 Node에 다운로드합니다. FIT는 자문용이며 Deploy는 M7-C에서 제공됩니다."
       onRefresh={() => void load('refresh')}
       refreshing={refreshing}
       lastUpdated={lastUpdated}
@@ -196,6 +368,9 @@ export function ModelCatalogPage() {
       <div className="toolbar toolbar--wrap" style={{ marginBottom: '0.75rem' }}>
         <Link className="btn btn--ghost" to="/models">
           ← Models / Versions
+        </Link>
+        <Link className="btn btn--ghost" to="/models/cache">
+          Model Cache
         </Link>
         <span className="secondary-text">
           FIT 결과는 자문용이며 배포 성공을 보장하지 않습니다.
@@ -250,6 +425,7 @@ export function ModelCatalogPage() {
                 fitOnly: e.target.value ? fitOnly : false,
               })
               setFitByRepo({})
+              setDownloadByRepo({})
             }}
           >
             <option value="">선택…</option>
@@ -316,6 +492,25 @@ export function ModelCatalogPage() {
                   const detail = fitByRepo[item.repository_id]
                   const fitCode =
                     detail?.result || item.resource_fit?.result || null
+                  const job = downloadByRepo[item.repository_id]
+                  const downloadActive =
+                    job != null && isActiveDownloadStatus(job.status)
+                  const diskBlocked = isDiskInsufficientForDownload(detail)
+                  const resolvedType = resolveDownloadModelType(
+                    item,
+                    downloadTypeByRepo[item.repository_id],
+                  )
+                  const typeMissing = resolvedType == null
+                  const downloadTitle = typeMissing
+                    ? 'Select LLM/VLM/EMBEDDING before Download'
+                    : downloadDisabledReason(nodeId, detail)
+                  const downloadDisabled =
+                    !nodeId ||
+                    diskBlocked ||
+                    typeMissing ||
+                    downloadActive ||
+                    downloadStarting === item.repository_id
+
                   return (
                     <tr key={item.repository_id}>
                       <td>
@@ -328,7 +523,27 @@ export function ModelCatalogPage() {
                             : ''}
                         </div>
                       </td>
-                      <td>{item.model_type || '—'}</td>
+                      <td>
+                        {item.model_type ? (
+                          item.model_type
+                        ) : (
+                          <select
+                            aria-label={`Type for ${item.repository_id}`}
+                            value={downloadTypeByRepo[item.repository_id] ?? ''}
+                            onChange={(e) =>
+                              setDownloadTypeByRepo((prev) => ({
+                                ...prev,
+                                [item.repository_id]: e.target.value,
+                              }))
+                            }
+                          >
+                            <option value="">Select…</option>
+                            <option value="LLM">LLM</option>
+                            <option value="VLM">VLM</option>
+                            <option value="EMBEDDING">EMBEDDING</option>
+                          </select>
+                        )}
+                      </td>
                       <td>
                         <div>
                           {formatBytes(item.estimated_download_size_bytes)}
@@ -361,13 +576,29 @@ export function ModelCatalogPage() {
                               ? '분석 중…'
                               : 'Fit 분석'}
                           </button>
-                          <button type="button" className="btn" disabled title="M7-B">
-                            Download
+                          <button
+                            type="button"
+                            className="btn"
+                            disabled={downloadDisabled}
+                            title={downloadTitle}
+                            onClick={() => void onDownload(item)}
+                          >
+                            {downloadStarting === item.repository_id
+                              ? 'Starting…'
+                              : downloadActive
+                                ? 'Downloading…'
+                                : 'Download'}
                           </button>
-                          <button type="button" className="btn" disabled title="M7-B">
+                          <button
+                            type="button"
+                            className="btn"
+                            disabled
+                            title="M7-C"
+                          >
                             Deploy
                           </button>
                         </div>
+                        {renderDownloadState(item)}
                       </td>
                     </tr>
                   )

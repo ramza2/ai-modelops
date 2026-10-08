@@ -60,6 +60,19 @@ class CacheStatus(StrEnum):
     FAILED = "FAILED"
 
 
+class DownloadJobStatus(StrEnum):
+    """Node Agent / Management API HF download job states (M7-B)."""
+
+    QUEUED = "QUEUED"
+    RESOLVING = "RESOLVING"
+    DOWNLOADING = "DOWNLOADING"
+    MATERIALIZING = "MATERIALIZING"
+    VERIFYING = "VERIFYING"
+    READY = "READY"
+    FAILED = "FAILED"
+    CANCELED = "CANCELED"
+
+
 class DeploymentType(StrEnum):
     IMPORTED = "IMPORTED"
     MANAGED = "MANAGED"

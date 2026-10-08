@@ -40,6 +40,7 @@ EXPECTED_TABLES = {
     "health_check",
     "client_app",
     "client_runtime_policy",
+    "model_cache_download_job",
     "invocation_log",
     "audit_log",
 }

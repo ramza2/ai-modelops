@@ -3,9 +3,10 @@ import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { ApiError } from '../api/client'
-import type { HfCatalogModel, HfCatalogPage, NodeSummary } from '../api/types'
+import type { HfCatalogModel, HfCatalogPage, HfDownloadJob, NodeSummary } from '../api/types'
 import { ModelCatalogPage } from '../pages/ModelCatalogPage'
 import * as catalogApi from '../api/catalog'
+import * as downloadsApi from '../api/downloads'
 import * as nodesApi from '../api/nodes'
 
 function pageResult(
@@ -42,6 +43,33 @@ function makeItem(
   }
 }
 
+function makeJob(
+  overrides: Partial<HfDownloadJob> & Pick<HfDownloadJob, 'job_id' | 'repository_id' | 'status'>,
+): HfDownloadJob {
+  return {
+    agent_job_id: 'agent-1',
+    node_id: 'node-1',
+    model_artifact_id: 'art-1',
+    node_model_cache_id: 'cache-1',
+    requested_revision: 'abc',
+    resolved_revision: 'abc',
+    bytes_downloaded: null,
+    total_bytes: null,
+    progress_percent: null,
+    local_path: null,
+    error_code: null,
+    error_message: null,
+    cache_status: 'PREPARING',
+    size_bytes: null,
+    source_uri: 'hf://org/model',
+    created_at: '2026-10-01T00:00:00Z',
+    started_at: null,
+    finished_at: null,
+    updated_at: '2026-10-01T00:00:00Z',
+    ...overrides,
+  }
+}
+
 function renderAt(path: string) {
   return render(
     <MemoryRouter initialEntries={[path]}>
@@ -56,6 +84,8 @@ describe('ModelCatalogPage', () => {
   beforeEach(() => {
     vi.spyOn(catalogApi, 'listHfCatalog')
     vi.spyOn(catalogApi, 'analyzeHfResourceFit')
+    vi.spyOn(downloadsApi, 'startHfDownload')
+    vi.spyOn(downloadsApi, 'getHfDownload')
     vi.spyOn(nodesApi, 'listNodes')
     vi.mocked(nodesApi.listNodes).mockResolvedValue({
       items: [
@@ -87,7 +117,7 @@ describe('ModelCatalogPage', () => {
     vi.restoreAllMocks()
   })
 
-  it('renders catalog rows, fit badges, and disabled next-step actions', async () => {
+  it('renders catalog rows, fit badges, enabled Download when node selected', async () => {
     vi.mocked(catalogApi.listHfCatalog).mockResolvedValue(
       pageResult([
         makeItem({
@@ -107,18 +137,158 @@ describe('ModelCatalogPage', () => {
     expect(screen.getByText('org/tight-model')).toBeInTheDocument()
     expect(screen.getAllByText(/적합/).length).toBeGreaterThan(0)
     expect(screen.getAllByText(/빠듯/).length).toBeGreaterThan(0)
-    expect(screen.getByText('GPU0 has spare VRAM')).toBeInTheDocument()
-    expect(screen.getByText('(FIT)')).toBeInTheDocument()
-    expect(screen.getByText('(TIGHT)')).toBeInTheDocument()
 
     const downloadButtons = screen.getAllByRole('button', { name: 'Download' })
     const deployButtons = screen.getAllByRole('button', { name: 'Deploy' })
-    expect(downloadButtons.every((b) => (b as HTMLButtonElement).disabled)).toBe(
+    expect(downloadButtons.every((b) => !(b as HTMLButtonElement).disabled)).toBe(
       true,
     )
     expect(deployButtons.every((b) => (b as HTMLButtonElement).disabled)).toBe(
       true,
     )
+  })
+
+  it('polls active download until READY and shows cache metadata', async () => {
+    vi.mocked(catalogApi.listHfCatalog).mockResolvedValue(
+      pageResult([makeItem({ repository_id: 'org/dl-model' })]),
+    )
+    vi.mocked(downloadsApi.startHfDownload).mockResolvedValue(
+      makeJob({
+        job_id: 'job-1',
+        repository_id: 'org/dl-model',
+        status: 'DOWNLOADING',
+        progress_percent: 10,
+      }),
+    )
+    vi.mocked(downloadsApi.getHfDownload).mockResolvedValue(
+      makeJob({
+        job_id: 'job-1',
+        repository_id: 'org/dl-model',
+        status: 'READY',
+        local_path: '/data/hf/org-dl-model',
+        resolved_revision: 'rev-ready',
+        size_bytes: 4096,
+        progress_percent: 100,
+      }),
+    )
+
+    renderAt('/models/catalog?node_id=node-1')
+    const row = (await screen.findByText('org/dl-model')).closest('tr')
+    expect(row).not.toBeNull()
+    await userEvent.click(
+      within(row as HTMLElement).getByRole('button', { name: 'Download' }),
+    )
+
+    await waitFor(() => {
+      expect(downloadsApi.startHfDownload).toHaveBeenCalledWith({
+        repositoryId: 'org/dl-model',
+        revision: 'abc',
+        nodeId: 'node-1',
+        modelType: 'LLM',
+      })
+    })
+
+    await waitFor(() => {
+      expect(screen.getByText('/data/hf/org-dl-model')).toBeInTheDocument()
+    })
+    expect(screen.getByText(/rev rev-ready/)).toBeInTheDocument()
+    expect(downloadsApi.getHfDownload).toHaveBeenCalled()
+  })
+
+  it('shows FAILED state with retry', async () => {
+    vi.mocked(catalogApi.listHfCatalog).mockResolvedValue(
+      pageResult([makeItem({ repository_id: 'org/fail-model' })]),
+    )
+    vi.mocked(downloadsApi.startHfDownload).mockResolvedValue(
+      makeJob({
+        job_id: 'job-fail',
+        repository_id: 'org/fail-model',
+        status: 'FAILED',
+        error_message: 'Hub timeout',
+      }),
+    )
+
+    renderAt('/models/catalog?node_id=node-1')
+    const row = (await screen.findByText('org/fail-model')).closest('tr')
+    await userEvent.click(
+      within(row as HTMLElement).getByRole('button', { name: 'Download' }),
+    )
+    expect(await screen.findByText('Hub timeout')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Retry download' }))
+    await waitFor(() => {
+      expect(downloadsApi.startHfDownload).toHaveBeenCalledTimes(2)
+    })
+  })
+
+  it('disables Download on disk insufficient but not VRAM-only insufficient', async () => {
+    vi.mocked(catalogApi.listHfCatalog).mockResolvedValue(
+      pageResult([
+        makeItem({ repository_id: 'org/vram-bad' }),
+        makeItem({ repository_id: 'org/disk-bad' }),
+      ]),
+    )
+    vi.mocked(catalogApi.analyzeHfResourceFit).mockImplementation(
+      async ({ repositoryId }) => {
+        if (repositoryId === 'org/vram-bad') {
+          return {
+            repository_id: repositoryId,
+            revision: 'abc',
+            node_id: 'node-1',
+            result: 'INSUFFICIENT',
+            estimated_required_vram_mb: 20000,
+            estimated_download_size_bytes: 40_000_000_000,
+            quantization_hint: null,
+            dtype_hint: 'float16',
+            disk_free_mb: 100000,
+            disk_ok: true,
+            tensor_parallel: 1,
+            gpu_results: [],
+            suggested_gpu_device_ids: [],
+            assumptions: [],
+            warnings: [],
+            reasons: ['Free VRAM too low'],
+            advisory_only: true,
+          }
+        }
+        return {
+          repository_id: repositoryId,
+          revision: 'abc',
+          node_id: 'node-1',
+          result: 'INSUFFICIENT',
+          estimated_required_vram_mb: 2000,
+          estimated_download_size_bytes: 40_000_000_000,
+          quantization_hint: null,
+          dtype_hint: 'float16',
+          disk_free_mb: 100,
+          disk_ok: false,
+          tensor_parallel: 1,
+          gpu_results: [],
+          suggested_gpu_device_ids: [],
+          assumptions: [],
+          warnings: [],
+          reasons: ['Disk full'],
+          advisory_only: true,
+        }
+      },
+    )
+
+    renderAt('/models/catalog?node_id=node-1')
+    expect(await screen.findByText('org/vram-bad')).toBeInTheDocument()
+
+    const vramRow = screen.getByText('org/vram-bad').closest('tr') as HTMLElement
+    const diskRow = screen.getByText('org/disk-bad').closest('tr') as HTMLElement
+
+    await userEvent.click(within(vramRow).getByRole('button', { name: 'Fit 분석' }))
+    await userEvent.click(within(diskRow).getByRole('button', { name: 'Fit 분석' }))
+
+    await waitFor(() => {
+      expect(
+        within(vramRow).getByRole('button', { name: 'Download' }),
+      ).not.toBeDisabled()
+    })
+    expect(
+      within(diskRow).getByRole('button', { name: 'Download' }),
+    ).toBeDisabled()
   })
 
   it('shows loading then error state', async () => {
@@ -199,6 +369,9 @@ describe('ModelCatalogPage', () => {
     )
     expect(await screen.findByText(/부족/)).toBeInTheDocument()
     expect(screen.getByText('Free VRAM too low')).toBeInTheDocument()
+    expect(
+      within(row as HTMLElement).getByRole('button', { name: 'Download' }),
+    ).not.toBeDisabled()
   })
 
   it('enables Next when has_more is true and navigates to page 2', async () => {
@@ -227,5 +400,51 @@ describe('ModelCatalogPage', () => {
       )
     })
     expect(screen.getByRole('button', { name: '다음' })).toBeDisabled()
+  })
+
+  it('requires explicit type selection when catalog model_type is unknown', async () => {
+    vi.mocked(catalogApi.listHfCatalog).mockResolvedValue(
+      pageResult([
+        makeItem({
+          repository_id: 'org/unknown-type',
+          model_type: null,
+          pipeline_tag: 'other',
+        }),
+      ]),
+    )
+    vi.mocked(downloadsApi.startHfDownload).mockResolvedValue(
+      makeJob({
+        job_id: 'job-unk',
+        repository_id: 'org/unknown-type',
+        status: 'READY',
+      }),
+    )
+
+    renderAt('/models/catalog?node_id=node-1')
+    const row = (await screen.findByText('org/unknown-type')).closest('tr')
+    expect(row).not.toBeNull()
+    const download = within(row as HTMLElement).getByRole('button', {
+      name: 'Download',
+    })
+    expect(download).toBeDisabled()
+    expect(download).toHaveAttribute(
+      'title',
+      'Select LLM/VLM/EMBEDDING before Download',
+    )
+
+    await userEvent.selectOptions(
+      within(row as HTMLElement).getByLabelText('Type for org/unknown-type'),
+      'EMBEDDING',
+    )
+    expect(download).not.toBeDisabled()
+    await userEvent.click(download)
+    await waitFor(() => {
+      expect(downloadsApi.startHfDownload).toHaveBeenCalledWith({
+        repositoryId: 'org/unknown-type',
+        revision: 'abc',
+        nodeId: 'node-1',
+        modelType: 'EMBEDDING',
+      })
+    })
   })
 })

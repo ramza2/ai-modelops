@@ -119,6 +119,76 @@ export type ResourceFitAnalysis = {
   advisory_only: boolean
 }
 
+/** M7-B HF download job states (Node Agent + Management API). */
+export type DownloadJobStatus =
+  | 'QUEUED'
+  | 'RESOLVING'
+  | 'DOWNLOADING'
+  | 'MATERIALIZING'
+  | 'VERIFYING'
+  | 'READY'
+  | 'FAILED'
+  | 'CANCELED'
+
+export type HfDownloadJob = {
+  job_id: string
+  agent_job_id: string | null
+  node_id: string
+  model_artifact_id: string
+  node_model_cache_id: string | null
+  repository_id: string
+  requested_revision: string | null
+  resolved_revision: string | null
+  status: DownloadJobStatus | string
+  bytes_downloaded: number | null
+  total_bytes: number | null
+  progress_percent: number | null
+  local_path: string | null
+  error_code: string | null
+  error_message: string | null
+  cache_status: string | null
+  size_bytes: number | null
+  source_uri: string | null
+  created_at: string
+  started_at: string | null
+  finished_at: string | null
+  updated_at: string
+  advisory_note?: string
+}
+
+/** M7-B Node-local model artifact cache (not a running Deployment). */
+export type ModelCacheEntry = {
+  id: string
+  node_id: string
+  node_name: string | null
+  model_artifact_id: string
+  repository_id: string | null
+  resolved_revision: string | null
+  model_id: string | null
+  model_slug: string | null
+  model_version_id: string | null
+  status: string
+  local_path: string | null
+  size_bytes: number | null
+  error_message: string | null
+  prepared_at: string | null
+  last_verified_at: string | null
+  created_at: string
+  updated_at: string
+  is_deployment: boolean
+  note: string | null
+}
+
+export type ModelCachePurgeResult = {
+  id: string
+  status: string
+  purged: boolean
+  repository_id: string
+  resolved_revision: string
+  registry_retained: boolean
+  agent?: unknown
+}
+
 export type NodeSummary = {
   id: string
   name: string

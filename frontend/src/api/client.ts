@@ -156,6 +156,13 @@ export async function apiPost<T>(
   return apiRequest<T>('POST', path, options)
 }
 
+export async function apiDelete<T>(
+  path: string,
+  options: ApiFetchOptions = {},
+): Promise<T> {
+  return apiRequest<T>('DELETE', path, options)
+}
+
 /** @deprecated use buildApiUrl('', ...) — kept for older tests */
 export function __testBuildUrl(
   path: string,
