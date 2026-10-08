@@ -821,11 +821,16 @@ Source of truth for that phase: `docs/testing/02-final-hardening-server-integrat
   idempotently (`hf://…` URI, immutable SHA) and mirrors jobs/cache rows.
   Admin: catalog Download + `/models/cache` purge.
   HF tokens never persisted/returned. Contract: `docs/api/06-hf-download-cache.md`.
-- **M7-C (current):** Cache READY → Managed Deployment → Start → Gateway
+- **M7-C (done):** Cache READY → Managed Deployment → Start → Gateway
   initial publish. Orchestration reuses existing Deployment/Operation/Endpoint
   lifecycle (no second execution engine). Fresh pre-deploy GPU fit; stale
   stopped managed containers recreated on ENSURE_CONTAINER; active-route
   aliases redirect to Switch. Contract: `docs/api/07-cache-deploy-publish.md`.
+- **M7-D (current):** Safe decommission opposite of M7-C —
+  Unpublish → Stop → Remove managed container → Retire metadata →
+  optional Cache Purge → optional Version/Model Archive. Preserves
+  registry/audit history (no hard-delete). Contract:
+  `docs/api/08-decommission-retirement.md`.
 
 한 번에 모든 기능을 스캐폴딩만 하는 것보다 각 milestone을 end-to-end로 동작하게 완성하는 것을 우선한다.
 
