@@ -23,7 +23,10 @@ from app.core.config import get_settings
 from app.core.errors import AppError, ErrorCode, error_envelope
 from app.services import NodeService
 from app.services.deployments import DeploymentLifecycleService
-from app.services.model_cache import ModelCacheService
+from app.services.model_cache import (
+    ModelCacheService,
+    collect_managed_occupied_model_paths,
+)
 
 REQUEST_ID_HEADER = "X-Request-ID"
 
@@ -47,7 +50,18 @@ def create_app(
     app = FastAPI(title=settings.app_name)
     node_service = service or build_default_service()
     lifecycle = deployment_service or DeploymentLifecycleService(node_service.docker)
-    cache_service = model_cache_service or ModelCacheService()
+    if model_cache_service is not None:
+        cache_service = model_cache_service
+    else:
+        docker = node_service.docker
+        model_root = settings.model_root
+
+        def _occupied_paths() -> set[str]:
+            from pathlib import Path
+
+            return collect_managed_occupied_model_paths(docker, Path(model_root))
+
+        cache_service = ModelCacheService(occupied_paths_provider=_occupied_paths)
 
     def _service_override() -> NodeService:
         return node_service

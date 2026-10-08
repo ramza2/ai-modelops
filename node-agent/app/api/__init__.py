@@ -108,6 +108,11 @@ class ModelCacheDownloadRequest(BaseModel):
     target_root: str | None = Field(default=None, max_length=1024)
 
 
+class ModelCacheResolveRequest(BaseModel):
+    repository_id: str = Field(min_length=3, max_length=255)
+    revision: str | None = Field(default=None, max_length=255)
+
+
 class ModelCachePurgeRequest(BaseModel):
     repository_id: str = Field(min_length=3, max_length=255)
     revision: str = Field(min_length=1, max_length=255)
@@ -357,6 +362,20 @@ async def remove_deployment(
     _ = (x_operation_id, x_step_id, x_request_id)
     service.remove(str(deployment_id))
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@internal_router.post("/model-cache/resolve")
+def resolve_model_cache_revision(
+    body: ModelCacheResolveRequest,
+    service: ModelCacheService = Depends(get_model_cache_service),
+    x_request_id: str | None = Header(default=None, alias="X-Request-ID"),
+) -> dict[str, Any]:
+    """Resolve branch/tag/SHA to an immutable commit SHA (no download)."""
+    _ = x_request_id
+    return service.resolve(
+        repository_id=body.repository_id,
+        revision=body.revision,
+    )
 
 
 @internal_router.post(

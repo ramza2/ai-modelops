@@ -401,4 +401,50 @@ describe('ModelCatalogPage', () => {
     })
     expect(screen.getByRole('button', { name: '다음' })).toBeDisabled()
   })
+
+  it('requires explicit type selection when catalog model_type is unknown', async () => {
+    vi.mocked(catalogApi.listHfCatalog).mockResolvedValue(
+      pageResult([
+        makeItem({
+          repository_id: 'org/unknown-type',
+          model_type: null,
+          pipeline_tag: 'other',
+        }),
+      ]),
+    )
+    vi.mocked(downloadsApi.startHfDownload).mockResolvedValue(
+      makeJob({
+        job_id: 'job-unk',
+        repository_id: 'org/unknown-type',
+        status: 'READY',
+      }),
+    )
+
+    renderAt('/models/catalog?node_id=node-1')
+    const row = (await screen.findByText('org/unknown-type')).closest('tr')
+    expect(row).not.toBeNull()
+    const download = within(row as HTMLElement).getByRole('button', {
+      name: 'Download',
+    })
+    expect(download).toBeDisabled()
+    expect(download).toHaveAttribute(
+      'title',
+      'Select LLM/VLM/EMBEDDING before Download',
+    )
+
+    await userEvent.selectOptions(
+      within(row as HTMLElement).getByLabelText('Type for org/unknown-type'),
+      'EMBEDDING',
+    )
+    expect(download).not.toBeDisabled()
+    await userEvent.click(download)
+    await waitFor(() => {
+      expect(downloadsApi.startHfDownload).toHaveBeenCalledWith({
+        repositoryId: 'org/unknown-type',
+        revision: 'abc',
+        nodeId: 'node-1',
+        modelType: 'EMBEDDING',
+      })
+    })
+  })
 })

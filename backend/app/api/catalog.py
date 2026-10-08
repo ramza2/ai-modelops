@@ -40,7 +40,7 @@ class DownloadRequest(BaseModel):
     repository_id: str = Field(min_length=3, max_length=255)
     revision: str | None = Field(default=None, max_length=255)
     node_id: uuid.UUID
-    model_type: str | None = Field(default=None, max_length=32)
+    model_type: str = Field(min_length=3, max_length=32)
 
 
 @router.get("/huggingface/models")

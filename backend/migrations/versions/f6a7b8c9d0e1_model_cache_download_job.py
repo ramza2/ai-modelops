@@ -72,15 +72,34 @@ def upgrade() -> None:
         ["agent_job_id"],
         unique=False,
     )
+    # At most one ACTIVE download job per node + artifact (canonical SHA identity).
+    op.create_index(
+        "uq_model_cache_download_job_active_node_artifact",
+        "model_cache_download_job",
+        ["node_id", "model_artifact_id"],
+        unique=True,
+        postgresql_where=sa.text(
+            "status IN ("
+            "'QUEUED','RESOLVING','DOWNLOADING','MATERIALIZING','VERIFYING'"
+            ")"
+        ),
+    )
 
 
 def downgrade() -> None:
     op.drop_index(
+        "uq_model_cache_download_job_active_node_artifact",
+        table_name="model_cache_download_job",
+        if_exists=True,
+    )
+    op.drop_index(
         "ix_model_cache_download_job_agent_job",
         table_name="model_cache_download_job",
+        if_exists=True,
     )
     op.drop_index(
         "ix_model_cache_download_job_node_status",
         table_name="model_cache_download_job",
+        if_exists=True,
     )
     op.drop_table("model_cache_download_job")

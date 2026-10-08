@@ -17,10 +17,11 @@ import threading
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Protocol
 
 from app.core.config import get_settings
 from app.core.errors import AppError, ValidationError
+from app.core.labels import LABEL_MANAGED, MANAGED_LABEL_VALUE
 
 
 class NotFoundError(AppError):
@@ -32,8 +33,14 @@ class ConflictError(AppError):
     code = "CONFLICT"
     http_status = 409
 
+
 READY_MARKER = ".modelops_cache_ready"
 STAGING_DIRNAME = ".staging"
+HF_LOCAL_CACHE_DIR = Path(".cache") / "huggingface"
+_WEIGHT_SUFFIXES = (".safetensors", ".bin", ".gguf", ".pt", ".pth", ".ggml")
+_ACTIVE_CONTAINER_STATUSES = frozenset(
+    {"running", "created", "restarting", "paused"}
+)
 ACTIVE_DOWNLOAD_STATUSES = frozenset(
     {
         "QUEUED",
@@ -44,6 +51,10 @@ ACTIVE_DOWNLOAD_STATUSES = frozenset(
     }
 )
 TERMINAL_STATUSES = frozenset({"READY", "FAILED", "CANCELED"})
+
+
+class _DockerLike(Protocol):
+    def list_containers(self, *, all_containers: bool = False) -> list[Any]: ...
 
 
 def utcnow() -> dt.datetime:
@@ -82,6 +93,12 @@ def _is_under(root: Path, candidate: Path) -> bool:
         return False
 
 
+def _paths_overlap(a: Path, b: Path) -> bool:
+    ar = a.resolve()
+    br = b.resolve()
+    return ar == br or _is_under(ar, br) or _is_under(br, ar)
+
+
 def _dir_size_bytes(path: Path) -> int:
     total = 0
     for dirpath, _dirnames, filenames in os.walk(path, followlinks=False):
@@ -105,8 +122,16 @@ def _has_symlinks(path: Path) -> bool:
     return False
 
 
+def _has_weight_files(path: Path) -> bool:
+    for dirpath, _dirnames, filenames in os.walk(path, followlinks=False):
+        for name in filenames:
+            lower = name.lower()
+            if any(lower.endswith(suffix) for suffix in _WEIGHT_SUFFIXES):
+                return True
+    return False
+
+
 def _replace_symlinks_with_files(path: Path) -> None:
-    """Materialize any remaining symlinks as real files under ``path``."""
     for dirpath, dirnames, filenames in os.walk(path, followlinks=False):
         base = Path(dirpath)
         for name in (*dirnames, *filenames):
@@ -119,6 +144,52 @@ def _replace_symlinks_with_files(path: Path) -> None:
                 shutil.copytree(target, link)
             else:
                 shutil.copy2(target, link)
+
+
+def _strip_hf_local_metadata(path: Path) -> None:
+    """Remove Hugging Face local_dir metadata before final rename."""
+    hf_meta = path / HF_LOCAL_CACHE_DIR
+    if hf_meta.exists():
+        shutil.rmtree(hf_meta, ignore_errors=True)
+    cache_root = path / ".cache"
+    if cache_root.is_dir():
+        try:
+            next(cache_root.iterdir())
+        except StopIteration:
+            cache_root.rmdir()
+        except OSError:
+            pass
+
+
+def collect_managed_occupied_model_paths(
+    docker: _DockerLike,
+    model_root: Path,
+) -> set[str]:
+    """Host paths from ModelOps-managed containers that must not be purged."""
+    occupied: set[str] = set()
+    root = model_root.resolve()
+    try:
+        containers = docker.list_containers(all_containers=True)
+    except Exception:  # noqa: BLE001
+        return occupied
+    for info in containers:
+        labels = getattr(info, "labels", None) or {}
+        if labels.get(LABEL_MANAGED) != MANAGED_LABEL_VALUE:
+            continue
+        status = str(getattr(info, "status", "") or "").lower()
+        if status not in _ACTIVE_CONTAINER_STATUSES:
+            continue
+        for vol in getattr(info, "volumes", None) or []:
+            host_path = getattr(vol, "host_path", None)
+            if not host_path:
+                continue
+            try:
+                host = Path(str(host_path)).resolve()
+            except OSError:
+                continue
+            if host == root or _is_under(root, host):
+                occupied.add(str(host))
+    return occupied
 
 
 @dataclass
@@ -158,16 +229,6 @@ class CacheJob:
         }
 
 
-@dataclass(frozen=True, slots=True)
-class CacheEntry:
-    repository_id: str
-    resolved_revision: str
-    local_path: str
-    size_bytes: int | None
-    status: str
-    ready_marker: bool
-
-
 class ModelCacheService:
     def __init__(
         self,
@@ -185,9 +246,7 @@ class ModelCacheService:
             model_root if model_root is not None else settings.model_root
         ).resolve()
         self._token = (
-            token
-            if token is not None
-            else (settings.hf_hub_token or None)
+            token if token is not None else (settings.hf_hub_token or None)
         )
         self._timeout = (
             float(timeout_seconds)
@@ -206,21 +265,18 @@ class ModelCacheService:
         self._jobs: dict[str, CacheJob] = {}
         self._lock = threading.RLock()
         self._key_locks: dict[str, threading.Lock] = {}
-        self._active_keys: dict[str, str] = {}  # dedupe_key -> job_id
+        self._active_keys: dict[str, str] = {}
         self._semaphore = threading.Semaphore(max(1, self._max_concurrency))
-        # Do not force-create the production root at import time (may be
-        # unwritable in unit-test / non-host environments). Created on use.
 
     @property
     def model_root(self) -> Path:
         return self._model_root
 
-    def _dedupe_key(self, repository_id: str, revision: str | None) -> str:
-        return f"{repository_id.strip()}@{revision or 'main'}"
+    def _dedupe_key(self, repository_id: str, resolved_sha: str) -> str:
+        return f"{repository_id.strip()}@{resolved_sha}"
 
     def _ensure_target_root(self, target_root: str | None) -> Path:
         root = Path(target_root or str(self._model_root)).resolve()
-        # M7-B: only the configured model root is accepted (no path escape).
         if root != self._model_root:
             raise ValidationError(
                 "target_root must equal the configured ModelOps model root.",
@@ -282,6 +338,23 @@ class ModelCacheService:
             )
         return str(sha)
 
+    def resolve(
+        self, *, repository_id: str, revision: str | None = None
+    ) -> dict[str, Any]:
+        repo = (repository_id or "").strip()
+        if not repo or repo.count("/") != 1:
+            raise ValidationError(
+                "repository_id must be org/repo.",
+                details={"repository_id": repository_id},
+            )
+        parse_repository_id(repo)
+        sha = self._resolve_revision(repo, revision)
+        return {
+            "repository_id": repo,
+            "requested_revision": revision,
+            "resolved_revision": sha,
+        }
+
     def _snapshot_download(
         self,
         *,
@@ -306,14 +379,26 @@ class ModelCacheService:
                 http_status=503,
                 details={"error": type(exc).__name__},
             ) from exc
-        # local_dir_use_symlinks=False materializes files for bind-mount use.
+        # etag_timeout bounds metadata/HEAD waits. Per-file transfer timeouts
+        # are controlled by huggingface_hub/httpx defaults; we do not fake a
+        # cancelable whole-model wall-clock timeout here.
         snapshot_download(
             repo_id=repository_id,
             revision=revision,
             local_dir=str(local_dir),
             local_dir_use_symlinks=False,
             token=self._token,
+            etag_timeout=self._timeout,
         )
+
+    def _is_ready_dir(self, path: Path) -> bool:
+        if not path.is_dir():
+            return False
+        if _has_symlinks(path):
+            return False
+        if (path / READY_MARKER).is_file():
+            return True
+        return self._looks_like_materialized(path)
 
     def start_download(
         self,
@@ -328,9 +413,33 @@ class ModelCacheService:
                 "repository_id must be org/repo.",
                 details={"repository_id": repository_id},
             )
-        parse_repository_id(repo)  # validate segments early
+        parse_repository_id(repo)
         root = self._ensure_target_root(target_root)
-        key = self._dedupe_key(repo, revision)
+
+        # Resolve immutable SHA before accepting/deduping the job.
+        sha = self._resolve_revision(repo, revision)
+        key = self._dedupe_key(repo, sha)
+        final = self._final_path(root, repo, sha)
+
+        if self._is_ready_dir(final):
+            size = _dir_size_bytes(final)
+            job = CacheJob(
+                job_id=str(uuid.uuid4()),
+                repository_id=repo,
+                requested_revision=revision,
+                resolved_revision=sha,
+                status="READY",
+                bytes_downloaded=size,
+                total_bytes=size,
+                progress_percent=100,
+                local_path=str(final),
+                started_at=utcnow(),
+                finished_at=utcnow(),
+                target_root=str(root),
+            )
+            with self._lock:
+                self._jobs[job.job_id] = job
+            return job.to_dict()
 
         with self._lock:
             existing_job_id = self._active_keys.get(key)
@@ -339,12 +448,11 @@ class ModelCacheService:
                 if job.status in ACTIVE_DOWNLOAD_STATUSES:
                     return job.to_dict()
 
-            # Fast path: already materialized for this requested revision alias
-            # is handled after resolve; here only create job.
             job = CacheJob(
                 job_id=str(uuid.uuid4()),
                 repository_id=repo,
                 requested_revision=revision,
+                resolved_revision=sha,
                 status="QUEUED",
                 target_root=str(root),
             )
@@ -354,7 +462,7 @@ class ModelCacheService:
 
         worker = threading.Thread(
             target=self._run_job,
-            args=(job.job_id, key, key_lock, root),
+            args=(job.job_id, key, key_lock, root, sha),
             name=f"hf-cache-{job.job_id[:8]}",
             daemon=True,
         )
@@ -367,6 +475,7 @@ class ModelCacheService:
         key: str,
         key_lock: threading.Lock,
         root: Path,
+        sha: str,
     ) -> None:
         acquired_key = key_lock.acquire(blocking=True)
         acquired_slot = self._semaphore.acquire(blocking=True)
@@ -374,30 +483,12 @@ class ModelCacheService:
         try:
             with self._lock:
                 job = self._jobs[job_id]
-                job.status = "RESOLVING"
+                job.status = "DOWNLOADING"
                 job.started_at = utcnow()
-
-            sha = self._resolve_revision(job.repository_id, job.requested_revision)
-            final = self._final_path(root, job.repository_id, sha)
-            with self._lock:
                 job.resolved_revision = sha
 
-            existing_ready = final.is_dir() and (
-                (final / READY_MARKER).is_file()
-                or self._looks_like_materialized(final)
-            )
-            if existing_ready:
-                if _has_symlinks(final):
-                    with self._lock:
-                        job.status = "FAILED"
-                        job.error_code = "CACHE_HAS_SYMLINKS"
-                        job.error_message = (
-                            "Existing cache directory contains symlinks; "
-                            "refusing to mark READY."
-                        )
-                        job.finished_at = utcnow()
-                    return
-                # Do not mutate pre-existing trees (e.g. imported BGE path).
+            final = self._final_path(root, job.repository_id, sha)
+            if self._is_ready_dir(final):
                 size = _dir_size_bytes(final)
                 with self._lock:
                     job.status = "READY"
@@ -408,12 +499,15 @@ class ModelCacheService:
                     job.finished_at = utcnow()
                 return
 
-            with self._lock:
-                job.status = "DOWNLOADING"
+            # Clear incomplete final leftovers (never treat staging as READY).
+            if final.exists() and not self._is_ready_dir(final):
+                shutil.rmtree(final, ignore_errors=True)
 
             staging = (root / STAGING_DIRNAME / job_id).resolve()
             if staging.exists():
                 shutil.rmtree(staging, ignore_errors=True)
+            # Also clear stale staging dirs from prior Agent processes for this SHA.
+            self._cleanup_stale_staging(root, job.repository_id, sha, keep_job_id=job_id)
             staging.mkdir(parents=True, exist_ok=True)
 
             self._snapshot_download(
@@ -425,22 +519,28 @@ class ModelCacheService:
             with self._lock:
                 job.status = "MATERIALIZING"
             _replace_symlinks_with_files(staging)
+            _strip_hf_local_metadata(staging)
             if _has_symlinks(staging):
                 raise AppError(
                     "Materialized cache still contains symlinks.",
                     code="CACHE_HAS_SYMLINKS",
                     http_status=500,
                 )
+            if HF_LOCAL_CACHE_DIR.parts[0] in {
+                p.name for p in staging.iterdir() if p.is_dir()
+            }:
+                # Ensure nested .cache/huggingface is gone.
+                _strip_hf_local_metadata(staging)
 
             with self._lock:
                 job.status = "VERIFYING"
-            size = _dir_size_bytes(staging)
-            if size <= 0:
+            if not _has_weight_files(staging):
                 raise AppError(
-                    "Downloaded cache is empty.",
+                    "Downloaded cache has no weight files.",
                     code="EMPTY_CACHE",
                     http_status=500,
                 )
+            size = _dir_size_bytes(staging)
             (staging / READY_MARKER).write_text(
                 f"repository_id={job.repository_id}\n"
                 f"resolved_revision={sha}\n",
@@ -449,11 +549,7 @@ class ModelCacheService:
 
             final.parent.mkdir(parents=True, exist_ok=True)
             if final.exists():
-                # Incomplete leftover without marker — replace safely.
-                if not (final / READY_MARKER).is_file():
-                    shutil.rmtree(final)
-                else:
-                    # Race: another worker finished; use existing.
+                if self._is_ready_dir(final):
                     shutil.rmtree(staging, ignore_errors=True)
                     staging = None
                     size = _dir_size_bytes(final)
@@ -465,6 +561,7 @@ class ModelCacheService:
                         job.progress_percent = 100
                         job.finished_at = utcnow()
                     return
+                shutil.rmtree(final)
 
             os.replace(staging, final)
             staging = None
@@ -504,13 +601,46 @@ class ModelCacheService:
             if acquired_key:
                 key_lock.release()
 
+    def _cleanup_stale_staging(
+        self,
+        root: Path,
+        repository_id: str,
+        sha: str,
+        *,
+        keep_job_id: str,
+    ) -> None:
+        staging_root = root / STAGING_DIRNAME
+        if not staging_root.is_dir():
+            return
+        marker_needle = f"resolved_revision={sha}"
+        for child in staging_root.iterdir():
+            if not child.is_dir() or child.name == keep_job_id:
+                continue
+            # Best-effort: remove empty/orphan staging dirs; never treat as READY.
+            try:
+                marker = child / READY_MARKER
+                if marker.is_file() and marker_needle in marker.read_text(
+                    encoding="utf-8", errors="ignore"
+                ):
+                    shutil.rmtree(child, ignore_errors=True)
+                    continue
+                # Orphan staging without a live job id mapping.
+                with self._lock:
+                    live = child.name in self._jobs and self._jobs[
+                        child.name
+                    ].status in ACTIVE_DOWNLOAD_STATUSES
+                if not live:
+                    shutil.rmtree(child, ignore_errors=True)
+            except OSError:
+                continue
+
     def get_job(self, job_id: str) -> dict[str, Any]:
         with self._lock:
             job = self._jobs.get(job_id)
             if job is None:
                 raise NotFoundError(
                     "Download job not found.",
-                    details={"job_id": job_id},
+                    details={"job_id": job_id, "code": "AGENT_JOB_NOT_FOUND"},
                 )
             return job.to_dict()
 
@@ -530,54 +660,28 @@ class ModelCacheService:
                     if not rev_dir.is_dir() or rev_dir.name.startswith("."):
                         continue
                     marker = rev_dir / READY_MARKER
-                    # Recognize READY dirs with marker, or known complete trees
-                    # without marker (e.g. pre-existing BGE materialization).
-                    ready = marker.is_file() or self._looks_like_materialized(rev_dir)
+                    ready = self._is_ready_dir(rev_dir)
                     if not ready:
                         continue
-                    if _has_symlinks(rev_dir):
-                        status = "FAILED"
-                    else:
-                        status = "READY"
                     size = _dir_size_bytes(rev_dir)
-                    repo_id = f"{org_dir.name}/{repo_dir.name}"
-                    entry = CacheEntry(
-                        repository_id=repo_id,
-                        resolved_revision=rev_dir.name,
-                        local_path=str(rev_dir.resolve()),
-                        size_bytes=size,
-                        status=status,
-                        ready_marker=marker.is_file(),
-                    )
                     entries.append(
                         {
-                            "repository_id": entry.repository_id,
-                            "resolved_revision": entry.resolved_revision,
-                            "local_path": entry.local_path,
-                            "size_bytes": entry.size_bytes,
-                            "status": entry.status,
-                            "ready_marker": entry.ready_marker,
+                            "repository_id": f"{org_dir.name}/{repo_dir.name}",
+                            "resolved_revision": rev_dir.name,
+                            "local_path": str(rev_dir.resolve()),
+                            "size_bytes": size,
+                            "status": "READY",
+                            "ready_marker": marker.is_file(),
                         }
                     )
         return {"items": entries, "model_root": str(root)}
 
     @staticmethod
     def _looks_like_materialized(path: Path) -> bool:
-        """Heuristic for pre-existing READY trees without a marker file."""
-        try:
-            children = [p for p in path.iterdir() if not p.name.startswith(".")]
-        except OSError:
+        """Markerless legacy discovery: weight files required, no symlinks."""
+        if _has_symlinks(path):
             return False
-        if not children:
-            return False
-        # Common HF weight/config presence.
-        names = {p.name.lower() for p in children}
-        if "config.json" in names:
-            return True
-        return any(
-            n.endswith((".safetensors", ".bin", ".gguf", ".pt", ".pth"))
-            for n in names
-        )
+        return _has_weight_files(path)
 
     def purge(
         self,
@@ -608,33 +712,30 @@ class ModelCacheService:
                         "Cannot purge while download/materialization is active.",
                         details={"job_id": active_id, "status": job.status},
                     )
-            # Also block if any active job targets same resolved path.
             for job in self._jobs.values():
                 if (
                     job.status in ACTIVE_DOWNLOAD_STATUSES
                     and job.repository_id == repo
-                    and (
-                        job.resolved_revision == rev
-                        or job.requested_revision == rev
-                    )
+                    and job.resolved_revision == rev
                 ):
                     raise ConflictError(
                         "Cannot purge while download/materialization is active.",
                         details={"job_id": job.job_id, "status": job.status},
                     )
 
-        occupied = {str(Path(p).resolve()) for p in self._occupied_paths_provider()}
-        if str(path) in occupied and not force:
+        occupied = {
+            str(Path(p).resolve()) for p in self._occupied_paths_provider()
+        }
+        protected = any(_paths_overlap(path, Path(p)) for p in occupied)
+        if protected:
             raise ConflictError(
-                "Cache is referenced by an active managed deployment.",
-                details={"local_path": str(path)},
-            )
-        if str(path) in occupied and force:
-            # force still must not silently stop deployments.
-            raise ConflictError(
-                "Cache is referenced by an active managed deployment; "
-                "force=true does not stop deployments or delete outside root.",
-                details={"local_path": str(path), "force": True},
+                "Cache is referenced by an active managed deployment"
+                + (
+                    "; force=true does not stop deployments or delete outside root."
+                    if force
+                    else "."
+                ),
+                details={"local_path": str(path), "force": force},
             )
 
         if path.exists():
@@ -642,7 +743,6 @@ class ModelCacheService:
                 shutil.rmtree(path)
             else:
                 path.unlink()
-        # Best-effort cleanup of empty parents under root.
         for parent in (path.parent, path.parent.parent):
             if _is_under(root, parent) and parent != root and parent.is_dir():
                 try:

@@ -18,7 +18,8 @@ export type StartHfDownloadBody = {
   repositoryId: string
   revision?: string | null
   nodeId: string
-  modelType?: string | null
+  /** Required: LLM | VLM | EMBEDDING — never silently defaulted. */
+  modelType: string
 }
 
 export async function startHfDownload(
@@ -30,7 +31,7 @@ export async function startHfDownload(
       repository_id: body.repositoryId,
       revision: body.revision ?? null,
       node_id: body.nodeId,
-      model_type: body.modelType ?? null,
+      model_type: body.modelType,
     },
     signal,
   })

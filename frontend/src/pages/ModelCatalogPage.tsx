@@ -63,6 +63,15 @@ function isDiskInsufficientForDownload(
   return detail.disk_ok === false
 }
 
+function resolveDownloadModelType(
+  item: HfCatalogModel,
+  override: string | undefined,
+): string | null {
+  const raw = (override || item.model_type || '').toUpperCase()
+  if (raw === 'LLM' || raw === 'VLM' || raw === 'EMBEDDING') return raw
+  return null
+}
+
 function downloadDisabledReason(
   nodeId: string,
   detail?: ResourceFitAnalysis | null,
@@ -94,6 +103,9 @@ export function ModelCatalogPage() {
   const [fitLoading, setFitLoading] = useState<string | null>(null)
   const [downloadByRepo, setDownloadByRepo] = useState<
     Record<string, HfDownloadJob>
+  >({})
+  const [downloadTypeByRepo, setDownloadTypeByRepo] = useState<
+    Record<string, string>
   >({})
   const [downloadStarting, setDownloadStarting] = useState<string | null>(null)
   const abortRef = useRef<AbortController | null>(null)
@@ -251,6 +263,16 @@ export function ModelCatalogPage() {
     const existing = downloadByRepo[item.repository_id]
     if (existing && isActiveDownloadStatus(existing.status)) return
     if (downloadStarting === item.repository_id) return
+    const modelType = resolveDownloadModelType(
+      item,
+      downloadTypeByRepo[item.repository_id],
+    )
+    if (!modelType) {
+      setError(
+        `${item.repository_id}: model type is unknown. Select LLM/VLM/EMBEDDING before Download.`,
+      )
+      return
+    }
 
     setDownloadStarting(item.repository_id)
     setError(null)
@@ -259,7 +281,7 @@ export function ModelCatalogPage() {
         repositoryId: item.repository_id,
         revision: item.revision,
         nodeId,
-        modelType: item.model_type,
+        modelType,
       })
       setDownloadByRepo((prev) => ({ ...prev, [item.repository_id]: job }))
     } catch (err) {
@@ -474,10 +496,18 @@ export function ModelCatalogPage() {
                   const downloadActive =
                     job != null && isActiveDownloadStatus(job.status)
                   const diskBlocked = isDiskInsufficientForDownload(detail)
-                  const downloadTitle = downloadDisabledReason(nodeId, detail)
+                  const resolvedType = resolveDownloadModelType(
+                    item,
+                    downloadTypeByRepo[item.repository_id],
+                  )
+                  const typeMissing = resolvedType == null
+                  const downloadTitle = typeMissing
+                    ? 'Select LLM/VLM/EMBEDDING before Download'
+                    : downloadDisabledReason(nodeId, detail)
                   const downloadDisabled =
                     !nodeId ||
                     diskBlocked ||
+                    typeMissing ||
                     downloadActive ||
                     downloadStarting === item.repository_id
 
@@ -493,7 +523,27 @@ export function ModelCatalogPage() {
                             : ''}
                         </div>
                       </td>
-                      <td>{item.model_type || '—'}</td>
+                      <td>
+                        {item.model_type ? (
+                          item.model_type
+                        ) : (
+                          <select
+                            aria-label={`Type for ${item.repository_id}`}
+                            value={downloadTypeByRepo[item.repository_id] ?? ''}
+                            onChange={(e) =>
+                              setDownloadTypeByRepo((prev) => ({
+                                ...prev,
+                                [item.repository_id]: e.target.value,
+                              }))
+                            }
+                          >
+                            <option value="">Select…</option>
+                            <option value="LLM">LLM</option>
+                            <option value="VLM">VLM</option>
+                            <option value="EMBEDDING">EMBEDDING</option>
+                          </select>
+                        )}
+                      </td>
                       <td>
                         <div>
                           {formatBytes(item.estimated_download_size_bytes)}

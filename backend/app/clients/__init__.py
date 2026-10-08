@@ -10,7 +10,12 @@ from typing import Any
 import httpx
 
 from app.core.config import get_settings
-from app.core.errors import ConflictError, DependencyUnavailableError, ErrorCode
+from app.core.errors import (
+    ConflictError,
+    DependencyUnavailableError,
+    ErrorCode,
+    NodeAgentJobNotFoundError,
+)
 
 
 class NodeAgentClient:
@@ -137,6 +142,12 @@ class NodeAgentClient:
                 if isinstance(err, dict) and err.get("message"):
                     message = str(err["message"])
                 raise ConflictError(message, details=details)
+            if response.status_code == 404:
+                message = "Node Agent resource not found."
+                err = details.get("error")
+                if isinstance(err, dict) and err.get("message"):
+                    message = str(err["message"])
+                raise NodeAgentJobNotFoundError(message, details=details)
             raise DependencyUnavailableError(
                 "Node Agent request failed.",
                 details=details,
@@ -149,6 +160,23 @@ class NodeAgentClient:
                 "Node Agent returned a non-object JSON body."
             )
         return data
+
+    async def resolve_model_cache_revision(
+        self,
+        *,
+        repository_id: str,
+        revision: str | None,
+        timeout_seconds: float | None = None,
+    ) -> dict[str, Any]:
+        return await self.request_json(
+            "POST",
+            "/internal/v1/model-cache/resolve",
+            json_body={
+                "repository_id": repository_id,
+                "revision": revision,
+            },
+            timeout_seconds=timeout_seconds,
+        )
 
     async def start_model_cache_download(
         self,

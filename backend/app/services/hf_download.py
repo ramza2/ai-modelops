@@ -1,8 +1,9 @@
 """M7-B Hugging Face download orchestration (Management API).
 
-Backend never touches host files or Hub tokens for download. It registers
-Model/Version/Artifact idempotently, tracks NodeModelCache + download jobs,
-and delegates filesystem work to Node Agent.
+Backend never touches host files or Hub tokens for download. It resolves an
+immutable commit SHA via Node Agent first, then registers Model/Version/Artifact
+idempotently against that SHA, tracks NodeModelCache + download jobs, and
+delegates filesystem work to Node Agent.
 """
 
 from __future__ import annotations
@@ -13,7 +14,8 @@ import uuid
 from collections.abc import Callable
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.clients import NodeAgentClient, build_node_agent_client
@@ -30,6 +32,7 @@ from app.core.enums import (
 from app.core.errors import (
     ConflictError,
     DependencyUnavailableError,
+    NodeAgentJobNotFoundError,
     NotFoundError,
     ValidationError,
 )
@@ -52,11 +55,6 @@ _ACTIVE_DOWNLOAD = {
     DownloadJobStatus.VERIFYING.value,
 }
 
-_BLOCKING_RUNTIME = {
-    RuntimeStatus.RUNNING.value,
-    "STARTING",  # health_status also uses STARTING; runtime may be RUNNING
-}
-
 
 def _slug_from_repo(repository_id: str) -> str:
     cleaned = re.sub(r"[^a-zA-Z0-9._-]+", "-", repository_id.strip().lower())
@@ -73,9 +71,9 @@ def _parse_dt(value: Any) -> dt.datetime | None:
         return None
     if isinstance(value, dt.datetime):
         return value if value.tzinfo else value.replace(tzinfo=dt.timezone.utc)
-    text = str(value)
+    text_v = str(value)
     try:
-        parsed = dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
+        parsed = dt.datetime.fromisoformat(text_v.replace("Z", "+00:00"))
     except ValueError:
         return None
     if parsed.tzinfo is None:
@@ -112,7 +110,13 @@ class HFDownloadService:
                 "repository_id must be org/repo.",
                 details={"repository_id": repository_id},
             )
-        resolved_type = (model_type or ModelType.LLM.value).upper()
+        if model_type is None or not str(model_type).strip():
+            raise ValidationError(
+                "model_type is required (LLM, VLM, or EMBEDDING). "
+                "Select a type before download.",
+                details={"model_type": model_type},
+            )
+        resolved_type = str(model_type).strip().upper()
         if resolved_type not in {m.value for m in ModelType}:
             raise ValidationError(
                 "model_type must be LLM, VLM, or EMBEDDING.",
@@ -123,33 +127,46 @@ class HFDownloadService:
         if node is None:
             raise NotFoundError("Node not found.", details={"node_id": str(node_id)})
 
+        client = self._agent_client_factory(str(node.agent_base_url))
+        # 1) Resolve immutable SHA BEFORE registry identity.
+        try:
+            resolved = await client.resolve_model_cache_revision(
+                repository_id=repo,
+                revision=revision,
+                timeout_seconds=self._agent_timeout,
+            )
+        except DependencyUnavailableError:
+            raise
+        sha = str(resolved.get("resolved_revision") or "").strip()
+        if not sha:
+            raise DependencyUnavailableError(
+                "Node Agent did not return a resolved commit SHA.",
+                details={"repository_id": repo},
+            )
+        requested = revision
+
+        # Advisory lock for node+repo+sha to serialize concurrent starts.
+        lock_key = f"m7b-dl:{node.id}:{repo}:{sha}"
+        await self._session.execute(
+            text("SELECT pg_advisory_xact_lock(hashtext(:k))"),
+            {"k": lock_key},
+        )
+
         model, version, artifact = await self._ensure_registry(
             repository_id=repo,
-            revision=revision,
+            resolved_revision=sha,
             model_type=resolved_type,
         )
         cache = await self._upsert_cache_preparing(
             node_id=node.id, artifact_id=artifact.id
         )
 
-        # Reuse in-flight job for same node+artifact.
-        existing = await self._session.execute(
-            select(ModelCacheDownloadJob)
-            .where(
-                ModelCacheDownloadJob.node_id == node.id,
-                ModelCacheDownloadJob.model_artifact_id == artifact.id,
-                ModelCacheDownloadJob.status.in_(sorted(_ACTIVE_DOWNLOAD)),
-            )
-            .order_by(ModelCacheDownloadJob.created_at.desc())
-            .limit(1)
-        )
-        active = existing.scalar_one_or_none()
+        active = await self._find_active_job(node_id=node.id, artifact_id=artifact.id)
         if active is not None:
             await self._sync_job_from_agent(active, node)
             await self._session.commit()
             return self._serialize_job(active, cache=cache, artifact=artifact)
 
-        # Already READY on this node for this artifact — return synthetic READY.
         if cache.status == CacheStatus.READY.value and cache.local_path:
             job = ModelCacheDownloadJob(
                 node_id=node.id,
@@ -157,8 +174,8 @@ class HFDownloadService:
                 node_model_cache_id=cache.id,
                 agent_job_id=None,
                 repository_id=repo,
-                requested_revision=revision,
-                resolved_revision=artifact.revision or revision,
+                requested_revision=requested,
+                resolved_revision=sha,
                 status=DownloadJobStatus.READY.value,
                 local_path=cache.local_path,
                 bytes_downloaded=artifact.size_bytes,
@@ -171,11 +188,10 @@ class HFDownloadService:
             await self._session.commit()
             return self._serialize_job(job, cache=cache, artifact=artifact)
 
-        client = self._agent_client_factory(str(node.agent_base_url))
         try:
             agent_job = await client.start_model_cache_download(
                 repository_id=repo,
-                revision=revision,
+                revision=sha,
                 timeout_seconds=self._agent_timeout,
             )
         except DependencyUnavailableError:
@@ -190,21 +206,44 @@ class HFDownloadService:
             node_model_cache_id=cache.id,
             agent_job_id=str(agent_job.get("job_id") or ""),
             repository_id=repo,
-            requested_revision=revision,
-            resolved_revision=agent_job.get("resolved_revision"),
+            requested_revision=requested,
+            resolved_revision=sha,
             status=str(agent_job.get("status") or DownloadJobStatus.QUEUED.value),
             bytes_downloaded=agent_job.get("bytes_downloaded"),
             total_bytes=agent_job.get("total_bytes"),
             progress_percent=agent_job.get("progress_percent"),
-            local_path=None,
+            local_path=(
+                agent_job.get("local_path")
+                if agent_job.get("status") == DownloadJobStatus.READY.value
+                else None
+            ),
             error_code=agent_job.get("error_code"),
             error_message=agent_job.get("error_message"),
             started_at=_parse_dt(agent_job.get("started_at")),
             finished_at=_parse_dt(agent_job.get("finished_at")),
         )
         self._session.add(job)
-        await self._session.commit()
-        # Immediate sync in case the agent finished very quickly / LKG path.
+        try:
+            await self._session.commit()
+        except IntegrityError:
+            await self._session.rollback()
+            active = await self._find_active_job(
+                node_id=node.id, artifact_id=artifact.id
+            )
+            if active is None:
+                raise ConflictError(
+                    "Concurrent download race for this node/artifact.",
+                    details={
+                        "node_id": str(node.id),
+                        "model_artifact_id": str(artifact.id),
+                    },
+                )
+            await self._sync_job_from_agent(active, node)
+            await self._session.commit()
+            cache = await self._session.get(NodeModelCache, active.node_model_cache_id)
+            artifact = await self._session.get(ModelArtifact, active.model_artifact_id)
+            return self._serialize_job(active, cache=cache, artifact=artifact)
+
         await self._sync_job_from_agent(job, node)
         await self._session.commit()
         await self._session.refresh(job)
@@ -221,7 +260,7 @@ class HFDownloadService:
         node = await self._session.get(Node, job.node_id)
         if node is None:
             raise NotFoundError("Node not found.", details={"node_id": str(job.node_id)})
-        if job.status in _ACTIVE_DOWNLOAD and job.agent_job_id:
+        if job.status in _ACTIVE_DOWNLOAD:
             await self._sync_job_from_agent(job, node)
             await self._session.commit()
             await self._session.refresh(job)
@@ -312,7 +351,6 @@ class HFDownloadService:
         if node is None:
             raise NotFoundError("Node not found.")
 
-        # Block when referenced by RUNNING/STARTING managed deployment on node.
         if version is not None:
             dep_rows = await self._session.execute(
                 select(Deployment).where(
@@ -370,26 +408,18 @@ class HFDownloadService:
             )
 
         client = self._agent_client_factory(str(node.agent_base_url))
-        try:
-            agent_result = await client.purge_model_cache_entry(
-                repository_id=repository_id,
-                revision=revision,
-                force=force,
-                timeout_seconds=self._agent_timeout,
-            )
-        except DependencyUnavailableError as exc:
-            # Surface agent conflict/validation when present in details.
-            raise DependencyUnavailableError(
-                "Node Agent purge failed.",
-                details=exc.details,
-            ) from exc
+        agent_result = await client.purge_model_cache_entry(
+            repository_id=repository_id,
+            revision=revision,
+            force=force,
+            timeout_seconds=self._agent_timeout,
+        )
 
         cache.status = CacheStatus.MISSING.value
         cache.local_path = None
         cache.error_message = None
         cache.prepared_at = None
         cache.last_verified_at = None
-        # Retain Model/Version/Artifact history intentionally.
         await self._session.commit()
         return {
             "id": str(cache.id),
@@ -401,22 +431,56 @@ class HFDownloadService:
             "registry_retained": True,
         }
 
+    async def _find_active_job(
+        self, *, node_id: Any, artifact_id: Any
+    ) -> ModelCacheDownloadJob | None:
+        existing = await self._session.execute(
+            select(ModelCacheDownloadJob)
+            .where(
+                ModelCacheDownloadJob.node_id == node_id,
+                ModelCacheDownloadJob.model_artifact_id == artifact_id,
+                ModelCacheDownloadJob.status.in_(sorted(_ACTIVE_DOWNLOAD)),
+            )
+            .order_by(ModelCacheDownloadJob.created_at.desc())
+            .limit(1)
+        )
+        return existing.scalar_one_or_none()
+
     async def _ensure_registry(
         self,
         *,
         repository_id: str,
-        revision: str | None,
+        resolved_revision: str,
         model_type: str,
     ) -> tuple[Model, ModelVersion, ModelArtifact]:
+        """Idempotent registry keyed by repository + immutable SHA."""
         slug = _slug_from_repo(repository_id)
         source_uri = _hf_source_uri(repository_id)
+        sha = resolved_revision
+
+        # Canonical lookup: hf:// URI + immutable SHA (any model row).
+        art_stmt = (
+            select(ModelArtifact)
+            .where(
+                ModelArtifact.source_uri == source_uri,
+                ModelArtifact.revision == sha,
+            )
+            .order_by(ModelArtifact.created_at.asc())
+            .limit(1)
+        )
+        artifact = (await self._session.execute(art_stmt)).scalar_one_or_none()
+        if artifact is not None:
+            version = await self._session.get(ModelVersion, artifact.model_version_id)
+            assert version is not None
+            model = await self._session.get(Model, version.model_id)
+            assert model is not None
+            return model, version, artifact
 
         model_row = await self._session.execute(
             select(Model).where(Model.slug == slug).limit(1)
         )
         model = model_row.scalar_one_or_none()
         if model is None:
-            # Also match by exact source later via versions.
             model = Model(
                 slug=slug,
                 name=repository_id,
@@ -429,33 +493,12 @@ class HFDownloadService:
             self._session.add(model)
             await self._session.flush()
 
-        # Prefer artifact matching hf:// URI + revision (requested or any).
-        art_stmt = (
-            select(ModelArtifact)
-            .join(ModelVersion, ModelVersion.id == ModelArtifact.model_version_id)
-            .where(
-                ModelVersion.model_id == model.id,
-                ModelArtifact.source_uri == source_uri,
-            )
-            .order_by(ModelArtifact.created_at.desc())
-        )
-        if revision:
-            art_stmt = art_stmt.where(
-                (ModelArtifact.revision == revision)
-                | (ModelVersion.source_revision == revision)
-            )
-        artifact = (await self._session.execute(art_stmt.limit(1))).scalar_one_or_none()
-        if artifact is not None:
-            version = await self._session.get(ModelVersion, artifact.model_version_id)
-            assert version is not None
-            return model, version, artifact
-
-        version_label = f"hf-{(revision or 'main')[:40]}"
+        version_label = f"hf-{sha[:12]}"
         version = ModelVersion(
             model_id=model.id,
             version_label=version_label,
             source_repository=repository_id,
-            source_revision=revision,
+            source_revision=sha,
             quantization=None,
             dtype=None,
             runtime_type=RuntimeType.VLLM.value,
@@ -470,7 +513,7 @@ class HFDownloadService:
             model_version_id=version.id,
             artifact_type=ArtifactType.MODEL.value,
             source_uri=source_uri,
-            revision=revision,
+            revision=sha,
             checksum=None,
             size_bytes=None,
         )
@@ -508,18 +551,30 @@ class HFDownloadService:
     async def _sync_job_from_agent(
         self, job: ModelCacheDownloadJob, node: Node
     ) -> None:
+        client = self._agent_client_factory(str(node.agent_base_url))
+        artifact = await self._session.get(ModelArtifact, job.model_artifact_id)
+        cache = None
+        if job.node_model_cache_id:
+            cache = await self._session.get(NodeModelCache, job.node_model_cache_id)
+
         if not job.agent_job_id:
             return
-        client = self._agent_client_factory(str(node.agent_base_url))
+
         try:
             payload = await client.get_model_cache_job(
                 job.agent_job_id, timeout_seconds=self._agent_timeout
             )
+        except NodeAgentJobNotFoundError:
+            await self._reconcile_lost_agent_job(job, node, client, cache, artifact)
+            return
         except DependencyUnavailableError:
+            # Temporary outage: leave ACTIVE job as-is.
             return
 
         job.status = str(payload.get("status") or job.status)
-        job.resolved_revision = payload.get("resolved_revision") or job.resolved_revision
+        # Never mutate canonical SHA after creation; only fill if missing.
+        if not job.resolved_revision:
+            job.resolved_revision = payload.get("resolved_revision")
         job.bytes_downloaded = payload.get("bytes_downloaded")
         job.total_bytes = payload.get("total_bytes")
         job.progress_percent = payload.get("progress_percent")
@@ -529,20 +584,10 @@ class HFDownloadService:
         job.finished_at = _parse_dt(payload.get("finished_at")) or job.finished_at
         if job.status == DownloadJobStatus.READY.value:
             job.local_path = payload.get("local_path")
-        else:
+        elif job.status in _ACTIVE_DOWNLOAD:
             job.local_path = None
 
-        artifact = await self._session.get(ModelArtifact, job.model_artifact_id)
-        cache = None
-        if job.node_model_cache_id:
-            cache = await self._session.get(NodeModelCache, job.node_model_cache_id)
-
-        if artifact is not None and job.resolved_revision:
-            artifact.revision = job.resolved_revision
-            version = await self._session.get(ModelVersion, artifact.model_version_id)
-            if version is not None:
-                version.source_revision = job.resolved_revision
-                version.source_repository = job.repository_id
+        if artifact is not None:
             if job.total_bytes is not None:
                 artifact.size_bytes = int(job.total_bytes)
             elif job.bytes_downloaded is not None:
@@ -561,6 +606,88 @@ class HFDownloadService:
                 cache.error_message = job.error_message
             elif job.status in _ACTIVE_DOWNLOAD:
                 cache.status = CacheStatus.PREPARING.value
+
+    async def _reconcile_lost_agent_job(
+        self,
+        job: ModelCacheDownloadJob,
+        node: Node,
+        client: NodeAgentClient,
+        cache: NodeModelCache | None,
+        artifact: ModelArtifact | None,
+    ) -> None:
+        """Agent restarted / job memory lost — reconcile via cache entries."""
+        sha = job.resolved_revision
+        repo = job.repository_id
+        if not sha:
+            job.status = DownloadJobStatus.FAILED.value
+            job.error_code = "AGENT_JOB_LOST"
+            job.error_message = (
+                "Node Agent download job was lost and resolved revision is unknown."
+            )
+            job.finished_at = dt.datetime.now(dt.timezone.utc)
+            if cache is not None:
+                cache.status = CacheStatus.FAILED.value
+                cache.error_message = job.error_message
+            return
+
+        try:
+            listing = await client.list_model_cache_entries(
+                timeout_seconds=self._agent_timeout
+            )
+        except DependencyUnavailableError:
+            # Still can't reach agent for listing — keep ACTIVE.
+            return
+
+        items = listing.get("items") if isinstance(listing, dict) else None
+        match = None
+        if isinstance(items, list):
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                if (
+                    item.get("repository_id") == repo
+                    and item.get("resolved_revision") == sha
+                    and item.get("status") == "READY"
+                ):
+                    match = item
+                    break
+
+        if match is not None:
+            job.status = DownloadJobStatus.READY.value
+            job.local_path = match.get("local_path")
+            size = match.get("size_bytes")
+            if size is not None:
+                try:
+                    job.bytes_downloaded = int(size)
+                    job.total_bytes = int(size)
+                except (TypeError, ValueError):
+                    pass
+            job.progress_percent = 100
+            job.error_code = None
+            job.error_message = None
+            job.finished_at = dt.datetime.now(dt.timezone.utc)
+            if artifact is not None and job.total_bytes is not None:
+                artifact.size_bytes = int(job.total_bytes)
+            if cache is not None:
+                cache.status = CacheStatus.READY.value
+                cache.local_path = job.local_path
+                cache.error_message = None
+                now = dt.datetime.now(dt.timezone.utc)
+                cache.prepared_at = now
+                cache.last_verified_at = now
+            return
+
+        job.status = DownloadJobStatus.FAILED.value
+        job.error_code = "AGENT_JOB_LOST"
+        job.error_message = (
+            "Node Agent download job was lost after restart; "
+            "cache is not READY. Retry the download."
+        )
+        job.finished_at = dt.datetime.now(dt.timezone.utc)
+        job.local_path = None
+        if cache is not None:
+            cache.status = CacheStatus.FAILED.value
+            cache.error_message = job.error_message
 
     def _serialize_job(
         self,
