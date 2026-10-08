@@ -833,12 +833,60 @@ class OperationExecutor:
         deployment: Deployment,
         mutation: MutationHeaders,
     ) -> None:
-        existing = await client.get_deployment(str(deployment.id), mutation=mutation)
-        if existing is not None:
-            self._merge_container_id(deployment, existing)
-            return
+        """Ensure managed container matches current create-critical spec.
 
+        Compatible existing containers are reused (Node Agent create is
+        idempotent). Incompatible stopped/exited containers are removed and
+        recreated. Incompatible RUNNING containers fail closed — never silently
+        replaced.
+        """
         create_payload = await self._build_create_payload(session, deployment)
+        conflict: NodeAgentError | None = None
+        try:
+            result = await client.create_deployment(
+                str(deployment.id), create_payload, mutation=mutation
+            )
+            self._merge_container_id(deployment, result)
+            return
+        except NodeAgentError as exc:
+            if exc.status_code != 409 and exc.code != "CONTAINER_CONFLICT":
+                raise
+            conflict = exc
+
+        existing = await client.get_deployment(str(deployment.id), mutation=mutation)
+        if existing is None:
+            raise PermanentStepError(
+                "Node Agent reported container conflict but inspect returned none.",
+                code="CONTAINER_CONFLICT",
+                details=conflict.details if conflict is not None else {},
+            )
+
+        status = str(
+            existing.get("runtime_status")
+            or existing.get("status")
+            or ""
+        ).lower()
+        running_like = status in {
+            "running",
+            "restarting",
+            "paused",
+            RuntimeStatus.RUNNING.value.lower(),
+        }
+        if running_like:
+            raise PermanentStepError(
+                "Existing managed container is RUNNING with incompatible "
+                "create-spec; refuse silent replace. Stop/retire first.",
+                code="CONTAINER_SPEC_CONFLICT_RUNNING",
+                details={
+                    "deployment_id": str(deployment.id),
+                    "container_id": existing.get("container_id")
+                    or existing.get("id"),
+                    "runtime_status": status,
+                },
+            )
+
+        # Incompatible and not running — safely remove then recreate.
+        await client.remove_deployment(str(deployment.id), mutation=mutation)
         result = await client.create_deployment(
             str(deployment.id), create_payload, mutation=mutation
         )
@@ -873,17 +921,27 @@ class OperationExecutor:
             )
 
         gpu_indices = await self._gpu_indices(session, uuid.UUID(str(deployment.id)))
+        # Deployment config may override served name without mutating Version history.
+        served = str(
+            cfg.get("served_model_name") or version.served_model_name or ""
+        ).strip()
+        dtype = cfg.get("dtype") if cfg.get("dtype") is not None else version.dtype
+        quantization = (
+            cfg.get("quantization")
+            if cfg.get("quantization") is not None
+            else version.quantization
+        )
         try:
             spec = adapter.build_create_spec(
                 RuntimeBuildInput(
                     runtime_image=version.runtime_image,
-                    served_model_name=version.served_model_name,
+                    served_model_name=served,
                     model_path=str(model_path) if model_path else None,
                     runtime_port=runtime_port,
                     gpu_device_indices=gpu_indices,
                     network_names=[str(n) for n in network_names],
-                    dtype=version.dtype,
-                    quantization=version.quantization,
+                    dtype=dtype,
+                    quantization=quantization,
                     max_model_len=version.default_max_model_len,
                     tensor_parallel_size=cfg.get("tensor_parallel_size"),
                     runtime_config=dict(version.runtime_config_json or {}),

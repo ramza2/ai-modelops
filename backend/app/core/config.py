@@ -54,6 +54,9 @@ class Settings(BaseSettings):
     # Longer timeout for Node Agent download start/status round-trips.
     node_agent_download_timeout_seconds: float = 30.0
 
+    # M7-C: internal Gateway base URL for post-publish verification (not public DNS).
+    gateway_base_url: str = Field(default="http://127.0.0.1:8080")
+
     @property
     def sync_database_url(self) -> str:
         """Return a synchronous SQLAlchemy URL for Alembic migrations."""

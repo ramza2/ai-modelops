@@ -122,13 +122,36 @@ class FakeNodeAgent:
             return httpx.Response(200, json=ctr)
 
         if method == "POST" and action == "create":
-            if deployment_id in self.containers:
-                return httpx.Response(200, json=self.containers[deployment_id])
+            existing = self.containers.get(deployment_id)
+            if existing is not None:
+                # Mirror Node Agent: compatible create is idempotent; drift → 409.
+                prev_cmd = existing.get("command")
+                new_cmd = (body or {}).get("command")
+                if prev_cmd is not None and new_cmd is not None and prev_cmd != new_cmd:
+                    return httpx.Response(
+                        409,
+                        json={
+                            "error": {
+                                "code": "CONTAINER_CONFLICT",
+                                "message": (
+                                    "Managed container already exists for "
+                                    "deployment with different config."
+                                ),
+                            }
+                        },
+                    )
+                return httpx.Response(200, json=existing)
             ctr = {
                 "deployment_id": deployment_id,
                 "container_id": f"ctr-{uuid.uuid4().hex[:12]}",
                 "container_name": (body or {}).get("container_name"),
                 "runtime_status": "CREATED",
+                "command": (body or {}).get("command"),
+                "runtime_image": (body or {}).get("runtime_image"),
+                "volumes": (body or {}).get("volumes"),
+                "gpu_device_indices": (body or {}).get("gpu_device_indices"),
+                "network_names": (body or {}).get("network_names"),
+                "runtime_port": (body or {}).get("runtime_port"),
             }
             self.containers[deployment_id] = ctr
             return httpx.Response(201, json=ctr)
