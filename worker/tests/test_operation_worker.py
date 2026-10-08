@@ -1886,8 +1886,10 @@ async def test_probe_uses_deployment_served_model_name_override(db) -> None:
                 UPDATE deployment
                 SET deployment_config_json =
                   COALESCE(deployment_config_json, '{}'::jsonb)
-                  || jsonb_build_object('served_model_name', :served)
-                WHERE id = :id
+                  || jsonb_build_object(
+                       'served_model_name', CAST(:served AS text)
+                     )
+                WHERE id = CAST(:id AS uuid)
                 """
             ),
             {"served": "new-name", "id": str(seeded["deployment_id"])},

@@ -646,38 +646,98 @@ async def test_spec_conflict_gpu_served_name_container() -> None:
         assert gpu_conflict.status_code == 409
         assert "gpu_device_ids" in gpu_conflict.json()["error"]["details"]["changed_fields"]
 
-        # Container-name collision with different cache identity / spec → 409
-        # Create a second cache on same node pointing at same version artifact.
-        async with session_factory() as session:
-            cache2 = uuid.uuid4()
-            await session.execute(
-                text(
-                    """
-                    INSERT INTO node_model_cache (
-                      id, node_id, model_artifact_id, status, local_path
-                    ) VALUES (
-                      :id, :node_id, :artifact_id, 'READY', :path
-                    )
-                    """
-                ),
-                {
-                    "id": str(cache2),
-                    "node_id": str(seeded["node_id"]),
-                    "artifact_id": str(seeded["artifact_id"]),
-                    "path": seeded["local_path"] + "-alt",
-                },
-            )
-            await session.commit()
+    # Container-name collision on same node with a different cache/spec → 409
+    async with session_factory() as session:
+        suffix2 = uuid.uuid4().hex[:8]
+        model2 = uuid.uuid4()
+        version2 = uuid.uuid4()
+        artifact2 = uuid.uuid4()
+        cache2 = uuid.uuid4()
+        await session.execute(
+            text(
+                """
+                INSERT INTO model (id, slug, name, model_type, source_type)
+                VALUES (:id, :slug, :name, 'LLM', 'HUGGINGFACE')
+                """
+            ),
+            {
+                "id": str(model2),
+                "slug": f"org-coll-{suffix2}",
+                "name": f"org/coll-{suffix2}",
+            },
+        )
+        await session.execute(
+            text(
+                """
+                INSERT INTO model_version (
+                  id, model_id, version_label, source_repository, source_revision,
+                  runtime_type, runtime_image, served_model_name, runtime_config_json
+                ) VALUES (
+                  :id, :model_id, :label, :repo, :rev,
+                  'VLLM', 'vllm/vllm-openai:latest', :served, '{}'::jsonb
+                )
+                """
+            ),
+            {
+                "id": str(version2),
+                "model_id": str(model2),
+                "label": f"hf-{suffix2}",
+                "repo": f"org/coll-{suffix2}",
+                "rev": "b" * 40,
+                "served": f"org/coll-{suffix2}",
+            },
+        )
+        await session.execute(
+            text(
+                """
+                INSERT INTO model_artifact (
+                  id, model_version_id, artifact_type, source_uri, revision, size_bytes
+                ) VALUES (
+                  :id, :version_id, 'MODEL', :uri, :rev, 1000000
+                )
+                """
+            ),
+            {
+                "id": str(artifact2),
+                "version_id": str(version2),
+                "uri": f"hf://org/coll-{suffix2}",
+                "rev": "b" * 40,
+            },
+        )
+        await session.execute(
+            text(
+                """
+                INSERT INTO node_model_cache (
+                  id, node_id, model_artifact_id, status, local_path
+                ) VALUES (
+                  :id, :node_id, :artifact_id, 'READY', :path
+                )
+                """
+            ),
+            {
+                "id": str(cache2),
+                "node_id": str(seeded["node_id"]),
+                "artifact_id": str(artifact2),
+                "path": f"/data/modelops/models/org/coll-{suffix2}/{'b'*40}",
+            },
+        )
+        await session.commit()
 
+    app2 = _mount(create_app(), session_factory, fake)
+    async with AsyncClient(
+        transport=ASGITransport(app=app2), base_url="http://test"
+    ) as ac:
         name_collision = await ac.post(
             f"/api/v1/model-cache/{cache2}/deployment",
             json={
-                **base_body,
-                "name": f"dep-coll-{seeded['suffix']}",
-                # same container_name as first deployment
+                "name": f"dep-coll-{suffix2}",
+                "container_name": base_body["container_name"],
+                "gpu_device_ids": [str(seeded["gpu_id"])],
+                "served_model_name": "collision-name",
+                "expected_vram_mb": 2000,
             },
         )
-        assert name_collision.status_code == 409
+        assert name_collision.status_code == 409, name_collision.text
         assert name_collision.json()["error"]["code"] == "DEPLOYMENT_SPEC_CONFLICT"
 
     await engine.dispose()
