@@ -17,6 +17,42 @@ from app.core.errors import ContainerNotFoundError, DockerUnavailableError
 from app.core.labels import LABEL_DEPLOYMENT_ID, LABEL_MANAGED, MANAGED_LABEL_VALUE
 
 
+def normalize_vllm_openai_create(
+    *,
+    image_entrypoint: list[str] | None,
+    command: list[str],
+) -> tuple[list[str] | None, list[str]]:
+    """Normalize vLLM OpenAI image ENTRYPOINT vs Worker CMD mismatch.
+
+    Official ``vllm/vllm-openai`` historically used ``ENTRYPOINT=["vllm"]`` while
+    Worker emits ``CMD=["serve", ...]``. Newer tags (e.g. v0.14+) may ship
+    ``ENTRYPOINT=["vllm","serve"]``; combining that with a CMD that also starts
+    with ``serve`` yields invalid argv ``vllm serve serve ...`` (exit 2).
+
+    Returns ``(entrypoint_override, cmd)`` where ``entrypoint_override`` is
+    ``None`` when the image ENTRYPOINT must be left unchanged. Only the exact
+    ``["vllm","serve"]`` + CMD-starting-``serve`` case is rewritten; unrelated
+    images and unsupported entrypoints are never silently altered.
+    """
+    entrypoint = [str(part) for part in (image_entrypoint or [])]
+    cmd = [str(part) for part in command]
+    if entrypoint == ["vllm", "serve"] and cmd and cmd[0] == "serve":
+        return ["vllm"], cmd
+    return None, cmd
+
+
+def _coerce_docker_argv(raw: Any) -> list[str] | None:
+    """Normalize Docker Config Entrypoint/Cmd (null | str | list) to a list."""
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        text = raw.strip()
+        return [text] if text else None
+    if isinstance(raw, (list, tuple)):
+        return [str(part) for part in raw]
+    return [str(raw)]
+
+
 @dataclass(frozen=True)
 class VolumeMount:
     host_path: str
@@ -273,6 +309,12 @@ class RealDockerAdapter:
                 {initial_network: client.api.create_endpoint_config()}
             )
 
+        image_entrypoint = self._image_entrypoint(spec.image)
+        entrypoint_override, create_command = normalize_vllm_openai_create(
+            image_entrypoint=image_entrypoint,
+            command=list(spec.command),
+        )
+
         created_id: str | None = None
         try:
             host_config = client.api.create_host_config(
@@ -280,16 +322,22 @@ class RealDockerAdapter:
                 device_requests=device_requests,
                 # Intentionally omit port_bindings — no Host port publishing.
             )
-            raw = client.api.create_container(
-                image=spec.image,
-                name=spec.name,
-                command=list(spec.command),
-                environment=env_list,
-                labels=dict(spec.labels),
-                host_config=host_config,
-                ports=[spec.runtime_port] if spec.runtime_port is not None else None,
-                networking_config=networking_config,
-            )
+            create_kwargs: dict[str, Any] = {
+                "image": spec.image,
+                "name": spec.name,
+                "command": create_command,
+                "environment": env_list,
+                "labels": dict(spec.labels),
+                "host_config": host_config,
+                "ports": (
+                    [spec.runtime_port] if spec.runtime_port is not None else None
+                ),
+                "networking_config": networking_config,
+            }
+            if entrypoint_override is not None:
+                # Exact ["vllm","serve"] image + CMD starting "serve" only.
+                create_kwargs["entrypoint"] = entrypoint_override
+            raw = client.api.create_container(**create_kwargs)
             created_id = str(raw.get("Id") or "")
             container = client.containers.get(created_id)
 
@@ -453,6 +501,27 @@ class RealDockerAdapter:
                 "Failed to inspect Docker image.",
                 details={"reason": f"{type(exc).__name__}: {exc}", "image": image},
             ) from exc
+
+    def _image_entrypoint(self, image: str) -> list[str] | None:
+        """Read local image Config.Entrypoint for create-time vLLM normalization.
+
+        Missing / unreadable images yield ``None`` (no ENTRYPOINT override).
+        """
+        client = self._require_client()
+        try:
+            img = client.images.get(image)
+        except Exception as exc:  # noqa: BLE001
+            if _is_not_found(exc):
+                return None
+            raise DockerUnavailableError(
+                "Failed to inspect Docker image ENTRYPOINT.",
+                details={"reason": f"{type(exc).__name__}: {exc}", "image": image},
+            ) from exc
+        attrs = getattr(img, "attrs", None) or {}
+        config = attrs.get("Config") if isinstance(attrs, dict) else None
+        if not isinstance(config, dict):
+            return None
+        return _coerce_docker_argv(config.get("Entrypoint"))
 
     def ensure_image(self, image: str, *, pull_timeout_seconds: float = 300.0) -> bool:
         """Ensure image exists locally using a dedicated pull timeout budget.
@@ -962,6 +1031,8 @@ class FakeDockerAdapter:
         self.last_device_requests: list[dict[str, Any]] | None = None
         self.last_create_spec: CreateContainerSpec | None = None
         self.last_create_published_ports: dict[str, Any] | None = None
+        self.last_create_entrypoint: list[str] | None = None
+        self.last_effective_argv: list[str] | None = None
         self.last_initial_network: str | None = None
         self.last_stop_timeout: int | None = None
         self.last_restart_timeout: int | None = None
@@ -969,6 +1040,8 @@ class FakeDockerAdapter:
         self.restart_reconcile_used = False
         self.start_reconcile_used = False
         self.known_images: set[str] = set()
+        # image ref -> Config.Entrypoint (mirrors local image inspect).
+        self.image_entrypoints: dict[str, list[str]] = {}
         self.pull_attempts: list[str] = []
         # container_id -> extra host PIDs in the container process tree
         # (in addition to ContainerInfo.pid). Used to simulate worker/child GPUs.
@@ -1041,10 +1114,26 @@ class FakeDockerAdapter:
         extra_networks = list(spec.network_names[1:]) if spec.network_names else []
         self.last_initial_network = initial_network
 
+        image_entrypoint = self.image_entrypoints.get(spec.image)
+        entrypoint_override, create_command = normalize_vllm_openai_create(
+            image_entrypoint=image_entrypoint,
+            command=list(spec.command),
+        )
+        # None = leave image ENTRYPOINT unchanged (same as RealDockerAdapter).
+        self.last_create_entrypoint = entrypoint_override
+        effective_entrypoint = (
+            list(entrypoint_override)
+            if entrypoint_override is not None
+            else list(image_entrypoint or [])
+        )
+        self.last_effective_argv = [*effective_entrypoint, *create_command]
+
         container_id = f"fake-{uuid.uuid4().hex[:12]}"
         name = spec.name.lstrip("/")
         self.known_images.add(spec.image)
         # Custom networks only — never add default "bridge" when requested.
+        # ContainerInfo.command stays Worker CMD (create_command) so
+        # _same_create_config idempotency compares Cmd, not Entrypoint.
         info = ContainerInfo(
             id=container_id,
             name=name,
@@ -1054,7 +1143,7 @@ class FakeDockerAdapter:
             started_at=None,
             restart_count=0,
             image=spec.image,
-            command=list(spec.command),
+            command=list(create_command),
             environment=dict(spec.environment),
             volumes=list(spec.volumes),
             gpu_device_indices=list(spec.gpu_device_indices),

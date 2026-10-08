@@ -54,10 +54,14 @@ class VLLMAdapter:
         )
         runner = _merged_choice(cfg, "runner", allowed=_RUNNER_ALLOWED)
 
-        # The official vLLM OpenAI image already has ENTRYPOINT ["vllm"].
-        # Docker appends this argv as the command, so emit the vLLM CLI
-        # subcommand directly. Supplying "python -m ..." here would become
-        # "vllm python -m ..." and fail argument parsing.
+        # Worker always emits CMD starting with the vLLM CLI subcommand
+        # ``serve`` (not ``python -m ...``). Image ENTRYPOINT varies by tag:
+        # older ``vllm/vllm-openai`` used ``["vllm"]``; newer tags (e.g.
+        # v0.14+/v0.24) may ship ``["vllm","serve"]``. Node Agent
+        # ``normalize_vllm_openai_create`` rewrites only the exact
+        # ``["vllm","serve"]`` + CMD-starts-``serve`` case to container
+        # ENTRYPOINT ``["vllm"]`` so effective argv stays
+        # ``vllm serve <model> ...`` (avoids ``vllm serve serve ...``).
         #
         # Model is positional for vLLM >= 0.24 ("--model" is deprecated).
         command: list[str] = [
