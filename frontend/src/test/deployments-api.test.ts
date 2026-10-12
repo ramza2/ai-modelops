@@ -9,6 +9,7 @@ import {
 
 describe('deployments API client', () => {
   afterEach(() => {
+    vi.unstubAllGlobals()
     vi.restoreAllMocks()
   })
 
@@ -51,6 +52,41 @@ describe('deployments API client', () => {
     expect(url).not.toContain('deployment_type=')
     expect(url).not.toContain('retired=')
     expect(url).not.toContain('node_id=')
+  })
+
+  it('generates UUIDv4 idempotency keys on insecure HTTP origins', async () => {
+    let invocation = 0
+    const getRandomValues = vi.fn((bytes: Uint8Array) => {
+      for (let i = 0; i < bytes.length; i += 1) {
+        bytes[i] = (invocation * 16 + i) & 0xff
+      }
+      invocation += 1
+      return bytes
+    })
+    // HTTP access by private LAN IP has getRandomValues but no randomUUID.
+    vi.stubGlobal('crypto', { getRandomValues })
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ id: 'op-http', status: 'QUEUED' }), {
+        status: 202,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    )
+
+    await startDeployment('d-http')
+    await stopDeployment('d-http')
+    await restartDeployment('d-http')
+
+    const keys = fetchSpy.mock.calls.map((call) =>
+      new Headers((call[1] as RequestInit).headers).get('Idempotency-Key'),
+    )
+    expect(getRandomValues).toHaveBeenCalledTimes(3)
+    expect(keys).toHaveLength(3)
+    expect(new Set(keys).size).toBe(3)
+    for (const key of keys) {
+      expect(key).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+      )
+    }
   })
 
   it('posts lifecycle enqueue paths', async () => {
