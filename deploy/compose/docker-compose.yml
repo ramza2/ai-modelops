@@ -41,6 +41,8 @@ services:
       MODELOPS_NODE_AGENT_TOKEN: ${MODELOPS_NODE_AGENT_TOKEN:-}
       MODELOPS_NODE_AGENT_TIMEOUT_SECONDS: ${MODELOPS_NODE_AGENT_TIMEOUT_SECONDS:-5}
       MODELOPS_DEFAULT_GPU_SAFETY_MARGIN_MB: ${MODELOPS_DEFAULT_GPU_SAFETY_MARGIN_MB:-1024}
+      # Container-to-container verification; localhost would point back to Backend.
+      MODELOPS_GATEWAY_BASE_URL: ${MODELOPS_GATEWAY_BASE_URL:-http://gateway:8080}
     depends_on:
       postgres:
         condition: service_healthy
