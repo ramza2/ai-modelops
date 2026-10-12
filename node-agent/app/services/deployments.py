@@ -746,19 +746,20 @@ class DeploymentLifecycleService:
         if not target_path:
             result["error"] = "target_path is required."
             return result
-        # Reject URI schemes that would require credentialed remote download.
+        path = Path(target_path)
         source_uri = str(raw.get("source_uri") or "")
+        # Remote URIs are registry metadata, not download instructions when the
+        # model has already been placed on disk (e.g. a Hugging Face cache).
+        # Never attempt a remote download when the target does not exist.
         if "://" in source_uri and not source_uri.startswith(
             ("file://", "local://")
-        ):
+        ) and not path.exists():
             result["error"] = (
                 "Remote artifact download is not supported without a safe "
                 "credential-free contract; provide a local file:// path or "
                 "pre-placed target_path."
             )
             return result
-
-        path = Path(target_path)
         if source_uri.startswith("file://"):
             source_path = Path(source_uri[7:])
             if not source_path.exists():
