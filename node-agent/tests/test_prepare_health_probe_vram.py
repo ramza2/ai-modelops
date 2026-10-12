@@ -161,6 +161,67 @@ async def test_prepare_rejects_remote_download_uri(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_prepare_accepts_preplaced_hf_directory(tmp_path: Path) -> None:
+    docker = FakeDockerAdapter(available=True)
+    docker.known_images.add("example/runtime:tag")
+    model_dir = tmp_path / "bge-m3" / "revision-123"
+    model_dir.mkdir(parents=True)
+    (model_dir / "pytorch_model.bin").write_bytes(b"preplaced-weights")
+    app, *_ = _make_app(docker=docker)
+    ids = _ids()
+    body = {
+        "runtime_image": "example/runtime:tag",
+        "artifacts": [
+            {
+                "artifact_id": str(uuid.uuid4()),
+                "source_uri": "hf://BAAI/bge-m3",
+                "revision": "revision-123",
+                "target_path": str(model_dir),
+            }
+        ],
+    }
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        resp = await ac.post(
+            f"/internal/v1/deployments/{ids['deployment_id']}/prepare",
+            json=body,
+        )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["artifacts_ready"] is True
+    assert resp.json()["artifacts"][0]["ready"] is True
+    assert resp.json()["artifacts"][0]["target_path"] == str(model_dir)
+
+
+@pytest.mark.asyncio
+async def test_prepare_preplaced_hf_file_enforces_checksum(tmp_path: Path) -> None:
+    docker = FakeDockerAdapter(available=True)
+    docker.known_images.add("example/runtime:tag")
+    model_file = tmp_path / "model.bin"
+    model_file.write_bytes(b"preplaced-weights")
+    app, *_ = _make_app(docker=docker)
+    ids = _ids()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        resp = await ac.post(
+            f"/internal/v1/deployments/{ids['deployment_id']}/prepare",
+            json={
+                "runtime_image": "example/runtime:tag",
+                "artifacts": [
+                    {
+                        "artifact_id": str(uuid.uuid4()),
+                        "source_uri": "https://huggingface.co/org/model",
+                        "target_path": str(model_file),
+                        "checksum": "sha256:deadbeef",
+                    }
+                ],
+            },
+        )
+    assert resp.status_code == 409
+    assert resp.json()["error"]["code"] == "ARTIFACT_NOT_READY"
+    assert "checksum mismatch" in json.dumps(resp.json()).lower()
+
+
+@pytest.mark.asyncio
 async def test_prepare_checksum_mismatch(tmp_path: Path) -> None:
     docker = FakeDockerAdapter(available=True)
     docker.known_images.add("example/runtime:tag")
