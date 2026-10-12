@@ -65,11 +65,12 @@ describe('deployments API client', () => {
     })
     // HTTP access by private LAN IP has getRandomValues but no randomUUID.
     vi.stubGlobal('crypto', { getRandomValues })
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      new Response(JSON.stringify({ id: 'op-http', status: 'QUEUED' }), {
-        status: 202,
-        headers: { 'Content-Type': 'application/json' },
-      }),
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(
+      async () =>
+        new Response(JSON.stringify({ id: 'op-http', status: 'QUEUED' }), {
+          status: 202,
+          headers: { 'Content-Type': 'application/json' },
+        }),
     )
 
     await startDeployment('d-http')
