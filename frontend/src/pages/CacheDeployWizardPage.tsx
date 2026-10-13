@@ -762,18 +762,18 @@ export function CacheDeployWizardPage() {
             </p>
           ) : null}
           <div className="form-grid">
-            <label>
+            <label className="form-grid__wide">
               Deployment name
               <input value={name} onChange={(e) => setName(e.target.value)} />
             </label>
-            <label>
+            <label className="form-grid__wide">
               Container name
               <input
                 value={containerName}
                 onChange={(e) => setContainerName(e.target.value)}
               />
             </label>
-            <label>
+            <label className="form-grid__wide">
               Served model name
               <input
                 value={servedModelName}
