@@ -54,7 +54,7 @@ const validRuntime = (v: unknown): v is CacheDeployRuntimeConfig => {
   const positive = ['max_model_len', 'max_num_seqs', 'tensor_parallel_size']
   for (const field of positive) {
     const x = v[field]
-    if (x != null && (!Number.isInteger(x) || (x as number) < 1)) return false
+    if (x != null && (typeof x !== 'number' || !Number.isInteger(x) || x < 1)) return false
   }
   const utilization = v.gpu_memory_utilization
   if (utilization != null &&
@@ -91,7 +91,7 @@ export function readWizardDraft(
         v.revision !== cache.resolved_revision ||
         !recent(v.savedAt, now) || !STEPS.includes(v.step as WizardDraftStep) ||
         !validText(v.name) || !validText(v.containerName) ||
-        !validText(v.servedModelName) || !Number.isInteger(v.runtimePort) ||
+        !validText(v.servedModelName) || typeof v.runtimePort !== 'number' || !Number.isInteger(v.runtimePort) ||
         (v.runtimePort as number) < 1 || (v.runtimePort as number) > 65535 ||
         !validRuntime(v.runtime) || !Array.isArray(v.selectedGpuIds) ||
         v.selectedGpuIds.length > 32 ||
