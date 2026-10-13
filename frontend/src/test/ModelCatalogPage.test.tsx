@@ -668,6 +668,14 @@ describe('ModelCatalogPage', () => {
         progress_percent: 20,
       }),
     )
+    vi.mocked(downloadsApi.getHfDownload).mockResolvedValue(
+      makeJob({
+        job_id: 'job-ok',
+        repository_id: 'org/ok-fit',
+        status: 'DOWNLOADING',
+        progress_percent: 20,
+      }),
+    )
 
     renderAt('/models/catalog?node_id=node-1')
     const okRow = (await screen.findByText('org/ok-fit')).closest(
@@ -677,7 +685,7 @@ describe('ModelCatalogPage', () => {
 
     await userEvent.click(within(okRow).getByRole('button', { name: 'Download' }))
     await waitFor(() => {
-      expect(within(okRow).getByText(/Progress/)).toBeInTheDocument()
+      expect(within(okRow).getByText(/진행률 20%/)).toBeInTheDocument()
     })
 
     await userEvent.click(within(okRow).getByRole('button', { name: 'Fit 분석' }))
@@ -688,7 +696,7 @@ describe('ModelCatalogPage', () => {
       'Fit upstream timeout',
     )
     expect(screen.getByTestId('fit-detail-org/ok-fit')).toBeInTheDocument()
-    expect(within(okRow).getByText(/Progress/)).toBeInTheDocument()
+    expect(within(okRow).getByText(/진행률 20%/)).toBeInTheDocument()
     expect(screen.queryByText('카탈로그 오류')).not.toBeInTheDocument()
 
     vi.mocked(catalogApi.analyzeHfResourceFit).mockResolvedValue(
@@ -792,13 +800,15 @@ describe('ModelCatalogPage', () => {
         total_bytes: 2048,
       }),
     )
+    // Active poll uses the same GET mock until remount; keep progress in sync
+    // with the POST payload so assertions are stable.
     vi.mocked(downloadsApi.getHfDownload).mockResolvedValue(
       makeJob({
         job_id: 'job-restore-1',
         repository_id: 'org/restore-model',
         status: 'DOWNLOADING',
-        progress_percent: 40,
-        bytes_downloaded: 900,
+        progress_percent: 25,
+        bytes_downloaded: 512,
         total_bytes: 2048,
       }),
     )
@@ -823,6 +833,7 @@ describe('ModelCatalogPage', () => {
     await waitFor(() => {
       expect(screen.getByText(/진행률 25%/)).toBeInTheDocument()
     })
+    expect(screen.getByText(/512 B \/ 2\.0 KiB/)).toBeInTheDocument()
 
     unmount()
     vi.mocked(downloadsApi.startHfDownload).mockClear()
@@ -1059,7 +1070,7 @@ describe('ModelCatalogPage', () => {
     let allowPollSuccess = false
     vi.mocked(downloadsApi.getHfDownload).mockImplementation(async () => {
       if (!allowPollSuccess) {
-        throw new ApiError(503, 'upstream unavailable')
+        throw new ApiError('upstream unavailable', { status: 503 })
       }
       return makeJob({
         job_id: 'job-poll-warn',
@@ -1109,7 +1120,7 @@ describe('ModelCatalogPage', () => {
       savedAt: Date.now(),
     })
     vi.mocked(downloadsApi.getHfDownload).mockRejectedValue(
-      new ApiError(404, 'not found'),
+      new ApiError('not found', { status: 404 }),
     )
 
     renderAt('/models/catalog?node_id=node-1')
