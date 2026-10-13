@@ -14,7 +14,8 @@ import {
 import { getDeployment, startDeployment } from '../api/deployments'
 import { listEndpoints } from '../api/endpoints'
 import { getModel, getModelVersion } from '../api/models'
-import { getNode, getNodeResources } from '../api/nodes'
+import { getNode, refreshNodeResources } from '../api/nodes'
+import { fitInputFingerprint, isFreshResourceSnapshot } from '../utils/cacheDeployFit'
 import { getOperation } from '../api/operations'
 import type {
   Deployment,
@@ -126,6 +127,8 @@ export function CacheDeployWizardPage() {
   const [version, setVersion] = useState<ModelVersion | null>(null)
   const [node, setNode] = useState<NodeDetail | null>(null)
   const [resources, setResources] = useState<NodeResourcesLatest | null>(null)
+  const [gpuResourceLoading, setGpuResourceLoading] = useState(false)
+  const [gpuResourceError, setGpuResourceError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -139,6 +142,7 @@ export function CacheDeployWizardPage() {
   const [expectedVramMb, setExpectedVramMb] = useState<string>('')
   const [ackUnknown, setAckUnknown] = useState(false)
   const [fit, setFit] = useState<FreshFitResult | null>(null)
+  const [fitKey, setFitKey] = useState('')
   const [fitLoading, setFitLoading] = useState(false)
 
   const [deployment, setDeployment] = useState<Deployment | null>(null)
@@ -211,13 +215,9 @@ export function CacheDeployWizardPage() {
           setRuntime((prev) => ({ ...d.runtime, ...prev }))
         }
         if (entry.node_id) {
-          const [n, res] = await Promise.all([
-            getNode(entry.node_id, controller.signal),
-            getNodeResources(entry.node_id, controller.signal).catch(() => null),
-          ])
+          const n = await getNode(entry.node_id, controller.signal)
           if (controller.signal.aborted) return
           setNode(n)
-          setResources(res)
           if (n.gpus[0] && selectedGpuIds.length === 0) {
             setSelectedGpuIds([n.gpus[0].id])
           }
@@ -280,11 +280,45 @@ export function CacheDeployWizardPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cacheId, deploymentIdParam, operationIdParam, stepParam])
 
+  // /resources/latest is a persisted snapshot, not a live GPU measurement.
+  // Refresh Node Agent resources on entering GPU step; never present old
+  // persisted values as live free VRAM. Create/fit still re-fetch independently.
+  useEffect(() => {
+    if (step !== 'gpu' || !node?.id) return
+    let active = true
+    setResources(null)
+    setGpuResourceLoading(true)
+    setGpuResourceError(null)
+    void refreshNodeResources(node.id)
+      .then((fresh) => {
+        if (active) setResources(fresh)
+      })
+      .catch((err: unknown) => {
+        if (active) {
+          setGpuResourceError(
+            err instanceof ApiError ? err.message : 'GPU resource refresh failed.',
+          )
+        }
+      })
+      .finally(() => {
+        if (active) setGpuResourceLoading(false)
+      })
+    return () => { active = false }
+  }, [step, node?.id])
+
   const uniqueGpuIds = Array.from(new Set(selectedGpuIds))
+  const currentFitKey = fitInputFingerprint(selectedGpuIds, expectedVramMb, runtime)
+  const currentFitKeyRef = useRef(currentFitKey)
+  currentFitKeyRef.current = currentFitKey
+  // Changing GPU/VRAM/runtime inputs invalidates any previously shown FIT.
+  const activeFit = fitKey === currentFitKey ? fit : null
 
   const refreshFit = async () => {
     if (!cacheId || uniqueGpuIds.length === 0) return
+    const requestedKey = currentFitKey
     setFitLoading(true)
+    setFit(null)
+    setFitKey('')
     setActionError(null)
     try {
       const result = await previewCacheDeployFit(cacheId, {
@@ -294,7 +328,9 @@ export function CacheDeployWizardPage() {
         dtype: runtime.dtype,
         quantization: runtime.quantization,
       })
+      if (currentFitKeyRef.current !== requestedKey) return
       setFit(result)
+      setFitKey(requestedKey)
       setRuntime((r) => ({ ...r, tensor_parallel_size: uniqueGpuIds.length }))
     } catch (err) {
       setActionError(
@@ -306,7 +342,7 @@ export function CacheDeployWizardPage() {
   }
 
   const onCreate = async () => {
-    if (!cache || busy) return
+    if (!cache || busy || !activeFit || fitLoading) return
     setBusy(true)
     setActionError(null)
     try {
@@ -652,9 +688,13 @@ export function CacheDeployWizardPage() {
         <section className="panel">
           <h2>3. GPU (fresh fit)</h2>
           <p className="secondary-text">
-            Live free/total from Node resources. Disk is not the main gate after
-            cache READY. VRAM is never pooled across GPUs.
+            GPU 단계 진입 시 Node Agent에서 새로 수집한 값입니다. Fresh Fit은 선택 GPU를
+            별도로 다시 측정합니다. VRAM은 GPU 사이에 합산하지 않습니다.
           </p>
+          {gpuResourceLoading ? <p className="secondary-text">GPU 메모리 측정 중…</p> : null}
+          {gpuResourceError ? (
+            <p role="alert">GPU 메모리 갱신 실패: {gpuResourceError}. Fresh Fit으로 별도 확인하세요.</p>
+          ) : null}
           <div className="table-wrap">
             <table className="data-table">
               <thead>
@@ -668,6 +708,13 @@ export function CacheDeployWizardPage() {
                 {(node?.gpus || []).map((g) => {
                   const snap = resources?.gpus.find((x) => x.gpu.id === g.id)
                     ?.snapshot
+                  const live = activeFit?.gpu_results.find((x) => x.gpu_device_id === g.id)
+                  const snapshotFresh = isFreshResourceSnapshot(snap?.sampled_at)
+                  const freeMb = live?.vram_free_mb ??
+                    (snapshotFresh ? snap?.vram_free_mb : null)
+                  const measuredAt = live
+                    ? activeFit?.evaluated_at
+                    : snapshotFresh ? snap?.sampled_at : null
                   const checked = selectedGpuIds.includes(g.id)
                   return (
                     <tr key={g.id}>
@@ -688,7 +735,12 @@ export function CacheDeployWizardPage() {
                         #{g.device_index} {g.model_name}
                       </td>
                       <td>
-                        {snap?.vram_free_mb ?? '—'} / {g.vram_total_mb} MiB
+                        {freeMb ?? '—'} / {live?.vram_total_mb ?? g.vram_total_mb} MiB
+                        <div className="secondary-text">
+                          {measuredAt
+                            ? `${live ? 'Fresh Fit' : 'Node Agent'} · ${new Date(measuredAt).toLocaleString()}`
+                            : gpuResourceLoading ? '측정 중…' : '최신 측정값 없음'}
+                        </div>
                       </td>
                     </tr>
                   )
@@ -714,15 +766,38 @@ export function CacheDeployWizardPage() {
               {fitLoading ? 'Fitting…' : 'Run fresh fit'}
             </button>
           </div>
-          {fit ? (
+          {activeFit ? (
             <div style={{ marginTop: '0.75rem' }}>
-              <StatusBadge status={fit.result} />
+              <StatusBadge status={activeFit.result} />{' '}
+              <span className="secondary-text">
+                Node Agent 측정: {activeFit.evaluated_at
+                  ? new Date(activeFit.evaluated_at).toLocaleString()
+                  : '시간 미확인'}
+              </span>
               <ul>
-                {fit.reasons.map((r) => (
+                {activeFit.reasons.map((r) => (
                   <li key={r}>{r}</li>
                 ))}
               </ul>
-              {fit.result === 'UNKNOWN' ? (
+              {activeFit.gpu_results.map((g) => (
+                <p key={g.gpu_device_id} className="secondary-text">
+                  GPU #{g.gpu_index ?? '?'}: {g.vram_free_mb ?? '—'} MiB available,
+                  {g.estimated_required_vram_mb ?? '—'} MiB estimated required,
+                  {g.safety_margin_mb} MiB safety margin — {g.result}
+                  {g.reasons.length ? ` (${g.reasons.join('; ')})` : ''}
+                </p>
+              ))}
+              {activeFit.assumptions.length > 0 ? (
+                <p className="secondary-text">
+                  추정 가정: {activeFit.assumptions.join(' / ')}
+                </p>
+              ) : null}
+              <p className="secondary-text">
+                Fit은 모델 아티팩트 기반 추정치입니다. max_model_len,
+                max_num_seqs 및 KV Cache 실제 메모리는 완전히 반영되지 않으므로
+                최종 실행 가능 여부는 Start/Health/Inference로 확인합니다.
+              </p>
+              {activeFit.result === 'UNKNOWN' ? (
                 <label>
                   <input
                     type="checkbox"
@@ -732,13 +807,17 @@ export function CacheDeployWizardPage() {
                   Acknowledge UNKNOWN fit and proceed
                 </label>
               ) : null}
-              {fit.result === 'INSUFFICIENT' ? (
+              {activeFit.result === 'INSUFFICIENT' ? (
                 <p className="secondary-text">
                   INSUFFICIENT blocks Deployment creation.
                 </p>
               ) : null}
             </div>
-          ) : null}
+          ) : (
+            <p className="secondary-text">
+              GPU 및 Runtime 설정에 대한 Fresh Fit을 실행해야 Review로 진행할 수 있습니다.
+            </p>
+          )}
           <div className="toolbar__actions">
             <button type="button" className="btn btn--ghost" onClick={() => syncStep('runtime')}>
               Back
@@ -748,8 +827,10 @@ export function CacheDeployWizardPage() {
               className="btn"
               disabled={
                 selectedGpuIds.length === 0 ||
-                fit?.result === 'INSUFFICIENT' ||
-                (fit?.result === 'UNKNOWN' && !ackUnknown)
+                fitLoading ||
+                !activeFit ||
+                activeFit.result === 'INSUFFICIENT' ||
+                (activeFit.result === 'UNKNOWN' && !ackUnknown)
               }
               onClick={() => syncStep('review')}
             >
@@ -776,7 +857,7 @@ export function CacheDeployWizardPage() {
                 },
                 model_path: cache?.local_path,
                 network_names: ['modelops-model'],
-                fit: fit?.result,
+                fit: activeFit?.result,
               },
               null,
               2,
@@ -784,6 +865,7 @@ export function CacheDeployWizardPage() {
           </pre>
           <p className="secondary-text">
             Create is metadata only — Start is a separate step.
+            {!activeFit ? ' Fresh Fit is required again after a refresh or settings change.' : ''}
           </p>
           <div className="toolbar__actions">
             <button type="button" className="btn btn--ghost" onClick={() => syncStep('gpu')}>
@@ -792,7 +874,7 @@ export function CacheDeployWizardPage() {
             <button
               type="button"
               className="btn"
-              disabled={busy}
+              disabled={busy || fitLoading || !activeFit}
               onClick={() => void onCreate()}
             >
               {busy ? 'Creating…' : 'Create Deployment'}
