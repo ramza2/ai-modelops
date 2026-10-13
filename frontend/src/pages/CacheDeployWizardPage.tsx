@@ -41,6 +41,17 @@ import { AppShell } from '../components/AppShell'
 import { LoadingBlock } from '../components/LoadingBlock'
 import { SectionError } from '../components/SectionError'
 import { StatusBadge } from '../components/StatusBadge'
+import { formatApiDateTime, operationElapsed } from '../utils/date'
+import {
+  createDetailFetchGate,
+  formatOperationError,
+  healthWaitElapsedMsFromFinishedAt,
+  isDeploymentReadyForPublish,
+  OPERATION_POLL_MS,
+  operationPollConfig,
+  resolveWizardLifecyclePhase,
+  shouldPollWizardLifecycle,
+} from '../utils/operationLifecycle'
 
 type Step =
   | 'cache'
@@ -172,10 +183,21 @@ export function CacheDeployWizardPage() {
   const [refreshing, setRefreshing] = useState(false)
 
   const abortRef = useRef<AbortController | null>(null)
+  const lifecycleGateRef = useRef(createDetailFetchGate())
+  const activeOpIdRef = useRef(operationIdParam)
+  activeOpIdRef.current = operationIdParam
+  const activeDepIdRef = useRef(deploymentIdParam)
+  activeDepIdRef.current = deploymentIdParam
+  const finishedAtRef = useRef<string | null>(null)
+  const busyRef = useRef(false)
+  busyRef.current = busy
   const restoredCacheRef = useRef<string | null>(null)
   const restoredPublishRef = useRef<string | null>(null)
   const [restoredDraft, setRestoredDraft] = useState(false)
   const [reviewNeedsFit, setReviewNeedsFit] = useState(false)
+  /** Forces re-render when finished_at-based health wait crosses the max. */
+  const [healthWaitTick, setHealthWaitTick] = useState(0)
+  const [pollWarning, setPollWarning] = useState<string | null>(null)
   const storage = (() : DraftStorage | null => {
     try { return window.sessionStorage } catch { return null }
   })()
@@ -485,40 +507,116 @@ export function CacheDeployWizardPage() {
     }
   }
 
+  // Clear poll-only warning when Operation identity changes (not Operation failure).
   useEffect(() => {
-    if (!operationIdParam) return
-    if (operation?.status === 'SUCCEEDED' || operation?.status === 'FAILED') return
+    setPollWarning(null)
+  }, [operationIdParam])
+
+  finishedAtRef.current = operation?.finished_at ?? null
+
+  const healthy = isDeploymentReadyForPublish(deployment)
+  // healthWaitTick is only a re-render signal; elapsed always uses wall clock
+  // vs Operation.finished_at so F5 cannot reset the 5m window.
+  void healthWaitTick
+  const healthWaitElapsedMs = healthWaitElapsedMsFromFinishedAt(
+    operation?.finished_at,
+  )
+  const lifecyclePhase = resolveWizardLifecyclePhase({
+    step,
+    hasOperationId: Boolean(operationIdParam),
+    operationStatus: operation?.status,
+    deploymentReady: healthy,
+    healthWaitElapsedMs,
+  })
+
+  // P1-4B: 4s silent poll on Start — Operation while active, then limited
+  // Deployment health wait after SUCCEEDED (elapsed from finished_at so F5
+  // does not reset the 5m window). Shares DetailFetchGate epoch.
+  useEffect(() => {
+    if (!shouldPollWizardLifecycle(lifecyclePhase)) return
+    const opId = operationIdParam
+    const depId = deploymentIdParam
+    if (!opId) return
+
+    let cancelled = false
     const timer = window.setInterval(() => {
-      void getOperation(operationIdParam)
-        .then(async (op) => {
+      if (busyRef.current) return
+
+      const elapsed = healthWaitElapsedMsFromFinishedAt(finishedAtRef.current)
+      if (
+        lifecyclePhase === 'health_wait' &&
+        elapsed != null &&
+        elapsed >= operationPollConfig.healthWaitMaxMs
+      ) {
+        setHealthWaitTick((n) => n + 1)
+        return
+      }
+
+      const gate = lifecycleGateRef.current
+      const { gen, signal } = gate.begin('poll')
+      void (async () => {
+        try {
+          const op = await getOperation(opId, signal)
+          if (
+            cancelled ||
+            !gate.isCurrent(gen) ||
+            activeOpIdRef.current !== opId ||
+            op.id !== opId
+          ) {
+            return
+          }
           setOperation(op)
-          if (deploymentIdParam) {
-            const dep = await getDeployment(deploymentIdParam)
+
+          if (depId) {
+            const dep = await getDeployment(depId, signal)
+            if (
+              cancelled ||
+              !gate.isCurrent(gen) ||
+              activeDepIdRef.current !== depId ||
+              activeOpIdRef.current !== opId ||
+              dep.id !== depId
+            ) {
+              return
+            }
             setDeployment(dep)
           }
+          setLastUpdated(new Date())
+          setPollWarning(null)
+        } catch (err: unknown) {
           if (
-            op.status === 'SUCCEEDED' &&
-            deployment?.runtime_status === 'RUNNING' &&
-            deployment?.health_status === 'HEALTHY'
+            cancelled ||
+            !gate.isCurrent(gen) ||
+            activeOpIdRef.current !== opId
           ) {
-            // keep on start until user advances; refresh dep below
+            return
           }
-        })
-        .catch(() => undefined)
-    }, 2000)
-    return () => window.clearInterval(timer)
+          if (err instanceof DOMException && err.name === 'AbortError') return
+          // Keep last known Operation/Deployment; do not wipe wizard inputs.
+          setPollWarning(
+            '자동 상태 갱신에 실패했습니다. 마지막 성공 조회 결과를 유지합니다.',
+          )
+        }
+      })()
+    }, operationPollConfig.ms)
+
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+      if (lifecycleGateRef.current.currentKind() === 'poll') {
+        lifecycleGateRef.current.abort()
+      }
+    }
   }, [
+    lifecyclePhase,
     operationIdParam,
-    operation?.status,
     deploymentIdParam,
-    deployment?.runtime_status,
-    deployment?.health_status,
   ])
 
-  const healthy =
-    deployment?.desired_state === 'RUNNING' &&
-    deployment?.runtime_status === 'RUNNING' &&
-    deployment?.health_status === 'HEALTHY'
+  useEffect(() => {
+    return () => {
+      lifecycleGateRef.current.abort()
+    }
+  }, [cacheId, operationIdParam, deploymentIdParam, step])
 
   const loadEndpoints = async () => {
     const page = await listEndpoints({ page: 1, pageSize: 100 })
@@ -1001,24 +1099,102 @@ export function CacheDeployWizardPage() {
           <p>
             Deployment{' '}
             <Link to={`/deployments/${deployment.id}`}>{deployment.name}</Link>{' '}
+            <StatusBadge status={deployment.desired_state} />{' '}
             <StatusBadge status={deployment.runtime_status} />{' '}
             <StatusBadge status={deployment.health_status} />
           </p>
           {operation ? (
-            <div>
-              <p>
-                Operation{' '}
-                <Link to={`/operations/${operation.id}`}>{operation.id}</Link>{' '}
-                <StatusBadge status={operation.status} />
-              </p>
-              <ul>
-                {(operation.steps || []).map((s) => (
-                  <li key={s.id}>
-                    {s.step_code}: <StatusBadge status={s.status} />{' '}
-                    {s.error?.message || ''}
-                  </li>
-                ))}
-              </ul>
+            <div className="operation-result" role="status">
+              {lifecyclePhase === 'operation_active' ? (
+                <p className="panel-hint">
+                  Operation 진행 중 — Operation/Deployment를{' '}
+                  {OPERATION_POLL_MS / 1000}초마다 자동 갱신합니다.
+                </p>
+              ) : null}
+              {lifecyclePhase === 'health_wait' ? (
+                <p className="panel-hint">
+                  Operation은 SUCCEEDED입니다. Deployment가 RUNNING + HEALTHY가
+                  될 때까지 제한적으로 상태를 확인합니다 (최대{' '}
+                  {Math.round(operationPollConfig.healthWaitMaxMs / 60000)}분,
+                  Operation 완료 시각 기준).
+                </p>
+              ) : null}
+              {lifecyclePhase === 'health_timeout' ? (
+                <SectionError
+                  title="Health 대기 시간 초과"
+                  message="Operation은 성공했지만 Deployment가 RUNNING + HEALTHY로 전환되지 않았습니다. Deployment 상세에서 상태를 확인하세요."
+                />
+              ) : null}
+              {lifecyclePhase === 'failed' ? (
+                <SectionError
+                  title="Operation 실패"
+                  message={
+                    formatOperationError(operation.error) !== '—'
+                      ? formatOperationError(operation.error)
+                      : `Operation status: ${operation.status}`
+                  }
+                />
+              ) : null}
+              {lifecyclePhase === 'ready' ? (
+                <p className="panel-hint" role="status">
+                  Deployment가 RUNNING + HEALTHY입니다. Publish로 진행할 수
+                  있습니다.
+                </p>
+              ) : null}
+              {pollWarning ? (
+                <p className="panel-hint" role="status" data-testid="poll-warning">
+                  {pollWarning}
+                </p>
+              ) : null}
+              <dl className="meta-grid">
+                <div>
+                  <dt>Operation ID</dt>
+                  <dd>
+                    <Link
+                      className="table-link mono"
+                      to={`/operations/${operation.id}`}
+                    >
+                      {operation.id}
+                    </Link>
+                  </dd>
+                </div>
+                <div>
+                  <dt>Status</dt>
+                  <dd>
+                    <StatusBadge status={operation.status} />
+                  </dd>
+                </div>
+                <div>
+                  <dt>Current Step</dt>
+                  <dd className="mono">{operation.current_step || '—'}</dd>
+                </div>
+                <div>
+                  <dt>Elapsed</dt>
+                  <dd>{operationElapsed(operation)}</dd>
+                </div>
+                <div>
+                  <dt>Error</dt>
+                  <dd>{formatOperationError(operation.error)}</dd>
+                </div>
+                <div>
+                  <dt>Last updated</dt>
+                  <dd>
+                    {lastUpdated
+                      ? formatApiDateTime(lastUpdated.toISOString())
+                      : '—'}
+                  </dd>
+                </div>
+              </dl>
+              {(operation.steps || []).length > 0 ? (
+                <ul>
+                  {(operation.steps || []).map((s) => (
+                    <li key={s.id}>
+                      {s.step_code}: <StatusBadge status={s.status} />{' '}
+                      {s.error?.message || ''}
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
             </div>
           ) : (
             <button

@@ -2,14 +2,20 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import {
   createDetailFetchGate,
   formatOperationError,
+  healthWaitElapsedMsFromFinishedAt,
   isActiveOperationStatus,
+  isDeploymentReadyForPublish,
+  isFailedOperationStatus,
   OPERATION_POLL_MS,
   operationPollConfig,
+  resolveWizardLifecyclePhase,
+  shouldPollWizardLifecycle,
 } from '../utils/operationLifecycle'
 
 describe('operationLifecycle', () => {
   beforeEach(() => {
     operationPollConfig.ms = 4000
+    operationPollConfig.healthWaitMaxMs = 5 * 60 * 1000
   })
 
   it('defaults to a 4s poll interval', () => {
@@ -28,6 +34,136 @@ describe('operationLifecycle', () => {
     expect(isActiveOperationStatus('ROLLED_BACK')).toBe(false)
     expect(isActiveOperationStatus('MANUAL_INTERVENTION_REQUIRED')).toBe(false)
     expect(isActiveOperationStatus(null)).toBe(false)
+  })
+
+  it('classifies failed Operation statuses', () => {
+    expect(isFailedOperationStatus('FAILED')).toBe(true)
+    expect(isFailedOperationStatus('CANCELLED')).toBe(true)
+    expect(isFailedOperationStatus('ROLLED_BACK')).toBe(true)
+    expect(isFailedOperationStatus('MANUAL_INTERVENTION_REQUIRED')).toBe(true)
+    expect(isFailedOperationStatus('SUCCEEDED')).toBe(false)
+    expect(isFailedOperationStatus('RUNNING')).toBe(false)
+    expect(isFailedOperationStatus(null)).toBe(false)
+  })
+
+  it('requires RUNNING desired/runtime and HEALTHY for Publish readiness', () => {
+    expect(
+      isDeploymentReadyForPublish({
+        desired_state: 'RUNNING',
+        runtime_status: 'RUNNING',
+        health_status: 'HEALTHY',
+      }),
+    ).toBe(true)
+    expect(
+      isDeploymentReadyForPublish({
+        desired_state: 'RUNNING',
+        runtime_status: 'RUNNING',
+        health_status: 'UNKNOWN',
+      }),
+    ).toBe(false)
+    expect(
+      isDeploymentReadyForPublish({
+        desired_state: 'RUNNING',
+        runtime_status: 'STARTING',
+        health_status: 'HEALTHY',
+      }),
+    ).toBe(false)
+    expect(isDeploymentReadyForPublish(null)).toBe(false)
+  })
+
+  it('computes health-wait elapsed from finished_at without resetting on bad timestamps', () => {
+    const now = Date.parse('2026-10-13T06:00:00.000Z')
+    expect(
+      healthWaitElapsedMsFromFinishedAt('2026-10-13T05:59:00.000Z', now),
+    ).toBe(60_000)
+    expect(healthWaitElapsedMsFromFinishedAt(null, now)).toBeNull()
+    expect(healthWaitElapsedMsFromFinishedAt(undefined, now)).toBeNull()
+    expect(healthWaitElapsedMsFromFinishedAt('', now)).toBeNull()
+    expect(healthWaitElapsedMsFromFinishedAt('   ', now)).toBeNull()
+    expect(healthWaitElapsedMsFromFinishedAt('not-a-date', now)).toBeNull()
+    expect(
+      healthWaitElapsedMsFromFinishedAt('2026-10-13T06:01:00.000Z', now),
+    ).toBe(0)
+    // F5-safe: same finished_at yields the same elapsed for a given now.
+    const finished = '2026-10-13T05:55:00.000Z'
+    expect(healthWaitElapsedMsFromFinishedAt(finished, now)).toBe(5 * 60_000)
+    expect(healthWaitElapsedMsFromFinishedAt(finished, now)).toBe(
+      operationPollConfig.healthWaitMaxMs,
+    )
+  })
+
+  it('resolves Wizard Start lifecycle phases and poll eligibility', () => {
+    expect(
+      resolveWizardLifecyclePhase({
+        step: 'review',
+        hasOperationId: true,
+        operationStatus: 'RUNNING',
+        deploymentReady: false,
+        healthWaitElapsedMs: null,
+      }),
+    ).toBe('idle')
+    expect(
+      resolveWizardLifecyclePhase({
+        step: 'start',
+        hasOperationId: false,
+        operationStatus: null,
+        deploymentReady: false,
+        healthWaitElapsedMs: null,
+      }),
+    ).toBe('idle')
+
+    expect(
+      resolveWizardLifecyclePhase({
+        step: 'start',
+        hasOperationId: true,
+        operationStatus: 'RUNNING',
+        deploymentReady: false,
+        healthWaitElapsedMs: null,
+      }),
+    ).toBe('operation_active')
+    expect(
+      resolveWizardLifecyclePhase({
+        step: 'start',
+        hasOperationId: true,
+        operationStatus: 'FAILED',
+        deploymentReady: false,
+        healthWaitElapsedMs: null,
+      }),
+    ).toBe('failed')
+    expect(
+      resolveWizardLifecyclePhase({
+        step: 'start',
+        hasOperationId: true,
+        operationStatus: 'SUCCEEDED',
+        deploymentReady: true,
+        healthWaitElapsedMs: null,
+      }),
+    ).toBe('ready')
+    expect(
+      resolveWizardLifecyclePhase({
+        step: 'start',
+        hasOperationId: true,
+        operationStatus: 'SUCCEEDED',
+        deploymentReady: false,
+        healthWaitElapsedMs: 1000,
+      }),
+    ).toBe('health_wait')
+    expect(
+      resolveWizardLifecyclePhase({
+        step: 'start',
+        hasOperationId: true,
+        operationStatus: 'SUCCEEDED',
+        deploymentReady: false,
+        healthWaitElapsedMs: operationPollConfig.healthWaitMaxMs,
+      }),
+    ).toBe('health_timeout')
+
+    expect(shouldPollWizardLifecycle('operation_active')).toBe(true)
+    expect(shouldPollWizardLifecycle('health_wait')).toBe(true)
+    expect(shouldPollWizardLifecycle('ready')).toBe(false)
+    expect(shouldPollWizardLifecycle('failed')).toBe(false)
+    expect(shouldPollWizardLifecycle('health_timeout')).toBe(false)
+    expect(shouldPollWizardLifecycle('idle')).toBe(false)
   })
 
   it('formats Operation errors without inventing text', () => {
