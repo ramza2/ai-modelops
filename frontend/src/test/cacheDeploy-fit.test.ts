@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { fitInputFingerprint, isFreshResourceSnapshot } from '../utils/cacheDeployFit'
+import { displayedGpuFreeMb, fitInputFingerprint, isFreshResourceSnapshot } from '../utils/cacheDeployFit'
 
 describe('cache deploy live GPU / fit safety', () => {
   it('invalidates a previous FIT after changing GPU or expected VRAM', () => {
@@ -24,6 +24,17 @@ describe('cache deploy live GPU / fit safety', () => {
     ]) {
       expect(fitInputFingerprint(['gpu-0'], '', config)).not.toBe(base)
     }
+  })
+
+  it('never falls back to stale snapshot when live Fit free is UNKNOWN', () => {
+    const now = Date.parse('2026-10-13T02:00:00Z')
+    const snap = { sampled_at: '2026-10-13T01:59:58Z', vram_free_mb: 15000 }
+    expect(displayedGpuFreeMb({ vram_free_mb: null }, snap, now)).toBeNull()
+    expect(displayedGpuFreeMb({ vram_free_mb: 6438 }, snap, now)).toBe(6438)
+    expect(displayedGpuFreeMb(undefined, snap, now)).toBe(15000)
+    expect(displayedGpuFreeMb(undefined, {
+      sampled_at: '2026-10-13T01:58:00Z', vram_free_mb: 15959,
+    }, now)).toBeNull()
   })
 
   it('hides stale, missing, invalid and far-future GPU snapshots', () => {
