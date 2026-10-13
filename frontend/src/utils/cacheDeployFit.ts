@@ -31,3 +31,15 @@ export function isFreshResourceSnapshot(
     sampledMs <= nowMs + 5_000 &&
     nowMs - sampledMs <= maxAgeMs
 }
+
+/** Live UNKNOWN(null) must never be replaced with a persisted snapshot value. */
+export function displayedGpuFreeMb(
+  live: { vram_free_mb: number | null } | undefined,
+  snapshot: { vram_free_mb: number | null; sampled_at: string | null } | null | undefined,
+  nowMs = Date.now(),
+): number | null {
+  if (live !== undefined) return live.vram_free_mb
+  return isFreshResourceSnapshot(snapshot?.sampled_at, nowMs)
+    ? (snapshot?.vram_free_mb ?? null)
+    : null
+}
