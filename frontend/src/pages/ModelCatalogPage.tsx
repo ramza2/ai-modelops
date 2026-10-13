@@ -40,6 +40,30 @@ type FitDetailState = {
   revision: string | null
 }
 
+function normalizeRevision(revision: string | null | undefined): string | null {
+  return revision ?? null
+}
+
+/** Only Fit details that match the current catalog row + selected Node are usable. */
+function fitDetailMatchesCurrent(
+  detail: FitDetailState | undefined,
+  item: HfCatalogModel,
+  currentNodeId: string,
+): detail is FitDetailState {
+  if (!detail) return false
+  if (!currentNodeId || detail.nodeId !== currentNodeId) return false
+  if (detail.analysis.repository_id !== item.repository_id) return false
+  if (detail.revision !== normalizeRevision(item.revision)) return false
+  if (detail.analysis.node_id !== currentNodeId) return false
+  if (
+    detail.analysis.revision != null &&
+    detail.analysis.revision !== normalizeRevision(item.revision)
+  ) {
+    return false
+  }
+  return true
+}
+
 const PAGE_SIZE = 20
 const POLL_MS = 2000
 const KNOWN_TYPES = new Set(['LLM', 'VLM', 'EMBEDDING'])
@@ -129,11 +153,11 @@ export function ModelCatalogPage() {
   const [error, setError] = useState<string | null>(null)
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
   const [fitByRepo, setFitByRepo] = useState<Record<string, FitDetailState>>({})
-  const [fitErrorByRepo, setFitErrorByRepo] = useState<Record<string, string>>(
-    {},
-  )
+  const [fitErrorByRepo, setFitErrorByRepo] = useState<
+    Record<string, { message: string; revision: string | null }>
+  >({})
   const [fitLoadingByRepo, setFitLoadingByRepo] = useState<
-    Record<string, boolean>
+    Record<string, { revision: string | null }>
   >({})
   const [expandedFitRepos, setExpandedFitRepos] = useState<
     Record<string, boolean>
@@ -262,13 +286,75 @@ export function ModelCatalogPage() {
     }
   }, [])
 
+  const invalidateFitRepo = useCallback((repoId: string) => {
+    fitAbortByRepoRef.current[repoId]?.abort()
+    delete fitAbortByRepoRef.current[repoId]
+    fitGenByRepoRef.current[repoId] = (fitGenByRepoRef.current[repoId] ?? 0) + 1
+  }, [])
+
+  // Same search context can refresh to a new revision or drop a model — drop
+  // mismatched Fit detail/loading/errors and abort in-flight analyze calls.
   useEffect(() => {
-    const next: Record<string, string | null> = {}
+    const nextRevisions: Record<string, string | null> = {}
     for (const item of items ?? []) {
-      next[item.repository_id] = item.revision ?? null
+      nextRevisions[item.repository_id] = normalizeRevision(item.revision)
     }
-    itemsRevisionByRepoRef.current = next
-  }, [items])
+    const prevRevisions = itemsRevisionByRepoRef.current
+    itemsRevisionByRepoRef.current = nextRevisions
+
+    const staleRepos = new Set<string>()
+    for (const [repoId, prevRev] of Object.entries(prevRevisions)) {
+      if (!(repoId in nextRevisions) || nextRevisions[repoId] !== prevRev) {
+        staleRepos.add(repoId)
+      }
+    }
+    for (const repoId of Object.keys(fitAbortByRepoRef.current)) {
+      if (!(repoId in nextRevisions)) {
+        staleRepos.add(repoId)
+      }
+    }
+    for (const repoId of staleRepos) {
+      invalidateFitRepo(repoId)
+    }
+
+    const prune = <T,>(prev: Record<string, T>): Record<string, T> => {
+      let changed = false
+      const next = { ...prev }
+      for (const repoId of Object.keys(next)) {
+        const currentRev = nextRevisions[repoId]
+        if (currentRev === undefined || staleRepos.has(repoId)) {
+          delete next[repoId]
+          changed = true
+        }
+      }
+      return changed ? next : prev
+    }
+
+    setFitByRepo((prev) => {
+      let changed = false
+      const next = { ...prev }
+      for (const [repoId, detail] of Object.entries(prev)) {
+        const currentRev = nextRevisions[repoId]
+        if (
+          currentRev === undefined ||
+          detail.revision !== currentRev ||
+          detail.nodeId !== nodeIdRef.current ||
+          detail.analysis.repository_id !== repoId ||
+          detail.analysis.node_id !== nodeIdRef.current
+        ) {
+          delete next[repoId]
+          changed = true
+          if (!staleRepos.has(repoId)) {
+            invalidateFitRepo(repoId)
+          }
+        }
+      }
+      return changed ? next : prev
+    })
+    setFitErrorByRepo(prune)
+    setFitLoadingByRepo(prune)
+    setExpandedFitRepos(prune)
+  }, [items, invalidateFitRepo])
 
   useEffect(() => {
     const active = Object.values(downloadByRepo).filter((j) =>
@@ -315,7 +401,7 @@ export function ModelCatalogPage() {
     if (!nodeId) return
     const repoId = item.repository_id
     const requestNodeId = nodeId
-    const requestRevision = item.revision ?? null
+    const requestRevision = normalizeRevision(item.revision)
     const requestContextKey = catalogContextKeyRef.current
     const requestedAt = new Date()
     const gen = (fitGenByRepoRef.current[repoId] ?? 0) + 1
@@ -325,13 +411,23 @@ export function ModelCatalogPage() {
     const controller = new AbortController()
     fitAbortByRepoRef.current[repoId] = controller
 
-    setFitLoadingByRepo((prev) => ({ ...prev, [repoId]: true }))
+    setFitLoadingByRepo((prev) => ({
+      ...prev,
+      [repoId]: { revision: requestRevision },
+    }))
     setFitErrorByRepo((prev) => {
       if (!(repoId in prev)) return prev
       const next = { ...prev }
       delete next[repoId]
       return next
     })
+
+    const isCurrentAnalyzeTarget = (): boolean =>
+      !controller.signal.aborted &&
+      fitGenByRepoRef.current[repoId] === gen &&
+      nodeIdRef.current === requestNodeId &&
+      catalogContextKeyRef.current === requestContextKey &&
+      (itemsRevisionByRepoRef.current[repoId] ?? null) === requestRevision
 
     try {
       const result = await analyzeHfResourceFit(
@@ -343,13 +439,12 @@ export function ModelCatalogPage() {
         },
         controller.signal,
       )
+      if (!isCurrentAnalyzeTarget()) return
+      if (result.repository_id !== repoId) return
+      if (result.node_id !== requestNodeId) return
       if (
-        controller.signal.aborted ||
-        fitGenByRepoRef.current[repoId] !== gen ||
-        nodeIdRef.current !== requestNodeId ||
-        catalogContextKeyRef.current !== requestContextKey ||
-        (itemsRevisionByRepoRef.current[repoId] ?? null) !== requestRevision ||
-        result.repository_id !== repoId
+        result.revision != null &&
+        result.revision !== requestRevision
       ) {
         return
       }
@@ -364,21 +459,17 @@ export function ModelCatalogPage() {
       }))
       setExpandedFitRepos((prev) => ({ ...prev, [repoId]: true }))
     } catch (err) {
-      if (
-        controller.signal.aborted ||
-        fitGenByRepoRef.current[repoId] !== gen ||
-        nodeIdRef.current !== requestNodeId ||
-        catalogContextKeyRef.current !== requestContextKey
-      ) {
-        return
-      }
+      if (!isCurrentAnalyzeTarget()) return
       if (err instanceof DOMException && err.name === 'AbortError') return
       setFitErrorByRepo((prev) => ({
         ...prev,
-        [repoId]:
-          err instanceof ApiError
-            ? err.message
-            : '자원 적합도 분석에 실패했습니다.',
+        [repoId]: {
+          message:
+            err instanceof ApiError
+              ? err.message
+              : '자원 적합도 분석에 실패했습니다.',
+          revision: requestRevision,
+        },
       }))
     } finally {
       if (fitGenByRepoRef.current[repoId] === gen) {
@@ -632,11 +723,23 @@ export function ModelCatalogPage() {
               <tbody>
                 {items.map((item) => {
                   const repoId = item.repository_id
-                  const fitDetail = fitByRepo[repoId]
+                  const fitDetail = fitDetailMatchesCurrent(
+                    fitByRepo[repoId],
+                    item,
+                    nodeId,
+                  )
+                    ? fitByRepo[repoId]
+                    : undefined
                   const analysis = fitDetail?.analysis
                   const catalogFit = item.resource_fit?.result || null
-                  const analyzing = Boolean(fitLoadingByRepo[repoId])
-                  const fitError = fitErrorByRepo[repoId]
+                  const itemRevision = normalizeRevision(item.revision)
+                  const analyzing =
+                    fitLoadingByRepo[repoId]?.revision === itemRevision
+                  const fitErrorEntry = fitErrorByRepo[repoId]
+                  const fitError =
+                    fitErrorEntry && fitErrorEntry.revision === itemRevision
+                      ? fitErrorEntry.message
+                      : undefined
                   const expanded = Boolean(expandedFitRepos[repoId] && analysis)
                   const job = downloadByRepo[repoId]
                   const downloadActive =

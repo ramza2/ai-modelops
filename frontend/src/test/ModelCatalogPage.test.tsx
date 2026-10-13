@@ -539,6 +539,104 @@ describe('ModelCatalogPage', () => {
     expect(screen.queryByTestId('fit-detail-org/stale-fit')).not.toBeInTheDocument()
   })
 
+  it('drops revision-A Fit detail and disk block when list refreshes to revision B; ignores late A', async () => {
+    let listCalls = 0
+    let resolveLateA: ((v: ResourceFitAnalysis) => void) | null = null
+    vi.mocked(catalogApi.listHfCatalog).mockImplementation(async () => {
+      listCalls += 1
+      if (listCalls === 1) {
+        return pageResult([
+          makeItem({ repository_id: 'org/rev-swap', revision: 'rev-a' }),
+        ])
+      }
+      return pageResult([
+        makeItem({ repository_id: 'org/rev-swap', revision: 'rev-b' }),
+      ])
+    })
+    vi.mocked(catalogApi.analyzeHfResourceFit)
+      .mockResolvedValueOnce(
+        makeFitAnalysis({
+          repository_id: 'org/rev-swap',
+          revision: 'rev-a',
+          result: 'INSUFFICIENT',
+          disk_ok: false,
+          disk_free_mb: 10,
+          reasons: ['Disk full on rev-a'],
+          gpu_results: [],
+          suggested_gpu_device_ids: [],
+          warnings: [],
+          assumptions: [],
+        }),
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveLateA = resolve
+          }),
+      )
+
+    renderAt('/models/catalog?node_id=node-1')
+    const row = (await screen.findByText('org/rev-swap')).closest(
+      'tr',
+    ) as HTMLElement
+    await userEvent.click(within(row).getByRole('button', { name: 'Fit 분석' }))
+
+    expect(await screen.findByTestId('fit-detail-org/rev-swap')).toBeInTheDocument()
+    expect(screen.getByText('Disk full on rev-a')).toBeInTheDocument()
+    expect(
+      within(row).getByRole('button', { name: 'Download' }),
+    ).toBeDisabled()
+    expect(
+      within(row).getByRole('button', { name: 'Download' }),
+    ).toHaveAttribute('title', '디스크 공간이 부족합니다.')
+
+    // Start a second analyze for A that will resolve after the list moves to B.
+    await userEvent.click(within(row).getByRole('button', { name: '재분석' }))
+    await waitFor(() => {
+      expect(resolveLateA).not.toBeNull()
+    })
+
+    await userEvent.click(screen.getByRole('button', { name: '새로고침' }))
+    await waitFor(() => {
+      expect(listCalls).toBeGreaterThanOrEqual(2)
+    })
+    await waitFor(() => {
+      expect(
+        screen.queryByTestId('fit-detail-org/rev-swap'),
+      ).not.toBeInTheDocument()
+    })
+    expect(screen.queryByText('Disk full on rev-a')).not.toBeInTheDocument()
+
+    const rowB = screen.getByText('org/rev-swap').closest('tr') as HTMLElement
+    expect(
+      within(rowB).getByRole('button', { name: 'Download' }),
+    ).not.toBeDisabled()
+    expect(
+      within(rowB).getByRole('button', { name: 'Fit 분석' }),
+    ).toBeInTheDocument()
+
+    resolveLateA!(
+      makeFitAnalysis({
+        repository_id: 'org/rev-swap',
+        revision: 'rev-a',
+        result: 'INSUFFICIENT',
+        disk_ok: false,
+        disk_free_mb: 10,
+        reasons: ['late-rev-a-must-not-apply'],
+        gpu_results: [],
+      }),
+    )
+    await waitFor(() => {
+      expect(
+        screen.queryByText('late-rev-a-must-not-apply'),
+      ).not.toBeInTheDocument()
+    })
+    expect(screen.queryByTestId('fit-detail-org/rev-swap')).not.toBeInTheDocument()
+    expect(
+      within(rowB).getByRole('button', { name: 'Download' }),
+    ).not.toBeDisabled()
+  })
+
   it('keeps other model fit/download state when one fit analysis fails, and allows retry', async () => {
     vi.mocked(catalogApi.listHfCatalog).mockResolvedValue(
       pageResult([
