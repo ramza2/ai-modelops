@@ -32,6 +32,20 @@ Downloaded ≠ Deployed ≠ Published.
 
 Fresh Node Agent resources + selected-GPU fit (authoritative before create).
 
+The GPU free/total table in the wizard refreshes Node resource snapshots on GPU-step
+entry. Its timestamps are shown explicitly; old persisted snapshots are not
+presented as live. The fit response includes selected GPU free VRAM and
+`evaluated_at` from its own Node Agent fetch. Preview results become invalid
+when GPU or Runtime inputs change, and the UI requires a new preview before
+Review/Create. Backend Create always fetches fresh resources independently.
+
+Fit estimates use artifact size, dtype/quantization hints and optional
+`expected_vram_mb`; they **do not fully model** `max_model_len`,
+`max_num_seqs`, `gpu_memory_utilization`, model loading overhead or KV Cache.
+FIT is an estimate, **not** a startup guarantee. Actual capability requires
+START → HEALTH → PROBE_INFERENCE. Do not use a FIT result as permission
+to interrupt an existing runtime.
+
 ### `POST /api/v1/model-cache/{cache_id}/deployment` → 201 (200 if reused)
 
 Body:
