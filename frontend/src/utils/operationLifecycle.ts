@@ -3,9 +3,12 @@
 /** Mutable config so focused tests can shorten the interval without fake timers. */
 export const operationPollConfig = {
   ms: 4000,
+  /** Max time to keep polling Deployment after Operation SUCCEEDED. */
+  healthWaitMaxMs: 5 * 60 * 1000,
 }
 
 export const OPERATION_POLL_MS = 4000
+export const HEALTH_WAIT_MAX_MS = 5 * 60 * 1000
 
 /** In-flight statuses that warrant automatic detail refresh. */
 export const ACTIVE_OPERATION_STATUSES = new Set([
@@ -14,11 +17,85 @@ export const ACTIVE_OPERATION_STATUSES = new Set([
   'ROLLING_BACK',
 ])
 
+const FAILED_OPERATION_STATUSES = new Set([
+  'FAILED',
+  'CANCELLED',
+  'ROLLED_BACK',
+  'MANUAL_INTERVENTION_REQUIRED',
+])
+
 export function isActiveOperationStatus(
   status: string | null | undefined,
 ): boolean {
   if (!status) return false
   return ACTIVE_OPERATION_STATUSES.has(status.toUpperCase())
+}
+
+export function isFailedOperationStatus(
+  status: string | null | undefined,
+): boolean {
+  if (!status) return false
+  return FAILED_OPERATION_STATUSES.has(status.toUpperCase())
+}
+
+export function isDeploymentReadyForPublish(
+  dep:
+    | {
+        desired_state?: string | null
+        runtime_status?: string | null
+        health_status?: string | null
+      }
+    | null
+    | undefined,
+): boolean {
+  if (!dep) return false
+  return (
+    dep.desired_state === 'RUNNING' &&
+    dep.runtime_status === 'RUNNING' &&
+    dep.health_status === 'HEALTHY'
+  )
+}
+
+/** Cache Deploy Wizard Start-step lifecycle poll phases (P1-4B). */
+export type WizardLifecyclePhase =
+  | 'idle'
+  | 'operation_active'
+  | 'health_wait'
+  | 'ready'
+  | 'failed'
+  | 'health_timeout'
+
+export function resolveWizardLifecyclePhase(input: {
+  step: string
+  hasOperationId: boolean
+  operationStatus: string | null | undefined
+  deploymentReady: boolean
+  healthWaitElapsedMs: number | null
+  healthWaitMaxMs?: number
+}): WizardLifecyclePhase {
+  if (input.step !== 'start' || !input.hasOperationId) return 'idle'
+  if (isFailedOperationStatus(input.operationStatus)) return 'failed'
+  if (isActiveOperationStatus(input.operationStatus)) return 'operation_active'
+  if (input.operationStatus === 'SUCCEEDED') {
+    if (input.deploymentReady) return 'ready'
+    const max = input.healthWaitMaxMs ?? operationPollConfig.healthWaitMaxMs
+    if (
+      input.healthWaitElapsedMs != null &&
+      input.healthWaitElapsedMs >= max
+    ) {
+      return 'health_timeout'
+    }
+    return 'health_wait'
+  }
+  // Operation row present but status not yet loaded / unexpected.
+  if (input.operationStatus) return 'operation_active'
+  return 'idle'
+}
+
+export function shouldPollWizardLifecycle(
+  phase: WizardLifecyclePhase,
+): boolean {
+  return phase === 'operation_active' || phase === 'health_wait'
 }
 
 export function formatOperationError(
