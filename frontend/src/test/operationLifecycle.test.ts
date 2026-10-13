@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import {
   createDetailFetchGate,
   formatOperationError,
+  healthWaitElapsedMsFromFinishedAt,
   isActiveOperationStatus,
   isDeploymentReadyForPublish,
   isFailedOperationStatus,
@@ -68,6 +69,27 @@ describe('operationLifecycle', () => {
       }),
     ).toBe(false)
     expect(isDeploymentReadyForPublish(null)).toBe(false)
+  })
+
+  it('computes health-wait elapsed from finished_at without resetting on bad timestamps', () => {
+    const now = Date.parse('2026-10-13T06:00:00.000Z')
+    expect(
+      healthWaitElapsedMsFromFinishedAt('2026-10-13T05:59:00.000Z', now),
+    ).toBe(60_000)
+    expect(healthWaitElapsedMsFromFinishedAt(null, now)).toBeNull()
+    expect(healthWaitElapsedMsFromFinishedAt(undefined, now)).toBeNull()
+    expect(healthWaitElapsedMsFromFinishedAt('', now)).toBeNull()
+    expect(healthWaitElapsedMsFromFinishedAt('   ', now)).toBeNull()
+    expect(healthWaitElapsedMsFromFinishedAt('not-a-date', now)).toBeNull()
+    expect(
+      healthWaitElapsedMsFromFinishedAt('2026-10-13T06:01:00.000Z', now),
+    ).toBe(0)
+    // F5-safe: same finished_at yields the same elapsed for a given now.
+    const finished = '2026-10-13T05:55:00.000Z'
+    expect(healthWaitElapsedMsFromFinishedAt(finished, now)).toBe(5 * 60_000)
+    expect(healthWaitElapsedMsFromFinishedAt(finished, now)).toBe(
+      operationPollConfig.healthWaitMaxMs,
+    )
   })
 
   it('resolves Wizard Start lifecycle phases and poll eligibility', () => {

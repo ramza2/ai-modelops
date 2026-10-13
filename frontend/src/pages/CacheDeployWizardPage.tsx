@@ -45,6 +45,7 @@ import { formatApiDateTime, operationElapsed } from '../utils/date'
 import {
   createDetailFetchGate,
   formatOperationError,
+  healthWaitElapsedMsFromFinishedAt,
   isDeploymentReadyForPublish,
   OPERATION_POLL_MS,
   operationPollConfig,
@@ -183,18 +184,20 @@ export function CacheDeployWizardPage() {
 
   const abortRef = useRef<AbortController | null>(null)
   const lifecycleGateRef = useRef(createDetailFetchGate())
-  const healthWaitStartedAtRef = useRef<number | null>(null)
   const activeOpIdRef = useRef(operationIdParam)
   activeOpIdRef.current = operationIdParam
   const activeDepIdRef = useRef(deploymentIdParam)
   activeDepIdRef.current = deploymentIdParam
+  const finishedAtRef = useRef<string | null>(null)
   const busyRef = useRef(false)
   busyRef.current = busy
   const restoredCacheRef = useRef<string | null>(null)
   const restoredPublishRef = useRef<string | null>(null)
   const [restoredDraft, setRestoredDraft] = useState(false)
   const [reviewNeedsFit, setReviewNeedsFit] = useState(false)
-  const [healthWaitTimedOut, setHealthWaitTimedOut] = useState(false)
+  /** Forces re-render when finished_at-based health wait crosses the max. */
+  const [healthWaitTick, setHealthWaitTick] = useState(0)
+  const [pollWarning, setPollWarning] = useState<string | null>(null)
   const storage = (() : DraftStorage | null => {
     try { return window.sessionStorage } catch { return null }
   })()
@@ -504,43 +507,31 @@ export function CacheDeployWizardPage() {
     }
   }
 
-  // Reset health-wait clock when Operation identity changes.
+  // Clear poll-only warning when Operation identity changes (not Operation failure).
   useEffect(() => {
-    healthWaitStartedAtRef.current = null
-    setHealthWaitTimedOut(false)
+    setPollWarning(null)
   }, [operationIdParam])
 
+  finishedAtRef.current = operation?.finished_at ?? null
+
   const healthy = isDeploymentReadyForPublish(deployment)
-  const healthWaitElapsedMs =
-    healthWaitStartedAtRef.current == null
-      ? null
-      : Date.now() - healthWaitStartedAtRef.current
+  // healthWaitTick is only a re-render signal; elapsed always uses wall clock
+  // vs Operation.finished_at so F5 cannot reset the 5m window.
+  void healthWaitTick
+  const healthWaitElapsedMs = healthWaitElapsedMsFromFinishedAt(
+    operation?.finished_at,
+  )
   const lifecyclePhase = resolveWizardLifecyclePhase({
     step,
     hasOperationId: Boolean(operationIdParam),
     operationStatus: operation?.status,
     deploymentReady: healthy,
-    healthWaitElapsedMs: healthWaitTimedOut
-      ? operationPollConfig.healthWaitMaxMs
-      : healthWaitElapsedMs,
+    healthWaitElapsedMs,
   })
 
-  // Track when SUCCEEDED but not yet RUNNING+HEALTHY for limited health wait.
-  useEffect(() => {
-    if (lifecyclePhase === 'health_wait') {
-      if (healthWaitStartedAtRef.current == null) {
-        healthWaitStartedAtRef.current = Date.now()
-      }
-      return
-    }
-    if (lifecyclePhase === 'ready' || lifecyclePhase === 'failed') {
-      healthWaitStartedAtRef.current = null
-      if (lifecyclePhase === 'ready') setHealthWaitTimedOut(false)
-    }
-  }, [lifecyclePhase])
-
   // P1-4B: 4s silent poll on Start — Operation while active, then limited
-  // Deployment health wait after SUCCEEDED. Shares DetailFetchGate epoch.
+  // Deployment health wait after SUCCEEDED (elapsed from finished_at so F5
+  // does not reset the 5m window). Shares DetailFetchGate epoch.
   useEffect(() => {
     if (!shouldPollWizardLifecycle(lifecyclePhase)) return
     const opId = operationIdParam
@@ -551,13 +542,13 @@ export function CacheDeployWizardPage() {
     const timer = window.setInterval(() => {
       if (busyRef.current) return
 
-      const startedAt = healthWaitStartedAtRef.current
+      const elapsed = healthWaitElapsedMsFromFinishedAt(finishedAtRef.current)
       if (
         lifecyclePhase === 'health_wait' &&
-        startedAt != null &&
-        Date.now() - startedAt >= operationPollConfig.healthWaitMaxMs
+        elapsed != null &&
+        elapsed >= operationPollConfig.healthWaitMaxMs
       ) {
-        setHealthWaitTimedOut(true)
+        setHealthWaitTick((n) => n + 1)
         return
       }
 
@@ -590,6 +581,7 @@ export function CacheDeployWizardPage() {
             setDeployment(dep)
           }
           setLastUpdated(new Date())
+          setPollWarning(null)
         } catch (err: unknown) {
           if (
             cancelled ||
@@ -600,6 +592,9 @@ export function CacheDeployWizardPage() {
           }
           if (err instanceof DOMException && err.name === 'AbortError') return
           // Keep last known Operation/Deployment; do not wipe wizard inputs.
+          setPollWarning(
+            '자동 상태 갱신에 실패했습니다. 마지막 성공 조회 결과를 유지합니다.',
+          )
         }
       })()
     }, operationPollConfig.ms)
@@ -1120,7 +1115,8 @@ export function CacheDeployWizardPage() {
                 <p className="panel-hint">
                   Operation은 SUCCEEDED입니다. Deployment가 RUNNING + HEALTHY가
                   될 때까지 제한적으로 상태를 확인합니다 (최대{' '}
-                  {Math.round(operationPollConfig.healthWaitMaxMs / 60000)}분).
+                  {Math.round(operationPollConfig.healthWaitMaxMs / 60000)}분,
+                  Operation 완료 시각 기준).
                 </p>
               ) : null}
               {lifecyclePhase === 'health_timeout' ? (
@@ -1143,6 +1139,11 @@ export function CacheDeployWizardPage() {
                 <p className="panel-hint" role="status">
                   Deployment가 RUNNING + HEALTHY입니다. Publish로 진행할 수
                   있습니다.
+                </p>
+              ) : null}
+              {pollWarning ? (
+                <p className="panel-hint" role="status" data-testid="poll-warning">
+                  {pollWarning}
                 </p>
               ) : null}
               <dl className="meta-grid">

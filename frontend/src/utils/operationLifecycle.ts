@@ -56,6 +56,24 @@ export function isDeploymentReadyForPublish(
   )
 }
 
+/**
+ * Elapsed time since Operation finished_at for post-SUCCEEDED health wait.
+ * Missing/invalid timestamps return null so F5 does not invent a new clock
+ * and we do not false-timeout on bad data.
+ */
+export function healthWaitElapsedMsFromFinishedAt(
+  finishedAt: string | null | undefined,
+  nowMs: number = Date.now(),
+): number | null {
+  if (finishedAt == null) return null
+  if (typeof finishedAt !== 'string') return null
+  const trimmed = finishedAt.trim()
+  if (!trimmed) return null
+  const t = Date.parse(trimmed)
+  if (!Number.isFinite(t)) return null
+  return Math.max(0, nowMs - t)
+}
+
 /** Cache Deploy Wizard Start-step lifecycle poll phases (P1-4B). */
 export type WizardLifecyclePhase =
   | 'idle'

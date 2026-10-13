@@ -238,7 +238,7 @@ describe('CacheDeployWizardPage Start lifecycle poll (P1-4B)', () => {
         return makeOpDetail({
           status: 'SUCCEEDED',
           current_step: 'FINALIZE',
-          finished_at: '2026-10-07T00:05:00Z',
+          finished_at: new Date(Date.now() - 1000).toISOString(),
         })
       }
       return makeOpDetail({
@@ -310,7 +310,7 @@ describe('CacheDeployWizardPage Start lifecycle poll (P1-4B)', () => {
         makeOpDetail({
           status: 'SUCCEEDED',
           current_step: 'FINALIZE',
-          finished_at: '2026-10-07T00:05:00Z',
+          finished_at: new Date(Date.now() - 1000).toISOString(),
         }),
       )
     })
@@ -339,6 +339,84 @@ describe('CacheDeployWizardPage Start lifecycle poll (P1-4B)', () => {
     })
     expect(screen.queryByText('STALE_STEP')).not.toBeInTheDocument()
     expect(screen.queryByText(/stale-failed/)).not.toBeInTheDocument()
+  })
+
+  it('on F5 keeps health-wait timeout anchored to finished_at (does not reset)', async () => {
+    operationPollConfig.healthWaitMaxMs = 200
+    const finishedAt = new Date(Date.now() - 5_000).toISOString()
+    vi.mocked(deploymentsApi.getDeployment).mockResolvedValue(
+      makeDeployment({
+        desired_state: 'RUNNING',
+        runtime_status: 'STARTING',
+        health_status: 'UNKNOWN',
+      }),
+    )
+    vi.mocked(operationsApi.getOperation).mockResolvedValue(
+      makeOpDetail({
+        status: 'SUCCEEDED',
+        current_step: 'FINALIZE',
+        finished_at: finishedAt,
+      }),
+    )
+
+    renderWizard(
+      '/models/cache/cache-1/deploy?step=start&deployment_id=dep-1&operation_id=op-1',
+    )
+    expect(await screen.findByText('Health 대기 시간 초과')).toBeInTheDocument()
+    expect(screen.queryByText(/제한적으로 상태를 확인/)).not.toBeInTheDocument()
+    expect(screen.queryByText('Operation 실패')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Next: Publish' })).toBeDisabled()
+
+    const callsAfterTimeout = vi.mocked(operationsApi.getOperation).mock.calls.length
+    await new Promise((r) => setTimeout(r, 120))
+    expect(vi.mocked(operationsApi.getOperation).mock.calls.length).toBe(
+      callsAfterTimeout,
+    )
+  })
+
+  it('shows non-blocking poll warning on API failure and clears it after recovery', async () => {
+    let opCalls = 0
+    vi.mocked(deploymentsApi.getDeployment).mockResolvedValue(
+      makeDeployment({
+        desired_state: 'RUNNING',
+        runtime_status: 'STARTING',
+        health_status: 'UNKNOWN',
+      }),
+    )
+    vi.mocked(operationsApi.getOperation).mockImplementation(async () => {
+      opCalls += 1
+      if (opCalls === 1) {
+        return makeOpDetail({
+          status: 'RUNNING',
+          current_step: 'START_CONTAINER',
+        })
+      }
+      if (opCalls === 2 || opCalls === 3) {
+        throw new Error('network down')
+      }
+      return makeOpDetail({
+        status: 'RUNNING',
+        current_step: 'WAIT_TARGET_HEALTH',
+      })
+    })
+
+    renderWizard(
+      '/models/cache/cache-1/deploy?step=start&deployment_id=dep-1&operation_id=op-1',
+    )
+    expect(await screen.findByText('START_CONTAINER')).toBeInTheDocument()
+    expect(await screen.findByText(/자동 갱신/)).toBeInTheDocument()
+
+    expect(await screen.findByTestId('poll-warning')).toHaveTextContent(
+      /자동 상태 갱신에 실패/,
+    )
+    expect(screen.queryByText('Operation 실패')).not.toBeInTheDocument()
+    expect(screen.getByText('START_CONTAINER')).toBeInTheDocument()
+
+    await waitFor(() => {
+      expect(screen.queryByTestId('poll-warning')).not.toBeInTheDocument()
+    })
+    expect(await screen.findByText('WAIT_TARGET_HEALTH')).toBeInTheDocument()
+    expect(screen.queryByText('Operation 실패')).not.toBeInTheDocument()
   })
 
   it('shows Operation failure distinctly and stops polling', async () => {
