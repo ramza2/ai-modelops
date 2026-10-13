@@ -376,6 +376,12 @@ export function CacheDeployWizardPage() {
   const fitInputRef = useRef(fitInput)
   fitInputRef.current = fitInput
   const validFit = fitFingerprint === fitInput ? fit : null
+  useEffect(() => {
+    if (!fit || fitFingerprint === fitInput) return
+    setFit(null)
+    setFitFingerprint('')
+    setAckUnknown(false)
+  }, [fit, fitFingerprint, fitInput])
 
   const refreshFit = async () => {
     if (!cacheId || uniqueGpuIds.length === 0) return
@@ -794,7 +800,8 @@ export function CacheDeployWizardPage() {
                     ?.snapshot
                   const live = validFit?.gpu_results.find((x) => x.gpu_device_id === g.id)
                   const checked = selectedGpuIds.includes(g.id)
-                  const freeMb = live?.vram_free_mb ?? snap?.vram_free_mb
+                  // UNKNOWN live free must not fall back to an old persisted value.
+                  const freeMb = live ? live.vram_free_mb : snap?.vram_free_mb
                   return (
                     <tr key={g.id}>
                       <td>
