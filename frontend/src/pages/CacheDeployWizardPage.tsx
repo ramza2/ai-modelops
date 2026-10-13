@@ -396,6 +396,7 @@ export function CacheDeployWizardPage() {
       if (fitInputRef.current !== inputAtRequest) return
       setFit(result)
       setFitFingerprint(inputAtRequest)
+      setReviewNeedsFit(false)
       setRuntime((r) => ({ ...r, tensor_parallel_size: uniqueGpuIds.length }))
     } catch (err) {
       setActionError(
@@ -498,6 +499,13 @@ export function CacheDeployWizardPage() {
       (model?.model_type || '').toUpperCase() === 'EMBEDDING' ? 'EMBEDDING' : 'CHAT'
     setEndpoints(page.items.filter((e) => e.api_type === apiType))
   }
+
+  // After F5, an existing-alias selection must have its options reloaded.
+  useEffect(() => {
+    if (step !== 'publish' || publishMode !== 'existing' || !model) return
+    void loadEndpoints().catch(() => setActionError('Endpoint 목록을 불러오지 못했습니다.'))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step, publishMode, model?.model_type])
 
   const onPublish = async () => {
     if (!deployment || busy) return
