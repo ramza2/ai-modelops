@@ -14,7 +14,8 @@ import {
 import { getDeployment, startDeployment } from '../api/deployments'
 import { listEndpoints } from '../api/endpoints'
 import { getModel, getModelVersion } from '../api/models'
-import { getNode, getNodeResources } from '../api/nodes'
+import { getNode, refreshNodeResources } from '../api/nodes'
+import { fitInputFingerprint, isFreshResourceSnapshot } from '../utils/cacheDeployFit'
 import { getOperation } from '../api/operations'
 import type {
   Deployment,
@@ -126,6 +127,8 @@ export function CacheDeployWizardPage() {
   const [version, setVersion] = useState<ModelVersion | null>(null)
   const [node, setNode] = useState<NodeDetail | null>(null)
   const [resources, setResources] = useState<NodeResourcesLatest | null>(null)
+  const [gpuResourceLoading, setGpuResourceLoading] = useState(false)
+  const [gpuResourceError, setGpuResourceError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -139,6 +142,7 @@ export function CacheDeployWizardPage() {
   const [expectedVramMb, setExpectedVramMb] = useState<string>('')
   const [ackUnknown, setAckUnknown] = useState(false)
   const [fit, setFit] = useState<FreshFitResult | null>(null)
+  const [fitKey, setFitKey] = useState('')
   const [fitLoading, setFitLoading] = useState(false)
 
   const [deployment, setDeployment] = useState<Deployment | null>(null)
@@ -211,13 +215,9 @@ export function CacheDeployWizardPage() {
           setRuntime((prev) => ({ ...d.runtime, ...prev }))
         }
         if (entry.node_id) {
-          const [n, res] = await Promise.all([
-            getNode(entry.node_id, controller.signal),
-            getNodeResources(entry.node_id, controller.signal).catch(() => null),
-          ])
+          const n = await getNode(entry.node_id, controller.signal)
           if (controller.signal.aborted) return
           setNode(n)
-          setResources(res)
           if (n.gpus[0] && selectedGpuIds.length === 0) {
             setSelectedGpuIds([n.gpus[0].id])
           }
