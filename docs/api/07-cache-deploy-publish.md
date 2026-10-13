@@ -50,6 +50,21 @@ Response diagnostics (P1-2):
 (`source=persisted_snapshot`, `is_live=false`, `age_ms`). It is not a live
 capacity probe — use refresh + fit-preview for deploy decisions.
 
+Wizard integration (P1-1 + P1-2):
+- Entering GPU step calls the Node resource refresh API and displays returned
+  sample timestamps. Values older than 30 seconds are shown as unavailable,
+  not as 'live'; refresh failures are visible.
+- After `fit-preview`, selected GPUs show the Fit's UUID-aligned live
+  measurements and `resource_sampled_at`. When live free is null/invalid
+  (UNKNOWN), the UI **must not** substitute a persisted free-VRAM value.
+- GPU selection, `expected_vram_mb`, dtype, quantization and Runtime
+  sizing knobs invalidate the displayed Fit. A new `fit-preview` is required
+  before Review/Create; Backend Create also fetches resources again.
+- Artifact size is only a rough starting point. `max_model_len`,
+  `max_num_seqs`, `gpu_memory_utilization`, loading overhead and KV Cache
+  are not fully estimated. Even FIT requires subsequent Health/Inference
+  verification; never interrupt an existing runtime based on the preview.
+
 ### `POST /api/v1/model-cache/{cache_id}/deployment` → 201 (200 if reused)
 
 Body:
