@@ -319,6 +319,7 @@ export function CacheDeployWizardPage() {
     setFitLoading(true)
     setFit(null)
     setFitKey('')
+    setAckUnknown(false)
     setActionError(null)
     try {
       const result = await previewCacheDeployFit(cacheId, {
