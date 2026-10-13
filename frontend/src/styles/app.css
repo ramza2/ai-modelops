@@ -694,6 +694,75 @@ th {
   .config-kv-grid {
     grid-template-columns: minmax(0, 1fr);
   }
+
+  .catalog-fit-detail__lists {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .catalog-fit-gpu-table {
+    min-width: 0;
+  }
+}
+
+/** P1-5B: Model Catalog Fit detail (scoped; does not alter Deploy Wizard Fit). */
+.catalog-fit-summary {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.catalog-fit-summary__detail {
+  display: grid;
+  gap: 0.2rem;
+  padding-top: 0.25rem;
+  border-top: 1px dashed var(--border);
+}
+
+.catalog-fit-loading {
+  margin: 0.4rem 0 0;
+}
+
+.catalog-fit-error {
+  margin: 0.4rem 0 0;
+  color: var(--bad);
+  font-size: 0.85rem;
+}
+
+.catalog-fit-detail-row > td {
+  background: var(--surface-2);
+  border-top: 0;
+  padding-top: 0.5rem;
+  padding-bottom: 1rem;
+}
+
+.catalog-fit-detail {
+  display: grid;
+  gap: 0.75rem;
+  min-width: 0;
+}
+
+.catalog-fit-detail__head .section-subheading {
+  margin-top: 0;
+}
+
+.catalog-fit-detail__block {
+  min-width: 0;
+}
+
+.catalog-fit-detail__lists {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr));
+  gap: 0.75rem 1rem;
+}
+
+.catalog-fit-list {
+  margin: 0;
+  padding-left: 1.1rem;
+  font-size: 0.9rem;
+}
+
+.catalog-fit-gpu-table th,
+.catalog-fit-gpu-table td {
+  vertical-align: top;
 }
 
 .mono {

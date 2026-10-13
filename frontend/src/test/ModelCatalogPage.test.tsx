@@ -3,7 +3,13 @@ import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { ApiError } from '../api/client'
-import type { HfCatalogModel, HfCatalogPage, HfDownloadJob, NodeSummary } from '../api/types'
+import type {
+  HfCatalogModel,
+  HfCatalogPage,
+  HfDownloadJob,
+  NodeSummary,
+  ResourceFitAnalysis,
+} from '../api/types'
 import { ModelCatalogPage } from '../pages/ModelCatalogPage'
 import * as catalogApi from '../api/catalog'
 import * as downloadsApi from '../api/downloads'
@@ -39,6 +45,54 @@ function makeItem(
     likes: 1,
     estimated_download_size_bytes: 2_000_000_000,
     estimated_required_vram_mb: 2500,
+    ...overrides,
+  }
+}
+
+function makeFitAnalysis(
+  overrides: Partial<ResourceFitAnalysis> &
+    Pick<ResourceFitAnalysis, 'repository_id'>,
+): ResourceFitAnalysis {
+  return {
+    revision: 'abc',
+    node_id: 'node-1',
+    result: 'FIT',
+    estimated_required_vram_mb: 2500,
+    estimated_download_size_bytes: 2_000_000_000,
+    quantization_hint: null,
+    dtype_hint: 'float16',
+    disk_free_mb: 100000,
+    disk_ok: true,
+    tensor_parallel: 1,
+    gpu_results: [
+      {
+        gpu_device_id: 'gpu-0',
+        gpu_index: 0,
+        name: 'GPU-0',
+        vram_total_mb: 16384,
+        vram_free_mb: 12000,
+        safety_margin_mb: 1024,
+        estimated_required_vram_mb: 2500,
+        result: 'FIT',
+        reasons: ['GPU0 has spare VRAM'],
+      },
+      {
+        gpu_device_id: 'gpu-1',
+        gpu_index: 1,
+        name: 'GPU-1',
+        vram_total_mb: 16384,
+        vram_free_mb: 2800,
+        safety_margin_mb: 1024,
+        estimated_required_vram_mb: 2500,
+        result: 'TIGHT',
+        reasons: ['GPU1 thin headroom'],
+      },
+    ],
+    suggested_gpu_device_ids: ['gpu-0'],
+    assumptions: ['Assumes single-GPU placement'],
+    warnings: ['Advisory only'],
+    reasons: ['Overall FIT on at least one GPU'],
+    advisory_only: true,
     ...overrides,
   }
 }
@@ -340,25 +394,18 @@ describe('ModelCatalogPage', () => {
     vi.mocked(catalogApi.listHfCatalog).mockResolvedValue(
       pageResult([makeItem({ repository_id: 'org/analyze-me' })]),
     )
-    vi.mocked(catalogApi.analyzeHfResourceFit).mockResolvedValue({
-      repository_id: 'org/analyze-me',
-      revision: 'abc',
-      node_id: 'node-1',
-      result: 'INSUFFICIENT',
-      estimated_required_vram_mb: 20000,
-      estimated_download_size_bytes: 40_000_000_000,
-      quantization_hint: null,
-      dtype_hint: 'float16',
-      disk_free_mb: 100000,
-      disk_ok: true,
-      tensor_parallel: 1,
-      gpu_results: [],
-      suggested_gpu_device_ids: [],
-      assumptions: [],
-      warnings: [],
-      reasons: ['Free VRAM too low'],
-      advisory_only: true,
-    })
+    vi.mocked(catalogApi.analyzeHfResourceFit).mockResolvedValue(
+      makeFitAnalysis({
+        repository_id: 'org/analyze-me',
+        result: 'INSUFFICIENT',
+        estimated_required_vram_mb: 20000,
+        gpu_results: [],
+        suggested_gpu_device_ids: [],
+        assumptions: [],
+        warnings: [],
+        reasons: ['Free VRAM too low'],
+      }),
+    )
 
     renderAt('/models/catalog?node_id=node-1')
     expect(await screen.findByText('org/analyze-me')).toBeInTheDocument()
@@ -367,11 +414,289 @@ describe('ModelCatalogPage', () => {
     await userEvent.click(
       within(row as HTMLElement).getByRole('button', { name: 'Fit 분석' }),
     )
-    expect(await screen.findByText(/부족/)).toBeInTheDocument()
-    expect(screen.getByText('Free VRAM too low')).toBeInTheDocument()
+    const detail = await screen.findByTestId('fit-detail-org/analyze-me')
+    expect(within(detail).getAllByText(/부족/).length).toBeGreaterThan(0)
+    expect(within(detail).getByText('Free VRAM too low')).toBeInTheDocument()
     expect(
       within(row as HTMLElement).getByRole('button', { name: 'Download' }),
     ).not.toBeDisabled()
+  })
+
+  it('shows loading then auto-expands GPU detail; supports collapse and re-analyze', async () => {
+    let resolveFit: ((v: ResourceFitAnalysis) => void) | null = null
+    vi.mocked(catalogApi.listHfCatalog).mockResolvedValue(
+      pageResult([
+        makeItem({
+          repository_id: 'org/fit-ux',
+          resource_fit: { result: 'TIGHT', reasons: ['List summary only'] },
+        }),
+      ]),
+    )
+    vi.mocked(catalogApi.analyzeHfResourceFit).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveFit = resolve
+        }),
+    )
+
+    renderAt('/models/catalog?node_id=node-1')
+    const row = (await screen.findByText('org/fit-ux')).closest(
+      'tr',
+    ) as HTMLElement
+    expect(within(row).getByText('List summary only')).toBeInTheDocument()
+    expect(within(row).getByText('목록 요약')).toBeInTheDocument()
+
+    await userEvent.click(within(row).getByRole('button', { name: 'Fit 분석' }))
+    expect(row).toHaveAttribute('data-fit-loading', 'true')
+    expect(within(row).getByText(/Fit 분석 중/)).toBeInTheDocument()
+    expect(within(row).getByRole('button', { name: '분석 중…' })).toBeDisabled()
+
+    resolveFit!(
+      makeFitAnalysis({
+        repository_id: 'org/fit-ux',
+        result: 'FIT',
+        warnings: ['Do not pool VRAM'],
+      }),
+    )
+
+    const detail = await screen.findByTestId('fit-detail-org/fit-ux')
+    expect(within(detail).getByText('종합 결과')).toBeInTheDocument()
+    expect(within(detail).getByText('index 0')).toBeInTheDocument()
+    expect(within(detail).getByText('index 1')).toBeInTheDocument()
+    expect(within(detail).getByText('GPU1 thin headroom')).toBeInTheDocument()
+    expect(within(detail).getByText('Do not pool VRAM')).toBeInTheDocument()
+    expect(within(detail).getByText('Assumes single-GPU placement')).toBeInTheDocument()
+    expect(within(detail).getByText('Suggested GPU (참고)')).toBeInTheDocument()
+    expect(within(detail).getByText('gpu-0')).toBeInTheDocument()
+    expect(within(detail).getByText(/서버 완료 시각이 아닙니다/)).toBeInTheDocument()
+    expect(within(row).getByText('상세 분석')).toBeInTheDocument()
+    expect(within(row).getByText('List summary only')).toBeInTheDocument()
+
+    await userEvent.click(within(row).getByRole('button', { name: '접기' }))
+    expect(screen.queryByTestId('fit-detail-org/fit-ux')).not.toBeInTheDocument()
+    await userEvent.click(within(row).getByRole('button', { name: '상세 펼치기' }))
+    expect(screen.getByTestId('fit-detail-org/fit-ux')).toBeInTheDocument()
+
+    vi.mocked(catalogApi.analyzeHfResourceFit).mockResolvedValue(
+      makeFitAnalysis({
+        repository_id: 'org/fit-ux',
+        result: 'TIGHT',
+        reasons: ['Re-analyzed'],
+        gpu_results: [
+          {
+            gpu_device_id: 'gpu-0',
+            gpu_index: 0,
+            name: 'GPU-0',
+            vram_total_mb: 16384,
+            vram_free_mb: 3000,
+            safety_margin_mb: 1024,
+            estimated_required_vram_mb: 2500,
+            result: 'TIGHT',
+            reasons: ['retry tight'],
+          },
+        ],
+      }),
+    )
+    await userEvent.click(within(row).getByRole('button', { name: '재분석' }))
+    expect(await screen.findByText('Re-analyzed')).toBeInTheDocument()
+    expect(screen.getByText('retry tight')).toBeInTheDocument()
+  })
+
+  it('ignores stale fit responses after Node or search context changes', async () => {
+    let resolveLate: ((v: ResourceFitAnalysis) => void) | null = null
+    vi.mocked(catalogApi.listHfCatalog).mockResolvedValue(
+      pageResult([makeItem({ repository_id: 'org/stale-fit' })]),
+    )
+    vi.mocked(catalogApi.analyzeHfResourceFit).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveLate = resolve
+        }),
+    )
+
+    renderAt('/models/catalog?node_id=node-1')
+    const row = (await screen.findByText('org/stale-fit')).closest(
+      'tr',
+    ) as HTMLElement
+    await userEvent.click(within(row).getByRole('button', { name: 'Fit 분석' }))
+    await waitFor(() => {
+      expect(resolveLate).not.toBeNull()
+    })
+
+    await userEvent.selectOptions(screen.getByLabelText('Node'), '')
+    resolveLate!(
+      makeFitAnalysis({
+        repository_id: 'org/stale-fit',
+        result: 'FIT',
+        reasons: ['stale-should-not-appear'],
+      }),
+    )
+    await waitFor(() => {
+      expect(
+        screen.queryByText('stale-should-not-appear'),
+      ).not.toBeInTheDocument()
+    })
+    expect(screen.queryByTestId('fit-detail-org/stale-fit')).not.toBeInTheDocument()
+  })
+
+  it('drops revision-A Fit detail and disk block when list refreshes to revision B; ignores late A', async () => {
+    let listCalls = 0
+    let resolveLateA: ((v: ResourceFitAnalysis) => void) | null = null
+    vi.mocked(catalogApi.listHfCatalog).mockImplementation(async () => {
+      listCalls += 1
+      if (listCalls === 1) {
+        return pageResult([
+          makeItem({ repository_id: 'org/rev-swap', revision: 'rev-a' }),
+        ])
+      }
+      return pageResult([
+        makeItem({ repository_id: 'org/rev-swap', revision: 'rev-b' }),
+      ])
+    })
+    vi.mocked(catalogApi.analyzeHfResourceFit)
+      .mockResolvedValueOnce(
+        makeFitAnalysis({
+          repository_id: 'org/rev-swap',
+          revision: 'rev-a',
+          result: 'INSUFFICIENT',
+          disk_ok: false,
+          disk_free_mb: 10,
+          reasons: ['Disk full on rev-a'],
+          gpu_results: [],
+          suggested_gpu_device_ids: [],
+          warnings: [],
+          assumptions: [],
+        }),
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveLateA = resolve
+          }),
+      )
+
+    renderAt('/models/catalog?node_id=node-1')
+    const row = (await screen.findByText('org/rev-swap')).closest(
+      'tr',
+    ) as HTMLElement
+    await userEvent.click(within(row).getByRole('button', { name: 'Fit 분석' }))
+
+    expect(await screen.findByTestId('fit-detail-org/rev-swap')).toBeInTheDocument()
+    expect(screen.getByText('Disk full on rev-a')).toBeInTheDocument()
+    expect(
+      within(row).getByRole('button', { name: 'Download' }),
+    ).toBeDisabled()
+    expect(
+      within(row).getByRole('button', { name: 'Download' }),
+    ).toHaveAttribute('title', '디스크 공간이 부족합니다.')
+
+    // Start a second analyze for A that will resolve after the list moves to B.
+    await userEvent.click(within(row).getByRole('button', { name: '재분석' }))
+    await waitFor(() => {
+      expect(resolveLateA).not.toBeNull()
+    })
+
+    await userEvent.click(screen.getByRole('button', { name: '새로고침' }))
+    await waitFor(() => {
+      expect(listCalls).toBeGreaterThanOrEqual(2)
+    })
+    await waitFor(() => {
+      expect(
+        screen.queryByTestId('fit-detail-org/rev-swap'),
+      ).not.toBeInTheDocument()
+    })
+    expect(screen.queryByText('Disk full on rev-a')).not.toBeInTheDocument()
+
+    const rowB = screen.getByText('org/rev-swap').closest('tr') as HTMLElement
+    expect(
+      within(rowB).getByRole('button', { name: 'Download' }),
+    ).not.toBeDisabled()
+    expect(
+      within(rowB).getByRole('button', { name: 'Fit 분석' }),
+    ).toBeInTheDocument()
+
+    resolveLateA!(
+      makeFitAnalysis({
+        repository_id: 'org/rev-swap',
+        revision: 'rev-a',
+        result: 'INSUFFICIENT',
+        disk_ok: false,
+        disk_free_mb: 10,
+        reasons: ['late-rev-a-must-not-apply'],
+        gpu_results: [],
+      }),
+    )
+    await waitFor(() => {
+      expect(
+        screen.queryByText('late-rev-a-must-not-apply'),
+      ).not.toBeInTheDocument()
+    })
+    expect(screen.queryByTestId('fit-detail-org/rev-swap')).not.toBeInTheDocument()
+    expect(
+      within(rowB).getByRole('button', { name: 'Download' }),
+    ).not.toBeDisabled()
+  })
+
+  it('keeps other model fit/download state when one fit analysis fails, and allows retry', async () => {
+    vi.mocked(catalogApi.listHfCatalog).mockResolvedValue(
+      pageResult([
+        makeItem({ repository_id: 'org/ok-fit' }),
+        makeItem({ repository_id: 'org/fail-fit' }),
+      ]),
+    )
+    vi.mocked(catalogApi.analyzeHfResourceFit).mockImplementation(
+      async ({ repositoryId }) => {
+        if (repositoryId === 'org/fail-fit') {
+          throw new ApiError('Fit upstream timeout', {
+            status: 503,
+            code: 'DEPENDENCY_UNAVAILABLE',
+          })
+        }
+        return makeFitAnalysis({ repository_id: repositoryId })
+      },
+    )
+    vi.mocked(downloadsApi.startHfDownload).mockResolvedValue(
+      makeJob({
+        job_id: 'job-ok',
+        repository_id: 'org/ok-fit',
+        status: 'DOWNLOADING',
+        progress_percent: 20,
+      }),
+    )
+
+    renderAt('/models/catalog?node_id=node-1')
+    const okRow = (await screen.findByText('org/ok-fit')).closest(
+      'tr',
+    ) as HTMLElement
+    const failRow = screen.getByText('org/fail-fit').closest('tr') as HTMLElement
+
+    await userEvent.click(within(okRow).getByRole('button', { name: 'Download' }))
+    await waitFor(() => {
+      expect(within(okRow).getByText(/Progress/)).toBeInTheDocument()
+    })
+
+    await userEvent.click(within(okRow).getByRole('button', { name: 'Fit 분석' }))
+    expect(await screen.findByTestId('fit-detail-org/ok-fit')).toBeInTheDocument()
+
+    await userEvent.click(within(failRow).getByRole('button', { name: 'Fit 분석' }))
+    expect(await screen.findByTestId('fit-error-org/fail-fit')).toHaveTextContent(
+      'Fit upstream timeout',
+    )
+    expect(screen.getByTestId('fit-detail-org/ok-fit')).toBeInTheDocument()
+    expect(within(okRow).getByText(/Progress/)).toBeInTheDocument()
+    expect(screen.queryByText('카탈로그 오류')).not.toBeInTheDocument()
+
+    vi.mocked(catalogApi.analyzeHfResourceFit).mockResolvedValue(
+      makeFitAnalysis({
+        repository_id: 'org/fail-fit',
+        result: 'TIGHT',
+        reasons: ['recovered'],
+      }),
+    )
+    await userEvent.click(within(failRow).getByRole('button', { name: 'Fit 분석' }))
+    expect(await screen.findByTestId('fit-detail-org/fail-fit')).toBeInTheDocument()
+    expect(screen.getByText('recovered')).toBeInTheDocument()
+    expect(screen.queryByTestId('fit-error-org/fail-fit')).not.toBeInTheDocument()
   })
 
   it('enables Next when has_more is true and navigates to page 2', async () => {
