@@ -38,6 +38,20 @@ describe('operationLifecycle', () => {
     expect(formatOperationError({ code: null, message: null })).toBe('—')
   })
 
+  it('invalidates the in-flight epoch on abort/unmount, even for late responses', () => {
+    const gate = createDetailFetchGate()
+    const pending = gate.begin('load')
+    expect(gate.isCurrent(pending.gen)).toBe(true)
+    gate.abort()
+    expect(pending.signal.aborted).toBe(true)
+    expect(gate.isCurrent(pending.gen)).toBe(false)
+    expect(gate.currentKind()).toBeNull()
+
+    const next = gate.begin('poll')
+    expect(gate.isCurrent(next.gen)).toBe(true)
+    expect(next.gen).toBeGreaterThan(pending.gen)
+  })
+
   it('invalidates older fetch epochs when a newer load or poll begins', () => {
     const gate = createDetailFetchGate()
     const first = gate.begin('poll')
