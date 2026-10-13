@@ -14,6 +14,29 @@ CACHE READY
 Deploy / Start / Gateway publish reuse existing Deployment, Operation, Endpoint,
 and Gateway contracts. There is **no** second execution engine.
 
+## Wizard draft recovery (P1-3)
+
+The Deploy from Cache wizard stores **operator inputs only** in browser
+`sessionStorage` (per tab; retained across F5/navigation, cleared when tab
+session ends). Entries are scoped to immutable Cache ID + revision, Node, and
+Model Version, schema versioned and expire after 24 hours.
+
+- Before metadata Create: Deployment/container/served name, port, runtime
+  configuration, selected GPU IDs and expected VRAM are restored after matching
+  the current READY cache. Invalid or unavailable GPUs are filtered.
+- A reopened Review step returns to GPU: cached Fit is never restored.
+  A fresh Fit is required before Review/Create. Changing Fit-related inputs
+  invalidates prior preview; UNKNOWN acknowledgement must be re-entered.
+- After Create, the pre-Create draft is discarded. Deployment and Operation
+  identity/resume still come from URL IDs and management APIs, never browser data.
+- During Publish, pending Alias/mode/rewrite are separately retained under the
+  Deployment ID. ACTIVE route and gateway verification are read from Backend.
+  The publish draft is removed after successful Publish or observed ACTIVE route.
+- Disabled/unavailable/corrupt browser storage falls back to in-memory editing
+  with no change to server side lifecycle.
+- Session drafts are **not** server-side durable storage or a substitute for
+  Backend idempotency / spec conflict checks.
+
 ## State distinctions
 
 | State | Meaning |
