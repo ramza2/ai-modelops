@@ -77,8 +77,23 @@ class NodeService:
         gpu_snaps = await self._repo.latest_gpu_snapshots(
             [uuid.UUID(str(g.id)) for g in gpus]
         )
+        sampled_times: list[dt.datetime] = []
+        if host_snap is not None and host_snap.sampled_at is not None:
+            sampled_times.append(_as_utc(host_snap.sampled_at))
+        for snap in gpu_snaps.values():
+            if snap is not None and snap.sampled_at is not None:
+                sampled_times.append(_as_utc(snap.sampled_at))
+        newest = max(sampled_times) if sampled_times else None
+        now = dt.datetime.now(tz=dt.UTC)
+        age_ms = (
+            int((now - newest).total_seconds() * 1000) if newest is not None else None
+        )
+        # Persisted DB snapshot only — never present as live Node Agent capacity.
         return {
             "node_id": str(node.id),
+            "source": "persisted_snapshot",
+            "is_live": False,
+            "age_ms": age_ms,
             "host": self._serialize_host_snapshot(host_snap),
             "gpus": [
                 {
@@ -196,10 +211,18 @@ class NodeService:
             # gpu_device.vram_total_mb is NOT NULL in schema; skip incomplete rows.
             if vram_total is None:
                 continue
+            raw_index = item.get("device_index")
+            if raw_index is None:
+                # Never collapse a missing index to 0 (would alias GPU0).
+                continue
+            try:
+                device_index = int(raw_index)
+            except (TypeError, ValueError):
+                continue
             gpu = await self._repo.upsert_gpu_by_uuid(
                 node_id=uuid.UUID(str(node.id)),
                 gpu_uuid=gpu_uuid,
-                device_index=int(item.get("device_index") or 0),
+                device_index=device_index,
                 model_name=str(item.get("model_name") or "UNKNOWN"),
                 vram_total_mb=int(vram_total),
                 compute_capability=item.get("compute_capability"),
@@ -312,6 +335,10 @@ class NodeService:
 def _iso(value: dt.datetime | None) -> str | None:
     if value is None:
         return None
+    return _as_utc(value).isoformat().replace("+00:00", "Z")
+
+
+def _as_utc(value: dt.datetime) -> dt.datetime:
     if value.tzinfo is None:
-        value = value.replace(tzinfo=dt.UTC)
-    return value.astimezone(dt.UTC).isoformat().replace("+00:00", "Z")
+        return value.replace(tzinfo=dt.UTC)
+    return value.astimezone(dt.UTC)

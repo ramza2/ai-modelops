@@ -652,8 +652,13 @@ export function CacheDeployWizardPage() {
         <section className="panel">
           <h2>3. GPU (fresh fit)</h2>
           <p className="secondary-text">
-            Live free/total from Node resources. Disk is not the main gate after
-            cache READY. VRAM is never pooled across GPUs.
+            Table values are persisted Node snapshots
+            {resources?.is_live === false ? ' (not live)' : ''}
+            {typeof resources?.age_ms === 'number'
+              ? ` · age ${Math.round(resources.age_ms / 1000)}s`
+              : ''}
+            . Fresh Fit re-reads Node Agent live free VRAM by GPU UUID. Disk is
+            not the main gate after cache READY. VRAM is never pooled across GPUs.
           </p>
           <div className="table-wrap">
             <table className="data-table">
@@ -668,7 +673,9 @@ export function CacheDeployWizardPage() {
                 {(node?.gpus || []).map((g) => {
                   const snap = resources?.gpus.find((x) => x.gpu.id === g.id)
                     ?.snapshot
+                  const live = fit?.gpu_results.find((x) => x.gpu_device_id === g.id)
                   const checked = selectedGpuIds.includes(g.id)
+                  const freeMb = live?.vram_free_mb ?? snap?.vram_free_mb
                   return (
                     <tr key={g.id}>
                       <td>
@@ -686,9 +693,17 @@ export function CacheDeployWizardPage() {
                       </td>
                       <td>
                         #{g.device_index} {g.model_name}
+                        <div className="secondary-text mono">{g.gpu_uuid}</div>
                       </td>
                       <td>
-                        {snap?.vram_free_mb ?? '—'} / {g.vram_total_mb} MiB
+                        {freeMb ?? '—'} / {live?.vram_total_mb ?? g.vram_total_mb} MiB
+                        <div className="secondary-text">
+                          {live
+                            ? `Fresh Fit · ${fit?.resource_sampled_at || fit?.evaluated_at || 'sampled'}`
+                            : snap?.sampled_at
+                              ? `Snapshot · ${snap.sampled_at}`
+                              : 'No sample'}
+                        </div>
                       </td>
                     </tr>
                   )
@@ -716,12 +731,29 @@ export function CacheDeployWizardPage() {
           </div>
           {fit ? (
             <div style={{ marginTop: '0.75rem' }}>
-              <StatusBadge status={fit.result} />
+              <StatusBadge status={fit.result} />{' '}
+              <span className="secondary-text">
+                Node Agent sample:{' '}
+                {fit.resource_sampled_at || fit.evaluated_at || 'time unknown'}
+              </span>
               <ul>
                 {fit.reasons.map((r) => (
                   <li key={r}>{r}</li>
                 ))}
               </ul>
+              {fit.gpu_results.map((g) => (
+                <p key={g.gpu_device_id} className="secondary-text">
+                  GPU #{g.gpu_index ?? '?'} {g.gpu_uuid ? `(${g.gpu_uuid})` : ''}:{' '}
+                  {g.vram_free_mb ?? '—'} free / {g.vram_used_mb ?? '—'} used /{' '}
+                  {g.vram_total_mb} total MiB — {g.result}
+                  {g.reasons.length ? ` (${g.reasons.join('; ')})` : ''}
+                </p>
+              ))}
+              {fit.assumptions.length > 0 ? (
+                <p className="secondary-text">
+                  Assumptions: {fit.assumptions.join(' / ')}
+                </p>
+              ) : null}
               {fit.result === 'UNKNOWN' ? (
                 <label>
                   <input

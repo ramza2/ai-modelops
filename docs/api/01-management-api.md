@@ -76,7 +76,16 @@ Node 상세 + GPU 목록.
 
 ### GET /nodes/{node_id}/resources/latest
 
-최신 Host/GPU snapshot.
+최신 Host/GPU **persisted** snapshot (DB). Not a live Node Agent probe.
+
+Response adds:
+
+- `source`: always `persisted_snapshot`
+- `is_live`: always `false`
+- `age_ms`: milliseconds since newest host/GPU `sampled_at` (null if none)
+
+For live capacity before deploy, use `POST /nodes/{id}/resources/refresh`
+and/or `POST /model-cache/{id}/fit-preview`.
 
 ### GET /nodes/{node_id}/resources/history
 

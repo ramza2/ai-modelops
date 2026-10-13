@@ -32,6 +32,24 @@ Downloaded ≠ Deployed ≠ Published.
 
 Fresh Node Agent resources + selected-GPU fit (authoritative before create).
 
+Response diagnostics (P1-2):
+
+- `resource_sampled_at` — Node Agent `collected_at` when parseable (else null)
+- `evaluated_at` — prefers `resource_sampled_at`; wall clock only as fallback
+- `gpu_results[].gpu_uuid` — NVML UUID for `nvidia-smi -L` reconciliation
+- `gpu_results[].vram_used_mb` / `vram_free_mb` / `vram_total_mb` — live sample
+  fields; `vram_free_mb` may be null when evidence is missing
+- Missing free, non-numeric free, or `|used + free − total| > 256 MiB` →
+  that GPU is **unusable evidence** and overall result is `UNKNOWN`
+  (never fabricate `free=0` for FIT/INSUFFICIENT)
+- Assumptions always state that Fit does **not** fully model
+  `max_model_len` / `max_num_seqs` / `gpu_memory_utilization` / KV Cache;
+  FIT is not a startup guarantee
+
+`GET /nodes/{id}/resources/latest` returns **persisted** snapshots only
+(`source=persisted_snapshot`, `is_live=false`, `age_ms`). It is not a live
+capacity probe — use refresh + fit-preview for deploy decisions.
+
 ### `POST /api/v1/model-cache/{cache_id}/deployment` → 201 (200 if reused)
 
 Body:
