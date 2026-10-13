@@ -415,6 +415,76 @@ describe('DeploymentDetailPage', () => {
     expect(deploymentsApi.startDeployment).toHaveBeenCalledTimes(1)
   })
 
+  it('keeps newer manual refresh when an older poll resolves late (same Deployment)', async () => {
+    operationPollConfig.ms = 40
+    const user = userEvent.setup()
+    let resolveSlowPollOp!: (value: OperationDetail) => void
+    let depCalls = 0
+    let opCalls = 0
+
+    vi.mocked(modelsApi.getModelVersion).mockResolvedValue(makeVersion())
+    vi.mocked(nodesApi.getNode).mockResolvedValue(makeNode())
+    vi.mocked(deploymentsApi.startDeployment).mockResolvedValue(
+      makeOp({ id: 'op-1', status: 'RUNNING', current_step: 'START_CONTAINER' }),
+    )
+    vi.mocked(deploymentsApi.getDeployment).mockImplementation(async () => {
+      depCalls += 1
+      if (depCalls <= 2) {
+        // initial load + post-enqueue refresh
+        return makeDeployment({
+          desired_state: depCalls === 1 ? 'STOPPED' : 'RUNNING',
+          runtime_status: depCalls === 1 ? 'CREATED' : 'STARTING',
+        })
+      }
+      // manual refresh (and any later polls after refresh wins the epoch)
+      return makeDeployment({
+        desired_state: 'RUNNING',
+        runtime_status: 'RUNNING',
+        health_status: 'HEALTHY',
+        status_reason: 'from-refresh',
+      })
+    })
+    vi.mocked(operationsApi.getOperation).mockImplementation(() => {
+      opCalls += 1
+      if (opCalls === 1) {
+        return new Promise((resolve) => {
+          resolveSlowPollOp = resolve
+        })
+      }
+      return Promise.resolve(
+        makeOpDetail({
+          status: 'RUNNING',
+          current_step: 'WAIT_TARGET_HEALTH',
+        }),
+      )
+    })
+
+    renderDetail()
+    await screen.findByRole('button', { name: 'Start' })
+    await user.click(screen.getByRole('button', { name: 'Start' }))
+    expect(await screen.findByRole('link', { name: 'op-1' })).toBeInTheDocument()
+
+    await waitFor(() => {
+      expect(opCalls).toBeGreaterThanOrEqual(1)
+    })
+    await user.click(screen.getByRole('button', { name: '새로고침' }))
+    expect(await screen.findByText('from-refresh')).toBeInTheDocument()
+    expect(screen.getByText(/HEALTHY/)).toBeInTheDocument()
+
+    resolveSlowPollOp(
+      makeOpDetail({
+        status: 'RUNNING',
+        current_step: 'STALE_POLL_STEP',
+        error: { code: 'S', message: 'stale-poll' },
+      }),
+    )
+    await waitFor(() => {
+      expect(screen.getByText('from-refresh')).toBeInTheDocument()
+    })
+    expect(screen.queryByText('STALE_POLL_STEP')).not.toBeInTheDocument()
+    expect(screen.queryByText('stale-poll')).not.toBeInTheDocument()
+  })
+
   it('ignores a late poll response after Operation id changes', async () => {
     operationPollConfig.ms = 40
     const user = userEvent.setup()

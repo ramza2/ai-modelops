@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import {
+  createDetailFetchGate,
   formatOperationError,
   isActiveOperationStatus,
   OPERATION_POLL_MS,
@@ -35,5 +36,24 @@ describe('operationLifecycle', () => {
     expect(formatOperationError({ code: 'X', message: null })).toBe('X')
     expect(formatOperationError({ code: null, message: 'boom' })).toBe('boom')
     expect(formatOperationError({ code: null, message: null })).toBe('—')
+  })
+
+  it('invalidates older fetch epochs when a newer load or poll begins', () => {
+    const gate = createDetailFetchGate()
+    const first = gate.begin('poll')
+    expect(gate.isCurrent(first.gen)).toBe(true)
+    expect(first.signal.aborted).toBe(false)
+
+    const second = gate.begin('load')
+    expect(gate.isCurrent(first.gen)).toBe(false)
+    expect(first.signal.aborted).toBe(true)
+    expect(gate.isCurrent(second.gen)).toBe(true)
+    expect(gate.currentKind()).toBe('load')
+
+    const third = gate.begin('poll')
+    expect(gate.isCurrent(second.gen)).toBe(false)
+    expect(second.signal.aborted).toBe(true)
+    expect(gate.isCurrent(third.gen)).toBe(true)
+    expect(gate.currentKind()).toBe('poll')
   })
 })

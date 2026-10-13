@@ -30,3 +30,37 @@ export function formatOperationError(
   )
   return parts.length > 0 ? parts.join(': ') : '—'
 }
+
+export type DetailFetchKind = 'load' | 'poll'
+
+/**
+ * Shared epoch for manual refresh and silent polling on the same detail page.
+ * A newer begin() invalidates older in-flight responses even for the same ID.
+ */
+export function createDetailFetchGate() {
+  let gen = 0
+  let controller: AbortController | null = null
+  let kind: DetailFetchKind | null = null
+
+  return {
+    begin(next: DetailFetchKind) {
+      controller?.abort()
+      controller = new AbortController()
+      gen += 1
+      kind = next
+      return { gen, signal: controller.signal, kind: next }
+    },
+    isCurrent(token: number) {
+      return token === gen
+    },
+    currentKind() {
+      return kind
+    },
+    abort() {
+      controller?.abort()
+      controller = null
+    },
+  }
+}
+
+export type DetailFetchGate = ReturnType<typeof createDetailFetchGate>

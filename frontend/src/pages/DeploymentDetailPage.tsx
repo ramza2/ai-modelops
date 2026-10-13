@@ -30,6 +30,7 @@ import {
 } from '../utils/format'
 import { formatInt, formatMemoryMb } from '../utils/number'
 import {
+  createDetailFetchGate,
   formatOperationError,
   isActiveOperationStatus,
   OPERATION_POLL_MS,
@@ -73,34 +74,40 @@ export function DeploymentDetailPage() {
     null,
   )
 
-  const abortRef = useRef<AbortController | null>(null)
-  const pollAbortRef = useRef<AbortController | null>(null)
-  const readGenRef = useRef(0)
-  const pollGenRef = useRef(0)
+  const fetchGateRef = useRef(createDetailFetchGate())
   const refAbortRef = useRef<AbortController | null>(null)
   const activeDeploymentIdRef = useRef(deploymentId)
   activeDeploymentIdRef.current = deploymentId
   const trackedOpIdRef = useRef<string | null>(null)
   trackedOpIdRef.current = lastOperation?.id ?? null
+  const refreshingRef = useRef(false)
+  refreshingRef.current = refreshing
+  const mutatingRef = useRef<LifecycleAction | null>(null)
+  mutatingRef.current = mutating
 
   const loadRefs = useCallback(
-    async (dep: Deployment, gen: number) => {
+    async (dep: Deployment, gen: number, gate: ReturnType<typeof createDetailFetchGate>) => {
       refAbortRef.current?.abort()
       const controller = new AbortController()
       refAbortRef.current = controller
       setVersionWarning(null)
       setNodeWarning(null)
 
+      const stillCurrent = () =>
+        !controller.signal.aborted &&
+        gate.isCurrent(gen) &&
+        activeDeploymentIdRef.current === String(dep.id)
+
       const versionPromise = getModelVersion(
         dep.model_version_id,
         controller.signal,
       )
         .then((data) => {
-          if (controller.signal.aborted || gen !== readGenRef.current) return
+          if (!stillCurrent()) return
           setVersion(data)
         })
         .catch((err: unknown) => {
-          if (controller.signal.aborted || gen !== readGenRef.current) return
+          if (!stillCurrent()) return
           if (err instanceof DOMException && err.name === 'AbortError') return
           const message =
             err instanceof ApiError
@@ -114,15 +121,11 @@ export function DeploymentDetailPage() {
       const nodePromise = dep.node_id
         ? getNode(dep.node_id, controller.signal)
             .then((data) => {
-              if (controller.signal.aborted || gen !== readGenRef.current) {
-                return
-              }
+              if (!stillCurrent()) return
               setNode(data)
             })
             .catch((err: unknown) => {
-              if (controller.signal.aborted || gen !== readGenRef.current) {
-                return
-              }
+              if (!stillCurrent()) return
               if (err instanceof DOMException && err.name === 'AbortError') {
                 return
               }
@@ -135,7 +138,7 @@ export function DeploymentDetailPage() {
               setNodeWarning(message)
             })
         : Promise.resolve().then(() => {
-            if (!controller.signal.aborted && gen === readGenRef.current) {
+            if (stillCurrent()) {
               setNode(null)
             }
           })
@@ -154,10 +157,8 @@ export function DeploymentDetailPage() {
         return
       }
 
-      abortRef.current?.abort()
-      const controller = new AbortController()
-      abortRef.current = controller
-      const gen = ++readGenRef.current
+      const gate = fetchGateRef.current
+      const { gen, signal } = gate.begin('load')
 
       if (mode === 'initial') {
         setLoading(true)
@@ -167,15 +168,27 @@ export function DeploymentDetailPage() {
       setError(null)
       setNotFound(false)
 
+      const isCurrent = () =>
+        gate.isCurrent(gen) && activeDeploymentIdRef.current === deploymentId
+
       try {
-        const data = await getDeployment(deploymentId, controller.signal)
-        if (controller.signal.aborted || gen !== readGenRef.current) return
+        const data = await getDeployment(deploymentId, signal)
+        if (!isCurrent()) return
         setDeployment(data)
         setNotFound(false)
         setLastUpdated(new Date())
-        await loadRefs(data, gen)
+        await loadRefs(data, gen, gate)
       } catch (err) {
-        if (controller.signal.aborted || gen !== readGenRef.current) return
+        if (!isCurrent()) {
+          if (
+            activeDeploymentIdRef.current === deploymentId &&
+            gate.currentKind() === 'poll'
+          ) {
+            setLoading(false)
+            setRefreshing(false)
+          }
+          return
+        }
         if (err instanceof DOMException && err.name === 'AbortError') return
         if (err instanceof ApiError && err.status === 404) {
           setDeployment(null)
@@ -193,7 +206,7 @@ export function DeploymentDetailPage() {
               : 'Deployment를 불러오지 못했습니다.'
         setError(message)
       } finally {
-        if (!controller.signal.aborted && gen === readGenRef.current) {
+        if (isCurrent()) {
           setLoading(false)
           setRefreshing(false)
         }
@@ -209,14 +222,14 @@ export function DeploymentDetailPage() {
     setMutating(null)
     void load('initial')
     return () => {
-      abortRef.current?.abort()
-      pollAbortRef.current?.abort()
+      fetchGateRef.current.abort()
       refAbortRef.current?.abort()
     }
   }, [load])
 
   // While an enqueued lifecycle Operation is in-flight, poll Operation +
   // Deployment every 4s (runtime/health). Silent — does not set refreshing.
+  // Shares fetch epoch with manual refresh (latest response wins).
   useEffect(() => {
     const depId = deploymentId
     const opId = lastOperation?.id
@@ -225,19 +238,18 @@ export function DeploymentDetailPage() {
 
     let cancelled = false
     const timer = window.setInterval(() => {
-      pollAbortRef.current?.abort()
-      const controller = new AbortController()
-      pollAbortRef.current = controller
-      const gen = ++pollGenRef.current
+      if (refreshingRef.current || mutatingRef.current) return
+
+      const gate = fetchGateRef.current
+      const { gen, signal } = gate.begin('poll')
       void Promise.all([
-        getOperation(opId, controller.signal),
-        getDeployment(depId, controller.signal),
+        getOperation(opId, signal),
+        getDeployment(depId, signal),
       ])
         .then(([op, dep]) => {
           if (
             cancelled ||
-            controller.signal.aborted ||
-            gen !== pollGenRef.current ||
+            !gate.isCurrent(gen) ||
             activeDeploymentIdRef.current !== depId ||
             trackedOpIdRef.current !== opId ||
             op.id !== opId ||
@@ -252,8 +264,7 @@ export function DeploymentDetailPage() {
         .catch((err: unknown) => {
           if (
             cancelled ||
-            controller.signal.aborted ||
-            gen !== pollGenRef.current ||
+            !gate.isCurrent(gen) ||
             activeDeploymentIdRef.current !== depId ||
             trackedOpIdRef.current !== opId
           ) {
@@ -267,7 +278,9 @@ export function DeploymentDetailPage() {
     return () => {
       cancelled = true
       window.clearInterval(timer)
-      pollAbortRef.current?.abort()
+      if (fetchGateRef.current.currentKind() === 'poll') {
+        fetchGateRef.current.abort()
+      }
     }
   }, [deploymentId, lastOperation?.id, lastOperation?.status])
 

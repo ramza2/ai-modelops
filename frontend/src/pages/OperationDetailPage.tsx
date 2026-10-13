@@ -16,6 +16,7 @@ import { SectionError } from '../components/SectionError'
 import { StatusBadge } from '../components/StatusBadge'
 import { formatApiDateTime, operationElapsed, shortId } from '../utils/date'
 import {
+  createDetailFetchGate,
   formatOperationError,
   isActiveOperationStatus,
   OPERATION_POLL_MS,
@@ -61,13 +62,14 @@ export function OperationDetailPage() {
     null,
   )
 
-  const abortRef = useRef<AbortController | null>(null)
-  const pollAbortRef = useRef<AbortController | null>(null)
-  const readGenRef = useRef(0)
-  const pollGenRef = useRef(0)
+  const fetchGateRef = useRef(createDetailFetchGate())
   /** Latest Operation ID the page is authorized to display / mutate. */
   const activeIdRef = useRef(operationId)
   activeIdRef.current = operationId
+  const refreshingRef = useRef(false)
+  refreshingRef.current = refreshing
+  const mutatingRef = useRef<MutationKind | null>(null)
+  mutatingRef.current = mutating
 
   const resetIdentityState = useCallback(() => {
     setOperation(null)
@@ -92,10 +94,8 @@ export function OperationDetailPage() {
         return
       }
 
-      abortRef.current?.abort()
-      const controller = new AbortController()
-      abortRef.current = controller
-      const gen = ++readGenRef.current
+      const gate = fetchGateRef.current
+      const { gen, signal } = gate.begin('load')
 
       if (mode === 'initial') {
         // New identity (or first mount): never keep prior Operation as stale.
@@ -108,12 +108,10 @@ export function OperationDetailPage() {
       setNotFound(false)
 
       const isCurrent = () =>
-        !controller.signal.aborted &&
-        gen === readGenRef.current &&
-        activeIdRef.current === requestId
+        gate.isCurrent(gen) && activeIdRef.current === requestId
 
       try {
-        const data = await getOperation(requestId, controller.signal)
+        const data = await getOperation(requestId, signal)
         if (!isCurrent()) return
         // Reject mismatched payload for the requested identity.
         if (data.id !== requestId) return
@@ -121,7 +119,17 @@ export function OperationDetailPage() {
         setNotFound(false)
         setLastUpdated(new Date())
       } catch (err) {
-        if (!isCurrent()) return
+        if (!isCurrent()) {
+          // Superseded by a newer load/poll — drop spinner if poll won.
+          if (
+            activeIdRef.current === requestId &&
+            gate.currentKind() === 'poll'
+          ) {
+            setLoading(false)
+            setRefreshing(false)
+          }
+          return
+        }
         if (err instanceof DOMException && err.name === 'AbortError') return
         if (err instanceof ApiError && err.status === 404) {
           setOperation(null)
@@ -150,13 +158,13 @@ export function OperationDetailPage() {
   useEffect(() => {
     void load('initial')
     return () => {
-      abortRef.current?.abort()
-      pollAbortRef.current?.abort()
+      fetchGateRef.current.abort()
     }
   }, [load])
 
   // Silent 4s polling while Operation is in-flight. Does not toggle
-  // refreshing (keeps Cancel reason / action buttons usable).
+  // refreshing (keeps Cancel reason / action buttons usable). Shares a
+  // fetch epoch with manual refresh so reversed responses cannot win.
   useEffect(() => {
     const requestId = operationId
     if (!requestId) return
@@ -165,16 +173,16 @@ export function OperationDetailPage() {
 
     let cancelled = false
     const timer = window.setInterval(() => {
-      pollAbortRef.current?.abort()
-      const controller = new AbortController()
-      pollAbortRef.current = controller
-      const gen = ++pollGenRef.current
-      void getOperation(requestId, controller.signal)
+      // Do not preempt an in-flight manual refresh / mutation.
+      if (refreshingRef.current || mutatingRef.current) return
+
+      const gate = fetchGateRef.current
+      const { gen, signal } = gate.begin('poll')
+      void getOperation(requestId, signal)
         .then((data) => {
           if (
             cancelled ||
-            controller.signal.aborted ||
-            gen !== pollGenRef.current ||
+            !gate.isCurrent(gen) ||
             activeIdRef.current !== requestId ||
             data.id !== requestId
           ) {
@@ -186,8 +194,7 @@ export function OperationDetailPage() {
         .catch((err: unknown) => {
           if (
             cancelled ||
-            controller.signal.aborted ||
-            gen !== pollGenRef.current ||
+            !gate.isCurrent(gen) ||
             activeIdRef.current !== requestId
           ) {
             return
@@ -200,7 +207,11 @@ export function OperationDetailPage() {
     return () => {
       cancelled = true
       window.clearInterval(timer)
-      pollAbortRef.current?.abort()
+      // Abort only an in-flight poll owned by this effect; a newer load
+      // begin() already invalidated this epoch via the shared gate.
+      if (fetchGateRef.current.currentKind() === 'poll') {
+        fetchGateRef.current.abort()
+      }
     }
   }, [operationId, operation?.id, operation?.status])
 

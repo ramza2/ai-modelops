@@ -599,6 +599,65 @@ describe('OperationDetailPage', () => {
     expect(screen.getByLabelText(/Cancel Reason/)).toHaveValue('keep-me')
   })
 
+  it('keeps newer manual refresh when an older poll resolves late (same ID)', async () => {
+    operationPollConfig.ms = 40
+    const user = userEvent.setup()
+    let resolveSlowPoll!: (value: OperationDetail) => void
+    let calls = 0
+    vi.mocked(operationsApi.getOperation).mockImplementation(() => {
+      calls += 1
+      if (calls === 1) {
+        return Promise.resolve(
+          makeOp({
+            status: 'RUNNING',
+            current_step: 'STEP_INITIAL',
+            steps: [],
+          }),
+        )
+      }
+      if (calls === 2) {
+        return new Promise((resolve) => {
+          resolveSlowPoll = resolve
+        })
+      }
+      return Promise.resolve(
+        makeOp({
+          status: 'RUNNING',
+          current_step: 'STEP_REFRESH',
+          steps: [],
+          error: { code: 'R', message: 'from-refresh' },
+        }),
+      )
+    })
+
+    renderDetail()
+    expect(await screen.findByText('STEP_INITIAL')).toBeInTheDocument()
+    const input = await screen.findByLabelText(/Cancel Reason/)
+    await user.type(input, 'preserve-reason')
+
+    await waitFor(() => {
+      expect(calls).toBeGreaterThanOrEqual(2)
+    })
+    await user.click(screen.getByRole('button', { name: '새로고침' }))
+    expect(await screen.findByText('STEP_REFRESH')).toBeInTheDocument()
+    expect(screen.getByText('R: from-refresh')).toBeInTheDocument()
+
+    resolveSlowPoll(
+      makeOp({
+        status: 'RUNNING',
+        current_step: 'STEP_STALE_POLL',
+        steps: [],
+        error: { code: 'S', message: 'stale-poll' },
+      }),
+    )
+    await waitFor(() => {
+      expect(screen.getByText('STEP_REFRESH')).toBeInTheDocument()
+    })
+    expect(screen.queryByText('STEP_STALE_POLL')).not.toBeInTheDocument()
+    expect(screen.queryByText('stale-poll')).not.toBeInTheDocument()
+    expect(screen.getByLabelText(/Cancel Reason/)).toHaveValue('preserve-reason')
+  })
+
   it('does not apply a late poll for a previous Operation id', async () => {
     operationPollConfig.ms = 40
     const user = userEvent.setup()
