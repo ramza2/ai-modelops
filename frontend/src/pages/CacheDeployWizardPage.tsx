@@ -15,7 +15,7 @@ import { getDeployment, startDeployment } from '../api/deployments'
 import { listEndpoints } from '../api/endpoints'
 import { getModel, getModelVersion } from '../api/models'
 import { getNode, refreshNodeResources } from '../api/nodes'
-import { fitInputFingerprint, isFreshResourceSnapshot } from '../utils/cacheDeployFit'
+import { displayedGpuFreeMb, fitInputFingerprint, isFreshResourceSnapshot } from '../utils/cacheDeployFit'
 import { getOperation } from '../api/operations'
 import type {
   Deployment,
@@ -711,9 +711,7 @@ export function CacheDeployWizardPage() {
                   const live = activeFit?.gpu_results.find((x) => x.gpu_device_id === g.id)
                   const freshSnapshot = isFreshResourceSnapshot(snap?.sampled_at)
                   // An UNKNOWN live free value must not fall back to an old snapshot.
-                  const freeMb = live
-                    ? live.vram_free_mb
-                    : freshSnapshot ? snap?.vram_free_mb : null
+                  const freeMb = displayedGpuFreeMb(live, snap)
                   const measuredAt = live
                     ? activeFit?.resource_sampled_at || activeFit?.evaluated_at
                     : freshSnapshot ? snap?.sampled_at : null
