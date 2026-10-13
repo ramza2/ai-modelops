@@ -359,6 +359,33 @@ export function CacheDeployWizardPage() {
     return () => { active = false }
   }, [step, node?.id])
 
+  // Save only operator inputs. Backend remains source of truth for Fit,
+  // deployment runtime, operation status, and ACTIVE route.
+  useEffect(() => {
+    if (!cache || cache.id !== cacheId || cache.status !== 'READY' ||
+        restoredCacheRef.current !== cacheId || loading || deploymentIdParam ||
+        !['cache', 'runtime', 'gpu', 'review'].includes(step)) return
+    writeWizardDraft(storage, {
+      schema: 1, cacheId, nodeId: cache.node_id,
+      modelVersionId: cache.model_version_id, revision: cache.resolved_revision,
+      savedAt: Date.now(), step: step as 'cache' | 'runtime' | 'gpu' | 'review',
+      name, containerName, servedModelName, runtimePort, runtime,
+      selectedGpuIds, expectedVramMb,
+    })
+  }, [cache, cacheId, loading, deploymentIdParam, step, name, containerName,
+    servedModelName, runtimePort, runtime, selectedGpuIds, expectedVramMb])
+
+  useEffect(() => {
+    if (!deploymentIdParam || step !== 'publish' || loading ||
+        publishStatusLoading || publishResult ||
+        restoredPublishRef.current !== deploymentIdParam) return
+    writePublishDraft(storage, {
+      schema: 1, deploymentId: deploymentIdParam, savedAt: Date.now(),
+      mode: publishMode, alias, endpointId, rewriteModelName,
+    })
+  }, [deploymentIdParam, step, loading, publishStatusLoading, publishResult,
+    publishMode, alias, endpointId, rewriteModelName])
+
   const uniqueGpuIds = Array.from(new Set(selectedGpuIds))
   const currentFitKey = fitInputFingerprint(selectedGpuIds, expectedVramMb, runtime)
   const currentFitKeyRef = useRef(currentFitKey)
@@ -394,6 +421,7 @@ export function CacheDeployWizardPage() {
           fitRevisionRef.current !== requestedRevision) return
       setFit(result)
       setFitKey(requestedKey)
+      setReviewNeedsFit(false)
       setRuntime((r) => ({ ...r, tensor_parallel_size: uniqueGpuIds.length }))
     } catch (err) {
       setActionError(
@@ -425,6 +453,7 @@ export function CacheDeployWizardPage() {
         },
       })
       setDeployment(created)
+      clearWizardDraft(storage, cacheId)
       syncStep('start', { deploymentId: created.id })
     } catch (err) {
       setActionError(
@@ -498,6 +527,13 @@ export function CacheDeployWizardPage() {
     setEndpoints(page.items.filter((e) => e.api_type === apiType))
   }
 
+  // After F5, the existing-alias dropdown must be repopulated.
+  useEffect(() => {
+    if (step !== 'publish' || publishMode !== 'existing' || !model) return
+    void loadEndpoints().catch(() => setActionError('Endpoint 목록을 불러오지 못했습니다.'))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step, publishMode, model?.model_type])
+
   const onPublish = async () => {
     if (!deployment || busy) return
     setBusy(true)
@@ -510,6 +546,7 @@ export function CacheDeployWizardPage() {
         verifyGateway: true,
       })
       setPublishResult(result)
+      clearPublishDraft(storage, deployment.id)
       syncStep('done', { deploymentId: deployment.id })
     } catch (err) {
       if (err instanceof ApiError && err.code === 'ACTIVE_ROUTE_EXISTS') {
@@ -565,6 +602,14 @@ export function CacheDeployWizardPage() {
       {error ? <SectionError title="로드 오류" message={error} /> : null}
       {actionError ? (
         <SectionError title="작업 오류" message={actionError} />
+      ) : null}
+      {restoredDraft ? (
+        <p className="secondary-text" role="status">
+          이전 입력 설정을 이 탭에서 복원했습니다. Fit 판정과 배포 상태는 저장하지 않습니다.
+        </p>
+      ) : null}
+      {reviewNeedsFit && step === 'gpu' ? (
+        <p role="alert">Review 이전 설정을 복원했습니다. GPU/Runtime을 확인한 후 Fresh Fit을 다시 실행해 주세요.</p>
       ) : null}
 
       {step === 'cache' && cache ? (
