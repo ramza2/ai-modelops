@@ -303,11 +303,20 @@ export function CacheDeployWizardPage() {
   const currentFitKey = fitInputFingerprint(selectedGpuIds, expectedVramMb, runtime)
   const currentFitKeyRef = useRef(currentFitKey)
   currentFitKeyRef.current = currentFitKey
+  const fitRevisionRef = useRef(0)
+  // Invalidate even if inputs later change back to their previous values.
+  useEffect(() => {
+    fitRevisionRef.current += 1
+    setFit(null)
+    setFitKey('')
+    setAckUnknown(false)
+  }, [currentFitKey])
   const activeFit = fitKey === currentFitKey ? fit : null
 
   const refreshFit = async () => {
     if (!cacheId || uniqueGpuIds.length === 0) return
     const requestedKey = currentFitKey
+    const requestedRevision = fitRevisionRef.current
     setFitLoading(true)
     setFit(null)
     setFitKey('')
@@ -321,7 +330,8 @@ export function CacheDeployWizardPage() {
         dtype: runtime.dtype,
         quantization: runtime.quantization,
       })
-      if (currentFitKeyRef.current !== requestedKey) return
+      if (currentFitKeyRef.current !== requestedKey ||
+          fitRevisionRef.current !== requestedRevision) return
       setFit(result)
       setFitKey(requestedKey)
       setRuntime((r) => ({ ...r, tensor_parallel_size: uniqueGpuIds.length }))
