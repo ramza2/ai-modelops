@@ -83,7 +83,7 @@ export type FreshFitResult = {
     gpu_index: number | null
     name: string | null
     vram_total_mb: number
-    vram_free_mb: number
+    vram_free_mb: number | null
     safety_margin_mb: number
     estimated_required_vram_mb: number | null
     result: string
