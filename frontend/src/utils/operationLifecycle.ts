@@ -59,6 +59,8 @@ export function createDetailFetchGate() {
     abort() {
       controller?.abort()
       controller = null
+      gen += 1
+      kind = null
     },
   }
 }
