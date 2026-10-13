@@ -13,6 +13,9 @@ import { DeploymentDetailPage } from '../pages/DeploymentDetailPage'
 import * as deploymentsApi from '../api/deployments'
 import * as modelsApi from '../api/models'
 import * as nodesApi from '../api/nodes'
+import * as operationsApi from '../api/operations'
+import type { OperationDetail } from '../api/types'
+import { operationPollConfig } from '../utils/operationLifecycle'
 
 function makeDeployment(overrides: Partial<Deployment> = {}): Deployment {
   return {
@@ -128,6 +131,31 @@ function renderDetail(path = '/deployments/d1') {
   )
 }
 
+function makeOpDetail(
+  overrides: Partial<OperationDetail> = {},
+): OperationDetail {
+  return {
+    id: 'op-1',
+    operation_type: 'START',
+    status: 'RUNNING',
+    switch_strategy: null,
+    endpoint_alias_id: null,
+    source_deployment_id: null,
+    target_deployment_id: 'd1',
+    current_step: 'START_CONTAINER',
+    cancel_requested_at: null,
+    retry_of_operation_id: null,
+    requested_by: null,
+    request_reason: null,
+    created_at: '2026-10-07T00:00:00Z',
+    started_at: '2026-10-07T00:00:01Z',
+    finished_at: null,
+    error: null,
+    steps: [],
+    ...overrides,
+  }
+}
+
 describe('DeploymentDetailPage', () => {
   beforeEach(() => {
     vi.spyOn(deploymentsApi, 'getDeployment')
@@ -137,10 +165,12 @@ describe('DeploymentDetailPage', () => {
     vi.spyOn(deploymentsApi, 'listDeployments')
     vi.spyOn(modelsApi, 'getModelVersion')
     vi.spyOn(nodesApi, 'getNode')
+    vi.spyOn(operationsApi, 'getOperation')
   })
 
   afterEach(() => {
     cleanup()
+    operationPollConfig.ms = 4000
     vi.restoreAllMocks()
   })
 
@@ -333,5 +363,117 @@ describe('DeploymentDetailPage', () => {
     expect(urls.some((u) => u.includes('/retire'))).toBe(false)
     expect(urls.some((u) => u.includes('/remove'))).toBe(false)
     expect(deploymentsApi.listDeployments).not.toHaveBeenCalled()
+  })
+
+  it('polls Operation and Deployment until terminal, then stops', async () => {
+    operationPollConfig.ms = 40
+    const user = userEvent.setup()
+    vi.mocked(deploymentsApi.getDeployment)
+      .mockResolvedValueOnce(makeDeployment())
+      .mockResolvedValueOnce(
+        makeDeployment({ desired_state: 'RUNNING', runtime_status: 'STARTING' }),
+      )
+      .mockResolvedValue(
+        makeDeployment({
+          desired_state: 'RUNNING',
+          runtime_status: 'RUNNING',
+          health_status: 'HEALTHY',
+        }),
+      )
+    vi.mocked(modelsApi.getModelVersion).mockResolvedValue(makeVersion())
+    vi.mocked(nodesApi.getNode).mockResolvedValue(makeNode())
+    vi.mocked(deploymentsApi.startDeployment).mockResolvedValue(
+      makeOp({ status: 'QUEUED', current_step: 'PREPARE_ARTIFACTS' }),
+    )
+    vi.mocked(operationsApi.getOperation).mockResolvedValue(
+      makeOpDetail({
+        status: 'SUCCEEDED',
+        current_step: 'FINALIZE',
+        finished_at: '2026-10-07T00:05:00Z',
+      }),
+    )
+
+    renderDetail()
+    await screen.findByRole('button', { name: 'Start' })
+    await user.click(screen.getByRole('button', { name: 'Start' }))
+    expect(await screen.findByRole('link', { name: 'op-1' })).toHaveAttribute(
+      'href',
+      '/operations/op-1',
+    )
+    expect(screen.getByText(/자동 갱신/)).toBeInTheDocument()
+
+    expect(await screen.findByText('FINALIZE')).toBeInTheDocument()
+    expect(screen.getByText(/HEALTHY/)).toBeInTheDocument()
+    expect(screen.queryByText(/자동 갱신/)).not.toBeInTheDocument()
+
+    const callsAfterTerminal = vi.mocked(operationsApi.getOperation).mock.calls
+      .length
+    await new Promise((r) => setTimeout(r, 120))
+    expect(vi.mocked(operationsApi.getOperation).mock.calls.length).toBe(
+      callsAfterTerminal,
+    )
+    expect(deploymentsApi.startDeployment).toHaveBeenCalledTimes(1)
+  })
+
+  it('ignores a late poll response after Operation id changes', async () => {
+    operationPollConfig.ms = 40
+    const user = userEvent.setup()
+    let resolveLate!: (value: OperationDetail) => void
+    let opAPolls = 0
+    vi.mocked(deploymentsApi.getDeployment).mockResolvedValue(makeDeployment())
+    vi.mocked(modelsApi.getModelVersion).mockResolvedValue(makeVersion())
+    vi.mocked(nodesApi.getNode).mockResolvedValue(makeNode())
+    vi.mocked(deploymentsApi.startDeployment).mockResolvedValue(
+      makeOp({ id: 'op-a', status: 'RUNNING' }),
+    )
+    vi.mocked(deploymentsApi.stopDeployment).mockResolvedValue(
+      makeOp({
+        id: 'op-b',
+        status: 'QUEUED',
+        operation_type: 'STOP',
+        current_step: 'STOP_CONTAINER',
+      }),
+    )
+    vi.mocked(operationsApi.getOperation).mockImplementation((id) => {
+      if (id === 'op-a') {
+        opAPolls += 1
+        return new Promise((resolve) => {
+          resolveLate = resolve
+        })
+      }
+      return Promise.resolve(
+        makeOpDetail({
+          id: 'op-b',
+          operation_type: 'STOP',
+          status: 'QUEUED',
+          current_step: 'STOP_CONTAINER',
+        }),
+      )
+    })
+
+    renderDetail()
+    await screen.findByRole('button', { name: 'Start' })
+    await user.click(screen.getByRole('button', { name: 'Start' }))
+    expect(await screen.findByRole('link', { name: 'op-a' })).toBeInTheDocument()
+
+    await waitFor(() => {
+      expect(opAPolls).toBeGreaterThan(0)
+    })
+    await user.click(screen.getByRole('button', { name: 'Stop' }))
+    expect(await screen.findByRole('link', { name: 'op-b' })).toBeInTheDocument()
+
+    resolveLate(
+      makeOpDetail({
+        id: 'op-a',
+        status: 'FAILED',
+        current_step: 'START_CONTAINER',
+        error: { code: 'X', message: 'stale' },
+      }),
+    )
+    await waitFor(() => {
+      expect(screen.getByRole('link', { name: 'op-b' })).toBeInTheDocument()
+    })
+    expect(screen.queryByText('stale')).not.toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: 'op-a' })).not.toBeInTheDocument()
   })
 })

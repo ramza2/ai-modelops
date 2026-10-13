@@ -15,6 +15,7 @@ import type {
 } from '../api/types'
 import { OperationDetailPage } from '../pages/OperationDetailPage'
 import * as operationsApi from '../api/operations'
+import { operationPollConfig } from '../utils/operationLifecycle'
 
 function makeStep(
   overrides: Partial<OperationStep> & Pick<OperationStep, 'id' | 'sequence_no'>,
@@ -130,6 +131,7 @@ describe('OperationDetailPage', () => {
 
   afterEach(() => {
     cleanup()
+    operationPollConfig.ms = 4000
     vi.restoreAllMocks()
   })
 
@@ -535,5 +537,126 @@ describe('OperationDetailPage', () => {
     )) {
       expect(th).toHaveAttribute('scope', 'col')
     }
+  })
+
+  it('polls an in-flight Operation and stops after success', async () => {
+    operationPollConfig.ms = 40
+    vi.mocked(operationsApi.getOperation)
+      .mockResolvedValueOnce(
+        makeOp({
+          status: 'RUNNING',
+          current_step: 'DRAIN_TRAFFIC',
+          started_at: '2026-10-07T00:01:00Z',
+        }),
+      )
+      .mockResolvedValueOnce(
+        makeOp({
+          status: 'RUNNING',
+          current_step: 'ACTIVATE_TARGET_ROUTE',
+          started_at: '2026-10-07T00:01:00Z',
+        }),
+      )
+      .mockResolvedValueOnce(
+        makeOp({
+          status: 'SUCCEEDED',
+          current_step: 'FINALIZE',
+          started_at: '2026-10-07T00:01:00Z',
+          finished_at: '2026-10-07T00:05:00Z',
+          steps: [],
+        }),
+      )
+
+    renderDetail()
+    expect(await screen.findByText('DRAIN_TRAFFIC')).toBeInTheDocument()
+    expect(screen.getByText(/자동 갱신/)).toBeInTheDocument()
+    expect(screen.getByText('Elapsed')).toBeInTheDocument()
+
+    expect(await screen.findByText('ACTIVATE_TARGET_ROUTE')).toBeInTheDocument()
+    expect(await screen.findByText('FINALIZE')).toBeInTheDocument()
+    expect(screen.queryByText(/자동 갱신/)).not.toBeInTheDocument()
+
+    const calls = vi.mocked(operationsApi.getOperation).mock.calls.length
+    await new Promise((r) => setTimeout(r, 120))
+    expect(vi.mocked(operationsApi.getOperation).mock.calls.length).toBe(calls)
+  })
+
+  it('keeps Cancel reason text across silent poll updates', async () => {
+    operationPollConfig.ms = 40
+    const user = userEvent.setup()
+    vi.mocked(operationsApi.getOperation).mockResolvedValue(
+      makeOp({ status: 'RUNNING', current_step: 'DRAIN_TRAFFIC' }),
+    )
+    renderDetail()
+    const input = await screen.findByLabelText(/Cancel Reason/)
+    await user.type(input, 'keep-me')
+    expect(input).toHaveValue('keep-me')
+
+    await waitFor(() => {
+      expect(vi.mocked(operationsApi.getOperation).mock.calls.length).toBeGreaterThan(
+        1,
+      )
+    })
+    expect(screen.getByLabelText(/Cancel Reason/)).toHaveValue('keep-me')
+  })
+
+  it('does not apply a late poll for a previous Operation id', async () => {
+    operationPollConfig.ms = 40
+    const user = userEvent.setup()
+    let resolveLatePoll!: (value: OperationDetail) => void
+    let opACalls = 0
+    vi.mocked(operationsApi.getOperation).mockImplementation((id) => {
+      if (id === 'op-a') {
+        opACalls += 1
+        if (opACalls === 1) {
+          return Promise.resolve(
+            makeOp({
+              id: 'op-a',
+              status: 'RUNNING',
+              current_step: 'STEP_A',
+              steps: [],
+            }),
+          )
+        }
+        return new Promise((resolve) => {
+          resolveLatePoll = resolve
+        })
+      }
+      return Promise.resolve(
+        makeOp({
+          id: 'op-b',
+          status: 'FAILED',
+          finished_at: '2026-10-07T02:00:00Z',
+          current_step: null,
+          steps: [],
+          error: { code: 'E', message: 'failed-b' },
+        }),
+      )
+    })
+
+    renderNavigable('/operations/op-a')
+    expect(await screen.findByText('STEP_A')).toBeInTheDocument()
+    await waitFor(() => {
+      expect(opACalls).toBeGreaterThan(1)
+    })
+    await user.click(screen.getByRole('button', { name: 'go-op-b' }))
+    expect(
+      await screen.findByRole('heading', { level: 2, name: 'op-b' }),
+    ).toBeInTheDocument()
+
+    resolveLatePoll(
+      makeOp({
+        id: 'op-a',
+        status: 'RUNNING',
+        current_step: 'STALE_STEP',
+        steps: [],
+      }),
+    )
+    await waitFor(() => {
+      expect(
+        screen.getByRole('heading', { level: 2, name: 'op-b' }),
+      ).toBeInTheDocument()
+    })
+    expect(screen.queryByText('STALE_STEP')).not.toBeInTheDocument()
+    expect(screen.getByText('E: failed-b')).toBeInTheDocument()
   })
 })

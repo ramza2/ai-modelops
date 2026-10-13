@@ -14,7 +14,13 @@ import { AppShell } from '../components/AppShell'
 import { LoadingBlock } from '../components/LoadingBlock'
 import { SectionError } from '../components/SectionError'
 import { StatusBadge } from '../components/StatusBadge'
-import { formatApiDateTime, shortId } from '../utils/date'
+import { formatApiDateTime, operationElapsed, shortId } from '../utils/date'
+import {
+  formatOperationError,
+  isActiveOperationStatus,
+  OPERATION_POLL_MS,
+  operationPollConfig,
+} from '../utils/operationLifecycle'
 
 const CANCEL_STATUSES = new Set(['QUEUED', 'RUNNING', 'ROLLING_BACK'])
 const RETRY_STATUSES = new Set(['FAILED', 'ROLLED_BACK'])
@@ -38,16 +44,6 @@ function canRetryGate(op: OperationDetail): boolean {
   )
 }
 
-function formatError(
-  error: { code: string | null; message: string | null } | null | undefined,
-): string {
-  if (!error) return '—'
-  const parts = [error.code, error.message].filter(
-    (p): p is string => Boolean(p && p.trim()),
-  )
-  return parts.length > 0 ? parts.join(': ') : '—'
-}
-
 export function OperationDetailPage() {
   const { operationId = '' } = useParams<{ operationId: string }>()
 
@@ -66,7 +62,9 @@ export function OperationDetailPage() {
   )
 
   const abortRef = useRef<AbortController | null>(null)
+  const pollAbortRef = useRef<AbortController | null>(null)
   const readGenRef = useRef(0)
+  const pollGenRef = useRef(0)
   /** Latest Operation ID the page is authorized to display / mutate. */
   const activeIdRef = useRef(operationId)
   activeIdRef.current = operationId
@@ -153,8 +151,58 @@ export function OperationDetailPage() {
     void load('initial')
     return () => {
       abortRef.current?.abort()
+      pollAbortRef.current?.abort()
     }
   }, [load])
+
+  // Silent 4s polling while Operation is in-flight. Does not toggle
+  // refreshing (keeps Cancel reason / action buttons usable).
+  useEffect(() => {
+    const requestId = operationId
+    if (!requestId) return
+    if (!operation || operation.id !== requestId) return
+    if (!isActiveOperationStatus(operation.status)) return
+
+    let cancelled = false
+    const timer = window.setInterval(() => {
+      pollAbortRef.current?.abort()
+      const controller = new AbortController()
+      pollAbortRef.current = controller
+      const gen = ++pollGenRef.current
+      void getOperation(requestId, controller.signal)
+        .then((data) => {
+          if (
+            cancelled ||
+            controller.signal.aborted ||
+            gen !== pollGenRef.current ||
+            activeIdRef.current !== requestId ||
+            data.id !== requestId
+          ) {
+            return
+          }
+          setOperation(data)
+          setLastUpdated(new Date())
+        })
+        .catch((err: unknown) => {
+          if (
+            cancelled ||
+            controller.signal.aborted ||
+            gen !== pollGenRef.current ||
+            activeIdRef.current !== requestId
+          ) {
+            return
+          }
+          if (err instanceof DOMException && err.name === 'AbortError') return
+          // Keep last known Operation + user input (cancel reason).
+        })
+    }, operationPollConfig.ms)
+
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+      pollAbortRef.current?.abort()
+    }
+  }, [operationId, operation?.id, operation?.status])
 
   const runCancel = async () => {
     if (
@@ -257,6 +305,9 @@ export function OperationDetailPage() {
     : false
   const showRetry = displayOperation ? canRetryGate(displayOperation) : false
   const steps = displayOperation?.steps ?? []
+  const polling = Boolean(
+    displayOperation && isActiveOperationStatus(displayOperation.status),
+  )
 
   return (
     <AppShell
@@ -304,6 +355,12 @@ export function OperationDetailPage() {
               </h2>
               <StatusBadge status={displayOperation.status} />
             </div>
+            {polling ? (
+              <p className="panel-hint" role="status">
+                진행 중 — {OPERATION_POLL_MS / 1000}초마다 자동 갱신합니다.
+                수동 새로고침과 Cancel reason 입력은 유지됩니다.
+              </p>
+            ) : null}
             <dl className="meta-grid">
               <div>
                 <dt>Type</dt>
@@ -318,6 +375,10 @@ export function OperationDetailPage() {
                 <dd className="mono">
                   {displayOperation.current_step || '—'}
                 </dd>
+              </div>
+              <div>
+                <dt>Elapsed</dt>
+                <dd>{operationElapsed(displayOperation)}</dd>
               </div>
               <div>
                 <dt>Requested By</dt>
@@ -335,7 +396,7 @@ export function OperationDetailPage() {
               </div>
               <div>
                 <dt>Error</dt>
-                <dd>{formatError(displayOperation.error)}</dd>
+                <dd>{formatOperationError(displayOperation.error)}</dd>
               </div>
               <div>
                 <dt>Created</dt>
@@ -548,7 +609,7 @@ export function OperationDetailPage() {
                           </td>
                           <td>{formatApiDateTime(step.started_at)}</td>
                           <td>{formatApiDateTime(step.finished_at)}</td>
-                          <td>{formatError(step.error)}</td>
+                          <td>{formatOperationError(step.error)}</td>
                         </tr>
                       ))}
                   </tbody>

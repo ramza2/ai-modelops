@@ -9,26 +9,48 @@ import {
 } from '../api/deployments'
 import { getModelVersion } from '../api/models'
 import { getNode } from '../api/nodes'
+import { getOperation } from '../api/operations'
 import type {
   Deployment,
   LifecycleOperation,
   ModelVersion,
   NodeDetail,
+  OperationDetail,
 } from '../api/types'
 import { AppShell } from '../components/AppShell'
 import { LoadingBlock } from '../components/LoadingBlock'
 import { SectionError } from '../components/SectionError'
 import { StatusBadge } from '../components/StatusBadge'
 import { TruncatedValue } from '../components/TruncatedValue'
-import { formatApiDateTime, shortId } from '../utils/date'
+import { formatApiDateTime, operationElapsed, shortId } from '../utils/date'
 import {
   abbreviateMiddle,
   pickRuntimeConfigEntries,
   safeRuntimeConfigValue,
 } from '../utils/format'
 import { formatInt, formatMemoryMb } from '../utils/number'
+import {
+  formatOperationError,
+  isActiveOperationStatus,
+  OPERATION_POLL_MS,
+  operationPollConfig,
+} from '../utils/operationLifecycle'
 
 type LifecycleAction = 'start' | 'stop' | 'restart'
+
+function toLifecycleOperation(op: OperationDetail): LifecycleOperation {
+  return {
+    id: op.id,
+    operation_type: op.operation_type,
+    status: op.status,
+    target_deployment_id: op.target_deployment_id,
+    current_step: op.current_step,
+    created_at: op.created_at,
+    started_at: op.started_at,
+    finished_at: op.finished_at,
+    error: op.error,
+  }
+}
 
 export function DeploymentDetailPage() {
   const { deploymentId = '' } = useParams<{ deploymentId: string }>()
@@ -52,8 +74,14 @@ export function DeploymentDetailPage() {
   )
 
   const abortRef = useRef<AbortController | null>(null)
+  const pollAbortRef = useRef<AbortController | null>(null)
   const readGenRef = useRef(0)
+  const pollGenRef = useRef(0)
   const refAbortRef = useRef<AbortController | null>(null)
+  const activeDeploymentIdRef = useRef(deploymentId)
+  activeDeploymentIdRef.current = deploymentId
+  const trackedOpIdRef = useRef<string | null>(null)
+  trackedOpIdRef.current = lastOperation?.id ?? null
 
   const loadRefs = useCallback(
     async (dep: Deployment, gen: number) => {
@@ -175,12 +203,73 @@ export function DeploymentDetailPage() {
   )
 
   useEffect(() => {
+    // New Deployment identity: drop prior Operation tracking immediately.
+    setLastOperation(null)
+    setActionError(null)
+    setMutating(null)
     void load('initial')
     return () => {
       abortRef.current?.abort()
+      pollAbortRef.current?.abort()
       refAbortRef.current?.abort()
     }
   }, [load])
+
+  // While an enqueued lifecycle Operation is in-flight, poll Operation +
+  // Deployment every 4s (runtime/health). Silent — does not set refreshing.
+  useEffect(() => {
+    const depId = deploymentId
+    const opId = lastOperation?.id
+    if (!depId || !opId) return
+    if (!isActiveOperationStatus(lastOperation?.status)) return
+
+    let cancelled = false
+    const timer = window.setInterval(() => {
+      pollAbortRef.current?.abort()
+      const controller = new AbortController()
+      pollAbortRef.current = controller
+      const gen = ++pollGenRef.current
+      void Promise.all([
+        getOperation(opId, controller.signal),
+        getDeployment(depId, controller.signal),
+      ])
+        .then(([op, dep]) => {
+          if (
+            cancelled ||
+            controller.signal.aborted ||
+            gen !== pollGenRef.current ||
+            activeDeploymentIdRef.current !== depId ||
+            trackedOpIdRef.current !== opId ||
+            op.id !== opId ||
+            dep.id !== depId
+          ) {
+            return
+          }
+          setLastOperation(toLifecycleOperation(op))
+          setDeployment(dep)
+          setLastUpdated(new Date())
+        })
+        .catch((err: unknown) => {
+          if (
+            cancelled ||
+            controller.signal.aborted ||
+            gen !== pollGenRef.current ||
+            activeDeploymentIdRef.current !== depId ||
+            trackedOpIdRef.current !== opId
+          ) {
+            return
+          }
+          if (err instanceof DOMException && err.name === 'AbortError') return
+          // Keep last known Deployment / Operation snapshot.
+        })
+    }, operationPollConfig.ms)
+
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+      pollAbortRef.current?.abort()
+    }
+  }, [deploymentId, lastOperation?.id, lastOperation?.status])
 
   const runLifecycle = async (action: LifecycleAction) => {
     if (!deploymentId || mutating) return
@@ -472,10 +561,23 @@ export function DeploymentDetailPage() {
             {lastOperation ? (
               <div className="operation-result" role="status">
                 <h3 className="section-subheading">최근 enqueue Operation</h3>
+                {isActiveOperationStatus(lastOperation.status) ? (
+                  <p className="panel-hint">
+                    진행 중 — Operation/Deployment를 {OPERATION_POLL_MS / 1000}
+                    초마다 자동 갱신합니다.
+                  </p>
+                ) : null}
                 <dl className="meta-grid">
                   <div>
                     <dt>Operation ID</dt>
-                    <dd className="mono">{lastOperation.id}</dd>
+                    <dd>
+                      <Link
+                        className="table-link mono"
+                        to={`/operations/${lastOperation.id}`}
+                      >
+                        {lastOperation.id}
+                      </Link>
+                    </dd>
                   </div>
                   <div>
                     <dt>Type</dt>
@@ -489,7 +591,17 @@ export function DeploymentDetailPage() {
                   </div>
                   <div>
                     <dt>Current Step</dt>
-                    <dd>{lastOperation.current_step || '—'}</dd>
+                    <dd className="mono">
+                      {lastOperation.current_step || '—'}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Elapsed</dt>
+                    <dd>{operationElapsed(lastOperation)}</dd>
+                  </div>
+                  <div>
+                    <dt>Error</dt>
+                    <dd>{formatOperationError(lastOperation.error)}</dd>
                   </div>
                   <div>
                     <dt>Created</dt>
