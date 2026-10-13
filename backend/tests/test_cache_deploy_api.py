@@ -39,12 +39,18 @@ class FakeResourcesAgent:
         self,
         *,
         free_mb: int | None = 14000,
+        used_mb: int | None = None,
+        total_mb: int | None = None,
         gpu_uuids: list[str] | None = None,
         omit_free: bool = False,
+        collected_at: str | None = "2026-10-13T02:00:00Z",
     ):
         self.free_mb = free_mb
+        self.used_mb = used_mb
+        self.total_mb = total_mb
         self.gpu_uuids = gpu_uuids or []
         self.omit_free = omit_free
+        self.collected_at = collected_at
 
     async def fetch_resources(self) -> dict[str, Any]:
         gpus: list[dict[str, Any]] = []
@@ -52,8 +58,15 @@ class FakeResourcesAgent:
             item: dict[str, Any] = {"gpu_uuid": gu}
             if not self.omit_free and self.free_mb is not None:
                 item["vram_free_mb"] = self.free_mb
+            if self.used_mb is not None:
+                item["vram_used_mb"] = self.used_mb
+            if self.total_mb is not None:
+                item["vram_total_mb"] = self.total_mb
             gpus.append(item)
-        return {"gpus": gpus}
+        payload: dict[str, Any] = {"gpus": gpus}
+        if self.collected_at is not None:
+            payload["collected_at"] = self.collected_at
+        return payload
 
 
 class FakeGatewayTransport(httpx.AsyncBaseTransport):
@@ -523,8 +536,12 @@ async def test_missing_live_vram_is_unknown_explicit_zero_insufficient() -> None
             json={"gpu_device_ids": [str(seeded["gpu_id"])]},
         )
         assert preview.status_code == 200, preview.text
-        assert preview.json()["result"] == "UNKNOWN"
-        assert preview.json()["gpu_results"][0]["vram_free_mb"] is None
+        body = preview.json()
+        assert body["result"] == "UNKNOWN"
+        assert body["gpu_results"][0]["vram_free_mb"] is None
+        assert body["gpu_results"][0]["gpu_uuid"] == seeded["gpu_uuid"]
+        assert body["resource_sampled_at"] == "2026-10-13T02:00:00Z"
+        assert any("KV Cache" in a for a in body["assumptions"])
 
         blocked = await ac.post(
             f"/api/v1/model-cache/{seeded['cache_id']}/deployment",
@@ -569,6 +586,59 @@ async def test_missing_live_vram_is_unknown_explicit_zero_insufficient() -> None
         )
         assert insuf.status_code == 422
         assert "INSUFFICIENT" in insuf.json()["error"]["message"]
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_inconsistent_vram_accounting_is_unknown() -> None:
+    """used+free far from total must not be treated as usable free capacity."""
+    engine = create_async_engine(_database_url(), pool_pre_ping=True)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with session_factory() as session:
+        seeded = await _seed_ready_cache(session, size_bytes=2_000_000_000)
+
+    # Idle-looking free with used that cannot reconcile to total → UNKNOWN.
+    fake = FakeResourcesAgent(
+        gpu_uuids=[seeded["gpu_uuid"]],
+        free_mb=15959,
+        used_mb=10000,
+        total_mb=16376,
+        collected_at="2026-10-12T12:00:00Z",
+    )
+    app = _mount(create_app(), session_factory, fake)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        preview = await ac.post(
+            f"/api/v1/model-cache/{seeded['cache_id']}/fit-preview",
+            json={
+                "gpu_device_ids": [str(seeded["gpu_id"])],
+                "expected_vram_mb": 2000,
+            },
+        )
+        assert preview.status_code == 200, preview.text
+        body = preview.json()
+        assert body["result"] == "UNKNOWN"
+        assert body["resource_sampled_at"] == "2026-10-12T12:00:00Z"
+        assert body["evaluated_at"] == "2026-10-12T12:00:00Z"
+        gpu = body["gpu_results"][0]
+        assert gpu["vram_free_mb"] == 15959
+        assert gpu["vram_used_mb"] == 10000
+        assert gpu["vram_total_mb"] == 16376
+        assert gpu["gpu_uuid"] == seeded["gpu_uuid"]
+        assert any("disagree with total" in r for r in gpu["reasons"])
+
+        blocked = await ac.post(
+            f"/api/v1/model-cache/{seeded['cache_id']}/deployment",
+            json={
+                "name": f"dep-acct-{seeded['suffix']}",
+                "container_name": f"ctr-acct-{seeded['suffix']}",
+                "gpu_device_ids": [str(seeded["gpu_id"])],
+                "expected_vram_mb": 2000,
+            },
+        )
+        assert blocked.status_code == 422
+        assert "UNKNOWN" in blocked.json()["error"]["message"]
 
     await engine.dispose()
 

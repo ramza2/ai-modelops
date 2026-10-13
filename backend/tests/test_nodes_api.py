@@ -269,6 +269,11 @@ async def test_nodes_api_list_and_get(db_session: AsyncSession) -> None:
 
         latest = await ac.get(f"/api/v1/nodes/{node_id}/resources/latest")
         assert latest.status_code == 200
+        latest_body = latest.json()
+        assert latest_body["source"] == "persisted_snapshot"
+        assert latest_body["is_live"] is False
+        assert isinstance(latest_body["age_ms"], int)
+        assert latest_body["age_ms"] >= 0
 
         gpu_id = body["gpus"][0]["gpu"]["id"]
         gpu = await ac.get(f"/api/v1/gpus/{gpu_id}")

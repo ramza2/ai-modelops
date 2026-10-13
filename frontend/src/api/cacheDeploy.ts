@@ -80,10 +80,13 @@ export type FreshFitResult = {
   tensor_parallel: number
   gpu_results: Array<{
     gpu_device_id: string
+    gpu_uuid?: string | null
     gpu_index: number | null
     name: string | null
     vram_total_mb: number
-    vram_free_mb: number
+    vram_used_mb?: number | null
+    /** Null when live free evidence is missing/unusable (UNKNOWN). */
+    vram_free_mb: number | null
     safety_margin_mb: number
     estimated_required_vram_mb: number | null
     result: string
@@ -96,6 +99,8 @@ export type FreshFitResult = {
   estimated_required_vram_mb: number | null
   estimated_required_vram_mb_per_gpu: number | null
   disk_gate: string
+  /** Node Agent collected_at when parseable. */
+  resource_sampled_at?: string | null
   evaluated_at: string | null
 }
 

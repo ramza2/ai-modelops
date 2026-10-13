@@ -663,18 +663,8 @@ class CacheDeployService:
                 details={"error": type(exc).__name__},
             ) from exc
 
-        free_by_uuid: dict[str, int] = {}
-        for item in resources.get("gpus") or []:
-            if not isinstance(item, dict):
-                continue
-            gu = str(item.get("gpu_uuid") or item.get("uuid") or "").strip()
-            free = item.get("vram_free_mb")
-            if not gu or free is None:
-                continue
-            try:
-                free_by_uuid[gu] = max(0, int(free))
-            except (TypeError, ValueError):
-                continue
+        resource_sampled_at = _coerce_collected_at(resources.get("collected_at"))
+        live_by_uuid = _index_live_gpu_vram(resources.get("gpus") or [])
 
         if expected_vram_mb is not None:
             required = int(expected_vram_mb)
@@ -700,8 +690,16 @@ class CacheDeployService:
                 "No artifact size or expected_vram_mb; VRAM fit is UNKNOWN."
             ]
 
-        gpu_meta: list[tuple[GPUDevice, int | None]] = []
-        missing_live: list[str] = []
+        # Estimator boundaries: artifact/dtype/quant hints only — never assert
+        # KV-cache / max_model_len / max_num_seqs / utilization capacity.
+        assumptions = list(assumptions) + [
+            "Fit estimate does not fully model max_model_len, max_num_seqs, "
+            "gpu_memory_utilization, load overhead, or KV Cache; "
+            "FIT is not a startup guarantee (Start/Health/Probe required).",
+        ]
+
+        gpu_meta: list[tuple[GPUDevice, dict[str, Any] | None]] = []
+        unusable: list[str] = []
         for gpu_id in gpu_device_ids:
             gpu = await self._session.get(GPUDevice, gpu_id)
             if gpu is None:
@@ -717,48 +715,36 @@ class CacheDeployService:
                         "cache_node_id": str(node.id),
                     },
                 )
-            free = free_by_uuid.get(str(gpu.gpu_uuid))
-            if free is None:
-                missing_live.append(str(gpu.gpu_uuid))
-            gpu_meta.append((gpu, free))
+            live = live_by_uuid.get(str(gpu.gpu_uuid))
+            if live is None or not live.get("usable"):
+                unusable.append(str(gpu.gpu_uuid))
+            gpu_meta.append((gpu, live))
 
         per_gpu = required
         if required is not None and tensor_parallel > 1:
             per_gpu = max(1, (required + tensor_parallel - 1) // tensor_parallel)
 
-        # Missing live free-VRAM is UNKNOWN evidence — never fabricate free=0.
-        if missing_live:
+        evaluated_at = resource_sampled_at or isoformat_utc(
+            dt.datetime.now(tz=dt.UTC)
+        )
+
+        # Missing/invalid live free-VRAM is UNKNOWN — never fabricate free=0.
+        if unusable:
             assumptions = list(assumptions) + [
                 "Live free VRAM missing/unusable for selected GPU(s); "
                 "not fabricating free=0. Fit result is UNKNOWN.",
-                f"missing_gpu_uuids={missing_live}",
+                f"unusable_gpu_uuids={unusable}",
             ]
             return {
                 "result": ResourceFitResult.UNKNOWN.value,
                 "tensor_parallel": tensor_parallel,
                 "gpu_results": [
-                    {
-                        "gpu_device_id": str(gpu.id),
-                        "gpu_index": int(gpu.device_index),
-                        "name": str(gpu.model_name),
-                        "vram_total_mb": int(gpu.vram_total_mb),
-                        "vram_free_mb": free,
-                        "safety_margin_mb": int(gpu.safety_margin_mb),
-                        "estimated_required_vram_mb": per_gpu,
-                        "result": ResourceFitResult.UNKNOWN.value,
-                        "reasons": (
-                            [
-                                "Live free VRAM metric missing; "
-                                "cannot evaluate fit."
-                            ]
-                            if free is None
-                            else [
-                                "Sibling selected GPU is missing live free VRAM; "
-                                "aggregate fit is UNKNOWN."
-                            ]
-                        ),
-                    }
-                    for gpu, free in gpu_meta
+                    _unknown_gpu_fit_result(
+                        gpu=gpu,
+                        live=live,
+                        per_gpu=per_gpu,
+                    )
+                    for gpu, live in gpu_meta
                 ],
                 "reasons": [
                     "Selected GPU live free-VRAM data is missing or unusable."
@@ -769,7 +755,8 @@ class CacheDeployService:
                 "estimated_required_vram_mb": required,
                 "estimated_required_vram_mb_per_gpu": per_gpu,
                 "disk_gate": "skipped_after_cache_ready",
-                "evaluated_at": isoformat_utc(dt.datetime.now(tz=dt.UTC)),
+                "resource_sampled_at": resource_sampled_at,
+                "evaluated_at": evaluated_at,
             }
 
         gpu_inputs = [
@@ -777,12 +764,16 @@ class CacheDeployService:
                 gpu_device_id=str(gpu.id),
                 gpu_index=int(gpu.device_index),
                 name=str(gpu.model_name),
-                vram_total_mb=int(gpu.vram_total_mb),
-                vram_free_mb=int(free if free is not None else 0),
+                vram_total_mb=int(
+                    (live or {}).get("vram_total_mb")
+                    if (live or {}).get("vram_total_mb") is not None
+                    else gpu.vram_total_mb
+                ),
+                vram_free_mb=int((live or {})["vram_free_mb"]),
                 safety_margin_mb=int(gpu.safety_margin_mb),
                 required_vram_mb=required,
             )
-            for gpu, free in gpu_meta
+            for gpu, live in gpu_meta
         ]
 
         # Disk is not the main gate after cache READY.
@@ -794,15 +785,27 @@ class CacheDeployService:
             assumptions=assumptions,
         )
 
+        live_by_id = {str(gpu.id): live for gpu, live in gpu_meta}
         return {
             "result": decision.result,
             "tensor_parallel": decision.tensor_parallel,
             "gpu_results": [
                 {
                     "gpu_device_id": g.gpu_device_id,
+                    "gpu_uuid": next(
+                        (
+                            str(gpu.gpu_uuid)
+                            for gpu, _live in gpu_meta
+                            if str(gpu.id) == g.gpu_device_id
+                        ),
+                        None,
+                    ),
                     "gpu_index": g.gpu_index,
                     "name": g.name,
                     "vram_total_mb": g.vram_total_mb,
+                    "vram_used_mb": (live_by_id.get(g.gpu_device_id) or {}).get(
+                        "vram_used_mb"
+                    ),
                     "vram_free_mb": g.vram_free_mb,
                     "safety_margin_mb": g.safety_margin_mb,
                     "estimated_required_vram_mb": g.estimated_required_vram_mb,
@@ -818,7 +821,8 @@ class CacheDeployService:
             "estimated_required_vram_mb": required,
             "estimated_required_vram_mb_per_gpu": per_gpu,
             "disk_gate": "skipped_after_cache_ready",
-            "evaluated_at": isoformat_utc(dt.datetime.now(tz=dt.UTC)),
+            "resource_sampled_at": resource_sampled_at,
+            "evaluated_at": evaluated_at,
         }
 
     async def _verify_gateway(
@@ -1065,3 +1069,121 @@ class CacheDeployService:
                     }
 
                 await asyncio.sleep(self._gateway_route_poll_interval_s)
+
+
+# NVML used+free may disagree with total by a small amount; larger gaps mean
+# unusable evidence (never invent free capacity).
+_VRAM_ACCOUNTING_TOLERANCE_MB = 256
+
+
+def _coerce_collected_at(raw: Any) -> str | None:
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    try:
+        parsed = dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=dt.UTC)
+    return isoformat_utc(parsed.astimezone(dt.UTC))
+
+
+def _coerce_nonneg_int(raw: Any) -> int | None:
+    if raw is None:
+        return None
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None
+    if value < 0:
+        return None
+    return value
+
+
+def _index_live_gpu_vram(gpus: Any) -> dict[str, dict[str, Any]]:
+    """Index Node Agent GPU rows by UUID with usable free-VRAM evidence.
+
+    Usable means free is a non-negative int and, when used+total are also
+    present, ``|used + free - total|`` stays within tolerance. Invalid rows
+    remain indexed with ``usable=False`` so Fit can return UNKNOWN with the
+    raw observed fields — never fabricate free=0 for FIT/INSUFFICIENT.
+    """
+    indexed: dict[str, dict[str, Any]] = {}
+    if not isinstance(gpus, list):
+        return indexed
+    for item in gpus:
+        if not isinstance(item, dict):
+            continue
+        gu = str(item.get("gpu_uuid") or item.get("uuid") or "").strip()
+        if not gu:
+            continue
+        free = _coerce_nonneg_int(item.get("vram_free_mb"))
+        used = _coerce_nonneg_int(item.get("vram_used_mb"))
+        total = _coerce_nonneg_int(item.get("vram_total_mb"))
+        reasons: list[str] = []
+        usable = free is not None
+        if free is None:
+            reasons.append("vram_free_mb missing or non-numeric")
+        if total is not None and used is not None and free is not None:
+            delta = abs((used + free) - total)
+            if delta > _VRAM_ACCOUNTING_TOLERANCE_MB:
+                usable = False
+                reasons.append(
+                    "vram used+free disagree with total beyond tolerance "
+                    f"(delta_mb={delta})"
+                )
+        indexed[gu] = {
+            "gpu_uuid": gu,
+            "vram_free_mb": free,
+            "vram_used_mb": used,
+            "vram_total_mb": total,
+            "usable": usable,
+            "reasons": reasons,
+        }
+    return indexed
+
+
+def _unknown_gpu_fit_result(
+    *,
+    gpu: GPUDevice,
+    live: dict[str, Any] | None,
+    per_gpu: int | None,
+) -> dict[str, Any]:
+    free = None if live is None else live.get("vram_free_mb")
+    used = None if live is None else live.get("vram_used_mb")
+    total = (
+        int(live["vram_total_mb"])
+        if live is not None and live.get("vram_total_mb") is not None
+        else int(gpu.vram_total_mb)
+    )
+    this_usable = bool(live and live.get("usable"))
+    if this_usable:
+        reasons = [
+            "Sibling selected GPU is missing or has invalid live free VRAM; "
+            "aggregate fit is UNKNOWN."
+        ]
+    elif live is None:
+        reasons = [
+            "GPU UUID absent from live Node Agent resources; "
+            "cannot evaluate fit."
+        ]
+    else:
+        reasons = list(live.get("reasons") or []) or [
+            "Live free VRAM metric missing or invalid; cannot evaluate fit."
+        ]
+    return {
+        "gpu_device_id": str(gpu.id),
+        "gpu_uuid": str(gpu.gpu_uuid),
+        "gpu_index": int(gpu.device_index),
+        "name": str(gpu.model_name),
+        "vram_total_mb": total,
+        "vram_used_mb": used,
+        "vram_free_mb": free,
+        "safety_margin_mb": int(gpu.safety_margin_mb),
+        "estimated_required_vram_mb": per_gpu,
+        "result": ResourceFitResult.UNKNOWN.value,
+        "reasons": reasons,
+    }

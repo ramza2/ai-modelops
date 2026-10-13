@@ -254,6 +254,10 @@ export type NodeGpuResource = {
 
 export type NodeResourcesLatest = {
   node_id: string
+  /** Always persisted DB snapshots — not a live Node Agent probe. */
+  source?: 'persisted_snapshot' | string
+  is_live?: boolean
+  age_ms?: number | null
   host: HostResourceSnapshot | null
   gpus: NodeGpuResource[]
 }
