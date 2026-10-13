@@ -16,6 +16,16 @@ import { listEndpoints } from '../api/endpoints'
 import { getModel, getModelVersion } from '../api/models'
 import { getNode, getNodeResources } from '../api/nodes'
 import { getOperation } from '../api/operations'
+import {
+  clearPublishDraft,
+  clearWizardDraft,
+  readPublishDraft,
+  readWizardDraft,
+  resumableStep,
+  writePublishDraft,
+  writeWizardDraft,
+  type DraftStorage,
+} from '../utils/cacheDeployDraft'
 import type {
   Deployment,
   Endpoint,
@@ -114,7 +124,8 @@ export function CacheDeployWizardPage() {
   const [searchParams, setSearchParams] = useSearchParams()
   const navigate = useNavigate()
 
-  const stepParam = (searchParams.get('step') as Step | null) || 'cache'
+  const urlStep = searchParams.get('step')
+  const stepParam = (urlStep as Step | null) || 'cache'
   const deploymentIdParam = searchParams.get('deployment_id') || ''
   const operationIdParam = searchParams.get('operation_id') || ''
 
@@ -140,6 +151,8 @@ export function CacheDeployWizardPage() {
   const [ackUnknown, setAckUnknown] = useState(false)
   const [fit, setFit] = useState<FreshFitResult | null>(null)
   const [fitLoading, setFitLoading] = useState(false)
+  // A Fit response is a transient resource decision; never persist/restore it.
+  const [fitFingerprint, setFitFingerprint] = useState('')
 
   const [deployment, setDeployment] = useState<Deployment | null>(null)
   const [operation, setOperation] = useState<OperationDetail | null>(null)
@@ -157,6 +170,13 @@ export function CacheDeployWizardPage() {
   const [refreshing, setRefreshing] = useState(false)
 
   const abortRef = useRef<AbortController | null>(null)
+  const restoredCacheRef = useRef<string | null>(null)
+  const restoredPublishRef = useRef<string | null>(null)
+  const [restoredDraft, setRestoredDraft] = useState(false)
+  const [reviewNeedsFit, setReviewNeedsFit] = useState(false)
+  const storage = (() : DraftStorage | null => {
+    try { return window.sessionStorage } catch { return null }
+  })()
 
   const syncStep = useCallback(
     (next: Step, extra?: { deploymentId?: string; operationId?: string }) => {
@@ -193,22 +213,38 @@ export function CacheDeployWizardPage() {
         setCache(entry)
         setLastUpdated(new Date())
         const repoLeaf = (entry.repository_id || 'model').split('/').pop() || 'model'
-        setName((n) => n || `${repoLeaf}-managed`)
-        setContainerName((c) => c || `modelops-${repoLeaf}`.replace(/[^a-zA-Z0-9._-]/g, '-'))
-        setAlias((a) => a || repoLeaf)
+        const firstLoad = restoredCacheRef.current !== cacheId
+        const saved = firstLoad && !deploymentIdParam
+          ? readWizardDraft(storage, entry)
+          : null
+        if (firstLoad) {
+          setName(saved?.name ?? `${repoLeaf}-managed`)
+          setContainerName(saved?.containerName ??
+            `modelops-${repoLeaf}`.replace(/[^a-zA-Z0-9._-]/g, '-'))
+          setRuntimePort(saved?.runtimePort ?? 8000)
+          setExpectedVramMb(saved?.expectedVramMb ?? '')
+          setAlias(repoLeaf)
+          setAckUnknown(false)
+          setFit(null)
+          setFitFingerprint('')
+          setRestoredDraft(Boolean(saved))
+          setReviewNeedsFit(urlStep === 'review' || saved?.step === 'review')
+        }
 
         if (entry.model_version_id) {
           const ver = await getModelVersion(entry.model_version_id, controller.signal)
           if (controller.signal.aborted) return
           setVersion(ver)
-          setServedModelName((s) => s || ver.served_model_name)
-          setRewriteModelName((s) => s || ver.served_model_name)
+          if (firstLoad) {
+            setServedModelName(saved?.servedModelName ?? ver.served_model_name)
+            setRewriteModelName(ver.served_model_name)
+          }
           const mod = await getModel(ver.model_id, controller.signal)
           if (controller.signal.aborted) return
           setModel(mod)
           const d = defaultsForModelType(mod.model_type, entry.repository_id)
           setKnownProfileLabel(d.knownProfileLabel)
-          setRuntime((prev) => ({ ...d.runtime, ...prev }))
+          if (firstLoad) setRuntime({ ...d.runtime, ...(saved?.runtime ?? {}) })
         }
         if (entry.node_id) {
           const [n, res] = await Promise.all([
@@ -218,12 +254,28 @@ export function CacheDeployWizardPage() {
           if (controller.signal.aborted) return
           setNode(n)
           setResources(res)
-          if (n.gpus[0] && selectedGpuIds.length === 0) {
-            setSelectedGpuIds([n.gpus[0].id])
+          if (firstLoad) {
+            const available = new Set(n.gpus.map((g) => g.id))
+            setSelectedGpuIds(
+              saved
+                ? saved.selectedGpuIds.filter((id) => available.has(id))
+                : n.gpus[0] ? [n.gpus[0].id] : [],
+            )
           }
         }
 
         if (deploymentIdParam) {
+          if (restoredPublishRef.current !== deploymentIdParam) {
+            const publishDraft = readPublishDraft(storage, deploymentIdParam)
+            if (publishDraft) {
+              setPublishMode(publishDraft.mode)
+              setAlias(publishDraft.alias)
+              setEndpointId(publishDraft.endpointId)
+              setRewriteModelName(publishDraft.rewriteModelName)
+              setRestoredDraft(true)
+            }
+            restoredPublishRef.current = deploymentIdParam
+          }
           const dep = await getDeployment(deploymentIdParam, controller.signal)
           if (controller.signal.aborted) return
           setDeployment(dep)
@@ -239,6 +291,7 @@ export function CacheDeployWizardPage() {
               )
               if (controller.signal.aborted) return
               if (status.published) {
+                clearPublishDraft(storage, deploymentIdParam)
                 setPublishResult({
                   endpoint: status.endpoint,
                   route: status.route,
@@ -269,6 +322,15 @@ export function CacheDeployWizardPage() {
           if (controller.signal.aborted) return
           setOperation(op)
         }
+        if (firstLoad) {
+          restoredCacheRef.current = cacheId
+          if (!deploymentIdParam) {
+            const resume = saved
+              ? resumableStep(saved.step, urlStep)
+              : urlStep === 'review' ? 'gpu' : null
+            if (resume && resume !== stepParam) syncStep(resume)
+          }
+        }
       } catch (err) {
         if (controller.signal.aborted) return
         setError(err instanceof ApiError ? err.message : 'Failed to load cache.')
@@ -280,11 +342,48 @@ export function CacheDeployWizardPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cacheId, deploymentIdParam, operationIdParam, stepParam])
 
+  // Only operator input is saved. Fit/Operation/Endpoint state is server-owned.
+  // Rehydration finishes before the first save so defaults never erase a draft.
+  useEffect(() => {
+    if (!cache || cache.id !== cacheId || cache.status !== 'READY' ||
+        restoredCacheRef.current !== cacheId || loading || deploymentIdParam ||
+        !['cache', 'runtime', 'gpu', 'review'].includes(step)) return
+    writeWizardDraft(storage, {
+      schema: 1, cacheId, nodeId: cache.node_id,
+      modelVersionId: cache.model_version_id, revision: cache.resolved_revision,
+      savedAt: Date.now(), step: step as 'cache' | 'runtime' | 'gpu' | 'review',
+      name, containerName, servedModelName, runtimePort, runtime,
+      selectedGpuIds, expectedVramMb,
+    })
+  }, [cache, cacheId, loading, deploymentIdParam, step, name, containerName,
+    servedModelName, runtimePort, runtime, selectedGpuIds, expectedVramMb])
+
+  useEffect(() => {
+    if (!deploymentIdParam || step !== 'publish' || loading ||
+        publishStatusLoading || publishResult ||
+        restoredPublishRef.current !== deploymentIdParam) return
+    writePublishDraft(storage, {
+      schema: 1, deploymentId: deploymentIdParam, savedAt: Date.now(),
+      mode: publishMode, alias, endpointId, rewriteModelName,
+    })
+  }, [deploymentIdParam, step, loading, publishStatusLoading, publishResult,
+    publishMode, alias, endpointId, rewriteModelName])
+
   const uniqueGpuIds = Array.from(new Set(selectedGpuIds))
+  const fitInput = JSON.stringify([uniqueGpuIds, expectedVramMb, runtime.max_model_len,
+    runtime.max_num_seqs, runtime.gpu_memory_utilization, runtime.dtype,
+    runtime.quantization])
+  const fitInputRef = useRef(fitInput)
+  fitInputRef.current = fitInput
+  const validFit = fitFingerprint === fitInput ? fit : null
 
   const refreshFit = async () => {
     if (!cacheId || uniqueGpuIds.length === 0) return
+    const inputAtRequest = fitInput
     setFitLoading(true)
+    setFit(null)
+    setFitFingerprint('')
+    setAckUnknown(false)
     setActionError(null)
     try {
       const result = await previewCacheDeployFit(cacheId, {
@@ -294,7 +393,9 @@ export function CacheDeployWizardPage() {
         dtype: runtime.dtype,
         quantization: runtime.quantization,
       })
+      if (fitInputRef.current !== inputAtRequest) return
       setFit(result)
+      setFitFingerprint(inputAtRequest)
       setRuntime((r) => ({ ...r, tensor_parallel_size: uniqueGpuIds.length }))
     } catch (err) {
       setActionError(
@@ -306,7 +407,7 @@ export function CacheDeployWizardPage() {
   }
 
   const onCreate = async () => {
-    if (!cache || busy) return
+    if (!cache || busy || !validFit || fitLoading) return
     setBusy(true)
     setActionError(null)
     try {
@@ -324,6 +425,7 @@ export function CacheDeployWizardPage() {
         },
       })
       setDeployment(created)
+      clearWizardDraft(storage, cacheId)
       syncStep('start', { deploymentId: created.id })
     } catch (err) {
       setActionError(
@@ -409,6 +511,7 @@ export function CacheDeployWizardPage() {
         verifyGateway: true,
       })
       setPublishResult(result)
+      clearPublishDraft(storage, deployment.id)
       syncStep('done', { deploymentId: deployment.id })
     } catch (err) {
       if (err instanceof ApiError && err.code === 'ACTIVE_ROUTE_EXISTS') {
@@ -464,6 +567,14 @@ export function CacheDeployWizardPage() {
       {error ? <SectionError title="로드 오류" message={error} /> : null}
       {actionError ? (
         <SectionError title="작업 오류" message={actionError} />
+      ) : null}
+      {restoredDraft ? (
+        <p className="secondary-text" role="status">
+          이전 입력 설정을 이 탭에서 복원했습니다. Fit 판정과 배포 상태는 저장하지 않습니다.
+        </p>
+      ) : null}
+      {reviewNeedsFit && step === 'gpu' ? (
+        <p role="alert">Review 이전 설정을 복원했습니다. 최신 GPU 상태로 Fresh Fit을 다시 실행해 주세요.</p>
       ) : null}
 
       {step === 'cache' && cache ? (
@@ -673,7 +784,7 @@ export function CacheDeployWizardPage() {
                 {(node?.gpus || []).map((g) => {
                   const snap = resources?.gpus.find((x) => x.gpu.id === g.id)
                     ?.snapshot
-                  const live = fit?.gpu_results.find((x) => x.gpu_device_id === g.id)
+                  const live = validFit?.gpu_results.find((x) => x.gpu_device_id === g.id)
                   const checked = selectedGpuIds.includes(g.id)
                   const freeMb = live?.vram_free_mb ?? snap?.vram_free_mb
                   return (
@@ -699,7 +810,7 @@ export function CacheDeployWizardPage() {
                         {freeMb ?? '—'} / {live?.vram_total_mb ?? g.vram_total_mb} MiB
                         <div className="secondary-text">
                           {live
-                            ? `Fresh Fit · ${fit?.resource_sampled_at || fit?.evaluated_at || 'sampled'}`
+                            ? `Fresh Fit · ${validFit?.resource_sampled_at || validFit?.evaluated_at || 'sampled'}`
                             : snap?.sampled_at
                               ? `Snapshot · ${snap.sampled_at}`
                               : 'No sample'}
@@ -729,19 +840,19 @@ export function CacheDeployWizardPage() {
               {fitLoading ? 'Fitting…' : 'Run fresh fit'}
             </button>
           </div>
-          {fit ? (
+          {validFit ? (
             <div style={{ marginTop: '0.75rem' }}>
-              <StatusBadge status={fit.result} />{' '}
+              <StatusBadge status={validFit.result} />{' '}
               <span className="secondary-text">
                 Node Agent sample:{' '}
-                {fit.resource_sampled_at || fit.evaluated_at || 'time unknown'}
+                {validFit.resource_sampled_at || validFit.evaluated_at || 'time unknown'}
               </span>
               <ul>
-                {fit.reasons.map((r) => (
+                {validFit.reasons.map((r) => (
                   <li key={r}>{r}</li>
                 ))}
               </ul>
-              {fit.gpu_results.map((g) => (
+              {validFit.gpu_results.map((g) => (
                 <p key={g.gpu_device_id} className="secondary-text">
                   GPU #{g.gpu_index ?? '?'} {g.gpu_uuid ? `(${g.gpu_uuid})` : ''}:{' '}
                   {g.vram_free_mb ?? '—'} free / {g.vram_used_mb ?? '—'} used /{' '}
@@ -749,12 +860,12 @@ export function CacheDeployWizardPage() {
                   {g.reasons.length ? ` (${g.reasons.join('; ')})` : ''}
                 </p>
               ))}
-              {fit.assumptions.length > 0 ? (
+              {validFit.assumptions.length > 0 ? (
                 <p className="secondary-text">
-                  Assumptions: {fit.assumptions.join(' / ')}
+                  Assumptions: {validFit.assumptions.join(' / ')}
                 </p>
               ) : null}
-              {fit.result === 'UNKNOWN' ? (
+              {validFit.result === 'UNKNOWN' ? (
                 <label>
                   <input
                     type="checkbox"
@@ -764,13 +875,17 @@ export function CacheDeployWizardPage() {
                   Acknowledge UNKNOWN fit and proceed
                 </label>
               ) : null}
-              {fit.result === 'INSUFFICIENT' ? (
+              {validFit.result === 'INSUFFICIENT' ? (
                 <p className="secondary-text">
                   INSUFFICIENT blocks Deployment creation.
                 </p>
               ) : null}
             </div>
-          ) : null}
+          ) : (
+            <p className="secondary-text">
+              진행하려면 선택한 GPU 및 Runtime 설정으로 Fresh Fit을 실행해야 합니다.
+            </p>
+          )}
           <div className="toolbar__actions">
             <button type="button" className="btn btn--ghost" onClick={() => syncStep('runtime')}>
               Back
@@ -780,8 +895,9 @@ export function CacheDeployWizardPage() {
               className="btn"
               disabled={
                 selectedGpuIds.length === 0 ||
-                fit?.result === 'INSUFFICIENT' ||
-                (fit?.result === 'UNKNOWN' && !ackUnknown)
+                fitLoading || !validFit ||
+                validFit?.result === 'INSUFFICIENT' ||
+                (validFit?.result === 'UNKNOWN' && !ackUnknown)
               }
               onClick={() => syncStep('review')}
             >
@@ -808,7 +924,7 @@ export function CacheDeployWizardPage() {
                 },
                 model_path: cache?.local_path,
                 network_names: ['modelops-model'],
-                fit: fit?.result,
+                fit: validFit?.result,
               },
               null,
               2,
@@ -824,7 +940,9 @@ export function CacheDeployWizardPage() {
             <button
               type="button"
               className="btn"
-              disabled={busy}
+              disabled={busy || fitLoading || !validFit ||
+                validFit.result === 'INSUFFICIENT' ||
+                (validFit.result === 'UNKNOWN' && !ackUnknown)}
               onClick={() => void onCreate()}
             >
               {busy ? 'Creating…' : 'Create Deployment'}
