@@ -17,6 +17,16 @@ import { getModel, getModelVersion } from '../api/models'
 import { getNode, refreshNodeResources } from '../api/nodes'
 import { displayedGpuFreeMb, fitInputFingerprint, isFreshResourceSnapshot } from '../utils/cacheDeployFit'
 import { getOperation } from '../api/operations'
+import {
+  clearPublishDraft,
+  clearWizardDraft,
+  readPublishDraft,
+  readWizardDraft,
+  resumableStep,
+  writePublishDraft,
+  writeWizardDraft,
+  type DraftStorage,
+} from '../utils/cacheDeployDraft'
 import type {
   Deployment,
   Endpoint,
@@ -115,7 +125,8 @@ export function CacheDeployWizardPage() {
   const [searchParams, setSearchParams] = useSearchParams()
   const navigate = useNavigate()
 
-  const stepParam = (searchParams.get('step') as Step | null) || 'cache'
+  const urlStep = searchParams.get('step')
+  const stepParam = (urlStep as Step | null) || 'cache'
   const deploymentIdParam = searchParams.get('deployment_id') || ''
   const operationIdParam = searchParams.get('operation_id') || ''
 
@@ -161,6 +172,13 @@ export function CacheDeployWizardPage() {
   const [refreshing, setRefreshing] = useState(false)
 
   const abortRef = useRef<AbortController | null>(null)
+  const restoredCacheRef = useRef<string | null>(null)
+  const restoredPublishRef = useRef<string | null>(null)
+  const [restoredDraft, setRestoredDraft] = useState(false)
+  const [reviewNeedsFit, setReviewNeedsFit] = useState(false)
+  const storage = (() : DraftStorage | null => {
+    try { return window.sessionStorage } catch { return null }
+  })()
 
   const syncStep = useCallback(
     (next: Step, extra?: { deploymentId?: string; operationId?: string }) => {
@@ -197,33 +215,65 @@ export function CacheDeployWizardPage() {
         setCache(entry)
         setLastUpdated(new Date())
         const repoLeaf = (entry.repository_id || 'model').split('/').pop() || 'model'
-        setName((n) => n || `${repoLeaf}-managed`)
-        setContainerName((c) => c || `modelops-${repoLeaf}`.replace(/[^a-zA-Z0-9._-]/g, '-'))
-        setAlias((a) => a || repoLeaf)
+        const firstLoad = restoredCacheRef.current !== cacheId
+        const saved = firstLoad && !deploymentIdParam
+          ? readWizardDraft(storage, entry)
+          : null
+        if (firstLoad) {
+          setName(saved?.name ?? `${repoLeaf}-managed`)
+          setContainerName(saved?.containerName ??
+            `modelops-${repoLeaf}`.replace(/[^a-zA-Z0-9._-]/g, '-'))
+          setRuntimePort(saved?.runtimePort ?? 8000)
+          setExpectedVramMb(saved?.expectedVramMb ?? '')
+          setAlias(repoLeaf)
+          setAckUnknown(false)
+          setFit(null)
+          setFitKey('')
+          setRestoredDraft(Boolean(saved))
+          setReviewNeedsFit(urlStep === 'review' || saved?.step === 'review')
+        }
 
         if (entry.model_version_id) {
           const ver = await getModelVersion(entry.model_version_id, controller.signal)
           if (controller.signal.aborted) return
           setVersion(ver)
-          setServedModelName((s) => s || ver.served_model_name)
-          setRewriteModelName((s) => s || ver.served_model_name)
+          if (firstLoad) {
+            setServedModelName(saved?.servedModelName ?? ver.served_model_name)
+            setRewriteModelName(ver.served_model_name)
+          }
           const mod = await getModel(ver.model_id, controller.signal)
           if (controller.signal.aborted) return
           setModel(mod)
           const d = defaultsForModelType(mod.model_type, entry.repository_id)
           setKnownProfileLabel(d.knownProfileLabel)
-          setRuntime((prev) => ({ ...d.runtime, ...prev }))
+          if (firstLoad) setRuntime({ ...d.runtime, ...(saved?.runtime ?? {}) })
         }
         if (entry.node_id) {
           const n = await getNode(entry.node_id, controller.signal)
           if (controller.signal.aborted) return
           setNode(n)
-          if (n.gpus[0] && selectedGpuIds.length === 0) {
-            setSelectedGpuIds([n.gpus[0].id])
+          if (firstLoad) {
+            const available = new Set(n.gpus.map((g) => g.id))
+            setSelectedGpuIds(
+              saved
+                ? saved.selectedGpuIds.filter((id) => available.has(id))
+                : n.gpus[0] ? [n.gpus[0].id] : [],
+            )
           }
         }
 
         if (deploymentIdParam) {
+          if (restoredPublishRef.current !== deploymentIdParam) {
+            const publishDraft = readPublishDraft(storage, deploymentIdParam)
+            if (publishDraft) {
+              setPublishMode(publishDraft.mode)
+              setAlias(publishDraft.alias)
+              setEndpointId(publishDraft.endpointId)
+              setRewriteModelName(publishDraft.rewriteModelName)
+              setRestoredDraft(true)
+            }
+            restoredPublishRef.current = deploymentIdParam
+          }
           const dep = await getDeployment(deploymentIdParam, controller.signal)
           if (controller.signal.aborted) return
           setDeployment(dep)
@@ -239,6 +289,7 @@ export function CacheDeployWizardPage() {
               )
               if (controller.signal.aborted) return
               if (status.published) {
+                clearPublishDraft(storage, deploymentIdParam)
                 setPublishResult({
                   endpoint: status.endpoint,
                   route: status.route,
@@ -269,6 +320,15 @@ export function CacheDeployWizardPage() {
           if (controller.signal.aborted) return
           setOperation(op)
         }
+        if (firstLoad) {
+          restoredCacheRef.current = cacheId
+          if (!deploymentIdParam) {
+            const resume = saved
+              ? resumableStep(saved.step, urlStep)
+              : urlStep === 'review' ? 'gpu' : null
+            if (resume && resume !== stepParam) syncStep(resume)
+          }
+        }
       } catch (err) {
         if (controller.signal.aborted) return
         setError(err instanceof ApiError ? err.message : 'Failed to load cache.')
@@ -298,6 +358,33 @@ export function CacheDeployWizardPage() {
       .finally(() => { if (active) setGpuResourceLoading(false) })
     return () => { active = false }
   }, [step, node?.id])
+
+  // Save only operator inputs. Backend remains source of truth for Fit,
+  // deployment runtime, operation status, and ACTIVE route.
+  useEffect(() => {
+    if (!cache || cache.id !== cacheId || cache.status !== 'READY' ||
+        restoredCacheRef.current !== cacheId || loading || deploymentIdParam ||
+        !['cache', 'runtime', 'gpu', 'review'].includes(step)) return
+    writeWizardDraft(storage, {
+      schema: 1, cacheId, nodeId: cache.node_id,
+      modelVersionId: cache.model_version_id, revision: cache.resolved_revision,
+      savedAt: Date.now(), step: step as 'cache' | 'runtime' | 'gpu' | 'review',
+      name, containerName, servedModelName, runtimePort, runtime,
+      selectedGpuIds, expectedVramMb,
+    })
+  }, [cache, cacheId, loading, deploymentIdParam, step, name, containerName,
+    servedModelName, runtimePort, runtime, selectedGpuIds, expectedVramMb])
+
+  useEffect(() => {
+    if (!deploymentIdParam || step !== 'publish' || loading ||
+        publishStatusLoading || publishResult ||
+        restoredPublishRef.current !== deploymentIdParam) return
+    writePublishDraft(storage, {
+      schema: 1, deploymentId: deploymentIdParam, savedAt: Date.now(),
+      mode: publishMode, alias, endpointId, rewriteModelName,
+    })
+  }, [deploymentIdParam, step, loading, publishStatusLoading, publishResult,
+    publishMode, alias, endpointId, rewriteModelName])
 
   const uniqueGpuIds = Array.from(new Set(selectedGpuIds))
   const currentFitKey = fitInputFingerprint(selectedGpuIds, expectedVramMb, runtime)
@@ -334,6 +421,7 @@ export function CacheDeployWizardPage() {
           fitRevisionRef.current !== requestedRevision) return
       setFit(result)
       setFitKey(requestedKey)
+      setReviewNeedsFit(false)
       setRuntime((r) => ({ ...r, tensor_parallel_size: uniqueGpuIds.length }))
     } catch (err) {
       setActionError(
@@ -365,6 +453,7 @@ export function CacheDeployWizardPage() {
         },
       })
       setDeployment(created)
+      clearWizardDraft(storage, cacheId)
       syncStep('start', { deploymentId: created.id })
     } catch (err) {
       setActionError(
@@ -438,6 +527,13 @@ export function CacheDeployWizardPage() {
     setEndpoints(page.items.filter((e) => e.api_type === apiType))
   }
 
+  // After F5, the existing-alias dropdown must be repopulated.
+  useEffect(() => {
+    if (step !== 'publish' || publishMode !== 'existing' || !model) return
+    void loadEndpoints().catch(() => setActionError('Endpoint 목록을 불러오지 못했습니다.'))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step, publishMode, model?.model_type])
+
   const onPublish = async () => {
     if (!deployment || busy) return
     setBusy(true)
@@ -450,6 +546,7 @@ export function CacheDeployWizardPage() {
         verifyGateway: true,
       })
       setPublishResult(result)
+      clearPublishDraft(storage, deployment.id)
       syncStep('done', { deploymentId: deployment.id })
     } catch (err) {
       if (err instanceof ApiError && err.code === 'ACTIVE_ROUTE_EXISTS') {
@@ -505,6 +602,14 @@ export function CacheDeployWizardPage() {
       {error ? <SectionError title="로드 오류" message={error} /> : null}
       {actionError ? (
         <SectionError title="작업 오류" message={actionError} />
+      ) : null}
+      {restoredDraft ? (
+        <p className="secondary-text" role="status">
+          이전 입력 설정을 이 탭에서 복원했습니다. Fit 판정과 배포 상태는 저장하지 않습니다.
+        </p>
+      ) : null}
+      {reviewNeedsFit && step === 'gpu' ? (
+        <p role="alert">Review 이전 설정을 복원했습니다. GPU/Runtime을 확인한 후 Fresh Fit을 다시 실행해 주세요.</p>
       ) : null}
 
       {step === 'cache' && cache ? (
