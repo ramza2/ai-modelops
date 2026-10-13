@@ -196,6 +196,16 @@ describe('DeploymentDetailPage', () => {
     expect(screen.getByText('priority')).toBeInTheDocument()
     expect(screen.queryByText('must-not-render')).not.toBeInTheDocument()
     expect(screen.getByText(/기타 설정 1개/)).toBeInTheDocument()
+    const configHeading = screen.getByRole('heading', {
+      level: 2,
+      name: 'Deployment Config',
+    })
+    const configSection = configHeading.closest('section')
+    expect(configSection?.querySelector('.config-kv-grid')).not.toBeNull()
+    expect(configSection?.querySelector('.meta-grid')).toBeNull()
+    expect(
+      configSection?.querySelector('dt')?.textContent,
+    ).toMatch(/^deployment_config\./)
   })
 
   it('shows Start/Stop/Restart for MANAGED non-retired only', async () => {

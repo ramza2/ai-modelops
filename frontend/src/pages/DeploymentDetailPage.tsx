@@ -672,7 +672,7 @@ export function DeploymentDetailPage() {
               runtime_config 또는 실제 컨테이너 observed 값과 다를 수 있습니다.
               Capacity Profile / runtime observability는 C4에서 호출하지 않습니다.
             </p>
-            <dl className="meta-grid">
+            <dl className="config-kv-grid">
               {configEntries.known.map(({ key, value }) => (
                 <div key={key}>
                   <dt>deployment_config.{key}</dt>
