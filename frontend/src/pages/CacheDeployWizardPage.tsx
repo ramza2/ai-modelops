@@ -280,11 +280,38 @@ export function CacheDeployWizardPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cacheId, deploymentIdParam, operationIdParam, stepParam])
 
+  // GPU list shows a newly refreshed Node Agent snapshot, not an old persisted
+  // /resources/latest value. Fit and Create independently fetch live resources.
+  useEffect(() => {
+    if (step !== 'gpu' || !node?.id) return
+    let active = true
+    setResources(null)
+    setGpuResourceLoading(true)
+    setGpuResourceError(null)
+    void refreshNodeResources(node.id)
+      .then((fresh) => { if (active) setResources(fresh) })
+      .catch((err: unknown) => {
+        if (active) setGpuResourceError(
+          err instanceof ApiError ? err.message : 'GPU resource refresh failed.',
+        )
+      })
+      .finally(() => { if (active) setGpuResourceLoading(false) })
+    return () => { active = false }
+  }, [step, node?.id])
+
   const uniqueGpuIds = Array.from(new Set(selectedGpuIds))
+  const currentFitKey = fitInputFingerprint(selectedGpuIds, expectedVramMb, runtime)
+  const currentFitKeyRef = useRef(currentFitKey)
+  currentFitKeyRef.current = currentFitKey
+  const activeFit = fitKey === currentFitKey ? fit : null
 
   const refreshFit = async () => {
     if (!cacheId || uniqueGpuIds.length === 0) return
+    const requestedKey = currentFitKey
     setFitLoading(true)
+    setFit(null)
+    setFitKey('')
+    setAckUnknown(false)
     setActionError(null)
     try {
       const result = await previewCacheDeployFit(cacheId, {
@@ -294,7 +321,9 @@ export function CacheDeployWizardPage() {
         dtype: runtime.dtype,
         quantization: runtime.quantization,
       })
+      if (currentFitKeyRef.current !== requestedKey) return
       setFit(result)
+      setFitKey(requestedKey)
       setRuntime((r) => ({ ...r, tensor_parallel_size: uniqueGpuIds.length }))
     } catch (err) {
       setActionError(
@@ -306,7 +335,9 @@ export function CacheDeployWizardPage() {
   }
 
   const onCreate = async () => {
-    if (!cache || busy) return
+    if (!cache || busy || fitLoading || !activeFit ||
+        activeFit.result === 'INSUFFICIENT' ||
+        (activeFit.result === 'UNKNOWN' && !ackUnknown)) return
     setBusy(true)
     setActionError(null)
     try {
