@@ -1,8 +1,9 @@
 import type { CacheDeployRuntimeConfig } from '../api/cacheDeploy'
 
 // Fingerprint only what the operator sees as fit-relevant. Runtime length/seqs
-// currently do not enter the backend estimate; changing them still invalidates
-// a displayed FIT so the operator explicitly rechecks the estimate.
+// and optional start options currently do not enter the backend estimate;
+// changing them still invalidates a displayed FIT so the operator explicitly
+// rechecks (conservative: runner / reasoning_parser / vllm_model_runner too).
 export function fitInputFingerprint(
   gpuIds: readonly string[],
   expectedVramMb: string,
@@ -16,6 +17,9 @@ export function fitInputFingerprint(
     maxModelLen: runtime.max_model_len ?? null,
     maxNumSeqs: runtime.max_num_seqs ?? null,
     memoryUtilization: runtime.gpu_memory_utilization ?? null,
+    runner: runtime.runner ?? null,
+    reasoningParser: runtime.reasoning_parser ?? null,
+    vllmModelRunner: runtime.vllm_model_runner ?? null,
   })
 }
 

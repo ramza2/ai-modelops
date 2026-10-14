@@ -15,12 +15,32 @@ describe('cache deploy live GPU / fit safety', () => {
       max_num_seqs: 1,
       gpu_memory_utilization: 0.85,
       quantization: 'awq',
+      runner: 'generate',
+      reasoning_parser: null,
+      vllm_model_runner: null,
     })
     for (const config of [
-      { max_model_len: 8192, max_num_seqs: 1, gpu_memory_utilization: 0.85, quantization: 'awq' },
-      { max_model_len: 4096, max_num_seqs: 2, gpu_memory_utilization: 0.85, quantization: 'awq' },
-      { max_model_len: 4096, max_num_seqs: 1, gpu_memory_utilization: 0.75, quantization: 'awq' },
-      { max_model_len: 4096, max_num_seqs: 1, gpu_memory_utilization: 0.85, quantization: 'gptq' },
+      { max_model_len: 8192, max_num_seqs: 1, gpu_memory_utilization: 0.85, quantization: 'awq', runner: 'generate' },
+      { max_model_len: 4096, max_num_seqs: 2, gpu_memory_utilization: 0.85, quantization: 'awq', runner: 'generate' },
+      { max_model_len: 4096, max_num_seqs: 1, gpu_memory_utilization: 0.75, quantization: 'awq', runner: 'generate' },
+      { max_model_len: 4096, max_num_seqs: 1, gpu_memory_utilization: 0.85, quantization: 'gptq', runner: 'generate' },
+      { max_model_len: 4096, max_num_seqs: 1, gpu_memory_utilization: 0.85, quantization: 'awq', runner: 'pooling' },
+      {
+        max_model_len: 4096,
+        max_num_seqs: 1,
+        gpu_memory_utilization: 0.85,
+        quantization: 'awq',
+        runner: 'generate',
+        reasoning_parser: 'qwen3',
+      },
+      {
+        max_model_len: 4096,
+        max_num_seqs: 1,
+        gpu_memory_utilization: 0.85,
+        quantization: 'awq',
+        runner: 'generate',
+        vllm_model_runner: 'v1',
+      },
     ]) {
       expect(fitInputFingerprint(['gpu-0'], '', config)).not.toBe(base)
     }

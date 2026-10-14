@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from '@testing-library/react'
+import { cleanup, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
@@ -12,8 +12,13 @@ import { CacheDeployWizardPage } from '../pages/CacheDeployWizardPage'
 import * as cacheDeployApi from '../api/cacheDeploy'
 import * as modelsApi from '../api/models'
 import * as nodesApi from '../api/nodes'
+import {
+  clearWizardDraft,
+  writeWizardDraft,
+  wizardDraftKey,
+} from '../utils/cacheDeployDraft'
 
-function makeCache(): ModelCacheEntry {
+function makeCache(overrides: Partial<ModelCacheEntry> = {}): ModelCacheEntry {
   return {
     id: 'cache-1',
     node_id: 'node-1',
@@ -34,10 +39,11 @@ function makeCache(): ModelCacheEntry {
     updated_at: '2026-10-01T00:00:00Z',
     is_deployment: false,
     note: null,
+    ...overrides,
   }
 }
 
-function makeVersion(): ModelVersion {
+function makeVersion(overrides: Partial<ModelVersion> = {}): ModelVersion {
   return {
     id: 'ver-1',
     model_id: 'model-1',
@@ -57,10 +63,11 @@ function makeVersion(): ModelVersion {
     archived_at: null,
     created_at: '2026-10-01T00:00:00Z',
     updated_at: '2026-10-01T00:00:00Z',
+    ...overrides,
   }
 }
 
-function makeModel(): ModelSummary {
+function makeModel(overrides: Partial<ModelSummary> = {}): ModelSummary {
   return {
     id: 'model-1',
     slug: 'demo-model',
@@ -73,6 +80,7 @@ function makeModel(): ModelSummary {
     is_active: true,
     created_at: '2026-10-01T00:00:00Z',
     updated_at: '2026-10-01T00:00:00Z',
+    ...overrides,
   }
 }
 
@@ -111,46 +119,128 @@ function makeNode(): NodeDetail {
   }
 }
 
-describe('CacheDeployWizardPage Runtime layout (P1-5A)', () => {
+function renderWizard(path = '/models/cache/cache-1/deploy?step=runtime') {
+  return render(
+    <MemoryRouter initialEntries={[path]}>
+      <Routes>
+        <Route
+          path="/models/cache/:cacheId/deploy"
+          element={<CacheDeployWizardPage />}
+        />
+      </Routes>
+    </MemoryRouter>,
+  )
+}
+
+describe('CacheDeployWizardPage Runtime layout (P1-5A / P1-8C)', () => {
   beforeEach(() => {
+    sessionStorage.clear()
     vi.spyOn(cacheDeployApi, 'getCacheEntry').mockResolvedValue(makeCache())
     vi.spyOn(modelsApi, 'getModelVersion').mockResolvedValue(makeVersion())
     vi.spyOn(modelsApi, 'getModel').mockResolvedValue(makeModel())
     vi.spyOn(nodesApi, 'getNode').mockResolvedValue(makeNode())
+    vi.spyOn(nodesApi, 'refreshNodeResources').mockResolvedValue({
+      node_id: 'node-1',
+      sampled_at: '2026-10-01T00:00:00Z',
+      age_ms: 1000,
+      host: null,
+      gpus: [
+        {
+          gpu: {
+            id: 'gpu-0',
+            node_id: 'node-1',
+            gpu_uuid: 'GPU-0',
+            device_index: 0,
+            model_name: 'Mock GPU',
+            vram_total_mb: 16384,
+            compute_capability: null,
+            safety_margin_mb: 1024,
+            status: 'AVAILABLE',
+            last_seen_at: null,
+            created_at: '2026-10-01T00:00:00Z',
+            updated_at: '2026-10-01T00:00:00Z',
+          },
+          snapshot: {
+            sampled_at: '2026-10-01T00:00:00Z',
+            vram_total_mb: 16384,
+            vram_used_mb: 4000,
+            vram_free_mb: 12000,
+            utilization_percent: null,
+            temperature_c: null,
+            power_watts: null,
+          },
+        },
+      ],
+    } as never)
   })
+
+  function makeFit() {
+    return {
+      result: 'FIT' as const,
+      tensor_parallel: 1,
+      evaluated_at: '2026-10-01T00:00:00Z',
+      resource_sampled_at: '2026-10-01T00:00:00Z',
+      reasons: ['ok'],
+      assumptions: [],
+      warnings: [],
+      suggested_gpu_device_ids: ['gpu-0'],
+      estimated_required_vram_mb: 2000,
+      estimated_required_vram_mb_per_gpu: 2000,
+      disk_gate: 'OK',
+      gpu_results: [
+        {
+          gpu_device_id: 'gpu-0',
+          gpu_index: 0,
+          gpu_uuid: 'GPU-0',
+          name: 'Mock GPU',
+          vram_total_mb: 16384,
+          vram_free_mb: 12000,
+          vram_used_mb: 4000,
+          safety_margin_mb: 1024,
+          estimated_required_vram_mb: 2000,
+          result: 'FIT' as const,
+          reasons: [],
+        },
+      ],
+    }
+  }
 
   afterEach(() => {
     cleanup()
+    sessionStorage.clear()
     vi.restoreAllMocks()
   })
 
-  it('renders Runtime fields in form-grid without changing control labels or types', async () => {
-    render(
-      <MemoryRouter
-        initialEntries={['/models/cache/cache-1/deploy?step=runtime']}
-      >
-        <Routes>
-          <Route
-            path="/models/cache/:cacheId/deploy"
-            element={<CacheDeployWizardPage />}
-          />
-        </Routes>
-      </MemoryRouter>,
-    )
+  it('groups Runtime fields and keeps control labels / types', async () => {
+    renderWizard()
 
     expect(
       await screen.findByRole('heading', { level: 2, name: '2. Runtime' }),
     ).toBeInTheDocument()
+    expect(screen.getByTestId('runtime-section-basic')).toBeInTheDocument()
+    expect(screen.getByTestId('runtime-section-resource')).toBeInTheDocument()
+    expect(screen.getByTestId('runtime-section-advanced')).toBeInTheDocument()
+    expect(screen.getByText('기본 정보')).toBeInTheDocument()
+    expect(screen.getByText('리소스 설정')).toBeInTheDocument()
+    expect(screen.getByText('고급 옵션')).toBeInTheDocument()
 
-    const grid = document.querySelector('.form-grid')
-    expect(grid).not.toBeNull()
-    expect(grid?.querySelectorAll('label').length).toBeGreaterThanOrEqual(10)
-    expect(grid?.querySelectorAll('.form-grid__wide').length).toBe(3)
+    const grids = document.querySelectorAll('.form-grid')
+    expect(grids.length).toBe(3)
+    const labelCount = Array.from(grids).reduce(
+      (n, g) => n + g.querySelectorAll('label').length,
+      0,
+    )
+    expect(labelCount).toBeGreaterThanOrEqual(10)
+    expect(document.querySelectorAll('.form-grid__wide').length).toBe(3)
 
     expect(screen.getByText('max_model_len')).toBeInTheDocument()
     expect(screen.getByText('max_num_seqs')).toBeInTheDocument()
     expect(screen.getByText('gpu_memory_utilization')).toBeInTheDocument()
     expect(screen.getByText('Served model name')).toBeInTheDocument()
+    expect(
+      screen.getByText(/runner\(generate\/pooling\)와 다릅니다/),
+    ).toBeInTheDocument()
+
     const parser = screen.getByLabelText('Reasoning Parser')
     expect(parser).toHaveValue('')
     expect(
@@ -162,8 +252,10 @@ describe('CacheDeployWizardPage Runtime layout (P1-5A)', () => {
       screen.queryByText(/V1 Model Runner는 컨테이너 환경변수/),
     ).not.toBeInTheDocument()
 
-    const numberInputs = grid?.querySelectorAll('input[type="number"]')
-    expect(numberInputs?.length).toBeGreaterThanOrEqual(4)
+    const numberInputs = document.querySelectorAll(
+      '.form-grid input[type="number"]',
+    )
+    expect(numberInputs.length).toBeGreaterThanOrEqual(4)
     const served = screen.getByDisplayValue(
       'org/very-long-served-model-name-for-layout',
     )
@@ -175,11 +267,182 @@ describe('CacheDeployWizardPage Runtime layout (P1-5A)', () => {
     expect(
       screen.getByText(/Reasoning Parser는 Runtime 시작 옵션/),
     ).toBeInTheDocument()
+    expect(screen.getByTestId('qwen3-compat-warning')).toBeInTheDocument()
 
     await userEvent.selectOptions(modelRunner, 'v1')
     expect(modelRunner).toHaveValue('v1')
     expect(
       screen.getByText(/V1 Model Runner는 컨테이너 환경변수/),
     ).toBeInTheDocument()
+  })
+
+  it('blocks Next: GPU on invalid numeric Runtime inputs', async () => {
+    renderWizard()
+    await screen.findByRole('heading', { level: 2, name: '2. Runtime' })
+
+    const next = screen.getByRole('button', { name: 'Next: GPU' })
+    expect(next).toBeEnabled()
+
+    const port = screen.getByLabelText(/Runtime port/)
+    await userEvent.clear(port)
+    await userEvent.type(port, '0')
+    expect(next).toBeDisabled()
+    expect(
+      document.querySelectorAll('.form-field-error').length,
+    ).toBeGreaterThan(0)
+    expect(
+      screen.getByText('1–65535 사이의 정수여야 합니다.'),
+    ).toBeInTheDocument()
+
+    await userEvent.clear(port)
+    await userEvent.type(port, '8000')
+    expect(next).toBeEnabled()
+
+    const len = screen.getByLabelText(/max_model_len/)
+    await userEvent.clear(len)
+    await userEvent.type(len, '-5')
+    expect(next).toBeDisabled()
+    expect(
+      screen.getByText(/max_model_len은\(는\) 미설정이거나 양의 정수/),
+    ).toBeInTheDocument()
+
+    await userEvent.clear(len)
+    expect(next).toBeEnabled()
+
+    const util = screen.getByLabelText(/gpu_memory_utilization/)
+    await userEvent.clear(util)
+    await userEvent.type(util, '1.5')
+    expect(next).toBeDisabled()
+    expect(
+      screen.getByText('미설정이거나 0 초과 1 이하 값이어야 합니다.'),
+    ).toBeInTheDocument()
+  })
+
+  it('keeps unset optional fields empty (no auto dtype/quant)', async () => {
+    vi.mocked(modelsApi.getModelVersion).mockResolvedValue(
+      makeVersion({ dtype: 'float16', quantization: 'awq' }),
+    )
+    renderWizard()
+    await screen.findByRole('heading', { level: 2, name: '2. Runtime' })
+
+    const dtype = screen.getByPlaceholderText('float16')
+    const quant = screen.getByPlaceholderText('awq')
+    expect(dtype).toHaveValue('')
+    expect(quant).toHaveValue('')
+    expect(screen.getByText(/ModelVersion 참고: float16/)).toBeInTheDocument()
+    expect(screen.getByText(/ModelVersion 참고: awq/)).toBeInTheDocument()
+  })
+
+  it('does not warn qwen3 compatibility when repository suggests Qwen3', async () => {
+    vi.mocked(cacheDeployApi.getCacheEntry).mockResolvedValue(
+      makeCache({ repository_id: 'Qwen/Qwen3-8B' }),
+    )
+    vi.mocked(modelsApi.getModelVersion).mockResolvedValue(
+      makeVersion({
+        source_repository: 'Qwen/Qwen3-8B',
+        served_model_name: 'Qwen/Qwen3-8B',
+      }),
+    )
+    renderWizard()
+    await screen.findByRole('heading', { level: 2, name: '2. Runtime' })
+    await userEvent.selectOptions(
+      screen.getByLabelText('Reasoning Parser'),
+      'qwen3',
+    )
+    expect(
+      screen.getByText(/Reasoning Parser는 Runtime 시작 옵션/),
+    ).toBeInTheDocument()
+    expect(
+      screen.queryByTestId('qwen3-compat-warning'),
+    ).not.toBeInTheDocument()
+  })
+
+  it('invalidates Fresh Fit when runner / parser / model runner change', async () => {
+    vi.spyOn(cacheDeployApi, 'previewCacheDeployFit').mockResolvedValue(
+      makeFit(),
+    )
+
+    renderWizard('/models/cache/cache-1/deploy?step=gpu')
+    await screen.findByRole('heading', { level: 2, name: /3\. GPU/ })
+    // First GPU is pre-selected on load.
+    await userEvent.click(screen.getByRole('button', { name: 'Run fresh fit' }))
+    expect(await screen.findByTitle('FIT')).toBeInTheDocument()
+    expect(cacheDeployApi.previewCacheDeployFit).toHaveBeenCalledTimes(1)
+
+    await userEvent.click(screen.getByRole('button', { name: 'Back' }))
+    await screen.findByRole('heading', { level: 2, name: '2. Runtime' })
+    await userEvent.selectOptions(
+      screen.getByLabelText('Reasoning Parser'),
+      'qwen3',
+    )
+    await userEvent.click(screen.getByRole('button', { name: 'Next: GPU' }))
+    await screen.findByRole('heading', { level: 2, name: /3\. GPU/ })
+    expect(
+      screen.getByText(/Fresh Fit을 다시 실행해야 Review/),
+    ).toBeInTheDocument()
+    expect(screen.queryByTitle('FIT')).not.toBeInTheDocument()
+  })
+
+  it('restores draft Runtime values and shows Review applied/unset partition', async () => {
+    writeWizardDraft(sessionStorage, {
+      schema: 1,
+      cacheId: 'cache-1',
+      nodeId: 'node-1',
+      modelVersionId: 'ver-1',
+      revision: 'abc123',
+      savedAt: Date.now(),
+      step: 'runtime',
+      name: 'restored-dep',
+      containerName: 'restored-ctr',
+      servedModelName: 'restored-served',
+      runtimePort: 9001,
+      runtime: {
+        runner: 'pooling',
+        max_model_len: 2048,
+        probe_type: 'CHAT',
+        health_path: '/health',
+        tensor_parallel_size: 1,
+        reasoning_parser: 'qwen3',
+        vllm_model_runner: 'v1',
+      },
+      selectedGpuIds: ['gpu-0'],
+      expectedVramMb: '',
+    })
+    expect(sessionStorage.getItem(wizardDraftKey('cache-1'))).toBeTruthy()
+
+    vi.spyOn(cacheDeployApi, 'previewCacheDeployFit').mockResolvedValue(
+      makeFit(),
+    )
+
+    renderWizard('/models/cache/cache-1/deploy?step=runtime')
+    await screen.findByRole('heading', { level: 2, name: '2. Runtime' })
+    expect(screen.getByDisplayValue('restored-dep')).toBeInTheDocument()
+    expect(screen.getByDisplayValue('9001')).toBeInTheDocument()
+    expect(screen.getByDisplayValue('2048')).toBeInTheDocument()
+    expect(screen.getByLabelText('Reasoning Parser')).toHaveValue('qwen3')
+    expect(screen.getByLabelText('vLLM Model Runner')).toHaveValue('v1')
+
+    await userEvent.click(screen.getByRole('button', { name: 'Next: GPU' }))
+    await screen.findByRole('heading', { level: 2, name: /3\. GPU/ })
+    await userEvent.click(screen.getByRole('button', { name: 'Run fresh fit' }))
+    expect(await screen.findByTitle('FIT')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Next: Review' }))
+
+    const summary = await screen.findByTestId('runtime-review-summary')
+    expect(within(summary).getByText('Runtime 설정 요약')).toBeInTheDocument()
+    const applied = within(summary).getByTestId('runtime-review-applied')
+    expect(applied).toHaveTextContent('max_model_len')
+    expect(applied).toHaveTextContent('2048')
+    expect(applied).toHaveTextContent('reasoning_parser')
+    expect(applied).toHaveTextContent('qwen3')
+    expect(applied).toHaveTextContent('vllm_model_runner')
+    expect(applied).toHaveTextContent('v1')
+    const unset = within(summary).getByTestId('runtime-review-unset')
+    expect(unset).toHaveTextContent('dtype')
+    expect(unset).toHaveTextContent('quantization')
+    expect(screen.getByTestId('review-qwen3-compat-warning')).toBeInTheDocument()
+    expect(summary).toHaveTextContent(/thinking_token_budget/)
+
+    clearWizardDraft(sessionStorage, 'cache-1')
   })
 })
