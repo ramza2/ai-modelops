@@ -704,6 +704,95 @@ th {
   }
 }
 
+/** P1-6A: Model Catalog list layout / pending Node switch. */
+.catalog-list-pending {
+  margin: 0.5rem 0 0.25rem;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.catalog-table-wrap--pending {
+  opacity: 0.72;
+}
+
+.catalog-table {
+  table-layout: fixed;
+  width: 100%;
+}
+
+.catalog-table th:nth-child(1) {
+  width: 22%;
+}
+
+.catalog-table th:nth-child(2) {
+  width: 8%;
+}
+
+.catalog-table th:nth-child(3) {
+  width: 12%;
+}
+
+.catalog-table th:nth-child(4) {
+  width: 12%;
+}
+
+.catalog-table th:nth-child(5) {
+  width: 18%;
+}
+
+.catalog-table th:nth-child(6) {
+  width: 28%;
+}
+
+.catalog-reason-cell,
+.catalog-clip-cell {
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.catalog-actions-cell {
+  min-width: 0;
+}
+
+.catalog-row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 0.5rem;
+  align-items: center;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.catalog-row-actions .btn {
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+
+.catalog-row-actions--inline {
+  margin-top: 0.25rem;
+}
+
+.catalog-download-status {
+  margin-top: 0.35rem;
+  display: grid;
+  gap: 0.2rem;
+  min-width: 0;
+}
+
+@media (max-width: 900px) {
+  .catalog-table {
+    table-layout: auto;
+  }
+
+  .catalog-table th:nth-child(n) {
+    width: auto;
+  }
+
+  .catalog-actions-cell {
+    min-width: 12rem;
+  }
+}
+
 /** P1-5B: Model Catalog Fit detail (scoped; does not alter Deploy Wizard Fit). */
 .catalog-fit-summary {
   display: grid;
