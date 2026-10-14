@@ -156,6 +156,11 @@ describe('CacheDeployWizardPage Runtime layout (P1-5A)', () => {
     expect(
       screen.queryByText(/Reasoning Parser는 Runtime 시작 옵션/),
     ).not.toBeInTheDocument()
+    const modelRunner = screen.getByLabelText('vLLM Model Runner')
+    expect(modelRunner).toHaveValue('')
+    expect(
+      screen.queryByText(/V1 Model Runner는 컨테이너 환경변수/),
+    ).not.toBeInTheDocument()
 
     const numberInputs = grid?.querySelectorAll('input[type="number"]')
     expect(numberInputs?.length).toBeGreaterThanOrEqual(4)
@@ -169,6 +174,12 @@ describe('CacheDeployWizardPage Runtime layout (P1-5A)', () => {
     expect(parser).toHaveValue('qwen3')
     expect(
       screen.getByText(/Reasoning Parser는 Runtime 시작 옵션/),
+    ).toBeInTheDocument()
+
+    await userEvent.selectOptions(modelRunner, 'v1')
+    expect(modelRunner).toHaveValue('v1')
+    expect(
+      screen.getByText(/V1 Model Runner는 컨테이너 환경변수/),
     ).toBeInTheDocument()
   })
 })

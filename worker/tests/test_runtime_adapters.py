@@ -506,3 +506,101 @@ def test_generic_openai_unchanged_by_reasoning_parser() -> None:
     )
     assert "--reasoning-parser" not in spec.command
 
+
+# ---------------------------------------------------------------------------
+# P1-7E vllm_model_runner
+# ---------------------------------------------------------------------------
+
+
+def test_vllm_model_runner_unset_keeps_baseline_env() -> None:
+    spec = VLLMAdapter().build_create_spec(
+        RuntimeBuildInput(
+            runtime_image="vllm/vllm-openai:v0.24.0",
+            served_model_name="m",
+            model_path="/srv/models/x",
+        )
+    )
+    assert spec.environment == {"MODEL_OPS_SERVED_MODEL_NAME": "m"}
+    assert "VLLM_USE_V2_MODEL_RUNNER" not in spec.environment
+
+
+def test_vllm_model_runner_v1_sets_env_once() -> None:
+    spec = VLLMAdapter().build_create_spec(
+        RuntimeBuildInput(
+            runtime_image="vllm/vllm-openai:v0.24.0",
+            served_model_name="m",
+            model_path="/srv/models/x",
+            deployment_config={"vllm_model_runner": "v1"},
+        )
+    )
+    assert spec.environment["VLLM_USE_V2_MODEL_RUNNER"] == "0"
+    assert sum(1 for k in spec.environment if k == "VLLM_USE_V2_MODEL_RUNNER") == 1
+    assert spec.environment["MODEL_OPS_SERVED_MODEL_NAME"] == "m"
+
+
+def test_vllm_model_runner_deployment_wins_runtime() -> None:
+    spec = VLLMAdapter().build_create_spec(
+        RuntimeBuildInput(
+            runtime_image="vllm/vllm-openai:v0.24.0",
+            served_model_name="m",
+            model_path="/srv/models/x",
+            runtime_config={"vllm_model_runner": "v1"},
+            deployment_config={},
+        )
+    )
+    assert spec.environment["VLLM_USE_V2_MODEL_RUNNER"] == "0"
+
+
+@pytest.mark.parametrize("value", ["V1", " v1 ", "v1"])
+def test_vllm_model_runner_normalized(value) -> None:
+    spec = VLLMAdapter().build_create_spec(
+        RuntimeBuildInput(
+            runtime_image="vllm/vllm-openai:v0.24.0",
+            served_model_name="m",
+            model_path="/srv/models/x",
+            deployment_config={"vllm_model_runner": value},
+        )
+    )
+    assert spec.environment["VLLM_USE_V2_MODEL_RUNNER"] == "0"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [None, "", "v2", "auto", "0", 0, True, False, [], {}],
+)
+def test_vllm_model_runner_invalid_rejected(value) -> None:
+    with pytest.raises(RuntimeAdapterError, match="vllm_model_runner"):
+        VLLMAdapter().build_create_spec(
+            RuntimeBuildInput(
+                runtime_image="vllm/vllm-openai:v0.24.0",
+                served_model_name="m",
+                model_path="/srv/models/x",
+                deployment_config={"vllm_model_runner": value},
+            )
+        )
+
+
+def test_vllm_model_runner_explicit_null_no_fallback() -> None:
+    with pytest.raises(RuntimeAdapterError, match="vllm_model_runner"):
+        VLLMAdapter().build_create_spec(
+            RuntimeBuildInput(
+                runtime_image="vllm/vllm-openai:v0.24.0",
+                served_model_name="m",
+                model_path="/srv/models/x",
+                runtime_config={"vllm_model_runner": "v1"},
+                deployment_config={"vllm_model_runner": None},
+            )
+        )
+
+
+def test_generic_openai_unchanged_by_vllm_model_runner() -> None:
+    spec = GenericOpenAIAdapter().build_create_spec(
+        RuntimeBuildInput(
+            runtime_image="example/openai-runtime:tag",
+            served_model_name="embed-model",
+            model_path="/srv/ai-models/embed/rev",
+            deployment_config={"vllm_model_runner": "v1"},
+        )
+    )
+    assert "VLLM_USE_V2_MODEL_RUNNER" not in spec.environment
+

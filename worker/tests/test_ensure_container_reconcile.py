@@ -173,3 +173,62 @@ async def test_incompatible_running_container_blocked(db) -> None:
             await executor._ensure_container(session, client, dep, _mutation())
         assert excinfo.value.code == "CONTAINER_SPEC_CONFLICT_RUNNING"
         client.remove_deployment.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_vllm_model_runner_env_mismatch_recreates_stopped(db) -> None:
+    """P1-7E: STOP→START after pinning V1 recreates when env differs."""
+    session_factory = db
+    async with session_factory() as session:
+        stale_id = f"ctr-env-{uuid.uuid4().hex[:8]}"
+        seeded = await _seed_vllm_deployment(
+            session,
+            deployment_config={
+                "model_path": "/data/models/x",
+                "vllm_model_runner": "v1",
+            },
+            container_id=stale_id,
+            runtime_status=RuntimeStatus.STOPPED.value,
+        )
+        dep = await session.get(Deployment, seeded["deployment_id"])
+        assert dep is not None
+        executor = OperationExecutor(
+            session_factory=session_factory,
+            settings=Settings(worker_id="w-m7c-env"),
+        )
+        payload = await executor._build_create_payload(session, dep)
+        assert payload["environment"]["VLLM_USE_V2_MODEL_RUNNER"] == "0"
+
+        calls = {"n": 0}
+
+        async def _create(_dep_id, create_payload, *, mutation):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise NodeAgentError(
+                    "conflict",
+                    code="CONTAINER_CONFLICT",
+                    status_code=409,
+                    retryable=False,
+                )
+            assert create_payload["environment"]["VLLM_USE_V2_MODEL_RUNNER"] == "0"
+            return {
+                "container_id": "ctr-env-new",
+                "runtime_status": "CREATED",
+                "command": create_payload["command"],
+            }
+
+        client = AsyncMock(spec=NodeAgentClient)
+        client.create_deployment = AsyncMock(side_effect=_create)
+        client.get_deployment = AsyncMock(
+            return_value={
+                "container_id": stale_id,
+                "runtime_status": "exited",
+                # Stale container lacks VLLM_USE_V2_MODEL_RUNNER (env mismatch).
+                "environment": {"MODEL_OPS_SERVED_MODEL_NAME": "demo"},
+            }
+        )
+        client.remove_deployment = AsyncMock()
+        await executor._ensure_container(session, client, dep, _mutation())
+        client.remove_deployment.assert_awaited_once()
+        assert client.create_deployment.await_count == 2
+        assert dep.container_id == "ctr-env-new"

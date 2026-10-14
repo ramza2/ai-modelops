@@ -19,6 +19,10 @@ from app.runtime_adapters.base import (
 _SCHEDULING_POLICY_ALLOWED = frozenset({"fcfs", "priority"})
 # Optional vLLM reasoning parser (P1-7A). Unset omits --reasoning-parser.
 _REASONING_PARSER_ALLOWED = frozenset({"qwen3"})
+# Optional V1 model runner pin (P1-7E). Unset = image default; "v1" sets
+# VLLM_USE_V2_MODEL_RUNNER=0 so thinking_token_budget works with qwen3 parser.
+_VLLM_MODEL_RUNNER_ALLOWED = frozenset({"v1"})
+_VLLM_USE_V2_MODEL_RUNNER_ENV = "VLLM_USE_V2_MODEL_RUNNER"
 # Explicit runner is needed for pooling/embedding runtimes such as BGE-M3.
 # Keep this allowlist narrow; normal generation runtimes omit the flag.
 _RUNNER_ALLOWED = frozenset({"generate", "pooling"})
@@ -56,6 +60,9 @@ class VLLMAdapter:
         )
         reasoning_parser = _merged_choice(
             cfg, "reasoning_parser", allowed=_REASONING_PARSER_ALLOWED
+        )
+        vllm_model_runner = _merged_choice(
+            cfg, "vllm_model_runner", allowed=_VLLM_MODEL_RUNNER_ALLOWED
         )
         runner = _merged_choice(cfg, "runner", allowed=_RUNNER_ALLOWED)
 
@@ -101,6 +108,9 @@ class VLLMAdapter:
         env = {
             "MODEL_OPS_SERVED_MODEL_NAME": served,
         }
+        # Pin V1 only when allowlisted; never inject arbitrary env keys.
+        if vllm_model_runner == "v1":
+            env[_VLLM_USE_V2_MODEL_RUNNER_ENV] = "0"
         volumes = [
             VolumeSpec(
                 host_path=model_path,

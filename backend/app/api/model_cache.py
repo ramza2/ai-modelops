@@ -16,6 +16,8 @@ from app.services.hf_download import HFDownloadService
 router = APIRouter(prefix="/api/v1/model-cache", tags=["model-cache"])
 
 _REASONING_PARSER_ALLOWED = frozenset({"qwen3"})
+# Optional vLLM V1 model runner pin (P1-7E). Unset = image default (auto/V2).
+_VLLM_MODEL_RUNNER_ALLOWED = frozenset({"v1"})
 
 
 def get_download_service(
@@ -43,6 +45,8 @@ class CacheDeployRuntimeConfig(BaseModel):
     scheduling_policy: str | None = Field(default=None, max_length=32)
     # Optional vLLM --reasoning-parser (P1-7A). Unset = omit flag (default).
     reasoning_parser: str | None = Field(default=None, max_length=32)
+    # Optional V1 model runner pin (P1-7E). Unset = do not set env (auto).
+    vllm_model_runner: str | None = Field(default=None, max_length=32)
 
     @field_validator("reasoning_parser", mode="before")
     @classmethod
@@ -56,6 +60,20 @@ class CacheDeployRuntimeConfig(BaseModel):
             return None
         if normalized not in _REASONING_PARSER_ALLOWED:
             raise ValueError("reasoning_parser must be unset or one of: qwen3")
+        return normalized
+
+    @field_validator("vllm_model_runner", mode="before")
+    @classmethod
+    def _normalize_vllm_model_runner(cls, value: Any) -> str | None:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError("vllm_model_runner must be unset or one of: v1")
+        normalized = value.strip().lower()
+        if normalized == "":
+            return None
+        if normalized not in _VLLM_MODEL_RUNNER_ALLOWED:
+            raise ValueError("vllm_model_runner must be unset or one of: v1")
         return normalized
 
 

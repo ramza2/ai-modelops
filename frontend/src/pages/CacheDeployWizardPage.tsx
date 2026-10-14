@@ -892,6 +892,22 @@ export function CacheDeployWizardPage() {
                 <option value="qwen3">qwen3</option>
               </select>
             </label>
+            <label>
+              vLLM Model Runner (optional)
+              <select
+                aria-label="vLLM Model Runner"
+                value={runtime.vllm_model_runner ?? ''}
+                onChange={(e) =>
+                  setRuntime((r) => ({
+                    ...r,
+                    vllm_model_runner: e.target.value || null,
+                  }))
+                }
+              >
+                <option value="">Auto (default)</option>
+                <option value="v1">V1</option>
+              </select>
+            </label>
           </div>
           <p className="secondary-text">
             Catalog dtype/quant hints are suggestions only. Official vLLM image
@@ -904,6 +920,15 @@ export function CacheDeployWizardPage() {
               업무 클라이언트 호환성을 운영에서 검증하세요. 요청별{' '}
               <code>enable_thinking</code> / <code>thinking_token_budget</code> /
               <code>max_tokens</code>는 Parser와 별개입니다.
+            </p>
+          ) : null}
+          {runtime.vllm_model_runner === 'v1' ? (
+            <p className="panel-hint" role="note">
+              V1 Model Runner는 컨테이너 환경변수{' '}
+              <code>VLLM_USE_V2_MODEL_RUNNER=0</code>만 설정합니다. vLLM 0.24.0에서
+              Qwen3 <code>thinking_token_budget</code> 등이 V2에서 거부될 때
+              사용하세요. 호환성·성능·메모리 특성을 운영에서 검증하세요. 기존
+              컨테이너는 STOP 후 START(ENSURE_CONTAINER)로 재생성되어야 적용됩니다.
             </p>
           ) : null}
           <div className="toolbar__actions">

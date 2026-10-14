@@ -52,12 +52,14 @@ describe('pickRuntimeConfigEntries', () => {
     const { known, otherCount } = pickRuntimeConfigEntries({
       max_num_seqs: 4,
       reasoning_parser: 'qwen3',
+      vllm_model_runner: 'v1',
       secret_or_unknown: 'x',
       another: 1,
     })
     expect(known.map((k) => k.key)).toEqual([
       'max_num_seqs',
       'reasoning_parser',
+      'vllm_model_runner',
     ])
     expect(otherCount).toBe(2)
   })

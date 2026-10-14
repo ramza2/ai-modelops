@@ -104,6 +104,26 @@ describe('P1-3 cache deploy draft persistence', () => {
     expect(readWizardDraft(store, cache, now)).toBeNull()
   })
 
+  it('persists optional vllm_model_runner=v1 and rejects unknown runners', () => {
+    const store = memoryStorage()
+    const withRunner: WizardDraft = {
+      ...sampleDraft(),
+      runtime: { ...sampleDraft().runtime, vllm_model_runner: 'v1' },
+    }
+    writeWizardDraft(store, withRunner)
+    expect(readWizardDraft(store, cache, now)?.runtime.vllm_model_runner).toBe(
+      'v1',
+    )
+    store.setItem(
+      wizardDraftKey(cache.id),
+      JSON.stringify({
+        ...withRunner,
+        runtime: { ...withRunner.runtime, vllm_model_runner: 'v2' },
+      }),
+    )
+    expect(readWizardDraft(store, cache, now)).toBeNull()
+  })
+
   it('keeps pending publish alias settings distinct from server-owned route status', () => {
     const store = memoryStorage()
     const draft = {
