@@ -10,10 +10,17 @@ import type {
   NodeSummary,
   ResourceFitAnalysis,
 } from '../api/types'
-import { ModelCatalogPage } from '../pages/ModelCatalogPage'
+import {
+  CATALOG_DOWNLOAD_POLL_MS,
+  ModelCatalogPage,
+} from '../pages/ModelCatalogPage'
 import * as catalogApi from '../api/catalog'
 import * as downloadsApi from '../api/downloads'
 import * as nodesApi from '../api/nodes'
+import {
+  catalogDownloadDraftKey,
+  writeCatalogDownloadDraft,
+} from '../utils/catalogDownloadDraft'
 
 function pageResult(
   items: HfCatalogModel[],
@@ -169,6 +176,7 @@ describe('ModelCatalogPage', () => {
   afterEach(() => {
     cleanup()
     vi.restoreAllMocks()
+    sessionStorage.clear()
   })
 
   it('renders catalog rows, fit badges, enabled Download when node selected', async () => {
@@ -663,6 +671,14 @@ describe('ModelCatalogPage', () => {
         progress_percent: 20,
       }),
     )
+    vi.mocked(downloadsApi.getHfDownload).mockResolvedValue(
+      makeJob({
+        job_id: 'job-ok',
+        repository_id: 'org/ok-fit',
+        status: 'DOWNLOADING',
+        progress_percent: 20,
+      }),
+    )
 
     renderAt('/models/catalog?node_id=node-1')
     const okRow = (await screen.findByText('org/ok-fit')).closest(
@@ -672,7 +688,7 @@ describe('ModelCatalogPage', () => {
 
     await userEvent.click(within(okRow).getByRole('button', { name: 'Download' }))
     await waitFor(() => {
-      expect(within(okRow).getByText(/Progress/)).toBeInTheDocument()
+      expect(within(okRow).getByText(/진행률 20%/)).toBeInTheDocument()
     })
 
     await userEvent.click(within(okRow).getByRole('button', { name: 'Fit 분석' }))
@@ -683,7 +699,7 @@ describe('ModelCatalogPage', () => {
       'Fit upstream timeout',
     )
     expect(screen.getByTestId('fit-detail-org/ok-fit')).toBeInTheDocument()
-    expect(within(okRow).getByText(/Progress/)).toBeInTheDocument()
+    expect(within(okRow).getByText(/진행률 20%/)).toBeInTheDocument()
     expect(screen.queryByText('카탈로그 오류')).not.toBeInTheDocument()
 
     vi.mocked(catalogApi.analyzeHfResourceFit).mockResolvedValue(
@@ -771,5 +787,777 @@ describe('ModelCatalogPage', () => {
         modelType: 'EMBEDDING',
       })
     })
+  })
+
+  it('persists Job id on start and restores via GET only after remount (F5)', async () => {
+    vi.mocked(catalogApi.listHfCatalog).mockResolvedValue(
+      pageResult([makeItem({ repository_id: 'org/restore-model' })]),
+    )
+    vi.mocked(downloadsApi.startHfDownload).mockResolvedValue(
+      makeJob({
+        job_id: 'job-restore-1',
+        repository_id: 'org/restore-model',
+        status: 'DOWNLOADING',
+        progress_percent: 25,
+        bytes_downloaded: 512,
+        total_bytes: 2048,
+      }),
+    )
+    // Active poll uses the same GET mock until remount; keep progress in sync
+    // with the POST payload so assertions are stable.
+    vi.mocked(downloadsApi.getHfDownload).mockResolvedValue(
+      makeJob({
+        job_id: 'job-restore-1',
+        repository_id: 'org/restore-model',
+        status: 'DOWNLOADING',
+        progress_percent: 25,
+        bytes_downloaded: 512,
+        total_bytes: 2048,
+      }),
+    )
+
+    const { unmount } = renderAt('/models/catalog?node_id=node-1')
+    const row = (await screen.findByText('org/restore-model')).closest('tr')
+    await userEvent.click(
+      within(row as HTMLElement).getByRole('button', { name: 'Download' }),
+    )
+    await waitFor(() => {
+      expect(downloadsApi.startHfDownload).toHaveBeenCalledTimes(1)
+    })
+    expect(
+      sessionStorage.getItem(
+        catalogDownloadDraftKey({
+          nodeId: 'node-1',
+          repositoryId: 'org/restore-model',
+          requestedRevision: 'abc',
+        }),
+      ),
+    ).toContain('job-restore-1')
+    await waitFor(() => {
+      expect(screen.getByText(/진행률 25%/)).toBeInTheDocument()
+    })
+    expect(screen.getByText(/512 B \/ 2\.0 KiB/)).toBeInTheDocument()
+
+    unmount()
+    vi.mocked(downloadsApi.startHfDownload).mockClear()
+    vi.mocked(downloadsApi.getHfDownload).mockClear()
+    vi.mocked(downloadsApi.getHfDownload).mockResolvedValue(
+      makeJob({
+        job_id: 'job-restore-1',
+        repository_id: 'org/restore-model',
+        status: 'READY',
+        local_path: '/data/hf/restore',
+        resolved_revision: 'abc',
+        size_bytes: 2048,
+        progress_percent: 100,
+      }),
+    )
+
+    renderAt('/models/catalog?node_id=node-1')
+    await waitFor(() => {
+      expect(downloadsApi.getHfDownload).toHaveBeenCalledWith(
+        'job-restore-1',
+        expect.anything(),
+      )
+    })
+    expect(downloadsApi.startHfDownload).not.toHaveBeenCalled()
+    expect(await screen.findByText('/data/hf/restore')).toBeInTheDocument()
+  })
+
+  it('restores FAILED/CANCELED without auto POST and allows explicit Retry', async () => {
+    vi.mocked(catalogApi.listHfCatalog).mockResolvedValue(
+      pageResult([makeItem({ repository_id: 'org/fail-restore' })]),
+    )
+    writeCatalogDownloadDraft(sessionStorage, {
+      schema: 1,
+      jobId: 'job-fail-restore',
+      nodeId: 'node-1',
+      repositoryId: 'org/fail-restore',
+      requestedRevision: 'abc',
+      savedAt: Date.now(),
+    })
+    vi.mocked(downloadsApi.getHfDownload).mockResolvedValue(
+      makeJob({
+        job_id: 'job-fail-restore',
+        repository_id: 'org/fail-restore',
+        status: 'FAILED',
+        error_message: 'disk full',
+      }),
+    )
+    vi.mocked(downloadsApi.startHfDownload).mockResolvedValue(
+      makeJob({
+        job_id: 'job-fail-retry',
+        repository_id: 'org/fail-restore',
+        status: 'QUEUED',
+      }),
+    )
+
+    renderAt('/models/catalog?node_id=node-1')
+    expect(await screen.findByText('disk full')).toBeInTheDocument()
+    expect(downloadsApi.startHfDownload).not.toHaveBeenCalled()
+
+    await userEvent.click(screen.getByRole('button', { name: 'Retry download' }))
+    await waitFor(() => {
+      expect(downloadsApi.startHfDownload).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  it('isolates download tracking by node and requested_revision', async () => {
+    vi.mocked(nodesApi.listNodes).mockResolvedValue({
+      items: [
+        {
+          id: 'node-1',
+          name: 'gpu-a',
+          hostname: 'host-a',
+          agent_base_url: 'http://host.docker.internal:8100',
+          environment: 'local',
+          region: null,
+          status: 'ONLINE',
+          last_heartbeat_at: null,
+          cpu_model: null,
+          ram_total_mb: null,
+          disk_total_mb: null,
+          labels_json: null,
+          created_at: '2026-10-01T00:00:00Z',
+          updated_at: '2026-10-01T00:00:00Z',
+        },
+        {
+          id: 'node-2',
+          name: 'gpu-b',
+          hostname: 'host-b',
+          agent_base_url: 'http://host.docker.internal:8101',
+          environment: 'local',
+          region: null,
+          status: 'ONLINE',
+          last_heartbeat_at: null,
+          cpu_model: null,
+          ram_total_mb: null,
+          disk_total_mb: null,
+          labels_json: null,
+          created_at: '2026-10-01T00:00:00Z',
+          updated_at: '2026-10-01T00:00:00Z',
+        },
+      ],
+      page: 1,
+      page_size: 100,
+      total: 2,
+    })
+    vi.mocked(catalogApi.listHfCatalog).mockResolvedValue(
+      pageResult([
+        makeItem({ repository_id: 'org/shared', revision: 'rev-a' }),
+      ]),
+    )
+    writeCatalogDownloadDraft(sessionStorage, {
+      schema: 1,
+      jobId: 'job-node2',
+      nodeId: 'node-2',
+      repositoryId: 'org/shared',
+      requestedRevision: 'rev-a',
+      savedAt: Date.now(),
+    })
+    writeCatalogDownloadDraft(sessionStorage, {
+      schema: 1,
+      jobId: 'job-rev-b',
+      nodeId: 'node-1',
+      repositoryId: 'org/shared',
+      requestedRevision: 'rev-b',
+      savedAt: Date.now(),
+    })
+    writeCatalogDownloadDraft(sessionStorage, {
+      schema: 1,
+      jobId: 'job-node1-reva',
+      nodeId: 'node-1',
+      repositoryId: 'org/shared',
+      requestedRevision: 'rev-a',
+      savedAt: Date.now(),
+    })
+    vi.mocked(downloadsApi.getHfDownload).mockImplementation(async (jobId) => {
+      if (jobId === 'job-node1-reva') {
+        return makeJob({
+          job_id: 'job-node1-reva',
+          repository_id: 'org/shared',
+          node_id: 'node-1',
+          requested_revision: 'rev-a',
+          status: 'READY',
+          local_path: '/data/hf/node1-reva',
+        })
+      }
+      if (jobId === 'job-node2') {
+        return makeJob({
+          job_id: 'job-node2',
+          repository_id: 'org/shared',
+          node_id: 'node-2',
+          requested_revision: 'rev-a',
+          status: 'READY',
+          local_path: '/data/hf/node2',
+        })
+      }
+      return makeJob({
+        job_id: jobId,
+        repository_id: 'org/shared',
+        node_id: 'node-1',
+        requested_revision: 'rev-b',
+        status: 'READY',
+        local_path: '/data/hf/rev-b',
+      })
+    })
+
+    renderAt('/models/catalog?node_id=node-1')
+    expect(await screen.findByText('/data/hf/node1-reva')).toBeInTheDocument()
+    expect(screen.queryByText('/data/hf/node2')).not.toBeInTheDocument()
+    expect(screen.queryByText('/data/hf/rev-b')).not.toBeInTheDocument()
+    expect(downloadsApi.getHfDownload).toHaveBeenCalledWith(
+      'job-node1-reva',
+      expect.anything(),
+    )
+    expect(downloadsApi.getHfDownload).not.toHaveBeenCalledWith(
+      'job-node2',
+      expect.anything(),
+    )
+  })
+
+  it('blocks Download while restoring and does not POST', async () => {
+    vi.mocked(catalogApi.listHfCatalog).mockResolvedValue(
+      pageResult([makeItem({ repository_id: 'org/restoring' })]),
+    )
+    writeCatalogDownloadDraft(sessionStorage, {
+      schema: 1,
+      jobId: 'job-slow-restore',
+      nodeId: 'node-1',
+      repositoryId: 'org/restoring',
+      requestedRevision: 'abc',
+      savedAt: Date.now(),
+    })
+    let resolveGet!: (job: HfDownloadJob) => void
+    const getPromise = new Promise<HfDownloadJob>((resolve) => {
+      resolveGet = resolve
+    })
+    vi.mocked(downloadsApi.getHfDownload).mockReturnValue(getPromise)
+
+    renderAt('/models/catalog?node_id=node-1')
+    const row = (await screen.findByText('org/restoring')).closest('tr')
+    expect(row).not.toBeNull()
+    await waitFor(() => {
+      expect(
+        within(row as HTMLElement).getByRole('button', { name: 'Restoring…' }),
+      ).toBeDisabled()
+    })
+    expect(downloadsApi.startHfDownload).not.toHaveBeenCalled()
+
+    resolveGet(
+      makeJob({
+        job_id: 'job-slow-restore',
+        repository_id: 'org/restoring',
+        status: 'VERIFYING',
+        progress_percent: 90,
+      }),
+    )
+    await waitFor(() => {
+      expect(screen.getByText(/진행률 90%/)).toBeInTheDocument()
+    })
+    expect(downloadsApi.startHfDownload).not.toHaveBeenCalled()
+  })
+
+  it('keeps last good download status on poll failure and recovers on retry', async () => {
+    vi.mocked(catalogApi.listHfCatalog).mockResolvedValue(
+      pageResult([makeItem({ repository_id: 'org/poll-warn' })]),
+    )
+    vi.mocked(downloadsApi.startHfDownload).mockResolvedValue(
+      makeJob({
+        job_id: 'job-poll-warn',
+        repository_id: 'org/poll-warn',
+        status: 'DOWNLOADING',
+        progress_percent: 15,
+      }),
+    )
+    let allowPollSuccess = false
+    vi.mocked(downloadsApi.getHfDownload).mockImplementation(async () => {
+      if (!allowPollSuccess) {
+        throw new ApiError('upstream unavailable', { status: 503 })
+      }
+      return makeJob({
+        job_id: 'job-poll-warn',
+        repository_id: 'org/poll-warn',
+        status: 'DOWNLOADING',
+        progress_percent: 55,
+      })
+    })
+
+    renderAt('/models/catalog?node_id=node-1')
+    const row = (await screen.findByText('org/poll-warn')).closest('tr')
+    await userEvent.click(
+      within(row as HTMLElement).getByRole('button', { name: 'Download' }),
+    )
+    await waitFor(() => {
+      expect(screen.getByText(/진행률 15%/)).toBeInTheDocument()
+    })
+    await waitFor(() => {
+      expect(screen.getByText(/upstream unavailable/)).toBeInTheDocument()
+    })
+    expect(screen.getByText(/진행률 15%/)).toBeInTheDocument()
+
+    allowPollSuccess = true
+    await userEvent.click(
+      screen.getByRole('button', { name: '상태 다시 조회' }),
+    )
+    await waitFor(() => {
+      expect(screen.getByText(/진행률 55%/)).toBeInTheDocument()
+    })
+  })
+
+  it('clears unusable draft on 404 restore without auto POST', async () => {
+    vi.mocked(catalogApi.listHfCatalog).mockResolvedValue(
+      pageResult([makeItem({ repository_id: 'org/missing-job' })]),
+    )
+    const key = catalogDownloadDraftKey({
+      nodeId: 'node-1',
+      repositoryId: 'org/missing-job',
+      requestedRevision: 'abc',
+    })
+    writeCatalogDownloadDraft(sessionStorage, {
+      schema: 1,
+      jobId: 'job-gone',
+      nodeId: 'node-1',
+      repositoryId: 'org/missing-job',
+      requestedRevision: 'abc',
+      savedAt: Date.now(),
+    })
+    vi.mocked(downloadsApi.getHfDownload).mockRejectedValue(
+      new ApiError('not found', { status: 404 }),
+    )
+
+    renderAt('/models/catalog?node_id=node-1')
+    expect(await screen.findByText('org/missing-job')).toBeInTheDocument()
+    await waitFor(() => {
+      expect(
+        screen.getByText(/저장된 다운로드 Job을 찾을 수 없어 추적을 정리/),
+      ).toBeInTheDocument()
+    })
+    expect(sessionStorage.getItem(key)).toBeNull()
+    expect(downloadsApi.startHfDownload).not.toHaveBeenCalled()
+  })
+
+  it('ignores corrupt sessionStorage drafts without breaking the page', async () => {
+    vi.mocked(catalogApi.listHfCatalog).mockResolvedValue(
+      pageResult([makeItem({ repository_id: 'org/corrupt-draft' })]),
+    )
+    sessionStorage.setItem(
+      catalogDownloadDraftKey({
+        nodeId: 'node-1',
+        repositoryId: 'org/corrupt-draft',
+        requestedRevision: 'abc',
+      }),
+      '{not-json',
+    )
+
+    renderAt('/models/catalog?node_id=node-1')
+    expect(await screen.findByText('org/corrupt-draft')).toBeInTheDocument()
+    expect(
+      within(
+        (screen.getByText('org/corrupt-draft').closest('tr') as HTMLElement),
+      ).getByRole('button', { name: 'Download' }),
+    ).not.toBeDisabled()
+    expect(downloadsApi.getHfDownload).not.toHaveBeenCalled()
+    expect(downloadsApi.startHfDownload).not.toHaveBeenCalled()
+  })
+
+  it('does not start overlapping poll GETs when a response is slower than the poll interval', async () => {
+    vi.mocked(catalogApi.listHfCatalog).mockResolvedValue(
+      pageResult([makeItem({ repository_id: 'org/slow-poll' })]),
+    )
+    vi.mocked(downloadsApi.startHfDownload).mockResolvedValue(
+      makeJob({
+        job_id: 'job-slow-poll',
+        repository_id: 'org/slow-poll',
+        status: 'DOWNLOADING',
+        progress_percent: 5,
+      }),
+    )
+    let resolveFirst!: (job: HfDownloadJob) => void
+    const first = new Promise<HfDownloadJob>((resolve) => {
+      resolveFirst = resolve
+    })
+    let callCount = 0
+    let inflight = 0
+    let maxInflight = 0
+    let sawAbortDuringFirst = false
+    vi.mocked(downloadsApi.getHfDownload).mockImplementation(
+      async (_jobId, signal) => {
+        callCount += 1
+        inflight += 1
+        maxInflight = Math.max(maxInflight, inflight)
+        try {
+          if (callCount === 1) {
+            const aborted = await Promise.race([
+              first.then((job) => ({ kind: 'job' as const, job })),
+              new Promise<{ kind: 'abort' }>((resolve) => {
+                if (!signal) return
+                if (signal.aborted) {
+                  resolve({ kind: 'abort' })
+                  return
+                }
+                signal.addEventListener(
+                  'abort',
+                  () => resolve({ kind: 'abort' }),
+                  { once: true },
+                )
+              }),
+            ])
+            if (aborted.kind === 'abort') {
+              sawAbortDuringFirst = true
+              throw new DOMException('Aborted', 'AbortError')
+            }
+            return aborted.job
+          }
+          return makeJob({
+            job_id: 'job-slow-poll',
+            repository_id: 'org/slow-poll',
+            status: 'DOWNLOADING',
+            progress_percent: 70,
+          })
+        } finally {
+          inflight -= 1
+        }
+      },
+    )
+
+    renderAt('/models/catalog?node_id=node-1')
+    const row = (await screen.findByText('org/slow-poll')).closest('tr')
+    await userEvent.click(
+      within(row as HTMLElement).getByRole('button', { name: 'Download' }),
+    )
+    await waitFor(() => {
+      expect(downloadsApi.getHfDownload).toHaveBeenCalledTimes(1)
+    })
+    await new Promise((r) =>
+      setTimeout(r, CATALOG_DOWNLOAD_POLL_MS + 400),
+    )
+    expect(downloadsApi.getHfDownload).toHaveBeenCalledTimes(1)
+    expect(maxInflight).toBe(1)
+    expect(sawAbortDuringFirst).toBe(false)
+
+    resolveFirst(
+      makeJob({
+        job_id: 'job-slow-poll',
+        repository_id: 'org/slow-poll',
+        status: 'DOWNLOADING',
+        progress_percent: 40,
+      }),
+    )
+    await waitFor(
+      () => {
+        expect(screen.getByText(/진행률 40%/)).toBeInTheDocument()
+      },
+      { timeout: CATALOG_DOWNLOAD_POLL_MS + 2000 },
+    )
+    await waitFor(
+      () => {
+        expect(
+          vi.mocked(downloadsApi.getHfDownload).mock.calls.length,
+        ).toBeGreaterThan(1)
+      },
+      { timeout: CATALOG_DOWNLOAD_POLL_MS + 2000 },
+    )
+    expect(maxInflight).toBe(1)
+  }, 15000)
+
+  it('stops polling after terminal READY', async () => {
+    vi.mocked(catalogApi.listHfCatalog).mockResolvedValue(
+      pageResult([makeItem({ repository_id: 'org/terminal-poll' })]),
+    )
+    vi.mocked(downloadsApi.startHfDownload).mockResolvedValue(
+      makeJob({
+        job_id: 'job-terminal',
+        repository_id: 'org/terminal-poll',
+        status: 'DOWNLOADING',
+        progress_percent: 10,
+      }),
+    )
+    vi.mocked(downloadsApi.getHfDownload).mockResolvedValue(
+      makeJob({
+        job_id: 'job-terminal',
+        repository_id: 'org/terminal-poll',
+        status: 'READY',
+        local_path: '/data/hf/terminal',
+        progress_percent: 100,
+        size_bytes: 100,
+      }),
+    )
+
+    renderAt('/models/catalog?node_id=node-1')
+    const row = (await screen.findByText('org/terminal-poll')).closest('tr')
+    await userEvent.click(
+      within(row as HTMLElement).getByRole('button', { name: 'Download' }),
+    )
+    expect(await screen.findByText('/data/hf/terminal')).toBeInTheDocument()
+    const callsAfterReady = vi.mocked(downloadsApi.getHfDownload).mock.calls
+      .length
+    await new Promise((r) =>
+      setTimeout(r, CATALOG_DOWNLOAD_POLL_MS + 400),
+    )
+    expect(vi.mocked(downloadsApi.getHfDownload).mock.calls.length).toBe(
+      callsAfterReady,
+    )
+  }, 10000)
+
+  it('ignores late poll responses after unmount', async () => {
+    vi.mocked(catalogApi.listHfCatalog).mockResolvedValue(
+      pageResult([makeItem({ repository_id: 'org/late-unmount' })]),
+    )
+    vi.mocked(downloadsApi.startHfDownload).mockResolvedValue(
+      makeJob({
+        job_id: 'job-late',
+        repository_id: 'org/late-unmount',
+        status: 'DOWNLOADING',
+        progress_percent: 1,
+      }),
+    )
+    let resolveLate!: (job: HfDownloadJob) => void
+    const late = new Promise<HfDownloadJob>((resolve) => {
+      resolveLate = resolve
+    })
+    vi.mocked(downloadsApi.getHfDownload).mockReturnValue(late)
+
+    const view = renderAt('/models/catalog?node_id=node-1')
+    const row = (await screen.findByText('org/late-unmount')).closest('tr')
+    await userEvent.click(
+      within(row as HTMLElement).getByRole('button', { name: 'Download' }),
+    )
+    await waitFor(() => {
+      expect(downloadsApi.getHfDownload).toHaveBeenCalled()
+    })
+    view.unmount()
+    resolveLate(
+      makeJob({
+        job_id: 'job-late',
+        repository_id: 'org/late-unmount',
+        status: 'DOWNLOADING',
+        progress_percent: 99,
+      }),
+    )
+    await new Promise((r) => setTimeout(r, 50))
+    expect(screen.queryByText(/진행률 99%/)).not.toBeInTheDocument()
+  })
+
+  it('clears download tracking on Node change without applying prior Node poll', async () => {
+    vi.mocked(nodesApi.listNodes).mockResolvedValue({
+      items: [
+        {
+          id: 'node-1',
+          name: 'gpu-a',
+          hostname: 'host-a',
+          agent_base_url: 'http://host.docker.internal:8100',
+          environment: 'local',
+          region: null,
+          status: 'ONLINE',
+          last_heartbeat_at: null,
+          cpu_model: null,
+          ram_total_mb: null,
+          disk_total_mb: null,
+          labels_json: null,
+          created_at: '2026-10-01T00:00:00Z',
+          updated_at: '2026-10-01T00:00:00Z',
+        },
+        {
+          id: 'node-2',
+          name: 'gpu-b',
+          hostname: 'host-b',
+          agent_base_url: 'http://host.docker.internal:8101',
+          environment: 'local',
+          region: null,
+          status: 'ONLINE',
+          last_heartbeat_at: null,
+          cpu_model: null,
+          ram_total_mb: null,
+          disk_total_mb: null,
+          labels_json: null,
+          created_at: '2026-10-01T00:00:00Z',
+          updated_at: '2026-10-01T00:00:00Z',
+        },
+      ],
+      page: 1,
+      page_size: 100,
+      total: 2,
+    })
+    vi.mocked(catalogApi.listHfCatalog).mockResolvedValue(
+      pageResult([makeItem({ repository_id: 'org/node-switch' })]),
+    )
+    vi.mocked(downloadsApi.startHfDownload).mockResolvedValue(
+      makeJob({
+        job_id: 'job-node1',
+        repository_id: 'org/node-switch',
+        node_id: 'node-1',
+        status: 'DOWNLOADING',
+        progress_percent: 12,
+      }),
+    )
+    let resolvePoll!: (job: HfDownloadJob) => void
+    const pollPromise = new Promise<HfDownloadJob>((resolve) => {
+      resolvePoll = resolve
+    })
+    vi.mocked(downloadsApi.getHfDownload).mockReturnValue(pollPromise)
+
+    renderAt('/models/catalog?node_id=node-1')
+    const row = (await screen.findByText('org/node-switch')).closest('tr')
+    await userEvent.click(
+      within(row as HTMLElement).getByRole('button', { name: 'Download' }),
+    )
+    await waitFor(() => {
+      expect(downloadsApi.startHfDownload).toHaveBeenCalled()
+    })
+
+    await userEvent.selectOptions(screen.getByLabelText('Node'), 'node-2')
+    await waitFor(() => {
+      expect(
+        within(
+          (screen.getByText('org/node-switch').closest('tr') as HTMLElement),
+        ).getByRole('button', { name: 'Download' }),
+      ).not.toBeDisabled()
+    })
+    resolvePoll(
+      makeJob({
+        job_id: 'job-node1',
+        repository_id: 'org/node-switch',
+        node_id: 'node-1',
+        status: 'DOWNLOADING',
+        progress_percent: 88,
+      }),
+    )
+    await new Promise((r) => setTimeout(r, 50))
+    expect(screen.queryByText(/진행률 88%/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/진행률 12%/)).not.toBeInTheDocument()
+  })
+
+  it('keeps Download locked after restore 503 until retry succeeds', async () => {
+    vi.mocked(catalogApi.listHfCatalog).mockResolvedValue(
+      pageResult([makeItem({ repository_id: 'org/restore-503' })]),
+    )
+    writeCatalogDownloadDraft(sessionStorage, {
+      schema: 1,
+      jobId: 'job-503',
+      nodeId: 'node-1',
+      repositoryId: 'org/restore-503',
+      requestedRevision: 'abc',
+      savedAt: Date.now(),
+    })
+    let allowRestore = false
+    vi.mocked(downloadsApi.getHfDownload).mockImplementation(async () => {
+      if (!allowRestore) {
+        throw new ApiError('restore upstream unavailable', { status: 503 })
+      }
+      return makeJob({
+        job_id: 'job-503',
+        repository_id: 'org/restore-503',
+        status: 'DOWNLOADING',
+        progress_percent: 33,
+      })
+    })
+
+    renderAt('/models/catalog?node_id=node-1')
+    const row = (await screen.findByText('org/restore-503')).closest(
+      'tr',
+    ) as HTMLElement
+    await waitFor(() => {
+      expect(
+        screen.getByText(/restore upstream unavailable/),
+      ).toBeInTheDocument()
+    })
+    expect(
+      within(row).getByRole('button', { name: 'Restoring…' }),
+    ).toBeDisabled()
+    expect(downloadsApi.startHfDownload).not.toHaveBeenCalled()
+    expect(
+      sessionStorage.getItem(
+        catalogDownloadDraftKey({
+          nodeId: 'node-1',
+          repositoryId: 'org/restore-503',
+          requestedRevision: 'abc',
+        }),
+      ),
+    ).toContain('job-503')
+
+    allowRestore = true
+    await userEvent.click(
+      screen.getByRole('button', { name: '상태 다시 조회' }),
+    )
+    await waitFor(() => {
+      expect(screen.getByText(/진행률 33%/)).toBeInTheDocument()
+    })
+    expect(downloadsApi.startHfDownload).not.toHaveBeenCalled()
+  })
+
+  it('blocks Download for later draft rows while earlier restores are still in flight', async () => {
+    vi.mocked(catalogApi.listHfCatalog).mockResolvedValue(
+      pageResult([
+        makeItem({ repository_id: 'org/first' }),
+        makeItem({ repository_id: 'org/second' }),
+      ]),
+    )
+    writeCatalogDownloadDraft(sessionStorage, {
+      schema: 1,
+      jobId: 'job-first',
+      nodeId: 'node-1',
+      repositoryId: 'org/first',
+      requestedRevision: 'abc',
+      savedAt: Date.now(),
+    })
+    writeCatalogDownloadDraft(sessionStorage, {
+      schema: 1,
+      jobId: 'job-second',
+      nodeId: 'node-1',
+      repositoryId: 'org/second',
+      requestedRevision: 'abc',
+      savedAt: Date.now(),
+    })
+    let resolveFirst!: (job: HfDownloadJob) => void
+    const firstPromise = new Promise<HfDownloadJob>((resolve) => {
+      resolveFirst = resolve
+    })
+    vi.mocked(downloadsApi.getHfDownload).mockImplementation(async (jobId) => {
+      if (jobId === 'job-first') return firstPromise
+      return makeJob({
+        job_id: 'job-second',
+        repository_id: 'org/second',
+        status: 'READY',
+        local_path: '/data/hf/second',
+      })
+    })
+
+    renderAt('/models/catalog?node_id=node-1')
+    const firstRow = (await screen.findByText('org/first')).closest(
+      'tr',
+    ) as HTMLElement
+    const secondRow = screen.getByText('org/second').closest('tr') as HTMLElement
+    await waitFor(() => {
+      expect(
+        within(firstRow).getByRole('button', { name: 'Restoring…' }),
+      ).toBeDisabled()
+      expect(
+        within(secondRow).getByRole('button', { name: 'Restoring…' }),
+      ).toBeDisabled()
+    })
+    expect(downloadsApi.startHfDownload).not.toHaveBeenCalled()
+    expect(downloadsApi.getHfDownload).toHaveBeenCalledWith(
+      'job-first',
+      expect.anything(),
+    )
+    expect(downloadsApi.getHfDownload).not.toHaveBeenCalledWith(
+      'job-second',
+      expect.anything(),
+    )
+
+    resolveFirst(
+      makeJob({
+        job_id: 'job-first',
+        repository_id: 'org/first',
+        status: 'READY',
+        local_path: '/data/hf/first',
+      }),
+    )
+    await waitFor(() => {
+      expect(screen.getByText('/data/hf/first')).toBeInTheDocument()
+      expect(screen.getByText('/data/hf/second')).toBeInTheDocument()
+    })
+    expect(downloadsApi.startHfDownload).not.toHaveBeenCalled()
   })
 })

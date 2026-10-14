@@ -27,9 +27,41 @@ import { Pagination } from '../components/Pagination'
 import { SectionError } from '../components/SectionError'
 import { StatusBadge } from '../components/StatusBadge'
 import { TruncatedValue } from '../components/TruncatedValue'
+import {
+  catalogDownloadTrackKey,
+  clearCatalogDownloadDraft,
+  normalizeRequestedRevision,
+  readCatalogDownloadDraft,
+  writeCatalogDownloadDraft,
+  type DraftStorage,
+} from '../utils/catalogDownloadDraft'
 import { abbreviateMiddle } from '../utils/format'
 import { formatApiDateTime } from '../utils/date'
 import { parsePositivePage } from '../utils/query'
+
+type TrackedDownload = {
+  job: HfDownloadJob
+  nodeId: string
+  repositoryId: string
+  requestedRevision: string | null
+  /** Client time of last successful GET/POST job payload. */
+  lastSuccessAt: Date | null
+}
+
+function jobMatchesTrack(
+  job: HfDownloadJob,
+  nodeId: string,
+  repositoryId: string,
+  requestedRevision: string | null,
+): boolean {
+  return (
+    job.job_id.length > 0 &&
+    job.node_id === nodeId &&
+    job.repository_id === repositoryId &&
+    normalizeRequestedRevision(job.requested_revision) ===
+      normalizeRequestedRevision(requestedRevision)
+  )
+}
 
 /** Per-repo detailed Fit analysis (button click), distinct from catalog list summary. */
 type FitDetailState = {
@@ -65,7 +97,9 @@ function fitDetailMatchesCurrent(
 }
 
 const PAGE_SIZE = 20
-const POLL_MS = 2000
+/** Active download poll cadence; next GET is scheduled only after the prior cycle finishes. */
+export const CATALOG_DOWNLOAD_POLL_MS = 2000
+const POLL_MS = CATALOG_DOWNLOAD_POLL_MS
 const KNOWN_TYPES = new Set(['LLM', 'VLM', 'EMBEDDING'])
 
 function parseModelType(raw: string | null): string | null {
@@ -162,14 +196,33 @@ export function ModelCatalogPage() {
   const [expandedFitRepos, setExpandedFitRepos] = useState<
     Record<string, boolean>
   >({})
-  const [downloadByRepo, setDownloadByRepo] = useState<
-    Record<string, HfDownloadJob>
+  const [downloadByKey, setDownloadByKey] = useState<
+    Record<string, TrackedDownload>
+  >({})
+  const [downloadRestoringByKey, setDownloadRestoringByKey] = useState<
+    Record<string, boolean>
+  >({})
+  const [downloadPollWarningByKey, setDownloadPollWarningByKey] = useState<
+    Record<string, string>
   >({})
   const [downloadTypeByRepo, setDownloadTypeByRepo] = useState<
     Record<string, string>
   >({})
-  const [downloadStarting, setDownloadStarting] = useState<string | null>(null)
+  const [downloadStartingByKey, setDownloadStartingByKey] = useState<
+    Record<string, boolean>
+  >({})
+  const storage = ((): DraftStorage | null => {
+    try {
+      return window.sessionStorage
+    } catch {
+      return null
+    }
+  })()
   const abortRef = useRef<AbortController | null>(null)
+  const downloadByKeyRef = useRef(downloadByKey)
+  downloadByKeyRef.current = downloadByKey
+  const downloadPollGenRef = useRef(0)
+  const downloadRestoreGenRef = useRef(0)
   const hasLoadedRef = useRef(false)
   const readGenRef = useRef(0)
   const fitAbortByRepoRef = useRef<Record<string, AbortController>>({})
@@ -356,35 +409,394 @@ export function ModelCatalogPage() {
     setExpandedFitRepos(prune)
   }, [items, invalidateFitRepo])
 
+  // F5 / re-entry: restore Job IDs from sessionStorage via GET only (no POST).
+  // Mark every draft-backed row restoring up front so sequential GET order cannot
+  // leave later rows clickable for a duplicate Download.
   useEffect(() => {
-    const active = Object.values(downloadByRepo).filter((j) =>
-      isActiveDownloadStatus(j.status),
-    )
-    if (active.length === 0) return
-
+    if (!nodeId || items == null) return
+    const gen = ++downloadRestoreGenRef.current
+    const controllers: AbortController[] = []
     let cancelled = false
-    const poll = async () => {
-      for (const job of active) {
-        try {
-          const updated = await getHfDownload(job.job_id)
-          if (cancelled) return
-          setDownloadByRepo((prev) => ({
-            ...prev,
-            [job.repository_id]: updated,
-          }))
-        } catch {
-          /* keep last known job; user can refresh */
+
+    const pending: Array<{
+      item: HfCatalogModel
+      key: string
+      requestedRevision: string | null
+      jobId: string
+    }> = []
+    for (const item of items) {
+      const requestedRevision = normalizeRequestedRevision(item.revision)
+      const key = catalogDownloadTrackKey(
+        nodeId,
+        item.repository_id,
+        requestedRevision,
+      )
+      if (downloadByKeyRef.current[key]) continue
+      const draft = readCatalogDownloadDraft(storage, {
+        nodeId,
+        repositoryId: item.repository_id,
+        requestedRevision,
+      })
+      if (!draft) continue
+      pending.push({ item, key, requestedRevision, jobId: draft.jobId })
+    }
+
+    if (pending.length > 0) {
+      setDownloadRestoringByKey((prev) => {
+        const next = { ...prev }
+        for (const { key } of pending) next[key] = true
+        return next
+      })
+    }
+
+    const clearRestoring = (key: string) => {
+      if (gen !== downloadRestoreGenRef.current) return
+      setDownloadRestoringByKey((prev) => {
+        if (!prev[key]) return prev
+        const next = { ...prev }
+        delete next[key]
+        return next
+      })
+    }
+
+    const restoreOne = async (entry: (typeof pending)[number]) => {
+      const { item, key, requestedRevision, jobId } = entry
+      if (downloadByKeyRef.current[key]) {
+        clearRestoring(key)
+        return
+      }
+      const controller = new AbortController()
+      controllers.push(controller)
+      try {
+        const job = await getHfDownload(jobId, controller.signal)
+        if (
+          cancelled ||
+          gen !== downloadRestoreGenRef.current ||
+          nodeIdRef.current !== nodeId ||
+          controller.signal.aborted
+        ) {
+          return
         }
+        if (
+          !jobMatchesTrack(
+            job,
+            nodeId,
+            item.repository_id,
+            requestedRevision,
+          )
+        ) {
+          clearCatalogDownloadDraft(storage, {
+            nodeId,
+            repositoryId: item.repository_id,
+            requestedRevision,
+          })
+          setDownloadPollWarningByKey((prev) => ({
+            ...prev,
+            [key]: '저장된 다운로드 Job이 현재 모델/Node/revision과 맞지 않아 추적을 정리했습니다.',
+          }))
+          return
+        }
+        setDownloadByKey((prev) => ({
+          ...prev,
+          [key]: {
+            job,
+            nodeId,
+            repositoryId: item.repository_id,
+            requestedRevision,
+            lastSuccessAt: new Date(),
+          },
+        }))
+        setDownloadPollWarningByKey((prev) => {
+          if (!(key in prev)) return prev
+          const next = { ...prev }
+          delete next[key]
+          return next
+        })
+      } catch (err) {
+        if (
+          cancelled ||
+          gen !== downloadRestoreGenRef.current ||
+          controller.signal.aborted
+        ) {
+          return
+        }
+        if (err instanceof ApiError && err.status === 404) {
+          clearCatalogDownloadDraft(storage, {
+            nodeId,
+            repositoryId: item.repository_id,
+            requestedRevision,
+          })
+          setDownloadPollWarningByKey((prev) => ({
+            ...prev,
+            [key]: '저장된 다운로드 Job을 찾을 수 없어 추적을 정리했습니다.',
+          }))
+          return
+        }
+        // Transient failure: keep draft so Download stays locked until retry
+        // succeeds or tracking is cleared (404 / mismatch).
+        setDownloadPollWarningByKey((prev) => ({
+          ...prev,
+          [key]:
+            err instanceof ApiError
+              ? err.message
+              : '다운로드 상태 복원에 실패했습니다. 다시 시도할 수 있습니다.',
+        }))
+      } finally {
+        clearRestoring(key)
       }
     }
 
-    const timer = window.setInterval(() => void poll(), POLL_MS)
-    void poll()
+    void (async () => {
+      for (const entry of pending) {
+        if (cancelled || gen !== downloadRestoreGenRef.current) return
+        await restoreOne(entry)
+      }
+    })()
+
     return () => {
       cancelled = true
-      window.clearInterval(timer)
+      downloadRestoreGenRef.current += 1
+      for (const c of controllers) c.abort()
     }
-  }, [downloadByRepo])
+  }, [nodeId, items, storage])
+
+  const activeDownloadSignature = Object.values(downloadByKey)
+    .filter((t) => isActiveDownloadStatus(t.job.status))
+    .map((t) => t.job.job_id)
+    .sort()
+    .join('|')
+
+  // Active Jobs: single-flight poll. Next GET is scheduled only after the prior
+  // cycle finishes (no abort of in-flight GET on the 2s cadence). Cleanup on
+  // unmount / Node change / terminal signature still aborts outstanding work.
+  useEffect(() => {
+    if (!activeDownloadSignature) return
+    const gen = ++downloadPollGenRef.current
+    let cancelled = false
+    let timer: number | null = null
+    let inFlight = false
+    const controllers = new Map<string, AbortController>()
+
+    const scheduleNext = () => {
+      if (cancelled || gen !== downloadPollGenRef.current) return
+      const stillActive = Object.values(downloadByKeyRef.current).some((t) =>
+        isActiveDownloadStatus(t.job.status),
+      )
+      if (!stillActive) return
+      timer = window.setTimeout(() => void pollOnce(), POLL_MS)
+    }
+
+    const pollOnce = async () => {
+      if (cancelled || gen !== downloadPollGenRef.current) return
+      if (inFlight) return
+      inFlight = true
+      try {
+        const active = Object.entries(downloadByKeyRef.current).filter(([, t]) =>
+          isActiveDownloadStatus(t.job.status),
+        )
+        for (const [key, tracked] of active) {
+          if (cancelled || gen !== downloadPollGenRef.current) return
+          const controller = new AbortController()
+          controllers.set(key, controller)
+          try {
+            const updated = await getHfDownload(
+              tracked.job.job_id,
+              controller.signal,
+            )
+            if (
+              cancelled ||
+              gen !== downloadPollGenRef.current ||
+              controller.signal.aborted
+            ) {
+              continue
+            }
+            if (updated.job_id !== tracked.job.job_id) continue
+            if (
+              !jobMatchesTrack(
+                updated,
+                tracked.nodeId,
+                tracked.repositoryId,
+                tracked.requestedRevision,
+              )
+            ) {
+              continue
+            }
+            if (nodeIdRef.current !== tracked.nodeId) continue
+            setDownloadByKey((prev) => {
+              const cur = prev[key]
+              if (!cur || cur.job.job_id !== updated.job_id) return prev
+              return {
+                ...prev,
+                [key]: {
+                  ...cur,
+                  job: updated,
+                  lastSuccessAt: new Date(),
+                },
+              }
+            })
+            setDownloadPollWarningByKey((prev) => {
+              if (!(key in prev)) return prev
+              const next = { ...prev }
+              delete next[key]
+              return next
+            })
+          } catch (err) {
+            if (
+              cancelled ||
+              gen !== downloadPollGenRef.current ||
+              controller.signal.aborted
+            ) {
+              continue
+            }
+            if (err instanceof DOMException && err.name === 'AbortError') {
+              continue
+            }
+            if (err instanceof ApiError && err.status === 404) {
+              clearCatalogDownloadDraft(storage, {
+                nodeId: tracked.nodeId,
+                repositoryId: tracked.repositoryId,
+                requestedRevision: tracked.requestedRevision,
+              })
+              setDownloadByKey((prev) => {
+                if (!(key in prev)) return prev
+                const next = { ...prev }
+                delete next[key]
+                return next
+              })
+              setDownloadPollWarningByKey((prev) => ({
+                ...prev,
+                [key]: '다운로드 Job이 더 이상 존재하지 않아 추적을 정리했습니다.',
+              }))
+              continue
+            }
+            setDownloadPollWarningByKey((prev) => ({
+              ...prev,
+              [key]:
+                err instanceof ApiError
+                  ? err.message
+                  : '다운로드 상태 갱신에 실패했습니다. 마지막 정상 상태를 유지합니다.',
+            }))
+          } finally {
+            if (controllers.get(key) === controller) {
+              controllers.delete(key)
+            }
+          }
+        }
+      } finally {
+        inFlight = false
+        scheduleNext()
+      }
+    }
+
+    void pollOnce()
+    return () => {
+      cancelled = true
+      downloadPollGenRef.current += 1
+      if (timer != null) window.clearTimeout(timer)
+      for (const c of controllers.values()) c.abort()
+      controllers.clear()
+    }
+  }, [activeDownloadSignature, storage])
+
+  const retryDownloadStatus = async (
+    trackKey: string,
+    item?: HfCatalogModel,
+  ) => {
+    const tracked = downloadByKeyRef.current[trackKey]
+    let jobId = tracked?.job.job_id
+    let nodeIdForJob = tracked?.nodeId
+    let repositoryId = tracked?.repositoryId
+    let requestedRevision = tracked?.requestedRevision ?? null
+
+    if (!jobId && item && nodeId) {
+      const draft = readCatalogDownloadDraft(storage, {
+        nodeId,
+        repositoryId: item.repository_id,
+        requestedRevision: normalizeRequestedRevision(item.revision),
+      })
+      if (!draft) return
+      jobId = draft.jobId
+      nodeIdForJob = draft.nodeId
+      repositoryId = draft.repositoryId
+      requestedRevision = draft.requestedRevision
+      setDownloadRestoringByKey((prev) => ({ ...prev, [trackKey]: true }))
+    }
+    if (!jobId || !nodeIdForJob || !repositoryId) return
+
+    try {
+      const updated = await getHfDownload(jobId)
+      if (
+        !jobMatchesTrack(
+          updated,
+          nodeIdForJob,
+          repositoryId,
+          requestedRevision,
+        )
+      ) {
+        clearCatalogDownloadDraft(storage, {
+          nodeId: nodeIdForJob,
+          repositoryId,
+          requestedRevision,
+        })
+        setDownloadPollWarningByKey((prev) => ({
+          ...prev,
+          [trackKey]:
+            '저장된 다운로드 Job이 현재 모델/Node/revision과 맞지 않아 추적을 정리했습니다.',
+        }))
+        return
+      }
+      if (nodeIdRef.current !== nodeIdForJob) return
+      setDownloadByKey((prev) => ({
+        ...prev,
+        [trackKey]: {
+          job: updated,
+          nodeId: nodeIdForJob,
+          repositoryId,
+          requestedRevision,
+          lastSuccessAt: new Date(),
+        },
+      }))
+      setDownloadPollWarningByKey((prev) => {
+        if (!(trackKey in prev)) return prev
+        const next = { ...prev }
+        delete next[trackKey]
+        return next
+      })
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 404) {
+        clearCatalogDownloadDraft(storage, {
+          nodeId: nodeIdForJob,
+          repositoryId,
+          requestedRevision,
+        })
+        setDownloadByKey((prev) => {
+          if (!(trackKey in prev)) return prev
+          const next = { ...prev }
+          delete next[trackKey]
+          return next
+        })
+        setDownloadPollWarningByKey((prev) => ({
+          ...prev,
+          [trackKey]: '다운로드 Job이 더 이상 존재하지 않아 추적을 정리했습니다.',
+        }))
+        return
+      }
+      setDownloadPollWarningByKey((prev) => ({
+        ...prev,
+        [trackKey]:
+          err instanceof ApiError
+            ? err.message
+            : '다운로드 상태 조회에 실패했습니다.',
+      }))
+    } finally {
+      setDownloadRestoringByKey((prev) => {
+        if (!prev[trackKey]) return prev
+        const next = { ...prev }
+        delete next[trackKey]
+        return next
+      })
+    }
+  }
 
   const onSubmitSearch = (event: FormEvent) => {
     event.preventDefault()
@@ -492,9 +904,27 @@ export function ModelCatalogPage() {
 
   const onDownload = async (item: HfCatalogModel) => {
     if (!nodeId) return
-    const existing = downloadByRepo[item.repository_id]
-    if (existing && isActiveDownloadStatus(existing.status)) return
-    if (downloadStarting === item.repository_id) return
+    const requestedRevision = normalizeRequestedRevision(item.revision)
+    const key = catalogDownloadTrackKey(
+      nodeId,
+      item.repository_id,
+      requestedRevision,
+    )
+    const existing = downloadByKey[key]
+    if (existing && isActiveDownloadStatus(existing.job.status)) return
+    if (downloadStartingByKey[key] || downloadRestoringByKey[key]) return
+    // Draft without a restored Job means restore is pending or temporarily
+    // failed — never POST a duplicate Download until tracking is cleared.
+    if (
+      !existing &&
+      readCatalogDownloadDraft(storage, {
+        nodeId,
+        repositoryId: item.repository_id,
+        requestedRevision,
+      })
+    ) {
+      return
+    }
     const modelType = resolveDownloadModelType(
       item,
       downloadTypeByRepo[item.repository_id],
@@ -506,16 +936,50 @@ export function ModelCatalogPage() {
       return
     }
 
-    setDownloadStarting(item.repository_id)
+    setDownloadStartingByKey((prev) => ({ ...prev, [key]: true }))
     setError(null)
+    setDownloadPollWarningByKey((prev) => {
+      if (!(key in prev)) return prev
+      const next = { ...prev }
+      delete next[key]
+      return next
+    })
     try {
       const job = await startHfDownload({
         repositoryId: item.repository_id,
-        revision: item.revision,
+        revision: requestedRevision,
         nodeId,
         modelType,
       })
-      setDownloadByRepo((prev) => ({ ...prev, [item.repository_id]: job }))
+      if (
+        !jobMatchesTrack(
+          job,
+          nodeId,
+          item.repository_id,
+          requestedRevision,
+        )
+      ) {
+        setError('다운로드 응답이 요청한 Node/모델/revision과 일치하지 않습니다.')
+        return
+      }
+      writeCatalogDownloadDraft(storage, {
+        schema: 1,
+        jobId: job.job_id,
+        nodeId,
+        repositoryId: item.repository_id,
+        requestedRevision,
+        savedAt: Date.now(),
+      })
+      setDownloadByKey((prev) => ({
+        ...prev,
+        [key]: {
+          job,
+          nodeId,
+          repositoryId: item.repository_id,
+          requestedRevision,
+          lastSuccessAt: new Date(),
+        },
+      }))
     } catch (err) {
       setError(
         err instanceof ApiError
@@ -523,68 +987,164 @@ export function ModelCatalogPage() {
           : '다운로드를 시작하지 못했습니다.',
       )
     } finally {
-      setDownloadStarting(null)
+      setDownloadStartingByKey((prev) => {
+        if (!prev[key]) return prev
+        const next = { ...prev }
+        delete next[key]
+        return next
+      })
     }
   }
 
   const renderDownloadState = (item: HfCatalogModel) => {
-    const job = downloadByRepo[item.repository_id]
-    if (!job) return null
+    if (!nodeId) return null
+    const requestedRevision = normalizeRequestedRevision(item.revision)
+    const key = catalogDownloadTrackKey(
+      nodeId,
+      item.repository_id,
+      requestedRevision,
+    )
+    const tracked = downloadByKey[key]
+    const restoring = Boolean(downloadRestoringByKey[key])
+    const pollWarning = downloadPollWarningByKey[key]
+    const starting = Boolean(downloadStartingByKey[key])
 
-    const status = job.status.toUpperCase()
-    if (status === 'READY') {
+    if (restoring && !tracked) {
       return (
-        <div className="secondary-text" style={{ marginTop: '0.35rem' }}>
-          <StatusBadge status={job.status} />
+        <div className="secondary-text" style={{ marginTop: '0.35rem' }} role="status">
+          저장된 다운로드 Job 복원 중…
+        </div>
+      )
+    }
+
+    if (!tracked && pollWarning) {
+      const draftStillPresent = Boolean(
+        readCatalogDownloadDraft(storage, {
+          nodeId,
+          repositoryId: item.repository_id,
+          requestedRevision,
+        }),
+      )
+      return (
+        <div style={{ marginTop: '0.35rem' }}>
+          <p className="catalog-fit-error" role="status">
+            {pollWarning}
+          </p>
+          <div className="toolbar__actions" style={{ marginTop: '0.25rem' }}>
+            {draftStillPresent ? (
+              <button
+                type="button"
+                className="btn btn--ghost"
+                disabled={restoring}
+                onClick={() => void retryDownloadStatus(key, item)}
+              >
+                상태 다시 조회
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="btn btn--ghost"
+                onClick={() => {
+                  setDownloadPollWarningByKey((prev) => {
+                    if (!(key in prev)) return prev
+                    const next = { ...prev }
+                    delete next[key]
+                    return next
+                  })
+                }}
+              >
+                안내 닫기
+              </button>
+            )}
+          </div>
+        </div>
+      )
+    }
+
+    // Draft still present while restore has not produced a Job yet (queued or
+    // mid-flight before restoring flag is set on a re-render).
+    if (
+      !tracked &&
+      readCatalogDownloadDraft(storage, {
+        nodeId,
+        repositoryId: item.repository_id,
+        requestedRevision,
+      })
+    ) {
+      return (
+        <div className="secondary-text" style={{ marginTop: '0.35rem' }} role="status">
+          저장된 다운로드 Job 복원 중…
+        </div>
+      )
+    }
+
+    if (!tracked) return null
+
+    const job = tracked.job
+    const status = job.status.toUpperCase()
+    const bytesLine =
+      job.bytes_downloaded != null || job.total_bytes != null
+        ? `${job.bytes_downloaded != null ? formatBytes(job.bytes_downloaded) : '—'} / ${
+            job.total_bytes != null ? formatBytes(job.total_bytes) : '—'
+          }`
+        : null
+
+    return (
+      <div className="secondary-text" style={{ marginTop: '0.35rem' }}>
+        <StatusBadge status={job.status} />
+        {isActiveDownloadStatus(job.status) ? (
+          <div>
+            {job.progress_percent != null
+              ? `진행률 ${job.progress_percent}%`
+              : '진행률 없음 (서버 미제공)'}
+          </div>
+        ) : null}
+        {bytesLine ? <div>{bytesLine}</div> : null}
+        {status === 'READY' ? (
           <div>
             {job.resolved_revision ? `rev ${job.resolved_revision}` : null}
             {job.size_bytes != null ? ` · ${formatBytes(job.size_bytes)}` : null}
           </div>
-          {job.local_path ? (
-            <TruncatedValue
-              className="mono"
-              value={job.local_path}
-              abbreviated={abbreviateMiddle(job.local_path, 28, 12)}
-            />
-          ) : null}
-        </div>
-      )
-    }
-
-    if (status === 'FAILED') {
-      return (
-        <div style={{ marginTop: '0.35rem' }}>
-          <StatusBadge status={job.status} />
-          {job.error_message ? (
-            <div className="secondary-text">{job.error_message}</div>
-          ) : null}
+        ) : null}
+        {job.local_path && status === 'READY' ? (
+          <TruncatedValue
+            className="mono"
+            value={job.local_path}
+            abbreviated={abbreviateMiddle(job.local_path, 28, 12)}
+          />
+        ) : null}
+        {job.error_message && (status === 'FAILED' || status === 'CANCELED') ? (
+          <div>{job.error_message}</div>
+        ) : null}
+        {tracked.lastSuccessAt ? (
+          <div>
+            마지막 성공 갱신:{' '}
+            {formatApiDateTime(tracked.lastSuccessAt.toISOString())}
+          </div>
+        ) : null}
+        {pollWarning ? (
+          <p className="catalog-fit-error" role="status">
+            {pollWarning}{' '}
+            <button
+              type="button"
+              className="btn btn--ghost"
+              onClick={() => void retryDownloadStatus(key)}
+            >
+              상태 다시 조회
+            </button>
+          </p>
+        ) : null}
+        {(status === 'FAILED' || status === 'CANCELED') && !starting ? (
           <button
             type="button"
             className="btn"
             style={{ marginTop: '0.25rem' }}
-            disabled={!nodeId || downloadStarting === item.repository_id}
+            disabled={!nodeId || starting || restoring}
             onClick={() => void onDownload(item)}
           >
             Retry download
           </button>
-        </div>
-      )
-    }
-
-    if (isActiveDownloadStatus(job.status)) {
-      const pct =
-        job.progress_percent != null ? `${job.progress_percent}%` : '…'
-      return (
-        <div className="secondary-text" style={{ marginTop: '0.35rem' }}>
-          <StatusBadge status={job.status} />
-          <div>Progress {pct}</div>
-        </div>
-      )
-    }
-
-    return (
-      <div style={{ marginTop: '0.35rem' }}>
-        <StatusBadge status={job.status} />
+        ) : null}
       </div>
     )
   }
@@ -657,8 +1217,14 @@ export function ModelCatalogPage() {
                 fitOnly: e.target.value ? fitOnly : false,
               })
               // Fit details clear via catalogContextKey effect; downloads are
-              // node-scoped and must reset here.
-              setDownloadByRepo({})
+              // node-scoped and must reset here. Drafts stay in sessionStorage
+              // for F5 / re-select restore (GET only).
+              setDownloadByKey({})
+              setDownloadRestoringByKey({})
+              setDownloadPollWarningByKey({})
+              setDownloadStartingByKey({})
+              downloadRestoreGenRef.current += 1
+              downloadPollGenRef.current += 1
             }}
           >
             <option value="">선택…</option>
@@ -741,9 +1307,38 @@ export function ModelCatalogPage() {
                       ? fitErrorEntry.message
                       : undefined
                   const expanded = Boolean(expandedFitRepos[repoId] && analysis)
-                  const job = downloadByRepo[repoId]
+                  const itemRequestedRevision = normalizeRequestedRevision(
+                    item.revision,
+                  )
+                  const downloadTrackKey = nodeId
+                    ? catalogDownloadTrackKey(
+                        nodeId,
+                        repoId,
+                        itemRequestedRevision,
+                      )
+                    : ''
+                  const trackedDownload = downloadTrackKey
+                    ? downloadByKey[downloadTrackKey]
+                    : undefined
+                  const job = trackedDownload?.job
                   const downloadActive =
                     job != null && isActiveDownloadStatus(job.status)
+                  const downloadRestoring = Boolean(
+                    downloadTrackKey && downloadRestoringByKey[downloadTrackKey],
+                  )
+                  const downloadStarting = Boolean(
+                    downloadTrackKey && downloadStartingByKey[downloadTrackKey],
+                  )
+                  const downloadDraftLocked =
+                    Boolean(nodeId) &&
+                    trackedDownload == null &&
+                    Boolean(
+                      readCatalogDownloadDraft(storage, {
+                        nodeId,
+                        repositoryId: repoId,
+                        requestedRevision: itemRequestedRevision,
+                      }),
+                    )
                   const diskBlocked = isDiskInsufficientForDownload(analysis)
                   const resolvedType = resolveDownloadModelType(
                     item,
@@ -752,13 +1347,17 @@ export function ModelCatalogPage() {
                   const typeMissing = resolvedType == null
                   const downloadTitle = typeMissing
                     ? 'Select LLM/VLM/EMBEDDING before Download'
-                    : downloadDisabledReason(nodeId, analysis)
+                    : downloadRestoring || downloadDraftLocked
+                      ? '저장된 다운로드 Job 복원 중…'
+                      : downloadDisabledReason(nodeId, analysis)
                   const downloadDisabled =
                     !nodeId ||
                     diskBlocked ||
                     typeMissing ||
                     downloadActive ||
-                    downloadStarting === repoId
+                    downloadStarting ||
+                    downloadRestoring ||
+                    downloadDraftLocked
                   const nodeLabel =
                     nodes.find((n) => n.id === (fitDetail?.nodeId || nodeId))
                       ?.name || fitDetail?.nodeId || nodeId || '—'
@@ -861,11 +1460,13 @@ export function ModelCatalogPage() {
                               title={downloadTitle}
                               onClick={() => void onDownload(item)}
                             >
-                              {downloadStarting === repoId
+                              {downloadStarting
                                 ? 'Starting…'
-                                : downloadActive
-                                  ? 'Downloading…'
-                                  : 'Download'}
+                                : downloadRestoring || downloadDraftLocked
+                                  ? 'Restoring…'
+                                  : downloadActive
+                                    ? 'Downloading…'
+                                    : 'Download'}
                             </button>
                             <button
                               type="button"
