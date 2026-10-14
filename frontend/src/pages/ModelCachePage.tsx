@@ -56,6 +56,24 @@ function pollSignature(items: ModelCacheEntry[] | null): string {
     .join('|')
 }
 
+function pruneJobTracks(
+  items: ModelCacheEntry[],
+  prev: Record<string, JobTrack>,
+): Record<string, JobTrack> {
+  const next: Record<string, JobTrack> = {}
+  for (const row of items) {
+    const tracked = prev[row.id]
+    if (
+      tracked &&
+      row.status === 'PREPARING' &&
+      row.active_download_job_id === tracked.job.job_id
+    ) {
+      next[row.id] = tracked
+    }
+  }
+  return next
+}
+
 export function ModelCachePage() {
   const [searchParams, setSearchParams] = useSearchParams()
   const nodeId = searchParams.get('node_id') ?? ''
@@ -74,15 +92,20 @@ export function ModelCachePage() {
   const [purging, setPurging] = useState(false)
   const [purgeError, setPurgeError] = useState<string | null>(null)
   const [jobByCacheId, setJobByCacheId] = useState<Record<string, JobTrack>>({})
+  /** Bumped after Purge ends so poll restarts even when signature is unchanged. */
+  const [pollResumeEpoch, setPollResumeEpoch] = useState(0)
 
   const abortRef = useRef<AbortController | null>(null)
   const hasLoadedRef = useRef(false)
   const readGenRef = useRef(0)
   const pollGenRef = useRef(0)
+  /** Shared monotonic seq so slower list responses cannot overwrite newer ones. */
+  const listSeqRef = useRef(0)
   const itemsRef = useRef<ModelCacheEntry[] | null>(null)
   const purgingRef = useRef(false)
   const nodeIdRef = useRef(nodeId)
   const pageRef = useRef(page)
+  const stopPollRef = useRef<() => void>(() => {})
   const listContextKey = `${nodeId}|${page}`
 
   itemsRef.current = items
@@ -100,12 +123,36 @@ export function ModelCachePage() {
     [setSearchParams],
   )
 
+  const applyCacheList = useCallback(
+    (
+      cachePage: { items: ModelCacheEntry[]; total: number },
+      bound: { nodeId: string; page: number },
+      seq: number,
+    ): boolean => {
+      if (seq !== listSeqRef.current) return false
+      if (
+        nodeIdRef.current !== bound.nodeId ||
+        pageRef.current !== bound.page
+      ) {
+        return false
+      }
+      setItems(cachePage.items)
+      setItemsBoundKey(`${bound.nodeId}|${bound.page}`)
+      setTotal(cachePage.total)
+      setLastUpdated(new Date())
+      setJobByCacheId((prev) => pruneJobTracks(cachePage.items, prev))
+      return true
+    },
+    [],
+  )
+
   const load = useCallback(
     async (mode: 'initial' | 'refresh') => {
       abortRef.current?.abort()
       const controller = new AbortController()
       abortRef.current = controller
       const gen = ++readGenRef.current
+      const listSeq = ++listSeqRef.current
 
       if (mode === 'initial' && !hasLoadedRef.current) setLoading(true)
       else setRefreshing(true)
@@ -130,27 +177,14 @@ export function ModelCachePage() {
           return
         }
 
+        if (
+          !applyCacheList(cachePage, { nodeId, page }, listSeq)
+        ) {
+          return
+        }
         setNodes(nodePage.items)
-        setItems(cachePage.items)
-        setItemsBoundKey(`${nodeId}|${page}`)
-        setTotal(cachePage.total)
-        setLastUpdated(new Date())
         hasLoadedRef.current = true
         setPollWarning(null)
-        setJobByCacheId((prev) => {
-          const next: Record<string, JobTrack> = {}
-          for (const row of cachePage.items) {
-            const tracked = prev[row.id]
-            if (
-              tracked &&
-              row.status === 'PREPARING' &&
-              row.active_download_job_id === tracked.job.job_id
-            ) {
-              next[row.id] = tracked
-            }
-          }
-          return next
-        })
       } catch (err) {
         if (controller.signal.aborted || gen !== readGenRef.current) return
         if (err instanceof ApiError) {
@@ -159,7 +193,7 @@ export function ModelCachePage() {
           setError('모델 캐시 목록을 불러오지 못했습니다.')
         }
         // Keep last good rows on refresh failure; clear only on first load.
-        if (!hasLoadedRef.current) {
+        if (!hasLoadedRef.current && listSeq === listSeqRef.current) {
           setItems([])
           setItemsBoundKey(`${nodeId}|${page}`)
           setTotal(0)
@@ -171,7 +205,7 @@ export function ModelCachePage() {
         }
       }
     },
-    [nodeId, page, syncUrl],
+    [nodeId, page, syncUrl, applyCacheList],
   )
 
   useEffect(() => {
@@ -190,6 +224,7 @@ export function ModelCachePage() {
   // P1-8A: single-flight poll — getHfDownload syncs Agent, then re-list caches.
   useEffect(() => {
     if (!activePollSignature) return
+    if (purgingRef.current) return
     const gen = ++pollGenRef.current
     const boundNodeId = nodeId
     const boundPage = page
@@ -197,10 +232,34 @@ export function ModelCachePage() {
     let cancelled = false
     let timer: number | null = null
     let inFlight = false
-    const controllers: AbortController[] = []
+    const controllers = new Set<AbortController>()
+
+    const trackController = (): AbortController => {
+      const controller = new AbortController()
+      controllers.add(controller)
+      return controller
+    }
+
+    const releaseController = (controller: AbortController) => {
+      controllers.delete(controller)
+    }
+
+    const stop = () => {
+      cancelled = true
+      pollGenRef.current += 1
+      if (timer != null) {
+        window.clearTimeout(timer)
+        timer = null
+      }
+      for (const c of controllers) c.abort()
+      controllers.clear()
+    }
+
+    stopPollRef.current = stop
 
     const scheduleNext = () => {
       if (cancelled || gen !== pollGenRef.current) return
+      if (purgingRef.current) return
       if (`${nodeIdRef.current}|${pageRef.current}` !== boundContext) return
       const still = pollSignature(itemsRef.current)
       if (!still) return
@@ -210,10 +269,7 @@ export function ModelCachePage() {
     const pollOnce = async () => {
       if (cancelled || gen !== pollGenRef.current) return
       if (inFlight) return
-      if (purgingRef.current) {
-        scheduleNext()
-        return
-      }
+      if (purgingRef.current) return
       inFlight = true
       try {
         const targets = (itemsRef.current ?? []).filter(
@@ -229,10 +285,9 @@ export function ModelCachePage() {
 
         for (const row of targets) {
           if (cancelled || gen !== pollGenRef.current) return
-          if (purgingRef.current) break
+          if (purgingRef.current) return
           const jobId = row.active_download_job_id as string
-          const controller = new AbortController()
-          controllers.push(controller)
+          const controller = trackController()
           try {
             const job = await getHfDownload(jobId, controller.signal)
             if (
@@ -285,6 +340,8 @@ export function ModelCachePage() {
               err instanceof ApiError
                 ? `다운로드 상태 갱신에 실패했습니다: ${err.message}`
                 : '다운로드 상태 갱신에 실패했습니다. 마지막 정상 상태를 유지합니다.'
+          } finally {
+            releaseController(controller)
           }
         }
 
@@ -299,8 +356,8 @@ export function ModelCachePage() {
         }
 
         // Re-list after job sync so PREPARING→READY/FAILED is authoritative.
-        const listController = new AbortController()
-        controllers.push(listController)
+        const listController = trackController()
+        const listSeq = ++listSeqRef.current
         try {
           const cachePage = await listModelCaches({
             nodeId: boundNodeId || null,
@@ -316,29 +373,14 @@ export function ModelCachePage() {
             return
           }
           if (
-            nodeIdRef.current !== boundNodeId ||
-            pageRef.current !== boundPage
+            !applyCacheList(
+              cachePage,
+              { nodeId: boundNodeId, page: boundPage },
+              listSeq,
+            )
           ) {
             return
           }
-          setItems(cachePage.items)
-          setItemsBoundKey(boundContext)
-          setTotal(cachePage.total)
-          setLastUpdated(new Date())
-          setJobByCacheId((prev) => {
-            const next: Record<string, JobTrack> = {}
-            for (const row of cachePage.items) {
-              const tracked = prev[row.id]
-              if (
-                tracked &&
-                row.status === 'PREPARING' &&
-                row.active_download_job_id === tracked.job.job_id
-              ) {
-                next[row.id] = tracked
-              }
-            }
-            return next
-          })
           hadSuccess = true
         } catch (err) {
           if (
@@ -354,6 +396,8 @@ export function ModelCachePage() {
                 ? `캐시 목록 재조회에 실패했습니다: ${err.message}`
                 : '캐시 목록 재조회에 실패했습니다. 마지막 정상 상태를 유지합니다.'
           }
+        } finally {
+          releaseController(listController)
         }
 
         if (warning) setPollWarning(warning)
@@ -366,12 +410,10 @@ export function ModelCachePage() {
 
     void pollOnce()
     return () => {
-      cancelled = true
-      pollGenRef.current += 1
-      if (timer != null) window.clearTimeout(timer)
-      for (const c of controllers) c.abort()
+      stopPollRef.current = () => {}
+      stop()
     }
-  }, [activePollSignature, nodeId, page])
+  }, [activePollSignature, nodeId, page, pollResumeEpoch, applyCacheList])
 
   const retryPoll = async () => {
     setPollWarning(null)
@@ -380,10 +422,11 @@ export function ModelCachePage() {
 
   const onConfirmPurge = async () => {
     if (!purgeTarget) return
-    setPurging(true)
     setPurgeError(null)
-    // Bump poll gen so in-flight sync/list results are ignored during purge.
-    pollGenRef.current += 1
+    // Stop in-flight poll (abort + invalidate gen) before mutating cache state.
+    stopPollRef.current()
+    setPurging(true)
+    purgingRef.current = true
     try {
       await purgeModelCache(purgeTarget.id)
       setPurgeTarget(null)
@@ -400,6 +443,9 @@ export function ModelCachePage() {
       )
     } finally {
       setPurging(false)
+      purgingRef.current = false
+      // Resume poll even when activePollSignature is unchanged.
+      setPollResumeEpoch((epoch) => epoch + 1)
     }
   }
 
