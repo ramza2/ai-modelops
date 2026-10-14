@@ -201,13 +201,10 @@ describe('ModelCatalogPage', () => {
     expect(screen.getAllByText(/빠듯/).length).toBeGreaterThan(0)
 
     const downloadButtons = screen.getAllByRole('button', { name: 'Download' })
-    const deployButtons = screen.getAllByRole('button', { name: 'Deploy' })
     expect(downloadButtons.every((b) => !(b as HTMLButtonElement).disabled)).toBe(
       true,
     )
-    expect(deployButtons.every((b) => (b as HTMLButtonElement).disabled)).toBe(
-      true,
-    )
+    expect(screen.queryByRole('button', { name: 'Deploy' })).not.toBeInTheDocument()
   })
 
   it('polls active download until READY and shows cache metadata', async () => {
@@ -255,6 +252,13 @@ describe('ModelCatalogPage', () => {
     })
     expect(screen.getByText(/rev rev-ready/)).toBeInTheDocument()
     expect(downloadsApi.getHfDownload).toHaveBeenCalled()
+    // Default makeJob cache_status is PREPARING — Wizard link must not appear.
+    expect(
+      screen.getByRole('link', { name: 'Model Cache 확인' }),
+    ).toHaveAttribute('href', '/models/cache?node_id=node-1')
+    expect(
+      screen.queryByRole('link', { name: '배포 설정' }),
+    ).not.toBeInTheDocument()
   })
 
   it('shows FAILED state with retry', async () => {
@@ -1706,6 +1710,144 @@ describe('ModelCatalogPage', () => {
     const expand = within(row).getByRole('button', { name: '접기' })
     expect(expand.className).toContain('btn')
     expect(row.querySelector('.catalog-row-actions')).not.toBeNull()
+  })
+
+  it('links READY + cache READY jobs to the Deploy Wizard without POST', async () => {
+    vi.mocked(catalogApi.listHfCatalog).mockResolvedValue(
+      pageResult([makeItem({ repository_id: 'org/ready-cache' })]),
+    )
+    vi.mocked(downloadsApi.startHfDownload).mockResolvedValue(
+      makeJob({
+        job_id: 'job-ready-cache',
+        repository_id: 'org/ready-cache',
+        status: 'READY',
+        node_model_cache_id: 'cache-ready-42',
+        cache_status: 'READY',
+        local_path: '/data/hf/ready',
+      }),
+    )
+
+    renderAt('/models/catalog?node_id=node-1')
+    const row = (await screen.findByText('org/ready-cache')).closest(
+      'tr',
+    ) as HTMLElement
+    await userEvent.click(within(row).getByRole('button', { name: 'Download' }))
+    const wizard = await screen.findByRole('link', { name: '배포 설정' })
+    expect(wizard).toHaveAttribute(
+      'href',
+      '/models/cache/cache-ready-42/deploy',
+    )
+    expect(
+      screen.queryByRole('link', { name: 'Model Cache 확인' }),
+    ).not.toBeInTheDocument()
+    expect(screen.getByText(/Downloaded ≠ Deployed ≠ Published/)).toBeInTheDocument()
+
+    expect(
+      within(row).getByRole('button', { name: 'Downloaded' }),
+    ).toBeDisabled()
+    await userEvent.click(within(row).getByRole('button', { name: 'Downloaded' }))
+    expect(downloadsApi.startHfDownload).toHaveBeenCalledTimes(1)
+  })
+
+  it('shows Model Cache 확인 when READY but cache is not confirmed READY', async () => {
+    vi.mocked(catalogApi.listHfCatalog).mockResolvedValue(
+      pageResult([makeItem({ repository_id: 'org/ready-nocache' })]),
+    )
+    vi.mocked(downloadsApi.startHfDownload).mockResolvedValue(
+      makeJob({
+        job_id: 'job-ready-nocache',
+        repository_id: 'org/ready-nocache',
+        status: 'READY',
+        node_model_cache_id: null,
+        cache_status: null,
+        local_path: '/data/hf/nocache',
+      }),
+    )
+
+    renderAt('/models/catalog?node_id=node-1')
+    const row = (await screen.findByText('org/ready-nocache')).closest(
+      'tr',
+    ) as HTMLElement
+    await userEvent.click(within(row).getByRole('button', { name: 'Download' }))
+    expect(
+      await screen.findByRole('link', { name: 'Model Cache 확인' }),
+    ).toHaveAttribute('href', '/models/cache?node_id=node-1')
+    expect(
+      screen.queryByRole('link', { name: '배포 설정' }),
+    ).not.toBeInTheDocument()
+    expect(
+      screen.getByText(/캐시가 아직 READY로 확인되지 않았습니다/),
+    ).toBeInTheDocument()
+  })
+
+  it('restores READY wizard link after F5 without re-POSTing Download', async () => {
+    vi.mocked(catalogApi.listHfCatalog).mockResolvedValue(
+      pageResult([makeItem({ repository_id: 'org/f5-ready' })]),
+    )
+    writeCatalogDownloadDraft(sessionStorage, {
+      schema: 1,
+      jobId: 'job-f5-ready',
+      nodeId: 'node-1',
+      repositoryId: 'org/f5-ready',
+      requestedRevision: 'abc',
+      savedAt: Date.now(),
+    })
+    vi.mocked(downloadsApi.getHfDownload).mockResolvedValue(
+      makeJob({
+        job_id: 'job-f5-ready',
+        repository_id: 'org/f5-ready',
+        status: 'READY',
+        node_model_cache_id: 'cache-f5',
+        cache_status: 'READY',
+        local_path: '/data/hf/f5',
+      }),
+    )
+
+    renderAt('/models/catalog?node_id=node-1')
+    expect(
+      await screen.findByRole('link', { name: '배포 설정' }),
+    ).toHaveAttribute('href', '/models/cache/cache-f5/deploy')
+    expect(downloadsApi.startHfDownload).not.toHaveBeenCalled()
+    expect(
+      screen.getByRole('button', { name: 'Downloaded' }),
+    ).toBeDisabled()
+  })
+
+  it('does not offer wizard link for a READY job from a different node', async () => {
+    vi.mocked(catalogApi.listHfCatalog).mockResolvedValue(
+      pageResult([makeItem({ repository_id: 'org/wrong-node' })]),
+    )
+    writeCatalogDownloadDraft(sessionStorage, {
+      schema: 1,
+      jobId: 'job-wrong-node',
+      nodeId: 'node-1',
+      repositoryId: 'org/wrong-node',
+      requestedRevision: 'abc',
+      savedAt: Date.now(),
+    })
+    vi.mocked(downloadsApi.getHfDownload).mockResolvedValue(
+      makeJob({
+        job_id: 'job-wrong-node',
+        repository_id: 'org/wrong-node',
+        node_id: 'node-other',
+        status: 'READY',
+        node_model_cache_id: 'cache-other',
+        cache_status: 'READY',
+        local_path: '/data/hf/other',
+      }),
+    )
+
+    renderAt('/models/catalog?node_id=node-1')
+    expect(await screen.findByText('org/wrong-node')).toBeInTheDocument()
+    await waitFor(() => {
+      expect(downloadsApi.getHfDownload).toHaveBeenCalled()
+    })
+    expect(
+      screen.queryByRole('link', { name: '배포 설정' }),
+    ).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole('link', { name: 'Model Cache 확인' }),
+    ).not.toBeInTheDocument()
   })
 
   it('blocks Download for later draft rows while earlier restores are still in flight', async () => {

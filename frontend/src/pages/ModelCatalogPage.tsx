@@ -170,6 +170,20 @@ function downloadDisabledReason(
   return undefined
 }
 
+/** Job MUST be READY with an explicit cache_status=READY + cache id — never guess from repo name. */
+function isDownloadCacheReadyForDeploy(job: HfDownloadJob): boolean {
+  return (
+    job.status.toUpperCase() === 'READY' &&
+    typeof job.node_model_cache_id === 'string' &&
+    job.node_model_cache_id.length > 0 &&
+    (job.cache_status ?? '').toUpperCase() === 'READY'
+  )
+}
+
+function isTerminalReadyDownload(job: HfDownloadJob | undefined): boolean {
+  return Boolean(job && job.status.toUpperCase() === 'READY')
+}
+
 export function ModelCatalogPage() {
   const [searchParams, setSearchParams] = useSearchParams()
   const modelType = parseModelType(searchParams.get('model_type'))
@@ -935,6 +949,8 @@ export function ModelCatalogPage() {
     )
     const existing = downloadByKey[key]
     if (existing && isActiveDownloadStatus(existing.job.status)) return
+    // READY already downloaded for this Node/repo/revision — no duplicate POST.
+    if (isTerminalReadyDownload(existing?.job)) return
     if (downloadStartingByKey[key] || downloadRestoringByKey[key]) return
     // Draft without a restored Job means restore is pending or temporarily
     // failed — never POST a duplicate Download until tracking is cleared.
@@ -1111,12 +1127,20 @@ export function ModelCatalogPage() {
 
     const job = tracked.job
     const status = job.status.toUpperCase()
+    const trackMatched = jobMatchesTrack(
+      job,
+      nodeId,
+      item.repository_id,
+      requestedRevision,
+    )
     const bytesLine =
       job.bytes_downloaded != null || job.total_bytes != null
         ? `${job.bytes_downloaded != null ? formatBytes(job.bytes_downloaded) : '—'} / ${
             job.total_bytes != null ? formatBytes(job.total_bytes) : '—'
           }`
         : null
+    const cacheReadyForDeploy =
+      trackMatched && isDownloadCacheReadyForDeploy(job)
 
     return (
       <div className="secondary-text catalog-download-status">
@@ -1141,6 +1165,35 @@ export function ModelCatalogPage() {
             value={job.local_path}
             abbreviated={abbreviateMiddle(job.local_path, 28, 12)}
           />
+        ) : null}
+        {status === 'READY' && trackMatched ? (
+          <div className="catalog-download-next">
+            <p className="panel-hint">
+              Downloaded ≠ Deployed ≠ Published. 다운로드 READY는 캐시 준비일 뿐
+              모델 실행·Alias 게시 성공을 의미하지 않습니다.
+            </p>
+            {cacheReadyForDeploy && job.node_model_cache_id ? (
+              <Link
+                className="btn"
+                to={`/models/cache/${encodeURIComponent(job.node_model_cache_id)}/deploy`}
+              >
+                배포 설정
+              </Link>
+            ) : (
+              <>
+                <p className="secondary-text">
+                  Cache ID가 없거나 캐시가 아직 READY로 확인되지 않았습니다. Model
+                  Cache에서 준비 상태를 확인하세요.
+                </p>
+                <Link
+                  className="btn btn--ghost"
+                  to={`/models/cache?node_id=${encodeURIComponent(nodeId)}`}
+                >
+                  Model Cache 확인
+                </Link>
+              </>
+            )}
+          </div>
         ) : null}
         {job.error_message && (status === 'FAILED' || status === 'CANCELED') ? (
           <div>{job.error_message}</div>
@@ -1180,7 +1233,7 @@ export function ModelCatalogPage() {
   return (
     <AppShell
       title="Model Catalog"
-      description="Hugging Face 모델을 검색하고 Node에 다운로드합니다. FIT는 자문용이며 Deploy는 M7-C에서 제공됩니다."
+      description="Hugging Face 모델을 검색하고 Node에 다운로드합니다. FIT는 자문용이며, 다운로드 READY는 배포·게시 성공을 의미하지 않습니다."
       onRefresh={() => void load('refresh')}
       refreshing={refreshing}
       lastUpdated={lastUpdated}
@@ -1375,6 +1428,7 @@ export function ModelCatalogPage() {
                   const job = trackedDownload?.job
                   const downloadActive =
                     job != null && isActiveDownloadStatus(job.status)
+                  const downloadReady = isTerminalReadyDownload(job)
                   const downloadRestoring = Boolean(
                     listMatchesContext &&
                       downloadTrackKey &&
@@ -1411,21 +1465,24 @@ export function ModelCatalogPage() {
                     : '목록 갱신 중…'
                   const downloadTitle = catalogListPending
                     ? '카탈로그 목록을 갱신하는 동안 Fit/Download를 실행할 수 없습니다.'
-                    : typeMissing
-                      ? 'Select LLM/VLM/EMBEDDING before Download'
-                      : downloadRestoring
-                        ? '저장된 다운로드 Job 복원 중…'
-                        : downloadDraftLocked && downloadPollWarning
-                          ? '다운로드 Job 복원 조회에 실패했습니다. 상태 다시 조회를 사용하세요.'
-                          : downloadDraftLocked
-                            ? '저장된 다운로드 Job 복원 중…'
-                            : downloadDisabledReason(nodeId, analysis)
+                    : downloadReady
+                      ? '이미 다운로드 READY입니다. 아래 링크로 Model Cache / 배포 설정을 확인하세요.'
+                      : typeMissing
+                        ? 'Select LLM/VLM/EMBEDDING before Download'
+                        : downloadRestoring
+                          ? '저장된 다운로드 Job 복원 중…'
+                          : downloadDraftLocked && downloadPollWarning
+                            ? '다운로드 Job 복원 조회에 실패했습니다. 상태 다시 조회를 사용하세요.'
+                            : downloadDraftLocked
+                              ? '저장된 다운로드 Job 복원 중…'
+                              : downloadDisabledReason(nodeId, analysis)
                   const downloadDisabled =
                     catalogListPending ||
                     !nodeId ||
                     diskBlocked ||
                     typeMissing ||
                     downloadActive ||
+                    downloadReady ||
                     downloadStarting ||
                     downloadRestoring ||
                     downloadDraftLocked
@@ -1552,15 +1609,9 @@ export function ModelCatalogPage() {
                                       ? 'Restoring…'
                                       : downloadActive
                                         ? 'Downloading…'
-                                        : 'Download'}
-                            </button>
-                            <button
-                              type="button"
-                              className="btn"
-                              disabled
-                              title="M7-C"
-                            >
-                              Deploy
+                                        : downloadReady
+                                          ? 'Downloaded'
+                                          : 'Download'}
                             </button>
                           </div>
                           {analyzing ? (

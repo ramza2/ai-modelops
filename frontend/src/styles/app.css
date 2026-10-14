@@ -779,6 +779,18 @@ th {
   min-width: 0;
 }
 
+.catalog-download-next {
+  display: grid;
+  gap: 0.35rem;
+  margin-top: 0.25rem;
+  min-width: 0;
+}
+
+.catalog-download-next .btn {
+  justify-self: start;
+  white-space: nowrap;
+}
+
 @media (max-width: 900px) {
   .catalog-table {
     table-layout: auto;
