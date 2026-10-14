@@ -876,11 +876,36 @@ export function CacheDeployWizardPage() {
                 placeholder={version?.quantization || 'do not guess'}
               />
             </label>
+            <label>
+              Reasoning Parser (optional)
+              <select
+                aria-label="Reasoning Parser"
+                value={runtime.reasoning_parser ?? ''}
+                onChange={(e) =>
+                  setRuntime((r) => ({
+                    ...r,
+                    reasoning_parser: e.target.value || null,
+                  }))
+                }
+              >
+                <option value="">(미설정)</option>
+                <option value="qwen3">qwen3</option>
+              </select>
+            </label>
           </div>
           <p className="secondary-text">
             Catalog dtype/quant hints are suggestions only. Official vLLM image
             ENTRYPOINT contract remains <code>vllm serve …</code>.
           </p>
+          {runtime.reasoning_parser === 'qwen3' ? (
+            <p className="panel-hint" role="note">
+              Reasoning Parser는 Runtime 시작 옵션입니다. Chat 응답에{' '}
+              <code>reasoning</code>/<code>content</code> 분리가 생길 수 있으므로
+              업무 클라이언트 호환성을 운영에서 검증하세요. 요청별{' '}
+              <code>enable_thinking</code> / <code>thinking_token_budget</code> /
+              <code>max_tokens</code>는 Parser와 별개입니다.
+            </p>
+          ) : null}
           <div className="toolbar__actions">
             <button type="button" className="btn btn--ghost" onClick={() => syncStep('cache')}>
               Back

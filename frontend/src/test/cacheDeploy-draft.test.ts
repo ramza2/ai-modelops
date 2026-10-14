@@ -84,6 +84,26 @@ describe('P1-3 cache deploy draft persistence', () => {
     expect(resumableStep('runtime', null)).toBe('runtime')
   })
 
+  it('persists optional reasoning_parser=qwen3 and rejects unknown parsers', () => {
+    const store = memoryStorage()
+    const withParser: WizardDraft = {
+      ...sampleDraft(),
+      runtime: { ...sampleDraft().runtime, reasoning_parser: 'qwen3' },
+    }
+    writeWizardDraft(store, withParser)
+    expect(readWizardDraft(store, cache, now)?.runtime.reasoning_parser).toBe(
+      'qwen3',
+    )
+    store.setItem(
+      wizardDraftKey(cache.id),
+      JSON.stringify({
+        ...withParser,
+        runtime: { ...withParser.runtime, reasoning_parser: 'deepseek' },
+      }),
+    )
+    expect(readWizardDraft(store, cache, now)).toBeNull()
+  })
+
   it('keeps pending publish alias settings distinct from server-owned route status', () => {
     const store = memoryStorage()
     const draft = {

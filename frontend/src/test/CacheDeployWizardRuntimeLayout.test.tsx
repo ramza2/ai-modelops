@@ -1,4 +1,5 @@
 import { cleanup, render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import type {
@@ -150,6 +151,11 @@ describe('CacheDeployWizardPage Runtime layout (P1-5A)', () => {
     expect(screen.getByText('max_num_seqs')).toBeInTheDocument()
     expect(screen.getByText('gpu_memory_utilization')).toBeInTheDocument()
     expect(screen.getByText('Served model name')).toBeInTheDocument()
+    const parser = screen.getByLabelText('Reasoning Parser')
+    expect(parser).toHaveValue('')
+    expect(
+      screen.queryByText(/Reasoning Parser는 Runtime 시작 옵션/),
+    ).not.toBeInTheDocument()
 
     const numberInputs = grid?.querySelectorAll('input[type="number"]')
     expect(numberInputs?.length).toBeGreaterThanOrEqual(4)
@@ -158,5 +164,11 @@ describe('CacheDeployWizardPage Runtime layout (P1-5A)', () => {
     )
     expect(served.tagName).toBe('INPUT')
     expect(served.closest('label')).toHaveClass('form-grid__wide')
+
+    await userEvent.selectOptions(parser, 'qwen3')
+    expect(parser).toHaveValue('qwen3')
+    expect(
+      screen.getByText(/Reasoning Parser는 Runtime 시작 옵션/),
+    ).toBeInTheDocument()
   })
 })

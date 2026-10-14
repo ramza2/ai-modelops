@@ -12,6 +12,8 @@ export type CacheDeployRuntimeConfig = {
   health_path?: string | null
   probe_type?: string | null
   scheduling_policy?: string | null
+  /** Optional vLLM --reasoning-parser. Unset omits the flag. */
+  reasoning_parser?: string | null
 }
 
 export type CreateCacheDeploymentBody = {
@@ -159,6 +161,8 @@ export async function createDeploymentFromCache(
               probe_type: body.runtimeConfig.probe_type ?? undefined,
               scheduling_policy:
                 body.runtimeConfig.scheduling_policy ?? undefined,
+              reasoning_parser:
+                body.runtimeConfig.reasoning_parser ?? undefined,
             }
           : undefined,
       },

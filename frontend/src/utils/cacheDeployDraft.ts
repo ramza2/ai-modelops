@@ -60,8 +60,20 @@ const validRuntime = (v: unknown): v is CacheDeployRuntimeConfig => {
   if (utilization != null &&
       (typeof utilization !== 'number' || !Number.isFinite(utilization) ||
        utilization <= 0 || utilization > 1)) return false
-  for (const field of ['dtype', 'quantization', 'runner', 'health_path', 'probe_type', 'scheduling_policy']) {
+  for (const field of [
+    'dtype',
+    'quantization',
+    'runner',
+    'health_path',
+    'probe_type',
+    'scheduling_policy',
+    'reasoning_parser',
+  ]) {
     if (v[field] != null && !validText(v[field])) return false
+  }
+  if (v.reasoning_parser != null) {
+    const normalized = String(v.reasoning_parser).trim().toLowerCase()
+    if (normalized !== 'qwen3') return false
   }
   return true
 }

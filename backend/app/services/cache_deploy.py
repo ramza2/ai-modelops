@@ -66,6 +66,7 @@ _CREATE_CRITICAL_CFG_KEYS = (
     "max_model_len",
     "max_num_seqs",
     "gpu_memory_utilization",
+    "reasoning_parser",
 )
 
 
@@ -514,6 +515,11 @@ class CacheDeployService:
                 return value
         if key in {"served_model_name", "model_path", "dtype", "quantization", "runner"}:
             text = str(value).strip()
+            return text if text else None
+        if key == "reasoning_parser":
+            if not isinstance(value, str):
+                return value
+            text = value.strip().lower()
             return text if text else None
         return value
 

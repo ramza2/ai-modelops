@@ -17,6 +17,8 @@ from app.runtime_adapters.base import (
 )
 
 _SCHEDULING_POLICY_ALLOWED = frozenset({"fcfs", "priority"})
+# Optional vLLM reasoning parser (P1-7A). Unset omits --reasoning-parser.
+_REASONING_PARSER_ALLOWED = frozenset({"qwen3"})
 # Explicit runner is needed for pooling/embedding runtimes such as BGE-M3.
 # Keep this allowlist narrow; normal generation runtimes omit the flag.
 _RUNNER_ALLOWED = frozenset({"generate", "pooling"})
@@ -51,6 +53,9 @@ class VLLMAdapter:
         max_num_seqs = _merged_positive_int(cfg, "max_num_seqs")
         scheduling_policy = _merged_choice(
             cfg, "scheduling_policy", allowed=_SCHEDULING_POLICY_ALLOWED
+        )
+        reasoning_parser = _merged_choice(
+            cfg, "reasoning_parser", allowed=_REASONING_PARSER_ALLOWED
         )
         runner = _merged_choice(cfg, "runner", allowed=_RUNNER_ALLOWED)
 
@@ -88,6 +93,8 @@ class VLLMAdapter:
             command.extend(["--max-num-seqs", str(max_num_seqs)])
         if scheduling_policy is not None:
             command.extend(["--scheduling-policy", scheduling_policy])
+        if reasoning_parser is not None:
+            command.extend(["--reasoning-parser", reasoning_parser])
         if runner is not None:
             command.extend(["--runner", runner])
 

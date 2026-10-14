@@ -53,6 +53,7 @@ export const RUNTIME_CONFIG_ALLOWLIST = [
   'dtype',
   'quantization',
   'scheduling_policy',
+  'reasoning_parser',
 ] as const
 
 export type RuntimeConfigKey = (typeof RUNTIME_CONFIG_ALLOWLIST)[number]

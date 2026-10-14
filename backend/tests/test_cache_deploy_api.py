@@ -514,6 +514,109 @@ async def test_insufficient_blocks_unknown_ack_exact_retry_reuses() -> None:
         assert conflict.json()["error"]["code"] == "DEPLOYMENT_SPEC_CONFLICT"
         assert "max_num_seqs" in conflict.json()["error"]["details"]["changed_fields"]
 
+        # P1-7A: invalid reasoning_parser rejected at API; qwen3 is create-critical
+        # (same cache identity → conflict when parser differs from existing unset).
+        bad_parser = await ac.post(
+            f"/api/v1/model-cache/{seeded['cache_id']}/deployment",
+            json={
+                **create_body,
+                "runtime_config": {
+                    **runtime_cfg,
+                    "reasoning_parser": "deepseek",
+                },
+            },
+        )
+        assert bad_parser.status_code == 422
+
+        parser_conflict = await ac.post(
+            f"/api/v1/model-cache/{seeded['cache_id']}/deployment",
+            json={
+                **create_body,
+                "runtime_config": {
+                    **runtime_cfg,
+                    "reasoning_parser": "qwen3",
+                },
+            },
+        )
+        assert parser_conflict.status_code == 409
+        assert (
+            parser_conflict.json()["error"]["code"] == "DEPLOYMENT_SPEC_CONFLICT"
+        )
+        assert (
+            "reasoning_parser"
+            in parser_conflict.json()["error"]["details"]["changed_fields"]
+        )
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_reasoning_parser_create_reuse_and_normalize() -> None:
+    """P1-7A: qwen3 persists, QWEN3 reuses, unset conflicts on same cache."""
+    engine = create_async_engine(_database_url(), pool_pre_ping=True)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with session_factory() as session:
+        seeded = await _seed_ready_cache(session, size_bytes=2_000_000_000)
+
+    fake = FakeResourcesAgent(gpu_uuids=[seeded["gpu_uuid"]], free_mb=14000)
+    app = _mount(create_app(), session_factory, fake)
+    transport = ASGITransport(app=app)
+    runtime_cfg = {
+        "max_model_len": 8192,
+        "max_num_seqs": 4,
+        "gpu_memory_utilization": 0.15,
+        "reasoning_parser": "qwen3",
+    }
+    create_body = {
+        "name": f"dep-rp-{seeded['suffix']}",
+        "container_name": f"ctr-rp-{seeded['suffix']}",
+        "gpu_device_ids": [str(seeded["gpu_id"])],
+        "acknowledge_unknown_fit": True,
+        "runtime_config": runtime_cfg,
+    }
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        created = await ac.post(
+            f"/api/v1/model-cache/{seeded['cache_id']}/deployment",
+            json=create_body,
+        )
+        assert created.status_code == 201, created.text
+        assert created.json()["deployment_config"]["reasoning_parser"] == "qwen3"
+        assert created.json()["reused"] is False
+        dep_id = created.json()["id"]
+
+        reuse = await ac.post(
+            f"/api/v1/model-cache/{seeded['cache_id']}/deployment",
+            json={
+                **create_body,
+                "runtime_config": {
+                    **runtime_cfg,
+                    "reasoning_parser": "QWEN3",
+                },
+            },
+        )
+        assert reuse.status_code == 200
+        assert reuse.json()["reused"] is True
+        assert reuse.json()["id"] == dep_id
+        assert reuse.json()["deployment_config"]["reasoning_parser"] == "qwen3"
+
+        conflict = await ac.post(
+            f"/api/v1/model-cache/{seeded['cache_id']}/deployment",
+            json={
+                **create_body,
+                "runtime_config": {
+                    "max_model_len": 8192,
+                    "max_num_seqs": 4,
+                    "gpu_memory_utilization": 0.15,
+                },
+            },
+        )
+        assert conflict.status_code == 409
+        assert conflict.json()["error"]["code"] == "DEPLOYMENT_SPEC_CONFLICT"
+        assert (
+            "reasoning_parser"
+            in conflict.json()["error"]["details"]["changed_fields"]
+        )
+
     await engine.dispose()
 
 
