@@ -135,6 +135,12 @@ When the Agent reports job NOT_FOUND:
 
 ### `GET /api/v1/model-cache`
 
+DB-only list (does not sync Node Agent or start downloads). Each item may include
+optional `active_download_job_id` when `status=PREPARING` and a latest Active
+download job exists for that cache. Clients that need live progress should call
+`GET /api/v1/catalog/huggingface/downloads/{job_id}` (which syncs the Agent),
+then re-list. Terminal / non-PREPARING rows return `active_download_job_id: null`.
+
 ### `DELETE /api/v1/model-cache/{cache_id}?force=false`
 
 ## Purge safety
