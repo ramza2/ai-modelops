@@ -497,3 +497,174 @@ async def test_purge_and_no_token_leak() -> None:
             ).scalar_one()
             assert src == SourceType.HUGGINGFACE.value
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_list_caches_includes_active_download_job_id_for_preparing() -> None:
+    """P1-8A: PREPARING rows expose latest active job id; list stays DB-only."""
+    engine = create_async_engine(_database_url(), pool_pre_ping=True)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    suffix = uuid.uuid4().hex[:8]
+    node_id = uuid.uuid4()
+    model_id = uuid.uuid4()
+    version_prep = uuid.uuid4()
+    version_ready = uuid.uuid4()
+    artifact_prep = uuid.uuid4()
+    artifact_ready = uuid.uuid4()
+    prep_cache_id = uuid.uuid4()
+    ready_cache_id = uuid.uuid4()
+    older_job_id = uuid.uuid4()
+    latest_job_id = uuid.uuid4()
+    async with session_factory() as session:
+        await session.execute(
+            text(
+                """
+                INSERT INTO node (
+                  id, name, hostname, agent_base_url, environment, status, labels_json
+                ) VALUES (
+                  :id, :name, :hostname, 'http://127.0.0.1:8100',
+                  'local', 'ONLINE', '{}'::jsonb
+                )
+                """
+            ),
+            {
+                "id": str(node_id),
+                "name": f"list-node-{suffix}",
+                "hostname": f"list-host-{suffix}",
+            },
+        )
+        await session.execute(
+            text(
+                """
+                INSERT INTO model (id, slug, name, model_type, source_type)
+                VALUES (:id, :slug, :name, 'LLM', 'HUGGINGFACE')
+                """
+            ),
+            {
+                "id": str(model_id),
+                "slug": f"org-list-{suffix}",
+                "name": f"org/list-{suffix}",
+            },
+        )
+        for version_id, artifact_id, rev, label in (
+            (version_prep, artifact_prep, "b" * 40, f"prep-{suffix}"),
+            (version_ready, artifact_ready, "c" * 40, f"ready-{suffix}"),
+        ):
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO model_version (
+                      id, model_id, version_label, source_repository, source_revision,
+                      runtime_type, runtime_image, served_model_name, runtime_config_json
+                    ) VALUES (
+                      :id, :model_id, :label, :repo, :rev,
+                      'VLLM', 'vllm/vllm-openai:latest', :served, '{}'::jsonb
+                    )
+                    """
+                ),
+                {
+                    "id": str(version_id),
+                    "model_id": str(model_id),
+                    "label": label,
+                    "repo": f"org/list-{suffix}",
+                    "rev": rev,
+                    "served": f"org/list-{suffix}",
+                },
+            )
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO model_artifact (
+                      id, model_version_id, artifact_type, source_uri, revision, size_bytes
+                    ) VALUES (
+                      :id, :version_id, 'MODEL', :uri, :rev, 1000
+                    )
+                    """
+                ),
+                {
+                    "id": str(artifact_id),
+                    "version_id": str(version_id),
+                    "uri": f"hf://org/list-{suffix}",
+                    "rev": rev,
+                },
+            )
+        await session.execute(
+            text(
+                """
+                INSERT INTO node_model_cache (
+                  id, node_id, model_artifact_id, status, local_path
+                ) VALUES
+                  (:prep, :node_id, :artifact_prep, 'PREPARING', NULL),
+                  (:ready, :node_id, :artifact_ready, 'READY', :path)
+                """
+            ),
+            {
+                "prep": str(prep_cache_id),
+                "ready": str(ready_cache_id),
+                "node_id": str(node_id),
+                "artifact_prep": str(artifact_prep),
+                "artifact_ready": str(artifact_ready),
+                "path": f"/data/modelops/models/org/list-{suffix}/{'c'*40}",
+            },
+        )
+        # Partial unique index allows only one ACTIVE job per node+artifact.
+        # Seed a terminal older job plus one active DOWNLOADING job.
+        await session.execute(
+            text(
+                """
+                INSERT INTO model_cache_download_job (
+                  id, node_id, model_artifact_id, node_model_cache_id,
+                  repository_id, requested_revision, resolved_revision, status,
+                  created_at, updated_at
+                ) VALUES
+                  (
+                    :older, :node_id, :artifact_prep, :prep,
+                    :repo, 'main', :rev, 'FAILED',
+                    NOW() - INTERVAL '2 minutes', NOW() - INTERVAL '2 minutes'
+                  ),
+                  (
+                    :latest, :node_id, :artifact_prep, :prep,
+                    :repo, 'main', :rev, 'DOWNLOADING',
+                    NOW() - INTERVAL '1 minute', NOW() - INTERVAL '1 minute'
+                  )
+                """
+            ),
+            {
+                "older": str(older_job_id),
+                "latest": str(latest_job_id),
+                "node_id": str(node_id),
+                "artifact_prep": str(artifact_prep),
+                "prep": str(prep_cache_id),
+                "repo": f"org/list-{suffix}",
+                "rev": "b" * 40,
+            },
+        )
+        await session.commit()
+
+    fake = FakeAgent()
+    before_start = fake.start_calls
+    app = _mount(create_app(), session_factory, fake)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        listed = await ac.get(
+            "/api/v1/model-cache", params={"node_id": str(node_id)}
+        )
+        assert listed.status_code == 200, listed.text
+        body = listed.json()
+        by_id = {item["id"]: item for item in body["items"]}
+        assert str(prep_cache_id) in by_id
+        prep = by_id[str(prep_cache_id)]
+        assert prep["status"] == CacheStatus.PREPARING.value
+        assert prep["active_download_job_id"] == str(latest_job_id)
+        assert "repository_id" in prep
+        assert "note" in prep
+
+        ready = by_id[str(ready_cache_id)]
+        assert ready["status"] == CacheStatus.READY.value
+        assert ready["active_download_job_id"] is None
+        # List must not start downloads or touch Agent job APIs.
+        assert fake.start_calls == before_start
+        assert fake.jobs == {}
+
+    await engine.dispose()
+

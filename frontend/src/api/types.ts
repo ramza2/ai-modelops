@@ -177,6 +177,8 @@ export type ModelCacheEntry = {
   updated_at: string
   is_deployment: boolean
   note: string | null
+  /** Latest Active download Job when status is PREPARING; else null/absent. */
+  active_download_job_id?: string | null
 }
 
 export type ModelCachePurgeResult = {

@@ -286,6 +286,15 @@ class HFDownloadService:
         total = len(rows)
         start = (page - 1) * page_size
         window = rows[start : start + page_size]
+        # P1-8A: batch-resolve latest active download job per PREPARING cache
+        # (list GET is DB-only — does not sync Node Agent or start downloads).
+        active_job_by_cache = await self._latest_active_job_ids_for_caches(
+            [
+                uuid.UUID(str(c.id))
+                for c in window
+                if str(c.status) == CacheStatus.PREPARING.value
+            ]
+        )
         items = []
         for cache in window:
             artifact = await self._session.get(ModelArtifact, cache.model_artifact_id)
@@ -298,9 +307,15 @@ class HFDownloadService:
                 await self._session.get(Model, version.model_id) if version else None
             )
             node = await self._session.get(Node, cache.node_id)
+            cache_id_str = str(cache.id)
+            active_job_id = (
+                active_job_by_cache.get(cache_id_str)
+                if str(cache.status) == CacheStatus.PREPARING.value
+                else None
+            )
             items.append(
                 {
-                    "id": str(cache.id),
+                    "id": cache_id_str,
                     "node_id": str(cache.node_id),
                     "node_name": node.name if node else None,
                     "model_artifact_id": str(cache.model_artifact_id),
@@ -323,6 +338,7 @@ class HFDownloadService:
                     "updated_at": isoformat_utc(cache.updated_at),
                     "is_deployment": False,
                     "note": "Downloaded cache is not a running deployment.",
+                    "active_download_job_id": active_job_id,
                 }
             )
         return {
@@ -331,6 +347,29 @@ class HFDownloadService:
             "page_size": page_size,
             "total": total,
         }
+
+    async def _latest_active_job_ids_for_caches(
+        self, cache_ids: list[uuid.UUID]
+    ) -> dict[str, str]:
+        """Map PREPARING cache id → latest active download job id (one query)."""
+        if not cache_ids:
+            return {}
+        result = await self._session.execute(
+            select(ModelCacheDownloadJob)
+            .where(
+                ModelCacheDownloadJob.node_model_cache_id.in_(cache_ids),
+                ModelCacheDownloadJob.status.in_(sorted(_ACTIVE_DOWNLOAD)),
+            )
+            .order_by(ModelCacheDownloadJob.created_at.desc())
+        )
+        latest: dict[str, str] = {}
+        for job in result.scalars().all():
+            if job.node_model_cache_id is None:
+                continue
+            key = str(job.node_model_cache_id)
+            if key not in latest:
+                latest[key] = str(job.id)
+        return latest
 
     async def purge_cache(
         self,
