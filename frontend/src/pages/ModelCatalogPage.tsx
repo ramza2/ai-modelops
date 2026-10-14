@@ -181,6 +181,10 @@ export function ModelCatalogPage() {
   const [draftQ, setDraftQ] = useState(q)
   const [nodes, setNodes] = useState<NodeSummary[]>([])
   const [items, setItems] = useState<HfCatalogModel[] | null>(null)
+  /** Catalog context key that produced the current `items` (stale-list guard). */
+  const [itemsBoundKey, setItemsBoundKey] = useState<string | null>(null)
+  const itemsBoundKeyRef = useRef<string | null>(null)
+  itemsBoundKeyRef.current = itemsBoundKey
   const [hasMore, setHasMore] = useState(false)
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
@@ -264,6 +268,7 @@ export function ModelCatalogPage() {
       const controller = new AbortController()
       abortRef.current = controller
       const gen = ++readGenRef.current
+      const requestKey = `${nodeId}|${q}|${modelType ?? ''}|${page}|${fitOnly}`
 
       if (mode === 'initial' || !hasLoadedRef.current) {
         setLoading(true)
@@ -288,6 +293,7 @@ export function ModelCatalogPage() {
         if (controller.signal.aborted || gen !== readGenRef.current) return
         setNodes(nodePage.items)
         setItems(catalog.items)
+        setItemsBoundKey(requestKey)
         setHasMore(Boolean(catalog.has_more))
         setLastUpdated(new Date())
         hasLoadedRef.current = true
@@ -299,6 +305,7 @@ export function ModelCatalogPage() {
           setError('Hugging Face 카탈로그를 불러오지 못했습니다.')
         }
         setItems([])
+        setItemsBoundKey(requestKey)
         setHasMore(false)
       } finally {
         if (!controller.signal.aborted && gen === readGenRef.current) {
@@ -414,6 +421,8 @@ export function ModelCatalogPage() {
   // leave later rows clickable for a duplicate Download.
   useEffect(() => {
     if (!nodeId || items == null) return
+    // Do not restore against a stale previous-Node list still on screen.
+    if (itemsBoundKey !== catalogContextKey) return
     const gen = ++downloadRestoreGenRef.current
     const controllers: AbortController[] = []
     let cancelled = false
@@ -538,8 +547,8 @@ export function ModelCatalogPage() {
           ...prev,
           [key]:
             err instanceof ApiError
-              ? err.message
-              : '다운로드 상태 복원에 실패했습니다. 다시 시도할 수 있습니다.',
+              ? `다운로드 Job 복원 조회에 실패했습니다: ${err.message}`
+              : '다운로드 Job 복원 조회에 실패했습니다. 다시 시도할 수 있습니다.',
         }))
       } finally {
         clearRestoring(key)
@@ -558,7 +567,7 @@ export function ModelCatalogPage() {
       downloadRestoreGenRef.current += 1
       for (const c of controllers) c.abort()
     }
-  }, [nodeId, items, storage])
+  }, [nodeId, items, storage, itemsBoundKey, catalogContextKey])
 
   const activeDownloadSignature = Object.values(downloadByKey)
     .filter((t) => isActiveDownloadStatus(t.job.status))
@@ -673,7 +682,7 @@ export function ModelCatalogPage() {
               ...prev,
               [key]:
                 err instanceof ApiError
-                  ? err.message
+                  ? `다운로드 상태 갱신에 실패했습니다: ${err.message}`
                   : '다운로드 상태 갱신에 실패했습니다. 마지막 정상 상태를 유지합니다.',
             }))
           } finally {
@@ -785,8 +794,12 @@ export function ModelCatalogPage() {
         ...prev,
         [trackKey]:
           err instanceof ApiError
-            ? err.message
-            : '다운로드 상태 조회에 실패했습니다.',
+            ? tracked
+              ? `다운로드 상태 갱신에 실패했습니다: ${err.message}`
+              : `다운로드 Job 복원 조회에 실패했습니다: ${err.message}`
+            : tracked
+              ? '다운로드 상태 갱신에 실패했습니다. 다시 시도할 수 있습니다.'
+              : '다운로드 Job 복원 조회에 실패했습니다. 다시 시도할 수 있습니다.',
       }))
     } finally {
       setDownloadRestoringByKey((prev) => {
@@ -809,8 +822,16 @@ export function ModelCatalogPage() {
     })
   }
 
+  const listMatchesContext = itemsBoundKey === catalogContextKey
+  const catalogListPending =
+    (loading && items === null) ||
+    (items !== null && !listMatchesContext)
+
   const onAnalyze = async (item: HfCatalogModel) => {
     if (!nodeId) return
+    // Previous Node/filter list may still be on screen while a new catalog
+    // fetch is in flight — never Fit against a stale row as if it were current.
+    if (itemsBoundKeyRef.current !== catalogContextKeyRef.current) return
     const repoId = item.repository_id
     const requestNodeId = nodeId
     const requestRevision = normalizeRevision(item.revision)
@@ -839,6 +860,7 @@ export function ModelCatalogPage() {
       fitGenByRepoRef.current[repoId] === gen &&
       nodeIdRef.current === requestNodeId &&
       catalogContextKeyRef.current === requestContextKey &&
+      itemsBoundKeyRef.current === requestContextKey &&
       (itemsRevisionByRepoRef.current[repoId] ?? null) === requestRevision
 
     try {
@@ -904,6 +926,7 @@ export function ModelCatalogPage() {
 
   const onDownload = async (item: HfCatalogModel) => {
     if (!nodeId) return
+    if (itemsBoundKeyRef.current !== catalogContextKeyRef.current) return
     const requestedRevision = normalizeRequestedRevision(item.revision)
     const key = catalogDownloadTrackKey(
       nodeId,
@@ -1009,9 +1032,13 @@ export function ModelCatalogPage() {
     const pollWarning = downloadPollWarningByKey[key]
     const starting = Boolean(downloadStartingByKey[key])
 
+    // Active restore GET in flight — distinct from a failed restore query.
     if (restoring && !tracked) {
       return (
-        <div className="secondary-text" style={{ marginTop: '0.35rem' }} role="status">
+        <div
+          className="secondary-text catalog-download-status"
+          role="status"
+        >
           저장된 다운로드 Job 복원 중…
         </div>
       )
@@ -1026,11 +1053,11 @@ export function ModelCatalogPage() {
         }),
       )
       return (
-        <div style={{ marginTop: '0.35rem' }}>
+        <div className="catalog-download-status">
           <p className="catalog-fit-error" role="status">
             {pollWarning}
           </p>
-          <div className="toolbar__actions" style={{ marginTop: '0.25rem' }}>
+          <div className="catalog-row-actions catalog-row-actions--inline">
             {draftStillPresent ? (
               <button
                 type="button"
@@ -1061,8 +1088,7 @@ export function ModelCatalogPage() {
       )
     }
 
-    // Draft still present while restore has not produced a Job yet (queued or
-    // mid-flight before restoring flag is set on a re-render).
+    // Draft still present while restore is queued (not yet failing).
     if (
       !tracked &&
       readCatalogDownloadDraft(storage, {
@@ -1072,7 +1098,10 @@ export function ModelCatalogPage() {
       })
     ) {
       return (
-        <div className="secondary-text" style={{ marginTop: '0.35rem' }} role="status">
+        <div
+          className="secondary-text catalog-download-status"
+          role="status"
+        >
           저장된 다운로드 Job 복원 중…
         </div>
       )
@@ -1090,7 +1119,7 @@ export function ModelCatalogPage() {
         : null
 
     return (
-      <div className="secondary-text" style={{ marginTop: '0.35rem' }}>
+      <div className="secondary-text catalog-download-status">
         <StatusBadge status={job.status} />
         {isActiveDownloadStatus(job.status) ? (
           <div>
@@ -1138,8 +1167,7 @@ export function ModelCatalogPage() {
           <button
             type="button"
             className="btn"
-            style={{ marginTop: '0.25rem' }}
-            disabled={!nodeId || starting || restoring}
+            disabled={!nodeId || starting || restoring || catalogListPending}
             onClick={() => void onDownload(item)}
           >
             Retry download
@@ -1268,14 +1296,25 @@ export function ModelCatalogPage() {
         <LoadingBlock label="Hugging Face 카탈로그를 불러오는 중…" />
       ) : null}
 
-      {items !== null && items.length === 0 ? (
+      {catalogListPending && items !== null ? (
+        <p className="catalog-list-pending" role="status">
+          {refreshing || !listMatchesContext
+            ? 'Node/필터 변경에 맞게 카탈로그를 다시 불러오는 중…'
+            : '카탈로그를 불러오는 중…'}
+        </p>
+      ) : null}
+
+      {items !== null && items.length === 0 && listMatchesContext ? (
         <p className="secondary-text">조건에 맞는 모델이 없습니다.</p>
       ) : null}
 
       {items !== null && items.length > 0 ? (
         <>
-          <div className="table-wrap">
-            <table className="data-table">
+          <div
+            className={`table-wrap${catalogListPending ? ' catalog-table-wrap--pending' : ''}`}
+            aria-busy={catalogListPending || undefined}
+          >
+            <table className="data-table catalog-table">
               <thead>
                 <tr>
                   <th scope="col">Repository</th>
@@ -1289,24 +1328,36 @@ export function ModelCatalogPage() {
               <tbody>
                 {items.map((item) => {
                   const repoId = item.repository_id
-                  const fitDetail = fitDetailMatchesCurrent(
-                    fitByRepo[repoId],
-                    item,
-                    nodeId,
-                  )
-                    ? fitByRepo[repoId]
-                    : undefined
+                  const fitDetail =
+                    listMatchesContext &&
+                    fitDetailMatchesCurrent(
+                      fitByRepo[repoId],
+                      item,
+                      nodeId,
+                    )
+                      ? fitByRepo[repoId]
+                      : undefined
                   const analysis = fitDetail?.analysis
-                  const catalogFit = item.resource_fit?.result || null
+                  const catalogFit =
+                    listMatchesContext
+                      ? item.resource_fit?.result || null
+                      : null
                   const itemRevision = normalizeRevision(item.revision)
                   const analyzing =
+                    listMatchesContext &&
                     fitLoadingByRepo[repoId]?.revision === itemRevision
                   const fitErrorEntry = fitErrorByRepo[repoId]
                   const fitError =
-                    fitErrorEntry && fitErrorEntry.revision === itemRevision
+                    listMatchesContext &&
+                    fitErrorEntry &&
+                    fitErrorEntry.revision === itemRevision
                       ? fitErrorEntry.message
                       : undefined
-                  const expanded = Boolean(expandedFitRepos[repoId] && analysis)
+                  const expanded = Boolean(
+                    listMatchesContext &&
+                      expandedFitRepos[repoId] &&
+                      analysis,
+                  )
                   const itemRequestedRevision = normalizeRequestedRevision(
                     item.revision,
                   )
@@ -1317,19 +1368,29 @@ export function ModelCatalogPage() {
                         itemRequestedRevision,
                       )
                     : ''
-                  const trackedDownload = downloadTrackKey
-                    ? downloadByKey[downloadTrackKey]
-                    : undefined
+                  const trackedDownload =
+                    listMatchesContext && downloadTrackKey
+                      ? downloadByKey[downloadTrackKey]
+                      : undefined
                   const job = trackedDownload?.job
                   const downloadActive =
                     job != null && isActiveDownloadStatus(job.status)
                   const downloadRestoring = Boolean(
-                    downloadTrackKey && downloadRestoringByKey[downloadTrackKey],
+                    listMatchesContext &&
+                      downloadTrackKey &&
+                      downloadRestoringByKey[downloadTrackKey],
                   )
                   const downloadStarting = Boolean(
-                    downloadTrackKey && downloadStartingByKey[downloadTrackKey],
+                    listMatchesContext &&
+                      downloadTrackKey &&
+                      downloadStartingByKey[downloadTrackKey],
                   )
+                  const downloadPollWarning =
+                    listMatchesContext && downloadTrackKey
+                      ? downloadPollWarningByKey[downloadTrackKey]
+                      : undefined
                   const downloadDraftLocked =
+                    listMatchesContext &&
                     Boolean(nodeId) &&
                     trackedDownload == null &&
                     Boolean(
@@ -1345,12 +1406,22 @@ export function ModelCatalogPage() {
                     downloadTypeByRepo[repoId],
                   )
                   const typeMissing = resolvedType == null
-                  const downloadTitle = typeMissing
-                    ? 'Select LLM/VLM/EMBEDDING before Download'
-                    : downloadRestoring || downloadDraftLocked
-                      ? '저장된 다운로드 Job 복원 중…'
-                      : downloadDisabledReason(nodeId, analysis)
+                  const reasonText = listMatchesContext
+                    ? catalogFitSummaryReason(item)
+                    : '목록 갱신 중…'
+                  const downloadTitle = catalogListPending
+                    ? '카탈로그 목록을 갱신하는 동안 Fit/Download를 실행할 수 없습니다.'
+                    : typeMissing
+                      ? 'Select LLM/VLM/EMBEDDING before Download'
+                      : downloadRestoring
+                        ? '저장된 다운로드 Job 복원 중…'
+                        : downloadDraftLocked && downloadPollWarning
+                          ? '다운로드 Job 복원 조회에 실패했습니다. 상태 다시 조회를 사용하세요.'
+                          : downloadDraftLocked
+                            ? '저장된 다운로드 Job 복원 중…'
+                            : downloadDisabledReason(nodeId, analysis)
                   const downloadDisabled =
+                    catalogListPending ||
                     !nodeId ||
                     diskBlocked ||
                     typeMissing ||
@@ -1358,6 +1429,8 @@ export function ModelCatalogPage() {
                     downloadStarting ||
                     downloadRestoring ||
                     downloadDraftLocked
+                  const fitDisabled =
+                    catalogListPending || !nodeId || analyzing
                   const nodeLabel =
                     nodes.find((n) => n.id === (fitDetail?.nodeId || nodeId))
                       ?.name || fitDetail?.nodeId || nodeId || '—'
@@ -1365,8 +1438,11 @@ export function ModelCatalogPage() {
                   return (
                     <Fragment key={repoId}>
                       <tr
-                        aria-busy={analyzing || undefined}
+                        aria-busy={analyzing || catalogListPending || undefined}
                         data-fit-loading={analyzing ? 'true' : undefined}
+                        data-catalog-pending={
+                          catalogListPending ? 'true' : undefined
+                        }
                       >
                         <td>
                           <div className="mono">{repoId}</div>
@@ -1415,7 +1491,9 @@ export function ModelCatalogPage() {
                             {catalogFit ? (
                               <StatusBadge status={catalogFit} />
                             ) : (
-                              <span className="secondary-text">—</span>
+                              <span className="secondary-text">
+                                {listMatchesContext ? '—' : '갱신 중'}
+                              </span>
                             )}
                             {analysis ? (
                               <div className="catalog-fit-summary__detail">
@@ -1425,15 +1503,19 @@ export function ModelCatalogPage() {
                             ) : null}
                           </div>
                         </td>
-                        <td className="secondary-text">
-                          {catalogFitSummaryReason(item)}
+                        <td className="catalog-reason-cell">
+                          <TruncatedValue
+                            className="secondary-text"
+                            value={reasonText}
+                            abbreviated={abbreviateMiddle(reasonText, 48, 16)}
+                          />
                         </td>
-                        <td>
-                          <div className="toolbar__actions">
+                        <td className="catalog-actions-cell">
+                          <div className="catalog-row-actions">
                             <button
                               type="button"
                               className="btn"
-                              disabled={!nodeId || analyzing}
+                              disabled={fitDisabled}
                               aria-busy={analyzing || undefined}
                               onClick={() => void onAnalyze(item)}
                             >
@@ -1462,11 +1544,15 @@ export function ModelCatalogPage() {
                             >
                               {downloadStarting
                                 ? 'Starting…'
-                                : downloadRestoring || downloadDraftLocked
+                                : downloadRestoring
                                   ? 'Restoring…'
-                                  : downloadActive
-                                    ? 'Downloading…'
-                                    : 'Download'}
+                                  : downloadDraftLocked && downloadPollWarning
+                                    ? '조회 실패'
+                                    : downloadDraftLocked
+                                      ? 'Restoring…'
+                                      : downloadActive
+                                        ? 'Downloading…'
+                                        : 'Download'}
                             </button>
                             <button
                               type="button"
@@ -1494,7 +1580,9 @@ export function ModelCatalogPage() {
                               {fitError}
                             </p>
                           ) : null}
-                          {renderDownloadState(item)}
+                          {listMatchesContext
+                            ? renderDownloadState(item)
+                            : null}
                         </td>
                       </tr>
                       {expanded && analysis && fitDetail ? (
@@ -1605,6 +1693,17 @@ export function ModelCatalogPage() {
                                             <div className="secondary-text">
                                               {gpu.name || '—'}
                                             </div>
+                                            {gpu.gpu_device_id ? (
+                                              <TruncatedValue
+                                                className="secondary-text mono catalog-clip-cell"
+                                                value={gpu.gpu_device_id}
+                                                abbreviated={abbreviateMiddle(
+                                                  gpu.gpu_device_id,
+                                                  10,
+                                                  8,
+                                                )}
+                                              />
+                                            ) : null}
                                           </td>
                                           <td>
                                             {formatMb(gpu.vram_free_mb)} /{' '}
@@ -1621,10 +1720,22 @@ export function ModelCatalogPage() {
                                           <td>
                                             <StatusBadge status={gpu.result} />
                                           </td>
-                                          <td className="secondary-text">
-                                            {gpu.reasons?.length
-                                              ? gpu.reasons.join('; ')
-                                              : '—'}
+                                          <td className="catalog-clip-cell">
+                                            {gpu.reasons?.length ? (
+                                              <TruncatedValue
+                                                className="secondary-text"
+                                                value={gpu.reasons.join('; ')}
+                                                abbreviated={abbreviateMiddle(
+                                                  gpu.reasons.join('; '),
+                                                  40,
+                                                  16,
+                                                )}
+                                              />
+                                            ) : (
+                                              <span className="secondary-text">
+                                                —
+                                              </span>
+                                            )}
                                           </td>
                                         </tr>
                                       ))}
@@ -1651,7 +1762,17 @@ export function ModelCatalogPage() {
                                   <ul className="catalog-fit-list mono">
                                     {analysis.suggested_gpu_device_ids.map(
                                       (id) => (
-                                        <li key={id}>{id}</li>
+                                        <li key={id}>
+                                          <TruncatedValue
+                                            className="catalog-clip-cell"
+                                            value={id}
+                                            abbreviated={abbreviateMiddle(
+                                              id,
+                                              12,
+                                              10,
+                                            )}
+                                          />
+                                        </li>
                                       ),
                                     )}
                                   </ul>
@@ -1664,7 +1785,16 @@ export function ModelCatalogPage() {
                                   <ul className="catalog-fit-list">
                                     {analysis.reasons.length > 0 ? (
                                       analysis.reasons.map((r) => (
-                                        <li key={r}>{r}</li>
+                                        <li key={r}>
+                                          <TruncatedValue
+                                            value={r}
+                                            abbreviated={abbreviateMiddle(
+                                              r,
+                                              72,
+                                              24,
+                                            )}
+                                          />
+                                        </li>
                                       ))
                                     ) : (
                                       <li className="secondary-text">—</li>
@@ -1676,7 +1806,16 @@ export function ModelCatalogPage() {
                                   <ul className="catalog-fit-list">
                                     {analysis.warnings.length > 0 ? (
                                       analysis.warnings.map((w) => (
-                                        <li key={w}>{w}</li>
+                                        <li key={w}>
+                                          <TruncatedValue
+                                            value={w}
+                                            abbreviated={abbreviateMiddle(
+                                              w,
+                                              72,
+                                              24,
+                                            )}
+                                          />
+                                        </li>
                                       ))
                                     ) : (
                                       <li className="secondary-text">—</li>
@@ -1690,7 +1829,16 @@ export function ModelCatalogPage() {
                                   <ul className="catalog-fit-list">
                                     {analysis.assumptions.length > 0 ? (
                                       analysis.assumptions.map((a) => (
-                                        <li key={a}>{a}</li>
+                                        <li key={a}>
+                                          <TruncatedValue
+                                            value={a}
+                                            abbreviated={abbreviateMiddle(
+                                              a,
+                                              72,
+                                              24,
+                                            )}
+                                          />
+                                        </li>
                                       ))
                                     ) : (
                                       <li className="secondary-text">—</li>

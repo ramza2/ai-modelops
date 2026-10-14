@@ -475,8 +475,10 @@ describe('ModelCatalogPage', () => {
     expect(within(detail).getByText('Do not pool VRAM')).toBeInTheDocument()
     expect(within(detail).getByText('Assumes single-GPU placement')).toBeInTheDocument()
     expect(within(detail).getByText('Suggested GPU (참고)')).toBeInTheDocument()
-    expect(within(detail).getByText('gpu-0')).toBeInTheDocument()
-    expect(within(detail).getByText(/서버 완료 시각이 아닙니다/)).toBeInTheDocument()
+    expect(within(detail).getAllByText('gpu-0').length).toBeGreaterThan(0)
+    expect(
+      within(detail).getAllByText(/서버 완료 시각이 아닙니다/).length,
+    ).toBeGreaterThan(0)
     expect(within(row).getByText('상세 분석')).toBeInTheDocument()
     expect(within(row).getByText('List summary only')).toBeInTheDocument()
 
@@ -1092,6 +1094,9 @@ describe('ModelCatalogPage', () => {
       expect(screen.getByText(/진행률 15%/)).toBeInTheDocument()
     })
     await waitFor(() => {
+      expect(
+        screen.getByText(/다운로드 상태 갱신에 실패했습니다/),
+      ).toBeInTheDocument()
       expect(screen.getByText(/upstream unavailable/)).toBeInTheDocument()
     })
     expect(screen.getByText(/진행률 15%/)).toBeInTheDocument()
@@ -1459,11 +1464,12 @@ describe('ModelCatalogPage', () => {
     ) as HTMLElement
     await waitFor(() => {
       expect(
-        screen.getByText(/restore upstream unavailable/),
+        screen.getByText(/다운로드 Job 복원 조회에 실패했습니다/),
       ).toBeInTheDocument()
+      expect(screen.getByText(/restore upstream unavailable/)).toBeInTheDocument()
     })
     expect(
-      within(row).getByRole('button', { name: 'Restoring…' }),
+      within(row).getByRole('button', { name: '조회 실패' }),
     ).toBeDisabled()
     expect(downloadsApi.startHfDownload).not.toHaveBeenCalled()
     expect(
@@ -1484,6 +1490,222 @@ describe('ModelCatalogPage', () => {
       expect(screen.getByText(/진행률 33%/)).toBeInTheDocument()
     })
     expect(downloadsApi.startHfDownload).not.toHaveBeenCalled()
+  })
+
+  it('auto-reloads catalog on Node change and blocks Fit/Download on the stale list', async () => {
+    vi.mocked(nodesApi.listNodes).mockResolvedValue({
+      items: [
+        {
+          id: 'node-1',
+          name: 'gpu-a',
+          hostname: 'host-a',
+          agent_base_url: 'http://host.docker.internal:8100',
+          environment: 'local',
+          region: null,
+          status: 'ONLINE',
+          last_heartbeat_at: null,
+          cpu_model: null,
+          ram_total_mb: null,
+          disk_total_mb: null,
+          labels_json: null,
+          created_at: '2026-10-01T00:00:00Z',
+          updated_at: '2026-10-01T00:00:00Z',
+        },
+        {
+          id: 'node-2',
+          name: 'gpu-b',
+          hostname: 'host-b',
+          agent_base_url: 'http://host.docker.internal:8101',
+          environment: 'local',
+          region: null,
+          status: 'ONLINE',
+          last_heartbeat_at: null,
+          cpu_model: null,
+          ram_total_mb: null,
+          disk_total_mb: null,
+          labels_json: null,
+          created_at: '2026-10-01T00:00:00Z',
+          updated_at: '2026-10-01T00:00:00Z',
+        },
+      ],
+      page: 1,
+      page_size: 100,
+      total: 2,
+    })
+    let resolveNode2!: (page: HfCatalogPage<HfCatalogModel>) => void
+    const node2Promise = new Promise<HfCatalogPage<HfCatalogModel>>((resolve) => {
+      resolveNode2 = resolve
+    })
+    vi.mocked(catalogApi.listHfCatalog).mockImplementation(async (params = {}) => {
+      if (params.nodeId === 'node-2') return node2Promise
+      return pageResult([
+        makeItem({
+          repository_id: 'org/node1-only',
+          resource_fit: {
+            result: 'FIT',
+            reasons: [
+              'GPU0 has spare VRAM on node-1 with a very long advisory reason that should not stretch the table forever',
+            ],
+          },
+        }),
+      ])
+    })
+    vi.mocked(catalogApi.analyzeHfResourceFit).mockResolvedValue(
+      makeFitAnalysis({ repository_id: 'org/node1-only' }),
+    )
+    vi.mocked(downloadsApi.startHfDownload).mockResolvedValue(
+      makeJob({
+        job_id: 'job-stale-node',
+        repository_id: 'org/node1-only',
+        status: 'QUEUED',
+      }),
+    )
+
+    renderAt('/models/catalog?node_id=node-1')
+    const row = (await screen.findByText('org/node1-only')).closest(
+      'tr',
+    ) as HTMLElement
+    expect(
+      within(row).getByRole('button', { name: 'Download' }),
+    ).not.toBeDisabled()
+    const reason = within(row).getByTitle(
+      /GPU0 has spare VRAM on node-1 with a very long advisory reason/,
+    )
+    expect(reason.textContent).toContain('…')
+    expect(reason.textContent?.length ?? 0).toBeLessThan(
+      'GPU0 has spare VRAM on node-1 with a very long advisory reason that should not stretch the table forever'
+        .length,
+    )
+
+    await userEvent.selectOptions(screen.getByLabelText('Node'), 'node-2')
+    expect(
+      await screen.findByText(/카탈로그를 다시 불러오는 중/),
+    ).toBeInTheDocument()
+    expect(within(row).getByText('목록 갱신 중…')).toBeInTheDocument()
+    expect(
+      within(row).getByRole('button', { name: 'Fit 분석' }),
+    ).toBeDisabled()
+    expect(
+      within(row).getByRole('button', { name: 'Download' }),
+    ).toBeDisabled()
+
+    await userEvent.click(within(row).getByRole('button', { name: 'Fit 분석' }))
+    await userEvent.click(within(row).getByRole('button', { name: 'Download' }))
+    expect(catalogApi.analyzeHfResourceFit).not.toHaveBeenCalled()
+    expect(downloadsApi.startHfDownload).not.toHaveBeenCalled()
+
+    resolveNode2(
+      pageResult([
+        makeItem({
+          repository_id: 'org/node2-only',
+          resource_fit: { result: 'TIGHT', reasons: ['node-2 headroom'] },
+        }),
+      ]),
+    )
+    expect(await screen.findByText('org/node2-only')).toBeInTheDocument()
+    expect(screen.queryByText('org/node1-only')).not.toBeInTheDocument()
+    expect(
+      screen.queryByText(/카탈로그를 다시 불러오는 중/),
+    ).not.toBeInTheDocument()
+    expect(
+      within(
+        (screen.getByText('org/node2-only').closest('tr') as HTMLElement),
+      ).getByRole('button', { name: 'Download' }),
+    ).not.toBeDisabled()
+  })
+
+  it('ignores a late catalog response after a faster Node switch', async () => {
+    vi.mocked(nodesApi.listNodes).mockResolvedValue({
+      items: [
+        {
+          id: 'node-1',
+          name: 'gpu-a',
+          hostname: 'host-a',
+          agent_base_url: 'http://host.docker.internal:8100',
+          environment: 'local',
+          region: null,
+          status: 'ONLINE',
+          last_heartbeat_at: null,
+          cpu_model: null,
+          ram_total_mb: null,
+          disk_total_mb: null,
+          labels_json: null,
+          created_at: '2026-10-01T00:00:00Z',
+          updated_at: '2026-10-01T00:00:00Z',
+        },
+        {
+          id: 'node-2',
+          name: 'gpu-b',
+          hostname: 'host-b',
+          agent_base_url: 'http://host.docker.internal:8101',
+          environment: 'local',
+          region: null,
+          status: 'ONLINE',
+          last_heartbeat_at: null,
+          cpu_model: null,
+          ram_total_mb: null,
+          disk_total_mb: null,
+          labels_json: null,
+          created_at: '2026-10-01T00:00:00Z',
+          updated_at: '2026-10-01T00:00:00Z',
+        },
+      ],
+      page: 1,
+      page_size: 100,
+      total: 2,
+    })
+    let resolveNode1Reload!: (page: HfCatalogPage<HfCatalogModel>) => void
+    const node1Reload = new Promise<HfCatalogPage<HfCatalogModel>>((resolve) => {
+      resolveNode1Reload = resolve
+    })
+    let node1Calls = 0
+    vi.mocked(catalogApi.listHfCatalog).mockImplementation(async (params = {}) => {
+      if (params.nodeId === 'node-2') {
+        return pageResult([makeItem({ repository_id: 'org/fast-node2' })])
+      }
+      node1Calls += 1
+      if (node1Calls === 1) {
+        return pageResult([makeItem({ repository_id: 'org/initial-node1' })])
+      }
+      return node1Reload
+    })
+
+    renderAt('/models/catalog?node_id=node-1')
+    expect(await screen.findByText('org/initial-node1')).toBeInTheDocument()
+
+    await userEvent.selectOptions(screen.getByLabelText('Node'), '')
+    await userEvent.selectOptions(screen.getByLabelText('Node'), 'node-1')
+    await waitFor(() => {
+      expect(node1Calls).toBeGreaterThan(1)
+    })
+    await userEvent.selectOptions(screen.getByLabelText('Node'), 'node-2')
+    expect(await screen.findByText('org/fast-node2')).toBeInTheDocument()
+
+    resolveNode1Reload(
+      pageResult([makeItem({ repository_id: 'org/late-node1' })]),
+    )
+    await new Promise((r) => setTimeout(r, 30))
+    expect(screen.queryByText('org/late-node1')).not.toBeInTheDocument()
+    expect(screen.getByText('org/fast-node2')).toBeInTheDocument()
+  })
+
+  it('keeps Fit action button labels on a single line via nowrap class', async () => {
+    vi.mocked(catalogApi.listHfCatalog).mockResolvedValue(
+      pageResult([makeItem({ repository_id: 'org/nowrap' })]),
+    )
+    vi.mocked(catalogApi.analyzeHfResourceFit).mockResolvedValue(
+      makeFitAnalysis({ repository_id: 'org/nowrap' }),
+    )
+    renderAt('/models/catalog?node_id=node-1')
+    const row = (await screen.findByText('org/nowrap')).closest(
+      'tr',
+    ) as HTMLElement
+    expect(row.querySelector('.catalog-row-actions')).not.toBeNull()
+    await userEvent.click(within(row).getByRole('button', { name: 'Fit 분석' }))
+    expect(await screen.findByTestId('fit-detail-org/nowrap')).toBeInTheDocument()
+    const expand = within(row).getByRole('button', { name: '접기' })
+    expect(expand.className).toContain('btn')
+    expect(row.querySelector('.catalog-row-actions')).not.toBeNull()
   })
 
   it('blocks Download for later draft rows while earlier restores are still in flight', async () => {
