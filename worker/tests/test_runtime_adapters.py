@@ -410,3 +410,99 @@ def test_generic_openai_unchanged_by_scheduling_policy() -> None:
     )
     assert "--scheduling-policy" not in spec.command
 
+
+# ---------------------------------------------------------------------------
+# P1-7A reasoning_parser
+# ---------------------------------------------------------------------------
+
+
+def test_vllm_reasoning_parser_unset_omitted() -> None:
+    spec = VLLMAdapter().build_create_spec(
+        RuntimeBuildInput(
+            runtime_image="vllm/vllm-openai:v0.24.0",
+            served_model_name="m",
+            model_path="/srv/models/x",
+        )
+    )
+    assert "--reasoning-parser" not in spec.command
+
+
+def test_vllm_reasoning_parser_qwen3_emitted_once() -> None:
+    spec = VLLMAdapter().build_create_spec(
+        RuntimeBuildInput(
+            runtime_image="vllm/vllm-openai:v0.24.0",
+            served_model_name="m",
+            model_path="/srv/models/x",
+            deployment_config={"reasoning_parser": "qwen3"},
+        )
+    )
+    assert _flag_value(spec.command, "--reasoning-parser") == "qwen3"
+    assert spec.command.count("--reasoning-parser") == 1
+
+
+def test_vllm_reasoning_parser_deployment_wins_runtime() -> None:
+    spec = VLLMAdapter().build_create_spec(
+        RuntimeBuildInput(
+            runtime_image="vllm/vllm-openai:v0.24.0",
+            served_model_name="m",
+            model_path="/srv/models/x",
+            runtime_config={"reasoning_parser": "qwen3"},
+            deployment_config={},
+        )
+    )
+    assert _flag_value(spec.command, "--reasoning-parser") == "qwen3"
+
+
+@pytest.mark.parametrize("value", ["QWEN3", " qwen3 ", "Qwen3"])
+def test_vllm_reasoning_parser_normalized(value) -> None:
+    spec = VLLMAdapter().build_create_spec(
+        RuntimeBuildInput(
+            runtime_image="vllm/vllm-openai:v0.24.0",
+            served_model_name="m",
+            model_path="/srv/models/x",
+            deployment_config={"reasoning_parser": value},
+        )
+    )
+    assert _flag_value(spec.command, "--reasoning-parser") == "qwen3"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [None, "", "deepseek", "qwen2", "0", 0, True, False, [], {}],
+)
+def test_vllm_reasoning_parser_invalid_rejected(value) -> None:
+    with pytest.raises(RuntimeAdapterError, match="reasoning_parser"):
+        VLLMAdapter().build_create_spec(
+            RuntimeBuildInput(
+                runtime_image="vllm/vllm-openai:v0.24.0",
+                served_model_name="m",
+                model_path="/srv/models/x",
+                deployment_config={"reasoning_parser": value},
+            )
+        )
+
+
+def test_vllm_reasoning_parser_explicit_null_no_fallback() -> None:
+    with pytest.raises(RuntimeAdapterError, match="reasoning_parser"):
+        VLLMAdapter().build_create_spec(
+            RuntimeBuildInput(
+                runtime_image="vllm/vllm-openai:v0.24.0",
+                served_model_name="m",
+                model_path="/srv/models/x",
+                runtime_config={"reasoning_parser": "qwen3"},
+                deployment_config={"reasoning_parser": None},
+            )
+        )
+
+
+def test_generic_openai_unchanged_by_reasoning_parser() -> None:
+    spec = GenericOpenAIAdapter().build_create_spec(
+        RuntimeBuildInput(
+            runtime_image="example/openai-runtime:tag",
+            served_model_name="embed-model",
+            model_path="/srv/ai-models/embed/rev",
+            deployment_config={"reasoning_parser": "qwen3"},
+        )
+    )
+    assert "--reasoning-parser" not in spec.command
+

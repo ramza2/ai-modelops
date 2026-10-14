@@ -6,7 +6,7 @@ import uuid
 from typing import Any
 
 from fastapi import APIRouter, Depends, Query, Response, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_session
@@ -14,6 +14,8 @@ from app.services.cache_deploy import CacheDeployService
 from app.services.hf_download import HFDownloadService
 
 router = APIRouter(prefix="/api/v1/model-cache", tags=["model-cache"])
+
+_REASONING_PARSER_ALLOWED = frozenset({"qwen3"})
 
 
 def get_download_service(
@@ -39,6 +41,22 @@ class CacheDeployRuntimeConfig(BaseModel):
     health_path: str | None = Field(default=None, max_length=255)
     probe_type: str | None = Field(default=None, max_length=32)
     scheduling_policy: str | None = Field(default=None, max_length=32)
+    # Optional vLLM --reasoning-parser (P1-7A). Unset = omit flag (default).
+    reasoning_parser: str | None = Field(default=None, max_length=32)
+
+    @field_validator("reasoning_parser", mode="before")
+    @classmethod
+    def _normalize_reasoning_parser(cls, value: Any) -> str | None:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError("reasoning_parser must be unset or one of: qwen3")
+        normalized = value.strip().lower()
+        if normalized == "":
+            return None
+        if normalized not in _REASONING_PARSER_ALLOWED:
+            raise ValueError("reasoning_parser must be unset or one of: qwen3")
+        return normalized
 
 
 class CreateCacheDeploymentRequest(BaseModel):
