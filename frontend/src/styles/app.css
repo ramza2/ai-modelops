@@ -699,8 +699,8 @@ th {
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .catalog-fit-gpu-table {
-    min-width: 0;
+  .catalog-fit-gpu-cards {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 
@@ -805,7 +805,7 @@ th {
   }
 }
 
-/** P1-5B: Model Catalog Fit detail (scoped; does not alter Deploy Wizard Fit). */
+/** P1-5B / P1-8B: Model Catalog Fit detail (scoped; does not alter Deploy Wizard Fit). */
 .catalog-fit-summary {
   display: grid;
   gap: 0.35rem;
@@ -816,6 +816,21 @@ th {
   gap: 0.2rem;
   padding-top: 0.25rem;
   border-top: 1px dashed var(--border);
+}
+
+.catalog-fit-pill {
+  display: inline-block;
+  font-size: 0.8rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.catalog-fit-pill--loading {
+  color: var(--muted);
+}
+
+.catalog-fit-pill--error {
+  color: var(--bad);
 }
 
 .catalog-fit-loading {
@@ -861,9 +876,65 @@ th {
   font-size: 0.9rem;
 }
 
-.catalog-fit-gpu-table th,
-.catalog-fit-gpu-table td {
-  vertical-align: top;
+.catalog-fit-gpu-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 16rem), 1fr));
+  gap: 0.75rem;
+}
+
+.catalog-fit-gpu-card {
+  display: grid;
+  gap: 0.5rem;
+  min-width: 0;
+  padding: 0.75rem 0.85rem;
+  border: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.catalog-fit-gpu-card--suggested {
+  border-color: var(--ok, #2f6f4e);
+  box-shadow: inset 3px 0 0 var(--ok, #2f6f4e);
+}
+
+.catalog-fit-gpu-card__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.catalog-fit-gpu-card__badge {
+  margin: 0;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--ok, #2f6f4e);
+}
+
+.catalog-fit-gpu-card__metrics {
+  display: grid;
+  gap: 0.35rem;
+  margin: 0;
+}
+
+.catalog-fit-gpu-card__metrics > div {
+  display: grid;
+  gap: 0.1rem;
+}
+
+.catalog-fit-gpu-card__metrics dt {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.catalog-fit-gpu-card__metrics dd {
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+.catalog-fit-gpu-card__reasons {
+  display: grid;
+  gap: 0.25rem;
+  min-width: 0;
 }
 
 .mono {
