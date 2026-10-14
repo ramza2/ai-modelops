@@ -473,17 +473,24 @@ describe('ModelCatalogPage', () => {
 
     const detail = await screen.findByTestId('fit-detail-org/fit-ux')
     expect(within(detail).getByText('종합 결과')).toBeInTheDocument()
-    expect(within(detail).getByText('index 0')).toBeInTheDocument()
-    expect(within(detail).getByText('index 1')).toBeInTheDocument()
+    expect(within(detail).getByText('GPU 0')).toBeInTheDocument()
+    expect(within(detail).getByText('GPU 1')).toBeInTheDocument()
+    expect(screen.getByTestId('fit-gpu-cards-org/fit-ux')).toBeInTheDocument()
+    expect(screen.getByTestId('fit-gpu-card-org/fit-ux-0')).toBeInTheDocument()
+    expect(screen.getByTestId('fit-gpu-card-org/fit-ux-1')).toBeInTheDocument()
     expect(within(detail).getByText('GPU1 thin headroom')).toBeInTheDocument()
     expect(within(detail).getByText('Do not pool VRAM')).toBeInTheDocument()
     expect(within(detail).getByText('Assumes single-GPU placement')).toBeInTheDocument()
-    expect(within(detail).getByText('Suggested GPU (참고)')).toBeInTheDocument()
+    expect(within(detail).getByText('추천 GPU 및 판단 근거')).toBeInTheDocument()
+    expect(within(detail).getByText(/추천 GPU \(참고\)/)).toBeInTheDocument()
+    expect(within(detail).getByText(/Cache Deploy Wizard/)).toBeInTheDocument()
     expect(within(detail).getAllByText('gpu-0').length).toBeGreaterThan(0)
     expect(
-      within(detail).getAllByText(/서버 완료 시각이 아닙니다/).length,
+      within(detail).getAllByText(/서버 완료 시각이 아닙니다|서버 완료 시각 아님/)
+        .length,
     ).toBeGreaterThan(0)
-    expect(within(row).getByText('상세 분석')).toBeInTheDocument()
+    expect(within(row).getByText('분석 완료')).toBeInTheDocument()
+    expect(screen.getByTestId('fit-row-status-org/fit-ux')).toBeInTheDocument()
     expect(within(row).getByText('List summary only')).toBeInTheDocument()
 
     await userEvent.click(within(row).getByRole('button', { name: '접기' }))
@@ -513,7 +520,43 @@ describe('ModelCatalogPage', () => {
     )
     await userEvent.click(within(row).getByRole('button', { name: '재분석' }))
     expect(await screen.findByText('Re-analyzed')).toBeInTheDocument()
-    expect(screen.getByText('retry tight')).toBeInTheDocument()
+    expect(screen.getAllByText('retry tight').length).toBeGreaterThan(0)
+  })
+
+  it('shows analyze failure with explicit retry that re-runs Fit', async () => {
+    vi.mocked(catalogApi.listHfCatalog).mockResolvedValue(
+      pageResult([makeItem({ repository_id: 'org/fit-fail' })]),
+    )
+    vi.mocked(catalogApi.analyzeHfResourceFit)
+      .mockRejectedValueOnce(
+        new ApiError('Node Agent unreachable', {
+          status: 503,
+          code: 'UNAVAILABLE',
+        }),
+      )
+      .mockResolvedValue(
+        makeFitAnalysis({
+          repository_id: 'org/fit-fail',
+          result: 'FIT',
+          reasons: ['recovered'],
+        }),
+      )
+
+    renderAt('/models/catalog?node_id=node-1')
+    const row = (await screen.findByText('org/fit-fail')).closest(
+      'tr',
+    ) as HTMLElement
+    await userEvent.click(within(row).getByRole('button', { name: 'Fit 분석' }))
+    expect(await screen.findByTestId('fit-error-org/fit-fail')).toHaveTextContent(
+      'Node Agent unreachable',
+    )
+    expect(within(row).getByText('분석 실패')).toBeInTheDocument()
+    expect(within(row).getByRole('button', { name: '재시도' })).toBeInTheDocument()
+
+    await userEvent.click(within(row).getByRole('button', { name: '재시도' }))
+    expect(await screen.findByTestId('fit-detail-org/fit-fail')).toBeInTheDocument()
+    expect(within(row).getByText('분석 완료')).toBeInTheDocument()
+    expect(screen.getByText('recovered')).toBeInTheDocument()
   })
 
   it('ignores stale fit responses after Node or search context changes', async () => {
@@ -715,7 +758,7 @@ describe('ModelCatalogPage', () => {
         reasons: ['recovered'],
       }),
     )
-    await userEvent.click(within(failRow).getByRole('button', { name: 'Fit 분석' }))
+    await userEvent.click(within(failRow).getByRole('button', { name: '재시도' }))
     expect(await screen.findByTestId('fit-detail-org/fail-fit')).toBeInTheDocument()
     expect(screen.getByText('recovered')).toBeInTheDocument()
     expect(screen.queryByTestId('fit-error-org/fail-fit')).not.toBeInTheDocument()

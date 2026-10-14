@@ -1552,10 +1552,33 @@ export function ModelCatalogPage() {
                                 {listMatchesContext ? '—' : '갱신 중'}
                               </span>
                             )}
-                            {analysis ? (
-                              <div className="catalog-fit-summary__detail">
-                                <span className="secondary-text">상세 분석</span>
+                            {analyzing ? (
+                              <div
+                                className="catalog-fit-summary__detail"
+                                data-testid={`fit-row-status-${repoId}`}
+                              >
+                                <span className="secondary-text">상태</span>
+                                <span className="catalog-fit-pill catalog-fit-pill--loading">
+                                  분석 중
+                                </span>
+                              </div>
+                            ) : analysis ? (
+                              <div
+                                className="catalog-fit-summary__detail"
+                                data-testid={`fit-row-status-${repoId}`}
+                              >
+                                <span className="secondary-text">분석 완료</span>
                                 <StatusBadge status={analysis.result} />
+                              </div>
+                            ) : fitError ? (
+                              <div
+                                className="catalog-fit-summary__detail"
+                                data-testid={`fit-row-status-${repoId}`}
+                              >
+                                <span className="secondary-text">상태</span>
+                                <span className="catalog-fit-pill catalog-fit-pill--error">
+                                  분석 실패
+                                </span>
                               </div>
                             ) : null}
                           </div>
@@ -1578,9 +1601,11 @@ export function ModelCatalogPage() {
                             >
                               {analyzing
                                 ? '분석 중…'
-                                : analysis
-                                  ? '재분석'
-                                  : 'Fit 분석'}
+                                : fitError
+                                  ? '재시도'
+                                  : analysis
+                                    ? '재분석'
+                                    : 'Fit 분석'}
                             </button>
                             {analysis ? (
                               <button
@@ -1628,7 +1653,7 @@ export function ModelCatalogPage() {
                               role="alert"
                               data-testid={`fit-error-${repoId}`}
                             >
-                              {fitError}
+                              {fitError} — 재시도로 다시 분석할 수 있습니다.
                             </p>
                           ) : null}
                           {listMatchesContext
@@ -1647,10 +1672,12 @@ export function ModelCatalogPage() {
                                 <h3 className="section-subheading">
                                   Fit 상세 분석 (advisory)
                                 </h3>
-                                <p className="panel-hint">
-                                  서버 응답을 그대로 표시합니다. GPU VRAM을
-                                  합산하지 않으며, 실제 Deployment를 실행하지
-                                  않습니다. 목록의 resource_fit 요약과 별개입니다.
+                                <p className="panel-hint" role="note">
+                                  현재 선택된 Node(<strong>{nodeLabel}</strong>)의
+                                  전체 GPU를 비교한 advisory 결과입니다. Catalog에서
+                                  GPU를 고르지 않으며, 실제 GPU 선택·Fresh Fit은
+                                  Cache Deploy Wizard에서 수행합니다. GPU VRAM을
+                                  합산하지 않고, Deployment를 실행하지 않습니다.
                                 </p>
                               </div>
                               <dl className="config-kv-grid">
@@ -1658,10 +1685,13 @@ export function ModelCatalogPage() {
                                   <dt>종합 결과</dt>
                                   <dd>
                                     <StatusBadge status={analysis.result} />
+                                    <div className="secondary-text">
+                                      TP={analysis.tensor_parallel}
+                                    </div>
                                   </dd>
                                 </div>
                                 <div>
-                                  <dt>분석 대상 Node</dt>
+                                  <dt>분석 Node</dt>
                                   <dd>
                                     {nodeLabel}
                                     <div className="secondary-text mono">
@@ -1670,7 +1700,7 @@ export function ModelCatalogPage() {
                                   </dd>
                                 </div>
                                 <div>
-                                  <dt>분석 대상 모델</dt>
+                                  <dt>모델 / revision</dt>
                                   <dd className="mono">
                                     {analysis.repository_id}
                                     <div className="secondary-text">
@@ -1682,13 +1712,13 @@ export function ModelCatalogPage() {
                                   </dd>
                                 </div>
                                 <div>
-                                  <dt>클라이언트 요청 시각</dt>
+                                  <dt>분석 시각</dt>
                                   <dd>
                                     {formatApiDateTime(
                                       fitDetail.requestedAt.toISOString(),
                                     )}
                                     <div className="secondary-text">
-                                      서버 완료 시각이 아닙니다.
+                                      클라이언트 요청 시각 (서버 완료 시각 아님)
                                     </div>
                                   </dd>
                                 </div>
@@ -1719,79 +1749,96 @@ export function ModelCatalogPage() {
 
                               <h4 className="section-subheading">GPU별 판정</h4>
                               <p className="panel-hint">
-                                GPU마다 독립적으로 표시합니다. free VRAM을
-                                합산하지 않습니다.
+                                GPU 0 / GPU 1을 각각 독립 카드로 표시합니다. free
+                                VRAM을 합산하지 않습니다.
                               </p>
                               {analysis.gpu_results.length > 0 ? (
-                                <div className="table-wrap">
-                                  <table className="data-table catalog-fit-gpu-table">
-                                    <thead>
-                                      <tr>
-                                        <th scope="col">GPU</th>
-                                        <th scope="col">Free / Total</th>
-                                        <th scope="col">Safety margin</th>
-                                        <th scope="col">예상 필요 VRAM</th>
-                                        <th scope="col">판정</th>
-                                        <th scope="col">Reasons</th>
-                                      </tr>
-                                    </thead>
-                                    <tbody>
-                                      {analysis.gpu_results.map((gpu) => (
-                                        <tr key={gpu.gpu_device_id}>
-                                          <td>
-                                            index{' '}
-                                            {gpu.gpu_index ?? '—'}
+                                <div
+                                  className="catalog-fit-gpu-cards"
+                                  data-testid={`fit-gpu-cards-${repoId}`}
+                                >
+                                  {analysis.gpu_results.map((gpu) => {
+                                    const suggested =
+                                      analysis.suggested_gpu_device_ids?.includes(
+                                        gpu.gpu_device_id,
+                                      ) ?? false
+                                    return (
+                                      <article
+                                        key={gpu.gpu_device_id}
+                                        className={
+                                          suggested
+                                            ? 'catalog-fit-gpu-card catalog-fit-gpu-card--suggested'
+                                            : 'catalog-fit-gpu-card'
+                                        }
+                                        data-testid={`fit-gpu-card-${repoId}-${gpu.gpu_index ?? gpu.gpu_device_id}`}
+                                      >
+                                        <header className="catalog-fit-gpu-card__head">
+                                          <div>
+                                            <strong>
+                                              GPU {gpu.gpu_index ?? '—'}
+                                            </strong>
                                             <div className="secondary-text">
                                               {gpu.name || '—'}
                                             </div>
-                                            {gpu.gpu_device_id ? (
-                                              <TruncatedValue
-                                                className="secondary-text mono catalog-clip-cell"
-                                                value={gpu.gpu_device_id}
-                                                abbreviated={abbreviateMiddle(
-                                                  gpu.gpu_device_id,
-                                                  10,
-                                                  8,
-                                                )}
-                                              />
-                                            ) : null}
-                                          </td>
-                                          <td>
-                                            {formatMb(gpu.vram_free_mb)} /{' '}
-                                            {formatMb(gpu.vram_total_mb)}
-                                          </td>
-                                          <td>
-                                            {formatMb(gpu.safety_margin_mb)}
-                                          </td>
-                                          <td>
-                                            {formatMb(
-                                              gpu.estimated_required_vram_mb,
+                                          </div>
+                                          <StatusBadge status={gpu.result} />
+                                        </header>
+                                        {suggested ? (
+                                          <p className="catalog-fit-gpu-card__badge">
+                                            추천 GPU (참고)
+                                          </p>
+                                        ) : null}
+                                        <dl className="catalog-fit-gpu-card__metrics">
+                                          <div>
+                                            <dt>Free / Total VRAM</dt>
+                                            <dd>
+                                              {formatMb(gpu.vram_free_mb)} /{' '}
+                                              {formatMb(gpu.vram_total_mb)}
+                                            </dd>
+                                          </div>
+                                          <div>
+                                            <dt>예상 필요 VRAM</dt>
+                                            <dd>
+                                              {formatMb(
+                                                gpu.estimated_required_vram_mb,
+                                              )}
+                                            </dd>
+                                          </div>
+                                          <div>
+                                            <dt>Safety margin</dt>
+                                            <dd>
+                                              {formatMb(gpu.safety_margin_mb)}
+                                            </dd>
+                                          </div>
+                                        </dl>
+                                        <div className="catalog-fit-gpu-card__reasons">
+                                          <span className="secondary-text">
+                                            판단 근거
+                                          </span>
+                                          {gpu.reasons?.length ? (
+                                            <ul className="catalog-fit-list">
+                                              {gpu.reasons.map((r) => (
+                                                <li key={r}>{r}</li>
+                                              ))}
+                                            </ul>
+                                          ) : (
+                                            <p className="secondary-text">—</p>
+                                          )}
+                                        </div>
+                                        {gpu.gpu_device_id ? (
+                                          <TruncatedValue
+                                            className="secondary-text mono catalog-clip-cell"
+                                            value={gpu.gpu_device_id}
+                                            abbreviated={abbreviateMiddle(
+                                              gpu.gpu_device_id,
+                                              10,
+                                              8,
                                             )}
-                                          </td>
-                                          <td>
-                                            <StatusBadge status={gpu.result} />
-                                          </td>
-                                          <td className="catalog-clip-cell">
-                                            {gpu.reasons?.length ? (
-                                              <TruncatedValue
-                                                className="secondary-text"
-                                                value={gpu.reasons.join('; ')}
-                                                abbreviated={abbreviateMiddle(
-                                                  gpu.reasons.join('; '),
-                                                  40,
-                                                  16,
-                                                )}
-                                              />
-                                            ) : (
-                                              <span className="secondary-text">
-                                                —
-                                              </span>
-                                            )}
-                                          </td>
-                                        </tr>
-                                      ))}
-                                    </tbody>
-                                  </table>
+                                          />
+                                        ) : null}
+                                      </article>
+                                    )
+                                  })}
                                 </div>
                               ) : (
                                 <p className="secondary-text">
@@ -1803,28 +1850,36 @@ export function ModelCatalogPage() {
                               analysis.suggested_gpu_device_ids.length > 0 ? (
                                 <div className="catalog-fit-detail__block">
                                   <h4 className="section-subheading">
-                                    Suggested GPU (참고)
+                                    추천 GPU 및 판단 근거
                                   </h4>
                                   <p className="panel-hint">
-                                    Node 기준 분석의 참고 제안입니다. Catalog에서
-                                    GPU를 선택하지 않으며, 실제 배정은 Cache Deploy
-                                    Wizard에서 합니다.
+                                    Node 전체 GPU 비교의 참고 제안입니다. Catalog는
+                                    GPU를 선택하지 않으며, Deploy Wizard에서 실제
+                                    GPU를 고르고 Fresh Fit을 수행합니다.
                                   </p>
-                                  <ul className="catalog-fit-list mono">
+                                  <ul className="catalog-fit-list">
                                     {analysis.suggested_gpu_device_ids.map(
-                                      (id) => (
-                                        <li key={id}>
-                                          <TruncatedValue
-                                            className="catalog-clip-cell"
-                                            value={id}
-                                            abbreviated={abbreviateMiddle(
-                                              id,
-                                              12,
-                                              10,
-                                            )}
-                                          />
-                                        </li>
-                                      ),
+                                      (id) => {
+                                        const gpu = analysis.gpu_results.find(
+                                          (g) => g.gpu_device_id === id,
+                                        )
+                                        const label = gpu
+                                          ? `GPU ${gpu.gpu_index ?? '—'} (${gpu.name || id})`
+                                          : id
+                                        return (
+                                          <li key={id}>
+                                            <strong>{label}</strong>
+                                            <div className="secondary-text mono">
+                                              {id}
+                                            </div>
+                                            {gpu?.reasons?.length ? (
+                                              <div className="secondary-text">
+                                                {gpu.reasons.join('; ')}
+                                              </div>
+                                            ) : null}
+                                          </li>
+                                        )
+                                      },
                                     )}
                                   </ul>
                                 </div>
@@ -1832,7 +1887,9 @@ export function ModelCatalogPage() {
 
                               <div className="catalog-fit-detail__lists">
                                 <div>
-                                  <h4 className="section-subheading">Reasons</h4>
+                                  <h4 className="section-subheading">
+                                    종합 Reasons
+                                  </h4>
                                   <ul className="catalog-fit-list">
                                     {analysis.reasons.length > 0 ? (
                                       analysis.reasons.map((r) => (
