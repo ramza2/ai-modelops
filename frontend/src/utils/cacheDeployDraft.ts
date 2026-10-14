@@ -68,12 +68,17 @@ const validRuntime = (v: unknown): v is CacheDeployRuntimeConfig => {
     'probe_type',
     'scheduling_policy',
     'reasoning_parser',
+    'vllm_model_runner',
   ]) {
     if (v[field] != null && !validText(v[field])) return false
   }
   if (v.reasoning_parser != null) {
     const normalized = String(v.reasoning_parser).trim().toLowerCase()
     if (normalized !== 'qwen3') return false
+  }
+  if (v.vllm_model_runner != null) {
+    const normalized = String(v.vllm_model_runner).trim().toLowerCase()
+    if (normalized !== 'v1') return false
   }
   return true
 }

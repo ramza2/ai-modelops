@@ -112,10 +112,13 @@ Body:
 }
 ```
 
-Optional LLM thinking (P1-7A, vLLM 0.24.0): set
+Optional LLM thinking (P1-7A / P1-7E, vLLM 0.24.0): set
 `runtime_config.reasoning_parser` to `"qwen3"` to emit
 `--reasoning-parser qwen3` on **new** Managed creates. Omit / null keeps the
-historical CMD (no flag). See `docs/deployment/02-vllm-reasoning-parser.md`.
+historical CMD (no flag). Optional `runtime_config.vllm_model_runner: "v1"`
+sets container env `VLLM_USE_V2_MODEL_RUNNER=0` (needed for some
+`thinking_token_budget` paths on V2). See
+`docs/deployment/02-vllm-reasoning-parser.md`.
 
 Requirements:
 
@@ -135,7 +138,8 @@ Requirements:
 - No host port publish; upstream is internal container DNS
 - Idempotent reuse only when create-critical spec matches (cache/node/version/
   container/port/served name/path/networks/GPUs/order/TP/dtype/quant/runner/
-  max_model_len/max_num_seqs/gpu_memory_utilization/reasoning_parser). Same
+  max_model_len/max_num_seqs/gpu_memory_utilization/reasoning_parser/
+  vllm_model_runner). Same
   identity with a different spec → `409 DEPLOYMENT_SPEC_CONFLICT`
 - Model / Version / Artifact rows stay immutable history
 - Effective `served_model_name`: Deployment config override → Version fallback

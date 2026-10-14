@@ -54,6 +54,7 @@ export const RUNTIME_CONFIG_ALLOWLIST = [
   'quantization',
   'scheduling_policy',
   'reasoning_parser',
+  'vllm_model_runner',
 ] as const
 
 export type RuntimeConfigKey = (typeof RUNTIME_CONFIG_ALLOWLIST)[number]

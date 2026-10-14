@@ -14,6 +14,8 @@ export type CacheDeployRuntimeConfig = {
   scheduling_policy?: string | null
   /** Optional vLLM --reasoning-parser. Unset omits the flag. */
   reasoning_parser?: string | null
+  /** Optional V1 model runner pin. Unset = auto (image default). */
+  vllm_model_runner?: string | null
 }
 
 export type CreateCacheDeploymentBody = {
@@ -163,6 +165,8 @@ export async function createDeploymentFromCache(
                 body.runtimeConfig.scheduling_policy ?? undefined,
               reasoning_parser:
                 body.runtimeConfig.reasoning_parser ?? undefined,
+              vllm_model_runner:
+                body.runtimeConfig.vllm_model_runner ?? undefined,
             }
           : undefined,
       },
