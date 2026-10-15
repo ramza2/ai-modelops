@@ -908,6 +908,55 @@ describe('ModelCachePage', () => {
     ).not.toBeDisabled()
   })
 
+  it('closes an open Purge dialog when Node context changes without calling purge API', async () => {
+    vi.mocked(downloadsApi.listModelCaches).mockImplementation(
+      async (params = {}) => {
+        if (params.nodeId === 'node-2') {
+          return cachePage([
+            makeCache({
+              id: 'cache-node2',
+              node_id: 'node-2',
+              node_name: 'gpu-b',
+              repository_id: 'org/node2-only',
+              status: 'READY',
+            }),
+          ])
+        }
+        return cachePage([
+          makeCache({
+            id: 'cache-ready-purge',
+            repository_id: 'org/ready-dialog',
+            status: 'READY',
+          }),
+        ])
+      },
+    )
+    vi.mocked(downloadsApi.purgeModelCache).mockResolvedValue({
+      id: 'cache-ready-purge',
+      status: 'MISSING',
+      purged: true,
+      repository_id: 'org/ready-dialog',
+      resolved_revision: 'abc123',
+      registry_retained: true,
+    })
+
+    renderAt('/models/cache?node_id=node-1')
+    const row = (await screen.findByText('org/ready-dialog')).closest(
+      'tr',
+    ) as HTMLElement
+    await userEvent.click(within(row).getByRole('button', { name: 'Purge' }))
+    expect(
+      await screen.findByRole('dialog', { name: /Purge 확인/i }),
+    ).toBeInTheDocument()
+
+    await userEvent.selectOptions(screen.getByLabelText('Node'), 'node-2')
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    })
+    expect(await screen.findByText('org/node2-only')).toBeInTheDocument()
+    expect(downloadsApi.purgeModelCache).not.toHaveBeenCalled()
+  })
+
   it('blocks Deploy/Purge while page change refetch is pending', async () => {
     let resolvePage2!: (page: Paginated<ModelCacheEntry>) => void
     const page2Promise = new Promise<Paginated<ModelCacheEntry>>((resolve) => {
