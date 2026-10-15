@@ -14,7 +14,9 @@ import type {
 import { EndpointDetailPage } from '../pages/EndpointDetailPage'
 import * as endpointsApi from '../api/endpoints'
 import * as deploymentsApi from '../api/deployments'
+import * as decommissionApi from '../api/decommission'
 import * as modelsApi from '../api/models'
+import type { UnpublishResult } from '../api/decommission'
 
 function makeEndpoint(overrides: Partial<Endpoint> = {}): Endpoint {
   return {
@@ -153,6 +155,33 @@ function makeOp(overrides: Partial<SwitchOperation> = {}): SwitchOperation {
   }
 }
 
+function makeUnpublishResult(
+  overrides: Partial<UnpublishResult> = {},
+): UnpublishResult {
+  return {
+    endpoint: {
+      id: 'e1',
+      alias: 'chat-main',
+      api_type: 'CHAT',
+      active_route: null,
+    },
+    previous_route: {
+      id: 'r-active',
+      deployment_id: 'source-dep',
+      status: 'INACTIVE',
+      rewrite_model_name: 'served',
+    },
+    routing_version: 4,
+    changed: true,
+    gateway_verification: {
+      status: 'PASSED',
+      applied_routing_version: 4,
+      active_deployment_id: null,
+    },
+    ...overrides,
+  }
+}
+
 function pageResult(items: Deployment[]): Paginated<Deployment> {
   return { items, page: 1, page_size: 100, total: items.length }
 }
@@ -177,6 +206,7 @@ describe('EndpointDetailPage', () => {
     vi.spyOn(endpointsApi, 'listEndpoints')
     vi.spyOn(deploymentsApi, 'listDeployments')
     vi.spyOn(deploymentsApi, 'getDeployment')
+    vi.spyOn(decommissionApi, 'unpublishEndpoint')
     vi.spyOn(modelsApi, 'getModel')
     vi.spyOn(modelsApi, 'getModelVersion')
   })
@@ -244,6 +274,9 @@ describe('EndpointDetailPage', () => {
     expect(
       await screen.findByText(/ACTIVE Source Route가 있어야/),
     ).toBeInTheDocument()
+    expect(
+      screen.queryByRole('button', { name: 'Unpublish' }),
+    ).not.toBeInTheDocument()
     cleanup()
 
     vi.mocked(endpointsApi.getEndpoint).mockResolvedValue(
@@ -682,9 +715,337 @@ describe('EndpointDetailPage', () => {
           (m === 'PATCH' || m === 'POST') &&
           urls[i]?.includes('/api/v1/endpoints/e1') &&
           !urls[i]?.includes('/switch') &&
-          !urls[i]?.includes('/routes'),
+          !urls[i]?.includes('/routes') &&
+          !urls[i]?.includes('/unpublish'),
       ),
     ).toBe(false)
     expect(endpointsApi.listEndpoints).not.toHaveBeenCalled()
+    expect(decommissionApi.unpublishEndpoint).not.toHaveBeenCalled()
+  })
+
+  it('hides Unpublish when there is no ACTIVE Route', async () => {
+    vi.mocked(endpointsApi.getEndpoint).mockResolvedValue(
+      makeEndpoint({ active_route: null }),
+    )
+    vi.mocked(endpointsApi.listEndpointRoutes).mockResolvedValue({
+      items: [],
+      total: 0,
+    })
+    renderDetail()
+    await screen.findByText(/ACTIVE Route가 없습니다/)
+    expect(
+      screen.queryByRole('button', { name: 'Unpublish' }),
+    ).not.toBeInTheDocument()
+    expect(decommissionApi.unpublishEndpoint).not.toHaveBeenCalled()
+  })
+
+  it('cancels Unpublish confirm without calling API', async () => {
+    const user = userEvent.setup()
+    vi.mocked(endpointsApi.getEndpoint).mockResolvedValue(makeEndpoint())
+    vi.mocked(endpointsApi.listEndpointRoutes).mockResolvedValue({
+      items: [makeRoute({ id: 'r1' })],
+      total: 1,
+    })
+    vi.mocked(deploymentsApi.listDeployments).mockResolvedValue(pageResult([]))
+    renderDetail()
+    await user.click(await screen.findByTestId('unpublish-open'))
+    expect(await screen.findByTestId('unpublish-dialog')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: '취소' }))
+    expect(screen.queryByTestId('unpublish-dialog')).not.toBeInTheDocument()
+    expect(decommissionApi.unpublishEndpoint).not.toHaveBeenCalled()
+  })
+
+  it('blocks Unpublish when Alias confirmation does not match', async () => {
+    const user = userEvent.setup()
+    vi.mocked(endpointsApi.getEndpoint).mockResolvedValue(makeEndpoint())
+    vi.mocked(endpointsApi.listEndpointRoutes).mockResolvedValue({
+      items: [makeRoute({ id: 'r1' })],
+      total: 1,
+    })
+    vi.mocked(deploymentsApi.listDeployments).mockResolvedValue(pageResult([]))
+    renderDetail()
+    await user.click(await screen.findByTestId('unpublish-open'))
+    await user.type(
+      screen.getByLabelText(/현재 Alias를 입력/),
+      'wrong-alias',
+    )
+    expect(screen.getByTestId('unpublish-confirm')).toBeDisabled()
+    // Force click path should still refuse even if enabled somehow.
+    await user.click(screen.getByTestId('unpublish-confirm'))
+    expect(decommissionApi.unpublishEndpoint).not.toHaveBeenCalled()
+  })
+
+  it('posts Unpublish with expectedDeploymentId and verifyGateway once', async () => {
+    const user = userEvent.setup()
+    let resolveUnpublish!: (value: UnpublishResult) => void
+    vi.mocked(endpointsApi.getEndpoint)
+      .mockResolvedValueOnce(makeEndpoint())
+      .mockResolvedValue(
+        makeEndpoint({
+          active_route: null,
+          traffic_state: 'SERVING',
+        }),
+      )
+    vi.mocked(endpointsApi.listEndpointRoutes)
+      .mockResolvedValueOnce({
+        items: [makeRoute({ id: 'r1', status: 'ACTIVE' })],
+        total: 1,
+      })
+      .mockResolvedValue({
+        items: [
+          makeRoute({
+            id: 'r1',
+            status: 'INACTIVE',
+            deactivated_at: '2026-10-07T01:00:00Z',
+          }),
+        ],
+        total: 1,
+      })
+    vi.mocked(deploymentsApi.listDeployments).mockResolvedValue(pageResult([]))
+    vi.mocked(decommissionApi.unpublishEndpoint).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveUnpublish = resolve
+        }),
+    )
+    renderDetail()
+    await user.click(await screen.findByTestId('unpublish-open'))
+    await user.type(
+      screen.getByLabelText(/현재 Alias를 입력/),
+      'chat-main',
+    )
+    await user.click(screen.getByTestId('unpublish-confirm'))
+    await waitFor(() => {
+      expect(screen.getByTestId('unpublish-confirm')).toBeDisabled()
+    })
+    await user.click(screen.getByTestId('unpublish-confirm'))
+    expect(decommissionApi.unpublishEndpoint).toHaveBeenCalledTimes(1)
+    expect(decommissionApi.unpublishEndpoint).toHaveBeenCalledWith(
+      'e1',
+      {
+        expectedDeploymentId: 'source-dep',
+        verifyGateway: true,
+        reason: 'Endpoint detail unpublish',
+      },
+      expect.any(AbortSignal),
+    )
+    resolveUnpublish(makeUnpublishResult({ changed: true }))
+    expect(await screen.findByTestId('unpublish-result')).toBeInTheDocument()
+    expect(screen.getByTestId('unpublish-changed')).toHaveTextContent(
+      /changed=true/,
+    )
+    expect(screen.getByTestId('unpublish-gateway-hint')).toHaveTextContent(
+      /Gateway 검증 통과/,
+    )
+    await waitFor(() => {
+      expect(
+        screen.queryByRole('button', { name: 'Unpublish' }),
+      ).not.toBeInTheDocument()
+    })
+    expect(screen.getByText(/비활성/)).toBeInTheDocument()
+  })
+
+  it('shows changed=false and non-PASSED Gateway verification accurately', async () => {
+    const user = userEvent.setup()
+    vi.mocked(endpointsApi.getEndpoint)
+      .mockResolvedValueOnce(makeEndpoint())
+      .mockResolvedValue(makeEndpoint({ active_route: null }))
+    vi.mocked(endpointsApi.listEndpointRoutes)
+      .mockResolvedValueOnce({
+        items: [makeRoute({ id: 'r1', status: 'ACTIVE' })],
+        total: 1,
+      })
+      .mockResolvedValue({
+        items: [
+          makeRoute({
+            id: 'r1',
+            status: 'INACTIVE',
+            deactivated_at: '2026-10-07T01:00:00Z',
+          }),
+        ],
+        total: 1,
+      })
+    vi.mocked(deploymentsApi.listDeployments).mockResolvedValue(pageResult([]))
+    vi.mocked(decommissionApi.unpublishEndpoint).mockResolvedValue(
+      makeUnpublishResult({
+        changed: false,
+        gateway_verification: {
+          status: 'ROUTING_PENDING',
+          reason: 'still converging',
+        },
+      }),
+    )
+    renderDetail()
+    await user.click(await screen.findByTestId('unpublish-open'))
+    await user.type(
+      screen.getByLabelText(/현재 Alias를 입력/),
+      'chat-main',
+    )
+    await user.click(screen.getByTestId('unpublish-confirm'))
+    expect(await screen.findByTestId('unpublish-changed')).toHaveTextContent(
+      /changed=false/,
+    )
+    expect(screen.getByTestId('unpublish-gateway-hint')).toHaveTextContent(
+      /ROUTING_PENDING/,
+    )
+    expect(screen.getByTestId('unpublish-gateway-hint').textContent).not.toMatch(
+      /^Gateway 검증 통과\./,
+    )
+    cleanup()
+
+    vi.mocked(endpointsApi.getEndpoint)
+      .mockResolvedValueOnce(makeEndpoint())
+      .mockResolvedValue(makeEndpoint({ active_route: null }))
+    vi.mocked(endpointsApi.listEndpointRoutes).mockResolvedValue({
+      items: [makeRoute({ id: 'r1' })],
+      total: 1,
+    })
+    vi.mocked(decommissionApi.unpublishEndpoint).mockResolvedValue(
+      makeUnpublishResult({
+        changed: true,
+        gateway_verification: { status: 'GATEWAY_UNAVAILABLE' },
+      }),
+    )
+    renderDetail()
+    await user.click(await screen.findByTestId('unpublish-open'))
+    await user.type(
+      screen.getByLabelText(/현재 Alias를 입력/),
+      'chat-main',
+    )
+    await user.click(screen.getByTestId('unpublish-confirm'))
+    expect(await screen.findByTestId('unpublish-gateway-hint')).toHaveTextContent(
+      /GATEWAY_UNAVAILABLE/,
+    )
+    expect(screen.getByTestId('unpublish-gateway-hint')).toHaveTextContent(
+      /성공으로 오인하지 마세요/,
+    )
+  })
+
+  it('reloads after 409 ROUTE_TARGET_CHANGED without inventing success', async () => {
+    const user = userEvent.setup()
+    vi.mocked(endpointsApi.getEndpoint)
+      .mockResolvedValueOnce(makeEndpoint())
+      .mockResolvedValue(
+        makeEndpoint({
+          active_route: {
+            route_id: 'r-other',
+            deployment_id: 'other-dep',
+            rewrite_model_name: 'other',
+            activated_at: '2026-10-07T02:00:00Z',
+            deployment: {
+              id: 'other-dep',
+              name: 'other-prod',
+              runtime_status: 'RUNNING',
+              health_status: 'HEALTHY',
+              upstream_base_url: null,
+              retired_at: null,
+            },
+          },
+        }),
+      )
+    vi.mocked(endpointsApi.listEndpointRoutes).mockResolvedValue({
+      items: [makeRoute({ id: 'r1' })],
+      total: 1,
+    })
+    vi.mocked(deploymentsApi.listDeployments).mockResolvedValue(pageResult([]))
+    vi.mocked(decommissionApi.unpublishEndpoint).mockRejectedValue(
+      new ApiError('route moved', {
+        status: 409,
+        code: 'ROUTE_TARGET_CHANGED',
+      }),
+    )
+    renderDetail()
+    await user.click(await screen.findByTestId('unpublish-open'))
+    await user.type(
+      screen.getByLabelText(/현재 Alias를 입력/),
+      'chat-main',
+    )
+    await user.click(screen.getByTestId('unpublish-confirm'))
+    expect(
+      await screen.findByText(/ROUTE_TARGET_CHANGED/),
+    ).toBeInTheDocument()
+    expect(screen.queryByTestId('unpublish-result')).not.toBeInTheDocument()
+    await waitFor(() => {
+      expect(endpointsApi.getEndpoint).toHaveBeenCalledTimes(2)
+    })
+    expect(await screen.findByRole('link', { name: 'other-prod' })).toBeInTheDocument()
+  })
+
+  it('restores ACTIVE Route from GET Endpoint after remount (F5)', async () => {
+    vi.mocked(endpointsApi.getEndpoint).mockResolvedValue(makeEndpoint())
+    vi.mocked(endpointsApi.listEndpointRoutes).mockResolvedValue({
+      items: [makeRoute({ id: 'r1' })],
+      total: 1,
+    })
+    vi.mocked(deploymentsApi.listDeployments).mockResolvedValue(pageResult([]))
+    const { unmount } = renderDetail()
+    expect(await screen.findByTestId('unpublish-open')).toBeInTheDocument()
+    unmount()
+    cleanup()
+
+    vi.mocked(endpointsApi.getEndpoint).mockResolvedValue(
+      makeEndpoint({ active_route: null }),
+    )
+    vi.mocked(endpointsApi.listEndpointRoutes).mockResolvedValue({
+      items: [
+        makeRoute({
+          id: 'r1',
+          status: 'INACTIVE',
+          deactivated_at: '2026-10-07T01:00:00Z',
+        }),
+      ],
+      total: 1,
+    })
+    renderDetail()
+    await screen.findByText(/ACTIVE Route가 없습니다/)
+    expect(
+      screen.queryByRole('button', { name: 'Unpublish' }),
+    ).not.toBeInTheDocument()
+  })
+
+  it('ignores stale Unpublish response after Endpoint identity change', async () => {
+    const user = userEvent.setup()
+    let resolveUnpublish!: (value: UnpublishResult) => void
+    vi.mocked(endpointsApi.getEndpoint).mockImplementation(async (id) =>
+      makeEndpoint({
+        id,
+        alias: id === 'e1' ? 'chat-main' : 'chat-other',
+        display_name: id === 'e1' ? 'Chat Main' : 'Chat Other',
+      }),
+    )
+    vi.mocked(endpointsApi.listEndpointRoutes).mockResolvedValue({
+      items: [makeRoute({ id: 'r1' })],
+      total: 1,
+    })
+    vi.mocked(deploymentsApi.listDeployments).mockResolvedValue(pageResult([]))
+    vi.mocked(decommissionApi.unpublishEndpoint).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveUnpublish = resolve
+        }),
+    )
+
+    renderDetail('/endpoints/e1')
+    await user.click(await screen.findByTestId('unpublish-open'))
+    await user.type(
+      screen.getByLabelText(/현재 Alias를 입력/),
+      'chat-main',
+    )
+    await user.click(screen.getByTestId('unpublish-confirm'))
+    await waitFor(() => {
+      expect(decommissionApi.unpublishEndpoint).toHaveBeenCalledTimes(1)
+    })
+
+    cleanup()
+    renderDetail('/endpoints/e2')
+    expect(
+      await screen.findByRole('heading', { level: 2, name: 'Chat Other' }),
+    ).toBeInTheDocument()
+    resolveUnpublish(makeUnpublishResult({ changed: true }))
+    await new Promise((r) => setTimeout(r, 50))
+    expect(screen.queryByTestId('unpublish-result')).not.toBeInTheDocument()
+    expect(
+      screen.getByRole('heading', { level: 2, name: 'Chat Other' }),
+    ).toBeInTheDocument()
   })
 })

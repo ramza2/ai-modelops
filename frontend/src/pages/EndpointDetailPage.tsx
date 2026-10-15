@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { ApiError } from '../api/client'
+import {
+  unpublishEndpoint,
+  type UnpublishResult,
+} from '../api/decommission'
 import { listDeployments } from '../api/deployments'
 import {
   createPreflightPreview,
@@ -28,6 +32,11 @@ type SwitchStrategy = 'HOT' | 'COLD'
 /** Management API max page_size for Deployment list. */
 const TARGET_PAGE_SIZE = 200
 
+const UNPUBLISH_ROUTE_CONFLICT_CODES = new Set([
+  'ROUTE_TARGET_CHANGED',
+  'ROUTE_MUTATION_BUSY',
+])
+
 function switchWorkflowBlockedReason(endpoint: Endpoint): string | null {
   if (!endpoint.is_enabled) {
     return 'Disabled Endpoint에서는 Switch를 사용할 수 없습니다.'
@@ -39,6 +48,34 @@ function switchWorkflowBlockedReason(endpoint: Endpoint): string | null {
     return `traffic_state가 ${endpoint.traffic_state}입니다. SERVING일 때만 Switch enqueue를 사용할 수 있습니다 (DRAINING/MAINTENANCE 불가).`
   }
   return null
+}
+
+/** Gateway verification is separate from Backend Route release. */
+function gatewayVerificationPassed(status: string | null | undefined): boolean {
+  return (status || '').toUpperCase() === 'PASSED'
+}
+
+function gatewayVerificationHint(status: string | null | undefined): string {
+  const s = (status || '').toUpperCase()
+  if (s === 'PASSED') {
+    return 'Gateway 검증 통과 (PASSED).'
+  }
+  if (s === 'ROUTING_PENDING') {
+    return 'Gateway 라우팅 반영이 아직 대기 중입니다 (ROUTING_PENDING). Backend Route 해제와는 별개이며 검증 통과로 보지 마세요.'
+  }
+  if (s === 'ROUTE_STILL_ACTIVE') {
+    return 'Gateway에 Route가 아직 활성으로 보입니다 (ROUTE_STILL_ACTIVE). Backend 해제와 Gateway 검증은 별개입니다.'
+  }
+  if (s === 'GATEWAY_UNAVAILABLE') {
+    return 'Gateway 검증을 수행할 수 없습니다 (GATEWAY_UNAVAILABLE). 성공으로 오인하지 마세요.'
+  }
+  if (s === 'SKIPPED') {
+    return 'Gateway 검증이 건너뛰어졌습니다 (SKIPPED). 검증 통과로 보지 마세요.'
+  }
+  if (!s) {
+    return 'Gateway verification 상태가 없습니다.'
+  }
+  return `Gateway verification.status=${s}. PASSED만 검증 통과로 표시합니다.`
 }
 
 export function EndpointDetailPage() {
@@ -72,14 +109,33 @@ export function EndpointDetailPage() {
     null,
   )
 
+  const [unpublishOpen, setUnpublishOpen] = useState(false)
+  const [unpublishAliasInput, setUnpublishAliasInput] = useState('')
+  const [unpublishExpectedDepId, setUnpublishExpectedDepId] = useState<
+    string | null
+  >(null)
+  const [unpublishing, setUnpublishing] = useState(false)
+  const [unpublishError, setUnpublishError] = useState<string | null>(null)
+  const [unpublishResult, setUnpublishResult] =
+    useState<UnpublishResult | null>(null)
+
   const abortRef = useRef<AbortController | null>(null)
+  const unpublishAbortRef = useRef<AbortController | null>(null)
   const readGenRef = useRef(0)
   const targetsAbortRef = useRef<AbortController | null>(null)
+  const activeEndpointIdRef = useRef(endpointId)
+  activeEndpointIdRef.current = endpointId
 
   const switchBlockedReason = endpoint
     ? switchWorkflowBlockedReason(endpoint)
     : null
   const canSwitchWorkflow = switchBlockedReason === null
+
+  const closeUnpublishDialog = useCallback(() => {
+    setUnpublishOpen(false)
+    setUnpublishAliasInput('')
+    setUnpublishExpectedDepId(null)
+  }, [])
 
   const invalidatePreview = useCallback(() => {
     setPreview(null)
@@ -246,20 +302,156 @@ export function EndpointDetailPage() {
   )
 
   useEffect(() => {
+    closeUnpublishDialog()
+    setUnpublishResult(null)
+    setUnpublishError(null)
     void load('initial')
     return () => {
       abortRef.current?.abort()
       targetsAbortRef.current?.abort()
+      unpublishAbortRef.current?.abort()
     }
-  }, [load])
+  }, [load, closeUnpublishDialog])
+
+  // Close confirm dialog if ACTIVE Route disappears or its Deployment changes.
+  useEffect(() => {
+    if (!unpublishOpen) return
+    const currentDep = endpoint?.active_route?.deployment_id ?? null
+    if (currentDep !== unpublishExpectedDepId) {
+      closeUnpublishDialog()
+    }
+  }, [
+    endpoint?.active_route?.deployment_id,
+    unpublishOpen,
+    unpublishExpectedDepId,
+    closeUnpublishDialog,
+  ])
 
   const onTargetChange = (nextId: string) => {
     setTargetId(nextId)
     invalidatePreview()
   }
 
+  const openUnpublishDialog = () => {
+    if (!endpoint?.active_route?.deployment_id || unpublishing || switching) {
+      return
+    }
+    setUnpublishExpectedDepId(endpoint.active_route.deployment_id)
+    setUnpublishAliasInput('')
+    setUnpublishError(null)
+    setUnpublishOpen(true)
+  }
+
+  const confirmUnpublish = async () => {
+    if (!endpointId || unpublishing || switching || previewing || refreshing) {
+      return
+    }
+    const active = endpoint?.active_route
+    if (!active?.deployment_id || !unpublishExpectedDepId) {
+      setUnpublishError('ACTIVE Route가 없습니다. 재조회 후 다시 시도하세요.')
+      closeUnpublishDialog()
+      await load('refresh')
+      return
+    }
+    if (unpublishAliasInput !== endpoint.alias) {
+      setUnpublishError('입력한 Alias가 현재 Endpoint Alias와 일치하지 않습니다.')
+      return
+    }
+    if (active.deployment_id !== unpublishExpectedDepId) {
+      setUnpublishError(
+        '확인 중 ACTIVE Route가 변경되었습니다. 실행을 차단하고 재조회합니다.',
+      )
+      closeUnpublishDialog()
+      await load('refresh')
+      return
+    }
+
+    unpublishAbortRef.current?.abort()
+    const controller = new AbortController()
+    unpublishAbortRef.current = controller
+    const gen = readGenRef.current
+    const epId = endpointId
+    const expectedDep = unpublishExpectedDepId
+
+    setUnpublishing(true)
+    setUnpublishError(null)
+    try {
+      const result = await unpublishEndpoint(
+        epId,
+        {
+          expectedDeploymentId: expectedDep,
+          verifyGateway: true,
+          reason: 'Endpoint detail unpublish',
+        },
+        controller.signal,
+      )
+      if (
+        controller.signal.aborted ||
+        gen !== readGenRef.current ||
+        activeEndpointIdRef.current !== epId
+      ) {
+        return
+      }
+      setUnpublishResult(result)
+      closeUnpublishDialog()
+      await load('refresh')
+    } catch (err) {
+      if (
+        controller.signal.aborted ||
+        gen !== readGenRef.current ||
+        activeEndpointIdRef.current !== epId
+      ) {
+        return
+      }
+      if (err instanceof DOMException && err.name === 'AbortError') return
+
+      if (
+        err instanceof ApiError &&
+        err.status === 409 &&
+        err.code &&
+        UNPUBLISH_ROUTE_CONFLICT_CODES.has(err.code)
+      ) {
+        setUnpublishError(
+          `Route 충돌 (${err.code}): 현재 Route가 바뀌었을 수 있습니다. 재조회합니다.`,
+        )
+        closeUnpublishDialog()
+        await load('refresh')
+        return
+      }
+
+      const message =
+        err instanceof ApiError
+          ? err.message
+          : err instanceof Error
+            ? err.message
+            : 'Unpublish 요청에 실패했습니다.'
+      // Do not invent success/failure of route release — re-read authoritative state.
+      setUnpublishError(
+        `${message} 실행 결과를 추정하지 않습니다. Endpoint/Route를 재조회합니다.`,
+      )
+      closeUnpublishDialog()
+      await load('refresh')
+    } finally {
+      if (
+        !controller.signal.aborted &&
+        gen === readGenRef.current &&
+        activeEndpointIdRef.current === epId
+      ) {
+        setUnpublishing(false)
+      }
+    }
+  }
+
   const runPreview = async () => {
-    if (!endpointId || !targetId || switching || !canSwitchWorkflow) return
+    if (
+      !endpointId ||
+      !targetId ||
+      switching ||
+      unpublishing ||
+      !canSwitchWorkflow
+    ) {
+      return
+    }
     setPreviewing(true)
     setPreviewError(null)
     setSwitchError(null)
@@ -290,7 +482,9 @@ export function EndpointDetailPage() {
   }
 
   const runSwitch = async () => {
-    if (!endpointId || !targetId || !strategy || switching) return
+    if (!endpointId || !targetId || !strategy || switching || unpublishing) {
+      return
+    }
     if (!canSwitchWorkflow || !preview) return
     if (preview.result === 'RESOURCE_INSUFFICIENT') return
     if (strategy === 'HOT' && preview.result !== 'HOT_SWITCH_AVAILABLE') return
@@ -346,7 +540,7 @@ export function EndpointDetailPage() {
     )
   }
 
-  const busy = switching
+  const busy = switching || unpublishing
   const hotAllowed = preview?.result === 'HOT_SWITCH_AVAILABLE'
   const coldAllowed =
     preview?.result === 'HOT_SWITCH_AVAILABLE' ||
@@ -435,49 +629,144 @@ export function EndpointDetailPage() {
           >
             <h2 id="active-route-heading">ACTIVE Route</h2>
             {active ? (
-              <dl className="meta-grid">
-                <div>
-                  <dt>Deployment</dt>
-                  <dd>
-                    <Link
-                      className="table-link"
-                      to={`/deployments/${active.deployment_id}`}
+              <>
+                <dl className="meta-grid">
+                  <div>
+                    <dt>Alias</dt>
+                    <dd className="mono">{endpoint.alias}</dd>
+                  </div>
+                  <div>
+                    <dt>Deployment</dt>
+                    <dd>
+                      <Link
+                        className="table-link"
+                        to={`/deployments/${active.deployment_id}`}
+                      >
+                        {active.deployment?.name ??
+                          shortId(active.deployment_id)}
+                      </Link>
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Runtime</dt>
+                    <dd>
+                      <StatusBadge
+                        status={active.deployment?.runtime_status}
+                      />
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Health</dt>
+                    <dd>
+                      <StatusBadge status={active.deployment?.health_status} />
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Rewrite Model Name</dt>
+                    <dd className="mono">
+                      {active.rewrite_model_name || '—'}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Activated</dt>
+                    <dd>{formatApiDateTime(active.activated_at)}</dd>
+                  </div>
+                </dl>
+
+                <div className="toolbar toolbar--wrap">
+                  <div className="toolbar__actions">
+                    <button
+                      type="button"
+                      className="btn btn--danger"
+                      data-testid="unpublish-open"
+                      disabled={busy || previewing || refreshing}
+                      onClick={openUnpublishDialog}
                     >
-                      {active.deployment?.name ??
-                        shortId(active.deployment_id)}
-                    </Link>
-                  </dd>
+                      Unpublish
+                    </button>
+                  </div>
                 </div>
-                <div>
-                  <dt>Runtime</dt>
-                  <dd>
-                    <StatusBadge
-                      status={active.deployment?.runtime_status}
-                    />
-                  </dd>
-                </div>
-                <div>
-                  <dt>Health</dt>
-                  <dd>
-                    <StatusBadge status={active.deployment?.health_status} />
-                  </dd>
-                </div>
-                <div>
-                  <dt>Rewrite Model Name</dt>
-                  <dd className="mono">
-                    {active.rewrite_model_name || '—'}
-                  </dd>
-                </div>
-                <div>
-                  <dt>Activated</dt>
-                  <dd>{formatApiDateTime(active.activated_at)}</dd>
-                </div>
-              </dl>
+                <p className="panel-hint">
+                  Unpublish는 Gateway Alias 호출 경로(ACTIVE Route)만
+                  해제합니다. Deployment Stop / Remove / Cache Purge와는 다른
+                  작업입니다. Unpublished ≠ Stopped ≠ Removed ≠ Retired ≠
+                  Purged ≠ Archived.
+                </p>
+              </>
             ) : (
               <p className="empty-state" role="status">
                 ACTIVE Route가 없습니다. Switch workflow를 사용할 수 없습니다.
               </p>
             )}
+
+            {unpublishError && !unpublishOpen ? (
+              <SectionError title="Unpublish" message={unpublishError} />
+            ) : null}
+
+            {unpublishResult ? (
+              <div
+                className="operation-result"
+                role="status"
+                data-testid="unpublish-result"
+              >
+                <h3 className="section-subheading">최근 Unpublish 결과</h3>
+                <dl className="meta-grid">
+                  <div>
+                    <dt>Backend Route</dt>
+                    <dd data-testid="unpublish-changed">
+                      {unpublishResult.changed
+                        ? '해제됨 (changed=true)'
+                        : '이미 해제된 상태 (changed=false)'}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Routing Version</dt>
+                    <dd>
+                      {unpublishResult.routing_version != null
+                        ? unpublishResult.routing_version
+                        : '—'}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Previous Deployment</dt>
+                    <dd className="mono">
+                      {unpublishResult.previous_route?.deployment_id
+                        ? shortId(
+                            unpublishResult.previous_route.deployment_id,
+                          )
+                        : '—'}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Gateway verification</dt>
+                    <dd>
+                      {unpublishResult.gateway_verification?.status ? (
+                        <StatusBadge
+                          status={
+                            unpublishResult.gateway_verification.status
+                          }
+                        />
+                      ) : (
+                        '—'
+                      )}
+                    </dd>
+                  </div>
+                </dl>
+                <p
+                  className="panel-hint"
+                  data-testid="unpublish-gateway-hint"
+                >
+                  {gatewayVerificationPassed(
+                    unpublishResult.gateway_verification?.status,
+                  )
+                    ? 'Gateway 검증 통과.'
+                    : gatewayVerificationHint(
+                        unpublishResult.gateway_verification?.status,
+                      )}{' '}
+                  Backend Route 해제와 Gateway 검증은 별개 상태입니다.
+                </p>
+              </div>
+            ) : null}
           </section>
 
           <section
@@ -809,6 +1098,91 @@ export function EndpointDetailPage() {
             ) : null}
           </section>
         </>
+      ) : null}
+
+      {unpublishOpen && endpoint?.active_route ? (
+        <div
+          className="modal-backdrop"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="unpublish-dialog-title"
+          data-testid="unpublish-dialog"
+        >
+          <div className="modal-card">
+            <h2 id="unpublish-dialog-title">Unpublish 확인</h2>
+            <p>
+              Alias <strong className="mono">{endpoint.alias}</strong> 의
+              ACTIVE Route를 해제합니다.
+            </p>
+            <dl className="meta-grid">
+              <div>
+                <dt>Alias</dt>
+                <dd className="mono">{endpoint.alias}</dd>
+              </div>
+              <div>
+                <dt>Deployment</dt>
+                <dd className="mono">
+                  {endpoint.active_route.deployment?.name ??
+                    shortId(endpoint.active_route.deployment_id)}
+                </dd>
+              </div>
+              <div>
+                <dt>Rewrite Model Name</dt>
+                <dd className="mono">
+                  {endpoint.active_route.rewrite_model_name || '—'}
+                </dd>
+              </div>
+            </dl>
+            <p className="secondary-text">
+              경고: Unpublish는 Gateway에서 이 Alias로의 호출 경로를
+              해제합니다. Deployment를 Stop/Remove 하거나 Cache를 Purge하지
+              않습니다.
+            </p>
+            <label className="toolbar__field" htmlFor="unpublish-alias-confirm">
+              <span>확인을 위해 현재 Alias를 입력하세요</span>
+              <input
+                id="unpublish-alias-confirm"
+                type="text"
+                value={unpublishAliasInput}
+                disabled={unpublishing}
+                autoComplete="off"
+                onChange={(e) => setUnpublishAliasInput(e.target.value)}
+                placeholder={endpoint.alias}
+              />
+            </label>
+            {unpublishError ? (
+              <SectionError title="확인 오류" message={unpublishError} />
+            ) : null}
+            <div className="toolbar__actions">
+              <button
+                type="button"
+                className="btn"
+                disabled={unpublishing}
+                onClick={() => {
+                  setUnpublishError(null)
+                  closeUnpublishDialog()
+                }}
+              >
+                취소
+              </button>
+              <button
+                type="button"
+                className="btn btn--danger"
+                data-testid="unpublish-confirm"
+                disabled={
+                  unpublishing ||
+                  unpublishAliasInput !== endpoint.alias ||
+                  busy ||
+                  previewing
+                }
+                aria-busy={unpublishing}
+                onClick={() => void confirmUnpublish()}
+              >
+                {unpublishing ? 'Unpublish 중…' : 'Unpublish 실행'}
+              </button>
+            </div>
+          </div>
+        </div>
       ) : null}
     </AppShell>
   )
