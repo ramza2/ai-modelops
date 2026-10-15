@@ -165,6 +165,41 @@ describe('operationLifecycle', () => {
       }),
     ).toBe(operationPollConfig.healthWaitMaxMs)
 
+    // Future → later past must not switch to finished_at and shrink elapsed.
+    const futureStamp = '2026-10-13T06:02:00.000Z'
+    expect(
+      stopSyncWaitElapsedMs({
+        operationId: 'op-future-then-past',
+        finishedAt: futureStamp,
+        fallback: clock,
+        nowMs: now,
+      }),
+    ).toBe(0)
+    const mid = now + 120_000
+    // Same ISO is now in the past relative to mid, but fallback stays pinned.
+    expect(parseTrustworthyFinishedAtMs(futureStamp, mid)).toBe(
+      Date.parse(futureStamp),
+    )
+    expect(
+      stopSyncWaitElapsedMs({
+        operationId: 'op-future-then-past',
+        finishedAt: futureStamp,
+        fallback: clock,
+        nowMs: mid,
+      }),
+    ).toBe(120_000)
+    // Would be ~0 if we switched to finished_at — must not regress.
+    expect(
+      stopSyncWaitElapsedMs({
+        operationId: 'op-future-then-past',
+        finishedAt: futureStamp,
+        fallback: clock,
+        nowMs: mid,
+      }),
+    ).toBeGreaterThan(
+      mid - Date.parse(futureStamp),
+    )
+
     // Distinct Operation IDs keep independent fallback starts.
     clock.ensure('op-b', now + 1000)
     expect(clock.get('op-null')).toBe(now)

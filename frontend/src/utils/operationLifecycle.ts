@@ -129,8 +129,9 @@ export function createStopSyncFallbackClock(): StopSyncFallbackClock {
 
 /**
  * Elapsed ms for Deployment Detail STOP status sync wait (P1-8G follow-up).
- * Prefer a trustworthy finished_at; otherwise pin a per-Operation fallback to
- * the first observation of STOP SUCCEEDED so polling always times out.
+ * If a per-Operation fallback was already pinned (null/invalid/future at first
+ * observation), keep that clock so a later-valid finished_at cannot shrink
+ * elapsed or extend the wait cap. Otherwise prefer trustworthy finished_at.
  * Always returns a finite number when operationId is provided.
  */
 export function stopSyncWaitElapsedMs(input: {
@@ -140,6 +141,10 @@ export function stopSyncWaitElapsedMs(input: {
   nowMs?: number
 }): number {
   const nowMs = input.nowMs ?? Date.now()
+  const pinned = input.fallback.get(input.operationId)
+  if (pinned != null) {
+    return Math.max(0, nowMs - pinned)
+  }
   const trusted = parseTrustworthyFinishedAtMs(input.finishedAt, nowMs)
   if (trusted != null) {
     return Math.max(0, nowMs - trusted)
