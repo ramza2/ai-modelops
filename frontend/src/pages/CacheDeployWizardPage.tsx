@@ -389,10 +389,13 @@ export function CacheDeployWizardPage() {
 
   // Save only operator inputs. Backend remains source of truth for Fit,
   // deployment runtime, operation status, and ACTIVE route.
+  // Skip persist while Runtime numeric fields are invalid so NaN/empty port
+  // cannot JSON-null the draft and fail readWizardDraft after F5.
   useEffect(() => {
     if (!cache || cache.id !== cacheId || cache.status !== 'READY' ||
         restoredCacheRef.current !== cacheId || loading || deploymentIdParam ||
         !['cache', 'runtime', 'gpu', 'review'].includes(step)) return
+    if (hasRuntimeFormErrors(collectRuntimeFormErrors(runtimePort, runtime))) return
     writeWizardDraft(storage, {
       schema: 1, cacheId, nodeId: cache.node_id,
       modelVersionId: cache.model_version_id, revision: cache.resolved_revision,

@@ -1,4 +1,4 @@
-import { cleanup, render, screen, within } from '@testing-library/react'
+import { cleanup, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
@@ -14,6 +14,7 @@ import * as modelsApi from '../api/models'
 import * as nodesApi from '../api/nodes'
 import {
   clearWizardDraft,
+  readWizardDraft,
   writeWizardDraft,
   wizardDraftKey,
 } from '../utils/cacheDeployDraft'
@@ -316,6 +317,63 @@ describe('CacheDeployWizardPage Runtime layout (P1-5A / P1-8C)', () => {
     expect(
       screen.getByText('미설정이거나 0 초과 1 이하 값이어야 합니다.'),
     ).toBeInTheDocument()
+  })
+
+  it('does not overwrite last-good Draft while Runtime numerics are invalid; resumes after fix', async () => {
+    const cache = makeCache()
+    renderWizard()
+    await screen.findByRole('heading', { level: 2, name: '2. Runtime' })
+
+    const nameInput = screen.getByDisplayValue(/-managed$/)
+    await userEvent.clear(nameInput)
+    await userEvent.type(nameInput, 'draft-keep-valid')
+    await userEvent.clear(screen.getByLabelText(/Runtime port/))
+    await userEvent.type(screen.getByLabelText(/Runtime port/), '8123')
+
+    await waitFor(() => {
+      const saved = readWizardDraft(sessionStorage, cache)
+      expect(saved?.runtimePort).toBe(8123)
+      expect(saved?.name).toBe('draft-keep-valid')
+    })
+    const lastGoodRaw = sessionStorage.getItem(wizardDraftKey('cache-1'))
+    expect(lastGoodRaw).toBeTruthy()
+
+    await userEvent.clear(screen.getByLabelText(/Runtime port/))
+    expect(screen.getByRole('button', { name: 'Next: GPU' })).toBeDisabled()
+    // Empty/NaN port must not JSON-null the draft (would fail read after F5).
+    expect(sessionStorage.getItem(wizardDraftKey('cache-1'))).toBe(lastGoodRaw)
+    expect(readWizardDraft(sessionStorage, cache)?.runtimePort).toBe(8123)
+
+    await userEvent.type(screen.getByLabelText(/Runtime port/), '0')
+    expect(screen.getByRole('button', { name: 'Next: GPU' })).toBeDisabled()
+    expect(sessionStorage.getItem(wizardDraftKey('cache-1'))).toBe(lastGoodRaw)
+    expect(readWizardDraft(sessionStorage, cache)?.runtimePort).toBe(8123)
+
+    const len = screen.getByLabelText(/max_model_len/)
+    await userEvent.clear(len)
+    await userEvent.type(len, '-1')
+    expect(screen.getByRole('button', { name: 'Next: GPU' })).toBeDisabled()
+    expect(sessionStorage.getItem(wizardDraftKey('cache-1'))).toBe(lastGoodRaw)
+
+    await userEvent.clear(len)
+    await userEvent.clear(screen.getByLabelText(/Runtime port/))
+    await userEvent.type(screen.getByLabelText(/Runtime port/), '9002')
+    await userEvent.type(screen.getByLabelText(/max_model_len/), '4096')
+    expect(screen.getByRole('button', { name: 'Next: GPU' })).toBeEnabled()
+
+    await waitFor(() => {
+      const saved = readWizardDraft(sessionStorage, cache)
+      expect(saved?.runtimePort).toBe(9002)
+      expect(saved?.runtime.max_model_len).toBe(4096)
+      expect(saved?.name).toBe('draft-keep-valid')
+    })
+
+    cleanup()
+    renderWizard('/models/cache/cache-1/deploy?step=runtime')
+    await screen.findByRole('heading', { level: 2, name: '2. Runtime' })
+    expect(screen.getByDisplayValue('draft-keep-valid')).toBeInTheDocument()
+    expect(screen.getByDisplayValue('9002')).toBeInTheDocument()
+    expect(screen.getByDisplayValue('4096')).toBeInTheDocument()
   })
 
   it('keeps unset optional fields empty (no auto dtype/quant)', async () => {
