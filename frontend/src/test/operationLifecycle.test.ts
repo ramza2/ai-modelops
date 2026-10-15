@@ -1,15 +1,21 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import {
   createDetailFetchGate,
+  createStopSyncFallbackClock,
   formatOperationError,
   healthWaitElapsedMsFromFinishedAt,
   isActiveOperationStatus,
   isDeploymentReadyForPublish,
+  isDeploymentStoppedForSync,
   isFailedOperationStatus,
   OPERATION_POLL_MS,
   operationPollConfig,
+  parseTrustworthyFinishedAtMs,
+  resolveDetailLifecyclePhase,
   resolveWizardLifecyclePhase,
+  shouldPollDetailLifecycle,
   shouldPollWizardLifecycle,
+  stopSyncWaitElapsedMs,
 } from '../utils/operationLifecycle'
 
 describe('operationLifecycle', () => {
@@ -92,6 +98,117 @@ describe('operationLifecycle', () => {
     )
   })
 
+  it('STOP sync elapsed uses finished_at when trustworthy, else per-op fallback', () => {
+    const now = Date.parse('2026-10-13T06:00:00.000Z')
+    expect(
+      parseTrustworthyFinishedAtMs('2026-10-13T05:59:00.000Z', now),
+    ).toBe(Date.parse('2026-10-13T05:59:00.000Z'))
+    expect(parseTrustworthyFinishedAtMs(null, now)).toBeNull()
+    expect(parseTrustworthyFinishedAtMs('not-a-date', now)).toBeNull()
+    expect(
+      parseTrustworthyFinishedAtMs('2026-10-13T06:01:00.000Z', now),
+    ).toBeNull()
+
+    const clock = createStopSyncFallbackClock()
+    expect(
+      stopSyncWaitElapsedMs({
+        operationId: 'op-a',
+        finishedAt: '2026-10-13T05:59:00.000Z',
+        fallback: clock,
+        nowMs: now,
+      }),
+    ).toBe(60_000)
+    // Trustworthy finished_at must not pin a fallback start.
+    expect(clock.get('op-a')).toBeUndefined()
+
+    expect(
+      stopSyncWaitElapsedMs({
+        operationId: 'op-null',
+        finishedAt: null,
+        fallback: clock,
+        nowMs: now,
+      }),
+    ).toBe(0)
+    expect(clock.get('op-null')).toBe(now)
+    expect(
+      stopSyncWaitElapsedMs({
+        operationId: 'op-null',
+        finishedAt: null,
+        fallback: clock,
+        nowMs: now + 90_000,
+      }),
+    ).toBe(90_000)
+
+    expect(
+      stopSyncWaitElapsedMs({
+        operationId: 'op-bad',
+        finishedAt: 'not-a-date',
+        fallback: clock,
+        nowMs: now,
+      }),
+    ).toBe(0)
+    expect(
+      stopSyncWaitElapsedMs({
+        operationId: 'op-future',
+        finishedAt: '2026-10-13T06:30:00.000Z',
+        fallback: clock,
+        nowMs: now,
+      }),
+    ).toBe(0)
+    expect(clock.get('op-future')).toBe(now)
+    expect(
+      stopSyncWaitElapsedMs({
+        operationId: 'op-future',
+        finishedAt: '2026-10-13T06:30:00.000Z',
+        fallback: clock,
+        nowMs: now + operationPollConfig.healthWaitMaxMs,
+      }),
+    ).toBe(operationPollConfig.healthWaitMaxMs)
+
+    // Future → later past must not switch to finished_at and shrink elapsed.
+    const futureStamp = '2026-10-13T06:02:00.000Z'
+    expect(
+      stopSyncWaitElapsedMs({
+        operationId: 'op-future-then-past',
+        finishedAt: futureStamp,
+        fallback: clock,
+        nowMs: now,
+      }),
+    ).toBe(0)
+    const mid = now + 120_000
+    // Same ISO is now in the past relative to mid, but fallback stays pinned.
+    expect(parseTrustworthyFinishedAtMs(futureStamp, mid)).toBe(
+      Date.parse(futureStamp),
+    )
+    expect(
+      stopSyncWaitElapsedMs({
+        operationId: 'op-future-then-past',
+        finishedAt: futureStamp,
+        fallback: clock,
+        nowMs: mid,
+      }),
+    ).toBe(120_000)
+    // Would be ~0 if we switched to finished_at — must not regress.
+    expect(
+      stopSyncWaitElapsedMs({
+        operationId: 'op-future-then-past',
+        finishedAt: futureStamp,
+        fallback: clock,
+        nowMs: mid,
+      }),
+    ).toBeGreaterThan(
+      mid - Date.parse(futureStamp),
+    )
+
+    // Distinct Operation IDs keep independent fallback starts.
+    clock.ensure('op-b', now + 1000)
+    expect(clock.get('op-null')).toBe(now)
+    expect(clock.get('op-b')).toBe(now + 1000)
+    clock.clear('op-null')
+    expect(clock.get('op-null')).toBeUndefined()
+    expect(clock.get('op-b')).toBe(now + 1000)
+  })
+
   it('resolves Wizard Start lifecycle phases and poll eligibility', () => {
     expect(
       resolveWizardLifecyclePhase({
@@ -164,6 +281,85 @@ describe('operationLifecycle', () => {
     expect(shouldPollWizardLifecycle('failed')).toBe(false)
     expect(shouldPollWizardLifecycle('health_timeout')).toBe(false)
     expect(shouldPollWizardLifecycle('idle')).toBe(false)
+  })
+
+  it('resolves Detail STOP lifecycle phases without inventing health', () => {
+    expect(isDeploymentStoppedForSync({ runtime_status: 'STOPPED' })).toBe(true)
+    expect(isDeploymentStoppedForSync({ runtime_status: 'RUNNING' })).toBe(false)
+    expect(isDeploymentStoppedForSync({ runtime_status: 'HEALTHY' })).toBe(false)
+    expect(isDeploymentStoppedForSync(null)).toBe(false)
+
+    expect(
+      resolveDetailLifecyclePhase({
+        operationType: 'START',
+        operationStatus: 'RUNNING',
+        hasOperationId: true,
+        deploymentStopped: false,
+        stopWaitElapsedMs: null,
+      }),
+    ).toBe('operation_active')
+    expect(
+      resolveDetailLifecyclePhase({
+        operationType: 'START',
+        operationStatus: 'SUCCEEDED',
+        hasOperationId: true,
+        deploymentStopped: false,
+        stopWaitElapsedMs: null,
+      }),
+    ).toBe('idle')
+
+    expect(
+      resolveDetailLifecyclePhase({
+        operationType: 'STOP',
+        operationStatus: 'FAILED',
+        hasOperationId: true,
+        deploymentStopped: false,
+        stopWaitElapsedMs: null,
+      }),
+    ).toBe('failed')
+    expect(
+      resolveDetailLifecyclePhase({
+        operationType: 'STOP',
+        operationStatus: 'CANCELLED',
+        hasOperationId: true,
+        deploymentStopped: false,
+        stopWaitElapsedMs: null,
+      }),
+    ).toBe('failed')
+    expect(
+      resolveDetailLifecyclePhase({
+        operationType: 'STOP',
+        operationStatus: 'SUCCEEDED',
+        hasOperationId: true,
+        deploymentStopped: false,
+        stopWaitElapsedMs: 1000,
+      }),
+    ).toBe('stop_wait')
+    expect(
+      resolveDetailLifecyclePhase({
+        operationType: 'STOP',
+        operationStatus: 'SUCCEEDED',
+        hasOperationId: true,
+        deploymentStopped: true,
+        stopWaitElapsedMs: 1000,
+      }),
+    ).toBe('stopped')
+    expect(
+      resolveDetailLifecyclePhase({
+        operationType: 'STOP',
+        operationStatus: 'SUCCEEDED',
+        hasOperationId: true,
+        deploymentStopped: false,
+        stopWaitElapsedMs: operationPollConfig.healthWaitMaxMs,
+      }),
+    ).toBe('stop_timeout')
+
+    expect(shouldPollDetailLifecycle('operation_active')).toBe(true)
+    expect(shouldPollDetailLifecycle('stop_wait')).toBe(true)
+    expect(shouldPollDetailLifecycle('stopped')).toBe(false)
+    expect(shouldPollDetailLifecycle('failed')).toBe(false)
+    expect(shouldPollDetailLifecycle('stop_timeout')).toBe(false)
+    expect(shouldPollDetailLifecycle('idle')).toBe(false)
   })
 
   it('formats Operation errors without inventing text', () => {

@@ -31,10 +31,15 @@ import {
 import { formatInt, formatMemoryMb } from '../utils/number'
 import {
   createDetailFetchGate,
+  createStopSyncFallbackClock,
   formatOperationError,
   isActiveOperationStatus,
+  isDeploymentStoppedForSync,
   OPERATION_POLL_MS,
   operationPollConfig,
+  resolveDetailLifecyclePhase,
+  shouldPollDetailLifecycle,
+  stopSyncWaitElapsedMs,
 } from '../utils/operationLifecycle'
 
 type LifecycleAction = 'start' | 'stop' | 'restart'
@@ -73,17 +78,44 @@ export function DeploymentDetailPage() {
   const [lastOperation, setLastOperation] = useState<LifecycleOperation | null>(
     null,
   )
+  /** Re-render signal when STOP sync wait crosses the max (finished_at or fallback). */
+  const [stopWaitTick, setStopWaitTick] = useState(0)
 
   const fetchGateRef = useRef(createDetailFetchGate())
   const refAbortRef = useRef<AbortController | null>(null)
+  const stopSyncFallbackRef = useRef(createStopSyncFallbackClock())
   const activeDeploymentIdRef = useRef(deploymentId)
   activeDeploymentIdRef.current = deploymentId
   const trackedOpIdRef = useRef<string | null>(null)
   trackedOpIdRef.current = lastOperation?.id ?? null
+  const finishedAtRef = useRef<string | null>(null)
+  finishedAtRef.current = lastOperation?.finished_at ?? null
   const refreshingRef = useRef(false)
   refreshingRef.current = refreshing
   const mutatingRef = useRef<LifecycleAction | null>(null)
   mutatingRef.current = mutating
+
+  // stopWaitTick is only a re-render signal. Prefer trustworthy finished_at;
+  // otherwise elapsed is anchored to the first STOP SUCCEEDED observation
+  // for this Operation ID so null/invalid/future stamps cannot poll forever.
+  void stopWaitTick
+  const stopWaitElapsedMs =
+    lastOperation?.id &&
+    (lastOperation.operation_type || '').toUpperCase() === 'STOP' &&
+    lastOperation.status === 'SUCCEEDED'
+      ? stopSyncWaitElapsedMs({
+          operationId: lastOperation.id,
+          finishedAt: lastOperation.finished_at,
+          fallback: stopSyncFallbackRef.current,
+        })
+      : null
+  const lifecyclePhase = resolveDetailLifecyclePhase({
+    operationType: lastOperation?.operation_type,
+    operationStatus: lastOperation?.status,
+    hasOperationId: Boolean(lastOperation?.id),
+    deploymentStopped: isDeploymentStoppedForSync(deployment),
+    stopWaitElapsedMs,
+  })
 
   const loadRefs = useCallback(
     async (dep: Deployment, gen: number, gate: ReturnType<typeof createDetailFetchGate>) => {
@@ -220,25 +252,40 @@ export function DeploymentDetailPage() {
     setLastOperation(null)
     setActionError(null)
     setMutating(null)
+    stopSyncFallbackRef.current.clear()
     void load('initial')
     return () => {
       fetchGateRef.current.abort()
       refAbortRef.current?.abort()
+      stopSyncFallbackRef.current.clear()
     }
   }, [load])
 
-  // While an enqueued lifecycle Operation is in-flight, poll Operation +
-  // Deployment every 4s (runtime/health). Silent — does not set refreshing.
+  // While an enqueued lifecycle Operation is in-flight — or STOP SUCCEEDED
+  // while runtime_status has not yet reached STOPPED — poll Operation +
+  // Deployment every 4s. Silent — does not set refreshing.
   // Shares fetch epoch with manual refresh (latest response wins).
   useEffect(() => {
     const depId = deploymentId
     const opId = lastOperation?.id
     if (!depId || !opId) return
-    if (!isActiveOperationStatus(lastOperation?.status)) return
+    if (!shouldPollDetailLifecycle(lifecyclePhase)) return
 
     let cancelled = false
     const timer = window.setInterval(() => {
       if (refreshingRef.current || mutatingRef.current) return
+
+      if (lifecyclePhase === 'stop_wait') {
+        const elapsed = stopSyncWaitElapsedMs({
+          operationId: opId,
+          finishedAt: finishedAtRef.current,
+          fallback: stopSyncFallbackRef.current,
+        })
+        if (elapsed >= operationPollConfig.healthWaitMaxMs) {
+          setStopWaitTick((n) => n + 1)
+          return
+        }
+      }
 
       const gate = fetchGateRef.current
       const { gen, signal } = gate.begin('poll')
@@ -282,7 +329,7 @@ export function DeploymentDetailPage() {
         fetchGateRef.current.abort()
       }
     }
-  }, [deploymentId, lastOperation?.id, lastOperation?.status])
+  }, [deploymentId, lastOperation?.id, lifecyclePhase])
 
   const runLifecycle = async (action: LifecycleAction) => {
     if (!deploymentId || mutating) return
@@ -579,6 +626,21 @@ export function DeploymentDetailPage() {
                     진행 중 — Operation/Deployment를 {OPERATION_POLL_MS / 1000}
                     초마다 자동 갱신합니다.
                   </p>
+                ) : null}
+                {lifecyclePhase === 'stop_wait' ? (
+                  <p className="panel-hint" data-testid="stop-sync-wait">
+                    STOP Operation은 완료되었지만 Deployment runtime_status가
+                    아직 STOPPED가 아닙니다. 상태 동기화를 위해 Deployment를{' '}
+                    {OPERATION_POLL_MS / 1000}초마다 자동 조회합니다. Health는
+                    Backend 값을 그대로 표시하며 임의로 변경하지 않습니다.
+                  </p>
+                ) : null}
+                {lifecyclePhase === 'stop_timeout' ? (
+                  <SectionError
+                    title="STOP 상태 동기화 대기 시간 초과"
+                    message="Operation은 SUCCEEDED이지만 runtime_status가 STOPPED로 반영되지 않았습니다. 수동 새로고침으로 다시 확인하세요."
+                    onRetry={() => void load('refresh')}
+                  />
                 ) : null}
                 <dl className="meta-grid">
                   <div>
