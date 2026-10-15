@@ -789,7 +789,10 @@ th {
   }
 }
 
-/** P1-6A: Model Catalog list layout / pending Node switch. */
+/**
+ * P1-6A / P1-8F: pending list while Node/page (Catalog filters) refetch.
+ * Shared by Model Catalog and Model Cache stale-context UX.
+ */
 .catalog-list-pending {
   margin: 0.5rem 0 0.25rem;
   color: var(--muted);

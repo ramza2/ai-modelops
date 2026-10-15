@@ -827,4 +827,212 @@ describe('ModelCachePage', () => {
     )
     expect(maxConcurrent).toBe(1)
   }, 20000)
+
+  it('blocks Deploy/Purge on stale rows while Node refetch is in flight, then restores', async () => {
+    let resolveNode2!: (page: Paginated<ModelCacheEntry>) => void
+    const node2Promise = new Promise<Paginated<ModelCacheEntry>>((resolve) => {
+      resolveNode2 = resolve
+    })
+    vi.mocked(downloadsApi.listModelCaches).mockImplementation(
+      async (params = {}) => {
+        if (params.nodeId === 'node-2') return node2Promise
+        return cachePage([
+          makeCache({
+            id: 'cache-node1',
+            repository_id: 'org/node1-only',
+            status: 'READY',
+          }),
+        ])
+      },
+    )
+    vi.mocked(downloadsApi.purgeModelCache).mockResolvedValue({
+      id: 'cache-node1',
+      status: 'MISSING',
+      purged: true,
+      repository_id: 'org/node1-only',
+      resolved_revision: 'abc123',
+      registry_retained: true,
+    })
+
+    renderAt('/models/cache?node_id=node-1')
+    const row = (await screen.findByText('org/node1-only')).closest(
+      'tr',
+    ) as HTMLElement
+    const deploy = within(row).getByRole('link', { name: 'Deploy' })
+    expect(deploy).not.toHaveAttribute('aria-disabled', 'true')
+    expect(
+      within(row).getByRole('button', { name: 'Purge' }),
+    ).not.toBeDisabled()
+
+    await userEvent.selectOptions(screen.getByLabelText('Node'), 'node-2')
+    expect(
+      await screen.findByText(/캐시 목록을 다시 불러오는 중/),
+    ).toBeInTheDocument()
+    expect(screen.getByTestId('cache-table')).toHaveAttribute(
+      'aria-busy',
+      'true',
+    )
+    expect(row).toHaveAttribute('data-cache-stale', 'true')
+    expect(within(row).getByText('목록 갱신 중…')).toBeInTheDocument()
+    expect(deploy).toHaveAttribute('aria-disabled', 'true')
+    expect(deploy).toHaveAttribute('title', '목록 갱신 중 — Deploy 불가')
+    expect(within(row).getByRole('button', { name: 'Purge' })).toBeDisabled()
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(downloadsApi.purgeModelCache).not.toHaveBeenCalled()
+
+    resolveNode2(
+      cachePage([
+        makeCache({
+          id: 'cache-node2',
+          node_id: 'node-2',
+          node_name: 'gpu-b',
+          repository_id: 'org/node2-only',
+          status: 'READY',
+        }),
+      ]),
+    )
+    expect(await screen.findByText('org/node2-only')).toBeInTheDocument()
+    expect(screen.queryByText('org/node1-only')).not.toBeInTheDocument()
+    expect(
+      screen.queryByText(/캐시 목록을 다시 불러오는 중/),
+    ).not.toBeInTheDocument()
+    const freshRow = screen.getByText('org/node2-only').closest(
+      'tr',
+    ) as HTMLElement
+    expect(freshRow).not.toHaveAttribute('data-cache-stale')
+    expect(
+      within(freshRow).getByRole('link', { name: 'Deploy' }),
+    ).not.toHaveAttribute('aria-disabled', 'true')
+    expect(
+      within(freshRow).getByRole('button', { name: 'Purge' }),
+    ).not.toBeDisabled()
+  })
+
+  it('blocks Deploy/Purge while page change refetch is pending', async () => {
+    let resolvePage2!: (page: Paginated<ModelCacheEntry>) => void
+    const page2Promise = new Promise<Paginated<ModelCacheEntry>>((resolve) => {
+      resolvePage2 = resolve
+    })
+    const page1Rows = Array.from({ length: 20 }, (_, i) =>
+      makeCache({
+        id: `cache-p1-${i}`,
+        repository_id: `org/page1-${i}`,
+        status: 'READY',
+      }),
+    )
+    vi.mocked(downloadsApi.listModelCaches).mockImplementation(
+      async (params = {}) => {
+        if ((params.page ?? 1) === 2) return page2Promise
+        return {
+          items: page1Rows,
+          page: 1,
+          page_size: 20,
+          total: 25,
+        }
+      },
+    )
+
+    renderAt('/models/cache')
+    expect(await screen.findByText('org/page1-0')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: '다음' }))
+    expect(
+      await screen.findByText(/캐시 목록을 다시 불러오는 중/),
+    ).toBeInTheDocument()
+    const staleRow = screen.getByText('org/page1-0').closest(
+      'tr',
+    ) as HTMLElement
+    expect(
+      within(staleRow).getByRole('link', { name: 'Deploy' }),
+    ).toHaveAttribute('aria-disabled', 'true')
+    expect(
+      within(staleRow).getByRole('button', { name: 'Purge' }),
+    ).toBeDisabled()
+
+    resolvePage2({
+      items: [
+        makeCache({
+          id: 'cache-p2-0',
+          repository_id: 'org/page2-0',
+          status: 'READY',
+        }),
+      ],
+      page: 2,
+      page_size: 20,
+      total: 25,
+    })
+    expect(await screen.findByText('org/page2-0')).toBeInTheDocument()
+    expect(screen.queryByText('org/page1-0')).not.toBeInTheDocument()
+    expect(
+      within(
+        screen.getByText('org/page2-0').closest('tr') as HTMLElement,
+      ).getByRole('button', { name: 'Purge' }),
+    ).not.toBeDisabled()
+  })
+
+  it('ignores a late list response after a faster Node switch', async () => {
+    let resolveSlowNode1!: (page: Paginated<ModelCacheEntry>) => void
+    const slowNode1 = new Promise<Paginated<ModelCacheEntry>>((resolve) => {
+      resolveSlowNode1 = resolve
+    })
+    vi.mocked(downloadsApi.listModelCaches).mockImplementation(
+      async (params = {}) => {
+        if (params.nodeId === 'node-2') {
+          return cachePage([
+            makeCache({
+              id: 'cache-fast',
+              node_id: 'node-2',
+              node_name: 'gpu-b',
+              repository_id: 'org/fast-node2',
+              status: 'READY',
+            }),
+          ])
+        }
+        if (params.nodeId === 'node-1') {
+          return slowNode1
+        }
+        return cachePage([
+          makeCache({
+            id: 'cache-all',
+            repository_id: 'org/all-nodes',
+            status: 'READY',
+          }),
+        ])
+      },
+    )
+
+    renderAt('/models/cache')
+    expect(await screen.findByText('org/all-nodes')).toBeInTheDocument()
+
+    // Start slow node-1 fetch, then quickly switch to node-2 which resolves first.
+    await userEvent.selectOptions(screen.getByLabelText('Node'), 'node-1')
+    await userEvent.selectOptions(screen.getByLabelText('Node'), 'node-2')
+    expect(await screen.findByText('org/fast-node2')).toBeInTheDocument()
+
+    resolveSlowNode1(
+      cachePage([
+        makeCache({
+          id: 'cache-late',
+          node_id: 'node-1',
+          repository_id: 'org/late-node1',
+          status: 'READY',
+        }),
+      ]),
+    )
+    await new Promise((r) => setTimeout(r, 50))
+    expect(screen.queryByText('org/late-node1')).not.toBeInTheDocument()
+    expect(screen.getByText('org/fast-node2')).toBeInTheDocument()
+  })
+
+  it('offers retry on cache list fetch failure', async () => {
+    vi.mocked(downloadsApi.listModelCaches)
+      .mockRejectedValueOnce(
+        new ApiError('cache list down', { status: 503, code: 'UNAVAILABLE' }),
+      )
+      .mockResolvedValue(cachePage([makeCache({ id: 'cache-ok' })]))
+
+    renderAt('/models/cache')
+    expect(await screen.findByText('cache list down')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: '다시 시도' }))
+    expect(await screen.findByText('org/model')).toBeInTheDocument()
+  })
 })
