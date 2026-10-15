@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import {
   createDetailFetchGate,
+  createStopSyncFallbackClock,
   formatOperationError,
   healthWaitElapsedMsFromFinishedAt,
   isActiveOperationStatus,
@@ -9,10 +10,12 @@ import {
   isFailedOperationStatus,
   OPERATION_POLL_MS,
   operationPollConfig,
+  parseTrustworthyFinishedAtMs,
   resolveDetailLifecyclePhase,
   resolveWizardLifecyclePhase,
   shouldPollDetailLifecycle,
   shouldPollWizardLifecycle,
+  stopSyncWaitElapsedMs,
 } from '../utils/operationLifecycle'
 
 describe('operationLifecycle', () => {
@@ -93,6 +96,82 @@ describe('operationLifecycle', () => {
     expect(healthWaitElapsedMsFromFinishedAt(finished, now)).toBe(
       operationPollConfig.healthWaitMaxMs,
     )
+  })
+
+  it('STOP sync elapsed uses finished_at when trustworthy, else per-op fallback', () => {
+    const now = Date.parse('2026-10-13T06:00:00.000Z')
+    expect(
+      parseTrustworthyFinishedAtMs('2026-10-13T05:59:00.000Z', now),
+    ).toBe(Date.parse('2026-10-13T05:59:00.000Z'))
+    expect(parseTrustworthyFinishedAtMs(null, now)).toBeNull()
+    expect(parseTrustworthyFinishedAtMs('not-a-date', now)).toBeNull()
+    expect(
+      parseTrustworthyFinishedAtMs('2026-10-13T06:01:00.000Z', now),
+    ).toBeNull()
+
+    const clock = createStopSyncFallbackClock()
+    expect(
+      stopSyncWaitElapsedMs({
+        operationId: 'op-a',
+        finishedAt: '2026-10-13T05:59:00.000Z',
+        fallback: clock,
+        nowMs: now,
+      }),
+    ).toBe(60_000)
+    // Trustworthy finished_at must not pin a fallback start.
+    expect(clock.get('op-a')).toBeUndefined()
+
+    expect(
+      stopSyncWaitElapsedMs({
+        operationId: 'op-null',
+        finishedAt: null,
+        fallback: clock,
+        nowMs: now,
+      }),
+    ).toBe(0)
+    expect(clock.get('op-null')).toBe(now)
+    expect(
+      stopSyncWaitElapsedMs({
+        operationId: 'op-null',
+        finishedAt: null,
+        fallback: clock,
+        nowMs: now + 90_000,
+      }),
+    ).toBe(90_000)
+
+    expect(
+      stopSyncWaitElapsedMs({
+        operationId: 'op-bad',
+        finishedAt: 'not-a-date',
+        fallback: clock,
+        nowMs: now,
+      }),
+    ).toBe(0)
+    expect(
+      stopSyncWaitElapsedMs({
+        operationId: 'op-future',
+        finishedAt: '2026-10-13T06:30:00.000Z',
+        fallback: clock,
+        nowMs: now,
+      }),
+    ).toBe(0)
+    expect(clock.get('op-future')).toBe(now)
+    expect(
+      stopSyncWaitElapsedMs({
+        operationId: 'op-future',
+        finishedAt: '2026-10-13T06:30:00.000Z',
+        fallback: clock,
+        nowMs: now + operationPollConfig.healthWaitMaxMs,
+      }),
+    ).toBe(operationPollConfig.healthWaitMaxMs)
+
+    // Distinct Operation IDs keep independent fallback starts.
+    clock.ensure('op-b', now + 1000)
+    expect(clock.get('op-null')).toBe(now)
+    expect(clock.get('op-b')).toBe(now + 1000)
+    clock.clear('op-null')
+    expect(clock.get('op-null')).toBeUndefined()
+    expect(clock.get('op-b')).toBe(now + 1000)
   })
 
   it('resolves Wizard Start lifecycle phases and poll eligibility', () => {

@@ -728,4 +728,102 @@ describe('DeploymentDetailPage', () => {
       callsAfterTimeout,
     )
   })
+
+  it('times out stop-sync wait when finished_at is null using fallback clock', async () => {
+    operationPollConfig.ms = 40
+    operationPollConfig.healthWaitMaxMs = 80
+    const user = userEvent.setup()
+    vi.mocked(deploymentsApi.getDeployment).mockResolvedValue(
+      makeDeployment({
+        desired_state: 'STOPPED',
+        runtime_status: 'RUNNING',
+        health_status: 'UNKNOWN',
+      }),
+    )
+    vi.mocked(modelsApi.getModelVersion).mockResolvedValue(makeVersion())
+    vi.mocked(nodesApi.getNode).mockResolvedValue(makeNode())
+    vi.mocked(deploymentsApi.stopDeployment).mockResolvedValue(
+      makeOp({
+        id: 'op-stop-null-finished',
+        operation_type: 'STOP',
+        status: 'QUEUED',
+      }),
+    )
+    vi.mocked(operationsApi.getOperation).mockResolvedValue(
+      makeOpDetail({
+        id: 'op-stop-null-finished',
+        operation_type: 'STOP',
+        status: 'SUCCEEDED',
+        current_step: 'FINALIZE',
+        finished_at: null,
+      }),
+    )
+
+    renderDetail()
+    await user.click(await screen.findByRole('button', { name: 'Stop' }))
+    expect(
+      await screen.findByRole('link', { name: 'op-stop-null-finished' }),
+    ).toBeInTheDocument()
+    expect(await screen.findByTestId('stop-sync-wait')).toBeInTheDocument()
+    expect(
+      await screen.findByText(/STOP 상태 동기화 대기 시간 초과/),
+    ).toBeInTheDocument()
+    expect(screen.queryByTestId('stop-sync-wait')).not.toBeInTheDocument()
+    expect(screen.getByText(/알 수 없음/)).toBeInTheDocument()
+
+    const callsAfterTimeout = vi.mocked(operationsApi.getOperation).mock.calls
+      .length
+    await new Promise((r) => setTimeout(r, 120))
+    expect(vi.mocked(operationsApi.getOperation).mock.calls.length).toBe(
+      callsAfterTimeout,
+    )
+  })
+
+  it('times out stop-sync wait for invalid or future finished_at', async () => {
+    operationPollConfig.ms = 40
+    operationPollConfig.healthWaitMaxMs = 80
+    const user = userEvent.setup()
+    vi.mocked(deploymentsApi.getDeployment).mockResolvedValue(
+      makeDeployment({
+        desired_state: 'STOPPED',
+        runtime_status: 'RUNNING',
+        health_status: 'DEGRADED',
+      }),
+    )
+    vi.mocked(modelsApi.getModelVersion).mockResolvedValue(makeVersion())
+    vi.mocked(nodesApi.getNode).mockResolvedValue(makeNode())
+    vi.mocked(deploymentsApi.stopDeployment).mockResolvedValue(
+      makeOp({
+        id: 'op-stop-future',
+        operation_type: 'STOP',
+        status: 'QUEUED',
+      }),
+    )
+    vi.mocked(operationsApi.getOperation).mockResolvedValue(
+      makeOpDetail({
+        id: 'op-stop-future',
+        operation_type: 'STOP',
+        status: 'SUCCEEDED',
+        current_step: 'FINALIZE',
+        // Far-future stamp must not freeze elapsed at 0 forever.
+        finished_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      }),
+    )
+
+    renderDetail()
+    await user.click(await screen.findByRole('button', { name: 'Stop' }))
+    expect(
+      await screen.findByRole('link', { name: 'op-stop-future' }),
+    ).toBeInTheDocument()
+    expect(
+      await screen.findByText(/STOP 상태 동기화 대기 시간 초과/),
+    ).toBeInTheDocument()
+
+    const callsAfterTimeout = vi.mocked(operationsApi.getOperation).mock.calls
+      .length
+    await new Promise((r) => setTimeout(r, 120))
+    expect(vi.mocked(operationsApi.getOperation).mock.calls.length).toBe(
+      callsAfterTimeout,
+    )
+  })
 })

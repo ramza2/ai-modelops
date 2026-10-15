@@ -60,6 +60,9 @@ export function isDeploymentReadyForPublish(
  * Elapsed time since Operation finished_at for post-SUCCEEDED health wait.
  * Missing/invalid timestamps return null so F5 does not invent a new clock
  * and we do not false-timeout on bad data.
+ *
+ * Wizard Start health wait must keep this behavior — do not redirect null/future
+ * timestamps through the STOP sync fallback clock below.
  */
 export function healthWaitElapsedMsFromFinishedAt(
   finishedAt: string | null | undefined,
@@ -72,6 +75,77 @@ export function healthWaitElapsedMsFromFinishedAt(
   const t = Date.parse(trimmed)
   if (!Number.isFinite(t)) return null
   return Math.max(0, nowMs - t)
+}
+
+/**
+ * Parse finished_at only when it is usable as a STOP sync timeout anchor:
+ * finite and not in the future (future stamps would keep elapsed at 0 forever).
+ */
+export function parseTrustworthyFinishedAtMs(
+  finishedAt: string | null | undefined,
+  nowMs: number = Date.now(),
+): number | null {
+  if (finishedAt == null) return null
+  if (typeof finishedAt !== 'string') return null
+  const trimmed = finishedAt.trim()
+  if (!trimmed) return null
+  const t = Date.parse(trimmed)
+  if (!Number.isFinite(t)) return null
+  if (t > nowMs) return null
+  return t
+}
+
+/**
+ * Per-Operation-ID fallback start times for STOP sync wait when finished_at is
+ * missing, invalid, or in the future. Session-local only — not used by Wizard.
+ */
+export type StopSyncFallbackClock = {
+  ensure(operationId: string, nowMs?: number): number
+  get(operationId: string): number | undefined
+  clear(operationId?: string): void
+}
+
+export function createStopSyncFallbackClock(): StopSyncFallbackClock {
+  const starts = new Map<string, number>()
+  return {
+    ensure(operationId: string, nowMs: number = Date.now()): number {
+      const existing = starts.get(operationId)
+      if (existing != null) return existing
+      starts.set(operationId, nowMs)
+      return nowMs
+    },
+    get(operationId: string): number | undefined {
+      return starts.get(operationId)
+    },
+    clear(operationId?: string): void {
+      if (operationId == null) {
+        starts.clear()
+        return
+      }
+      starts.delete(operationId)
+    },
+  }
+}
+
+/**
+ * Elapsed ms for Deployment Detail STOP status sync wait (P1-8G follow-up).
+ * Prefer a trustworthy finished_at; otherwise pin a per-Operation fallback to
+ * the first observation of STOP SUCCEEDED so polling always times out.
+ * Always returns a finite number when operationId is provided.
+ */
+export function stopSyncWaitElapsedMs(input: {
+  operationId: string
+  finishedAt: string | null | undefined
+  fallback: StopSyncFallbackClock
+  nowMs?: number
+}): number {
+  const nowMs = input.nowMs ?? Date.now()
+  const trusted = parseTrustworthyFinishedAtMs(input.finishedAt, nowMs)
+  if (trusted != null) {
+    return Math.max(0, nowMs - trusted)
+  }
+  const start = input.fallback.ensure(input.operationId, nowMs)
+  return Math.max(0, nowMs - start)
 }
 
 /** Cache Deploy Wizard Start-step lifecycle poll phases (P1-4B). */

@@ -31,14 +31,15 @@ import {
 import { formatInt, formatMemoryMb } from '../utils/number'
 import {
   createDetailFetchGate,
+  createStopSyncFallbackClock,
   formatOperationError,
-  healthWaitElapsedMsFromFinishedAt,
   isActiveOperationStatus,
   isDeploymentStoppedForSync,
   OPERATION_POLL_MS,
   operationPollConfig,
   resolveDetailLifecyclePhase,
   shouldPollDetailLifecycle,
+  stopSyncWaitElapsedMs,
 } from '../utils/operationLifecycle'
 
 type LifecycleAction = 'start' | 'stop' | 'restart'
@@ -77,11 +78,12 @@ export function DeploymentDetailPage() {
   const [lastOperation, setLastOperation] = useState<LifecycleOperation | null>(
     null,
   )
-  /** Re-render signal when finished_at-based STOP sync wait crosses the max. */
+  /** Re-render signal when STOP sync wait crosses the max (finished_at or fallback). */
   const [stopWaitTick, setStopWaitTick] = useState(0)
 
   const fetchGateRef = useRef(createDetailFetchGate())
   const refAbortRef = useRef<AbortController | null>(null)
+  const stopSyncFallbackRef = useRef(createStopSyncFallbackClock())
   const activeDeploymentIdRef = useRef(deploymentId)
   activeDeploymentIdRef.current = deploymentId
   const trackedOpIdRef = useRef<string | null>(null)
@@ -93,12 +95,20 @@ export function DeploymentDetailPage() {
   const mutatingRef = useRef<LifecycleAction | null>(null)
   mutatingRef.current = mutating
 
-  // stopWaitTick is only a re-render signal; elapsed always uses wall clock
-  // vs Operation.finished_at so F5 cannot reset the wait window.
+  // stopWaitTick is only a re-render signal. Prefer trustworthy finished_at;
+  // otherwise elapsed is anchored to the first STOP SUCCEEDED observation
+  // for this Operation ID so null/invalid/future stamps cannot poll forever.
   void stopWaitTick
-  const stopWaitElapsedMs = healthWaitElapsedMsFromFinishedAt(
-    lastOperation?.finished_at,
-  )
+  const stopWaitElapsedMs =
+    lastOperation?.id &&
+    (lastOperation.operation_type || '').toUpperCase() === 'STOP' &&
+    lastOperation.status === 'SUCCEEDED'
+      ? stopSyncWaitElapsedMs({
+          operationId: lastOperation.id,
+          finishedAt: lastOperation.finished_at,
+          fallback: stopSyncFallbackRef.current,
+        })
+      : null
   const lifecyclePhase = resolveDetailLifecyclePhase({
     operationType: lastOperation?.operation_type,
     operationStatus: lastOperation?.status,
@@ -242,10 +252,12 @@ export function DeploymentDetailPage() {
     setLastOperation(null)
     setActionError(null)
     setMutating(null)
+    stopSyncFallbackRef.current.clear()
     void load('initial')
     return () => {
       fetchGateRef.current.abort()
       refAbortRef.current?.abort()
+      stopSyncFallbackRef.current.clear()
     }
   }, [load])
 
@@ -263,14 +275,16 @@ export function DeploymentDetailPage() {
     const timer = window.setInterval(() => {
       if (refreshingRef.current || mutatingRef.current) return
 
-      const elapsed = healthWaitElapsedMsFromFinishedAt(finishedAtRef.current)
-      if (
-        lifecyclePhase === 'stop_wait' &&
-        elapsed != null &&
-        elapsed >= operationPollConfig.healthWaitMaxMs
-      ) {
-        setStopWaitTick((n) => n + 1)
-        return
+      if (lifecyclePhase === 'stop_wait') {
+        const elapsed = stopSyncWaitElapsedMs({
+          operationId: opId,
+          finishedAt: finishedAtRef.current,
+          fallback: stopSyncFallbackRef.current,
+        })
+        if (elapsed >= operationPollConfig.healthWaitMaxMs) {
+          setStopWaitTick((n) => n + 1)
+          return
+        }
       }
 
       const gate = fetchGateRef.current
