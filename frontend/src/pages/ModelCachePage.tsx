@@ -107,11 +107,22 @@ export function ModelCachePage() {
   const pageRef = useRef(page)
   const stopPollRef = useRef<() => void>(() => {})
   const listContextKey = `${nodeId}|${page}`
+  const listMatchesContext = itemsBoundKey === listContextKey
+  const cacheListPending =
+    (loading && items === null) ||
+    (items !== null && !listMatchesContext)
 
   itemsRef.current = items
   purgingRef.current = purging
   nodeIdRef.current = nodeId
   pageRef.current = page
+
+  // Drop an open Purge dialog when Node/page context changes so operators
+  // cannot confirm against a stale row still on screen.
+  useEffect(() => {
+    setPurgeTarget(null)
+    setPurgeError(null)
+  }, [listContextKey])
 
   const syncUrl = useCallback(
     (next: { nodeId: string; page: number }) => {
@@ -490,7 +501,13 @@ export function ModelCachePage() {
         </label>
       </div>
 
-      {error ? <SectionError title="캐시 목록 오류" message={error} /> : null}
+      {error ? (
+        <SectionError
+          title="캐시 목록 오류"
+          message={error}
+          onRetry={() => void load('refresh')}
+        />
+      ) : null}
       {pollWarning ? (
         <SectionError
           title="다운로드 상태 갱신"
@@ -503,13 +520,25 @@ export function ModelCachePage() {
         <LoadingBlock label="모델 캐시를 불러오는 중…" />
       ) : null}
 
-      {items !== null && items.length === 0 ? (
+      {cacheListPending && items !== null ? (
+        <p className="catalog-list-pending" role="status">
+          {refreshing || !listMatchesContext
+            ? 'Node/페이지 변경에 맞게 캐시 목록을 다시 불러오는 중…'
+            : '캐시 목록을 불러오는 중…'}
+        </p>
+      ) : null}
+
+      {items !== null && items.length === 0 && listMatchesContext ? (
         <p className="secondary-text">등록된 캐시가 없습니다.</p>
       ) : null}
 
       {items !== null && items.length > 0 ? (
         <>
-          <div className="table-wrap">
+          <div
+            className={`table-wrap${cacheListPending ? ' catalog-table-wrap--pending' : ''}`}
+            aria-busy={cacheListPending || undefined}
+            data-testid="cache-table"
+          >
             <table className="data-table">
               <thead>
                 <tr>
@@ -528,6 +557,7 @@ export function ModelCachePage() {
                   const tracked = jobByCacheId[row.id]
                   const job = tracked?.job
                   const showProgress =
+                    listMatchesContext &&
                     row.status === 'PREPARING' &&
                     job != null &&
                     isActiveDownloadStatus(job.status)
@@ -540,8 +570,15 @@ export function ModelCachePage() {
                             : '—'
                         }`
                       : null
+                  const deployBlocked =
+                    !listMatchesContext || row.status !== 'READY'
                   return (
-                    <tr key={row.id}>
+                    <tr
+                      key={row.id}
+                      data-cache-stale={
+                        listMatchesContext ? undefined : 'true'
+                      }
+                    >
                       <td className="mono">{row.repository_id || '—'}</td>
                       <td className="mono">{row.resolved_revision || '—'}</td>
                       <td>{row.node_name || row.node_id}</td>
@@ -553,6 +590,9 @@ export function ModelCachePage() {
                       </td>
                       <td>
                         <StatusBadge status={row.status} />
+                        {!listMatchesContext ? (
+                          <div className="secondary-text">목록 갱신 중…</div>
+                        ) : null}
                         {showProgress ? (
                           <div
                             className="secondary-text"
@@ -564,10 +604,13 @@ export function ModelCachePage() {
                               : '진행률 없음 (서버 미제공)'}
                           </div>
                         ) : null}
-                        {row.status === 'FAILED' && row.error_message ? (
+                        {listMatchesContext &&
+                        row.status === 'FAILED' &&
+                        row.error_message ? (
                           <div className="secondary-text">{row.error_message}</div>
                         ) : null}
-                        {row.status === 'PREPARING' &&
+                        {listMatchesContext &&
+                        row.status === 'PREPARING' &&
                         !row.active_download_job_id ? (
                           <div className="secondary-text">
                             Active Download Job 없음 — READY로 추정하지 않습니다.
@@ -593,17 +636,19 @@ export function ModelCachePage() {
                           <Link
                             className="btn"
                             to={`/models/cache/${row.id}/deploy`}
-                            aria-disabled={row.status !== 'READY'}
+                            aria-disabled={deployBlocked}
                             onClick={(e) => {
-                              if (row.status !== 'READY') e.preventDefault()
+                              if (deployBlocked) e.preventDefault()
                             }}
                             title={
-                              row.status === 'READY'
-                                ? 'Deploy READY cache'
-                                : 'Deploy requires READY cache'
+                              !listMatchesContext
+                                ? '목록 갱신 중 — Deploy 불가'
+                                : row.status === 'READY'
+                                  ? 'Deploy READY cache'
+                                  : 'Deploy requires READY cache'
                             }
                             style={
-                              row.status !== 'READY'
+                              deployBlocked
                                 ? { pointerEvents: 'none', opacity: 0.5 }
                                 : undefined
                             }
@@ -613,8 +658,14 @@ export function ModelCachePage() {
                           <button
                             type="button"
                             className="btn btn--danger"
-                            disabled={purging}
+                            disabled={purging || !listMatchesContext}
+                            title={
+                              !listMatchesContext
+                                ? '목록 갱신 중 — Purge 불가'
+                                : undefined
+                            }
                             onClick={() => {
+                              if (!listMatchesContext) return
                               setPurgeError(null)
                               setPurgeTarget(row)
                             }}
