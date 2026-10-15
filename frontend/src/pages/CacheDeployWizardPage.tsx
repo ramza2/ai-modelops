@@ -16,6 +16,12 @@ import { listEndpoints } from '../api/endpoints'
 import { getModel, getModelVersion } from '../api/models'
 import { getNode, refreshNodeResources } from '../api/nodes'
 import { displayedGpuFreeMb, fitInputFingerprint, isFreshResourceSnapshot } from '../utils/cacheDeployFit'
+import {
+  collectRuntimeFormErrors,
+  hasRuntimeFormErrors,
+  partitionRuntimeReview,
+  repositorySuggestsQwen3,
+} from '../utils/cacheDeployRuntimeForm'
 import { getOperation } from '../api/operations'
 import {
   clearPublishDraft,
@@ -383,10 +389,13 @@ export function CacheDeployWizardPage() {
 
   // Save only operator inputs. Backend remains source of truth for Fit,
   // deployment runtime, operation status, and ACTIVE route.
+  // Skip persist while Runtime numeric fields are invalid so NaN/empty port
+  // cannot JSON-null the draft and fail readWizardDraft after F5.
   useEffect(() => {
     if (!cache || cache.id !== cacheId || cache.status !== 'READY' ||
         restoredCacheRef.current !== cacheId || loading || deploymentIdParam ||
         !['cache', 'runtime', 'gpu', 'review'].includes(step)) return
+    if (hasRuntimeFormErrors(collectRuntimeFormErrors(runtimePort, runtime))) return
     writeWizardDraft(storage, {
       schema: 1, cacheId, nodeId: cache.node_id,
       modelVersionId: cache.model_version_id, revision: cache.resolved_revision,
@@ -454,8 +463,25 @@ export function CacheDeployWizardPage() {
     }
   }
 
+  const runtimeFormErrors = collectRuntimeFormErrors(runtimePort, runtime)
+  const runtimeFormValid = !hasRuntimeFormErrors(runtimeFormErrors)
+  const qwen3ParserSelected = runtime.reasoning_parser === 'qwen3'
+  const qwen3CompatibilityUnverified =
+    qwen3ParserSelected &&
+    !repositorySuggestsQwen3(
+      cache?.repository_id,
+      model?.name,
+      model?.slug,
+      version?.source_repository,
+      version?.served_model_name,
+    )
+  const runtimeReview = partitionRuntimeReview(
+    runtime,
+    uniqueGpuIds.length > 0 ? uniqueGpuIds.length : runtime.tensor_parallel_size ?? 1,
+  )
+
   const onCreate = async () => {
-    if (!cache || busy || fitLoading || !activeFit ||
+    if (!cache || busy || fitLoading || !runtimeFormValid || !activeFit ||
         activeFit.result === 'INSUFFICIENT' ||
         (activeFit.result === 'UNKNOWN' && !ackUnknown)) return
     setBusy(true)
@@ -761,165 +787,283 @@ export function CacheDeployWizardPage() {
               Prefill: {knownProfileLabel}
             </p>
           ) : null}
-          <div className="form-grid">
-            <label className="form-grid__wide">
-              Deployment name
-              <input value={name} onChange={(e) => setName(e.target.value)} />
-            </label>
-            <label className="form-grid__wide">
-              Container name
-              <input
-                value={containerName}
-                onChange={(e) => setContainerName(e.target.value)}
-              />
-            </label>
-            <label className="form-grid__wide">
-              Served model name
-              <input
-                value={servedModelName}
-                onChange={(e) => {
-                  setServedModelName(e.target.value)
-                  setRewriteModelName(e.target.value)
-                }}
-              />
-            </label>
-            <label>
-              Runtime port
-              <input
-                type="number"
-                value={runtimePort}
-                onChange={(e) => setRuntimePort(Number(e.target.value))}
-              />
-            </label>
-            <label>
-              max_model_len
-              <input
-                type="number"
-                value={runtime.max_model_len ?? ''}
-                onChange={(e) =>
-                  setRuntime((r) => ({
-                    ...r,
-                    max_model_len: e.target.value
-                      ? Number(e.target.value)
-                      : null,
-                  }))
-                }
-              />
-            </label>
-            <label>
-              max_num_seqs
-              <input
-                type="number"
-                value={runtime.max_num_seqs ?? ''}
-                onChange={(e) =>
-                  setRuntime((r) => ({
-                    ...r,
-                    max_num_seqs: e.target.value
-                      ? Number(e.target.value)
-                      : null,
-                  }))
-                }
-              />
-            </label>
-            <label>
-              gpu_memory_utilization
-              <input
-                type="number"
-                step="0.01"
-                value={runtime.gpu_memory_utilization ?? ''}
-                onChange={(e) =>
-                  setRuntime((r) => ({
-                    ...r,
-                    gpu_memory_utilization: e.target.value
-                      ? Number(e.target.value)
-                      : null,
-                  }))
-                }
-              />
-            </label>
-            <label>
-              runner
-              <select
-                value={runtime.runner ?? ''}
-                onChange={(e) =>
-                  setRuntime((r) => ({
-                    ...r,
-                    runner: e.target.value || null,
-                  }))
-                }
-              >
-                <option value="">(omit / generate)</option>
-                <option value="generate">generate</option>
-                <option value="pooling">pooling</option>
-              </select>
-            </label>
-            <label>
-              dtype (optional)
-              <input
-                value={runtime.dtype ?? ''}
-                onChange={(e) =>
-                  setRuntime((r) => ({ ...r, dtype: e.target.value || null }))
-                }
-                placeholder={version?.dtype || 'do not guess'}
-              />
-            </label>
-            <label>
-              quantization (optional)
-              <input
-                value={runtime.quantization ?? ''}
-                onChange={(e) =>
-                  setRuntime((r) => ({
-                    ...r,
-                    quantization: e.target.value || null,
-                  }))
-                }
-                placeholder={version?.quantization || 'do not guess'}
-              />
-            </label>
-            <label>
-              Reasoning Parser (optional)
-              <select
-                aria-label="Reasoning Parser"
-                value={runtime.reasoning_parser ?? ''}
-                onChange={(e) =>
-                  setRuntime((r) => ({
-                    ...r,
-                    reasoning_parser: e.target.value || null,
-                  }))
-                }
-              >
-                <option value="">(미설정)</option>
-                <option value="qwen3">qwen3</option>
-              </select>
-            </label>
-            <label>
-              vLLM Model Runner (optional)
-              <select
-                aria-label="vLLM Model Runner"
-                value={runtime.vllm_model_runner ?? ''}
-                onChange={(e) =>
-                  setRuntime((r) => ({
-                    ...r,
-                    vllm_model_runner: e.target.value || null,
-                  }))
-                }
-              >
-                <option value="">Auto (default)</option>
-                <option value="v1">V1</option>
-              </select>
-            </label>
+          <p className="secondary-text">
+            미설정 필드는 기존 기본 동작을 유지합니다. 확인되지 않은 dtype /
+            quantization을 자동으로 채우지 않습니다.
+          </p>
+
+          <div className="form-section" data-testid="runtime-section-basic">
+            <h3 className="form-section__title">기본 정보</h3>
+            <div className="form-grid">
+              <label className="form-grid__wide">
+                Deployment name
+                <span className="form-field-hint">
+                  Management API에 등록되는 Deployment 표시 이름입니다.
+                </span>
+                <input value={name} onChange={(e) => setName(e.target.value)} />
+              </label>
+              <label className="form-grid__wide">
+                Container name
+                <span className="form-field-hint">
+                  Managed 컨테이너 이름입니다. Node 내에서 고유해야 합니다.
+                </span>
+                <input
+                  value={containerName}
+                  onChange={(e) => setContainerName(e.target.value)}
+                />
+              </label>
+              <label className="form-grid__wide">
+                Served model name
+                <span className="form-field-hint">
+                  런타임이 노출하는 model id이며 Publish rewrite 기본값으로도
+                  사용됩니다.
+                </span>
+                <input
+                  value={servedModelName}
+                  onChange={(e) => {
+                    setServedModelName(e.target.value)
+                    setRewriteModelName(e.target.value)
+                  }}
+                />
+              </label>
+              <label>
+                Runtime port
+                <span className="form-field-hint">
+                  컨테이너 listen 포트 (1–65535 정수).
+                </span>
+                <input
+                  type="number"
+                  value={Number.isFinite(runtimePort) ? runtimePort : ''}
+                  aria-invalid={runtimeFormErrors.runtimePort ? true : undefined}
+                  onChange={(e) =>
+                    setRuntimePort(
+                      e.target.value === ''
+                        ? Number.NaN
+                        : Number(e.target.value),
+                    )
+                  }
+                />
+                {runtimeFormErrors.runtimePort ? (
+                  <span className="form-field-error" role="alert">
+                    {runtimeFormErrors.runtimePort}
+                  </span>
+                ) : null}
+              </label>
+            </div>
           </div>
+
+          <div className="form-section" data-testid="runtime-section-resource">
+            <h3 className="form-section__title">리소스 설정</h3>
+            <div className="form-grid">
+              <label>
+                max_model_len
+                <span className="form-field-hint">
+                  컨텍스트 길이 상한. 비우면 런타임 기본값을 사용합니다.
+                </span>
+                <input
+                  type="number"
+                  value={runtime.max_model_len ?? ''}
+                  aria-invalid={
+                    runtimeFormErrors.max_model_len ? true : undefined
+                  }
+                  onChange={(e) =>
+                    setRuntime((r) => ({
+                      ...r,
+                      max_model_len: e.target.value
+                        ? Number(e.target.value)
+                        : null,
+                    }))
+                  }
+                />
+                {runtimeFormErrors.max_model_len ? (
+                  <span className="form-field-error" role="alert">
+                    {runtimeFormErrors.max_model_len}
+                  </span>
+                ) : null}
+              </label>
+              <label>
+                max_num_seqs
+                <span className="form-field-hint">
+                  스케줄러 동시 시퀀스 상한(사용자 수 보장 아님). 비우면 기본
+                  동작입니다.
+                </span>
+                <input
+                  type="number"
+                  value={runtime.max_num_seqs ?? ''}
+                  aria-invalid={
+                    runtimeFormErrors.max_num_seqs ? true : undefined
+                  }
+                  onChange={(e) =>
+                    setRuntime((r) => ({
+                      ...r,
+                      max_num_seqs: e.target.value
+                        ? Number(e.target.value)
+                        : null,
+                    }))
+                  }
+                />
+                {runtimeFormErrors.max_num_seqs ? (
+                  <span className="form-field-error" role="alert">
+                    {runtimeFormErrors.max_num_seqs}
+                  </span>
+                ) : null}
+              </label>
+              <label>
+                gpu_memory_utilization
+                <span className="form-field-hint">
+                  GPU당 VRAM 사용 비율 (0 초과–1 이하). GPU 간 합산하지 않습니다.
+                </span>
+                <input
+                  type="number"
+                  step="0.01"
+                  value={runtime.gpu_memory_utilization ?? ''}
+                  aria-invalid={
+                    runtimeFormErrors.gpu_memory_utilization ? true : undefined
+                  }
+                  onChange={(e) =>
+                    setRuntime((r) => ({
+                      ...r,
+                      gpu_memory_utilization: e.target.value
+                        ? Number(e.target.value)
+                        : null,
+                    }))
+                  }
+                />
+                {runtimeFormErrors.gpu_memory_utilization ? (
+                  <span className="form-field-error" role="alert">
+                    {runtimeFormErrors.gpu_memory_utilization}
+                  </span>
+                ) : null}
+              </label>
+              <label>
+                dtype (optional)
+                <span className="form-field-hint">
+                  자유 입력. ModelVersion 값은 참고용이며 자동 선택하지 않습니다.
+                  {version?.dtype
+                    ? ` (ModelVersion 참고: ${version.dtype})`
+                    : ''}
+                </span>
+                <input
+                  value={runtime.dtype ?? ''}
+                  onChange={(e) =>
+                    setRuntime((r) => ({
+                      ...r,
+                      dtype: e.target.value || null,
+                    }))
+                  }
+                  placeholder={version?.dtype || 'do not guess'}
+                />
+              </label>
+              <label>
+                quantization (optional)
+                <span className="form-field-hint">
+                  자유 입력. 확인되지 않은 양자화 설정을 추측하지 마세요.
+                  {version?.quantization
+                    ? ` (ModelVersion 참고: ${version.quantization})`
+                    : ''}
+                </span>
+                <input
+                  value={runtime.quantization ?? ''}
+                  onChange={(e) =>
+                    setRuntime((r) => ({
+                      ...r,
+                      quantization: e.target.value || null,
+                    }))
+                  }
+                  placeholder={version?.quantization || 'do not guess'}
+                />
+              </label>
+            </div>
+          </div>
+
+          <div className="form-section" data-testid="runtime-section-advanced">
+            <h3 className="form-section__title">고급 옵션</h3>
+            <div className="form-grid">
+              <label>
+                runner
+                <span className="form-field-hint">
+                  vLLM 작업 모드: generate(생성) / pooling(임베딩). 아래 vLLM
+                  Model Runner(Auto/V1)와는 다른 설정입니다.
+                </span>
+                <select
+                  value={runtime.runner ?? ''}
+                  onChange={(e) =>
+                    setRuntime((r) => ({
+                      ...r,
+                      runner: e.target.value || null,
+                    }))
+                  }
+                >
+                  <option value="">(omit / generate)</option>
+                  <option value="generate">generate</option>
+                  <option value="pooling">pooling</option>
+                </select>
+              </label>
+              <label>
+                Reasoning Parser (optional)
+                <span className="form-field-hint">
+                  Qwen3용 Runtime 시작 옵션(<code>--reasoning-parser</code>).
+                  요청별 enable_thinking과는 별개입니다.
+                </span>
+                <select
+                  aria-label="Reasoning Parser"
+                  value={runtime.reasoning_parser ?? ''}
+                  onChange={(e) =>
+                    setRuntime((r) => ({
+                      ...r,
+                      reasoning_parser: e.target.value || null,
+                    }))
+                  }
+                >
+                  <option value="">(미설정)</option>
+                  <option value="qwen3">qwen3</option>
+                </select>
+              </label>
+              <label>
+                vLLM Model Runner (optional)
+                <span className="form-field-hint">
+                  엔진 Model Runner 선택(Auto/V1). runner(generate/pooling)와
+                  다릅니다. V1은 thinking_token_budget 호환용입니다.
+                </span>
+                <select
+                  aria-label="vLLM Model Runner"
+                  value={runtime.vllm_model_runner ?? ''}
+                  onChange={(e) =>
+                    setRuntime((r) => ({
+                      ...r,
+                      vllm_model_runner: e.target.value || null,
+                    }))
+                  }
+                >
+                  <option value="">Auto (default)</option>
+                  <option value="v1">V1</option>
+                </select>
+              </label>
+            </div>
+          </div>
+
           <p className="secondary-text">
             Catalog dtype/quant hints are suggestions only. Official vLLM image
             ENTRYPOINT contract remains <code>vllm serve …</code>.
           </p>
-          {runtime.reasoning_parser === 'qwen3' ? (
+          {qwen3ParserSelected ? (
             <p className="panel-hint" role="note">
               Reasoning Parser는 Runtime 시작 옵션입니다. Chat 응답에{' '}
               <code>reasoning</code>/<code>content</code> 분리가 생길 수 있으므로
               업무 클라이언트 호환성을 운영에서 검증하세요. 요청별{' '}
               <code>enable_thinking</code> / <code>thinking_token_budget</code> /
               <code>max_tokens</code>는 Parser와 별개입니다.
+            </p>
+          ) : null}
+          {qwen3CompatibilityUnverified ? (
+            <p
+              className="panel-hint panel-hint--warn"
+              role="status"
+              data-testid="qwen3-compat-warning"
+            >
+              reasoning_parser=qwen3은 Qwen3용 옵션입니다. 현재 모델에 대한
+              호환성은 확인되지 않았습니다. 지원 여부를 추측한 매트릭스는
+              제공하지 않으며, 운영에서 검증하세요.
             </p>
           ) : null}
           {runtime.vllm_model_runner === 'v1' ? (
@@ -931,11 +1075,21 @@ export function CacheDeployWizardPage() {
               컨테이너는 STOP 후 START(ENSURE_CONTAINER)로 재생성되어야 적용됩니다.
             </p>
           ) : null}
+          {!runtimeFormValid ? (
+            <p className="form-field-error" role="alert">
+              Runtime 입력값을 수정한 뒤 다음 단계로 진행하세요.
+            </p>
+          ) : null}
           <div className="toolbar__actions">
             <button type="button" className="btn btn--ghost" onClick={() => syncStep('cache')}>
               Back
             </button>
-            <button type="button" className="btn" onClick={() => syncStep('gpu')}>
+            <button
+              type="button"
+              className="btn"
+              disabled={!runtimeFormValid}
+              onClick={() => syncStep('gpu')}
+            >
               Next: GPU
             </button>
           </div>
@@ -1101,6 +1255,85 @@ export function CacheDeployWizardPage() {
       {step === 'review' ? (
         <section className="panel">
           <h2>4–5. Review & Create Deployment</h2>
+          <div
+            className="runtime-review"
+            data-testid="runtime-review-summary"
+          >
+            <h3 className="form-section__title">Runtime 설정 요약</h3>
+            <p className="secondary-text">
+              Create는 metadata only입니다. 아래는 요청에 전달될 runtime_config와
+              미설정(기존 기본 동작) 항목입니다.
+            </p>
+            <dl className="runtime-review__meta">
+              <div>
+                <dt>Runtime port</dt>
+                <dd className="mono">{String(runtimePort)}</dd>
+              </div>
+              <div>
+                <dt>Served model name</dt>
+                <dd className="mono">{servedModelName || '—'}</dd>
+              </div>
+              <div>
+                <dt>Selected GPUs (TP)</dt>
+                <dd className="mono">
+                  {uniqueGpuIds.length} → tensor_parallel_size=
+                  {uniqueGpuIds.length}
+                </dd>
+              </div>
+            </dl>
+            <div className="runtime-review__columns">
+              <div>
+                <h4>전달될 설정</h4>
+                {runtimeReview.applied.length === 0 ? (
+                  <p className="secondary-text">명시 전달 항목 없음</p>
+                ) : (
+                  <ul data-testid="runtime-review-applied">
+                    {runtimeReview.applied.map((row) => (
+                      <li key={row.key}>
+                        <code>{row.key}</code>: {row.value}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+              <div>
+                <h4>미설정 (기본 동작 유지)</h4>
+                {runtimeReview.unset.length === 0 ? (
+                  <p className="secondary-text">없음</p>
+                ) : (
+                  <ul data-testid="runtime-review-unset">
+                    {runtimeReview.unset.map((key) => (
+                      <li key={key}>
+                        <code>{key}</code>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            </div>
+            {qwen3ParserSelected ? (
+              <p className="panel-hint" role="note">
+                qwen3 Reasoning Parser가 Create runtime_config에 포함됩니다.
+                Runtime 시작 옵션이며 요청별 enable_thinking /
+                thinking_token_budget과 별개입니다.
+              </p>
+            ) : null}
+            {qwen3CompatibilityUnverified ? (
+              <p
+                className="panel-hint panel-hint--warn"
+                role="status"
+                data-testid="review-qwen3-compat-warning"
+              >
+                현재 모델에 대한 qwen3 Parser 호환성은 확인되지 않았습니다.
+              </p>
+            ) : null}
+            {runtime.vllm_model_runner === 'v1' ? (
+              <p className="panel-hint" role="note">
+                V1 Model Runner가 포함됩니다 (vLLM 0.24.0 thinking_token_budget
+                호환 목적). 적용에는 STOP→START 재생성이 필요합니다.
+              </p>
+            ) : null}
+          </div>
           <pre className="mono" style={{ whiteSpace: 'pre-wrap' }}>
             {JSON.stringify(
               {
@@ -1125,6 +1358,11 @@ export function CacheDeployWizardPage() {
             Create is metadata only — Start is a separate step.
             {!activeFit ? ' Run fresh Fit again after a reload or input change.' : ''}
           </p>
+          {!runtimeFormValid ? (
+            <p className="form-field-error" role="alert">
+              Runtime 입력값이 유효하지 않습니다. Runtime 단계로 돌아가 수정하세요.
+            </p>
+          ) : null}
           <div className="toolbar__actions">
             <button type="button" className="btn btn--ghost" onClick={() => syncStep('gpu')}>
               Back
@@ -1132,7 +1370,7 @@ export function CacheDeployWizardPage() {
             <button
               type="button"
               className="btn"
-              disabled={busy || fitLoading || !activeFit ||
+              disabled={busy || fitLoading || !runtimeFormValid || !activeFit ||
                 activeFit.result === 'INSUFFICIENT' ||
                 (activeFit.result === 'UNKNOWN' && !ackUnknown)}
               onClick={() => void onCreate()}
