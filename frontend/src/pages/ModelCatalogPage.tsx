@@ -2,6 +2,7 @@ import {
   Fragment,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   type FormEvent,
@@ -245,6 +246,8 @@ export function ModelCatalogPage() {
   const readGenRef = useRef(0)
   const fitAbortByRepoRef = useRef<Record<string, AbortController>>({})
   const fitGenByRepoRef = useRef<Record<string, number>>({})
+  /** After successful Fit expand, scroll/focus the new detail once it mounts. */
+  const pendingFitRevealRepoRef = useRef<string | null>(null)
   const nodeIdRef = useRef(nodeId)
   nodeIdRef.current = nodeId
   const catalogContextKey = `${nodeId}|${q}|${modelType ?? ''}|${page}|${fitOnly}`
@@ -345,11 +348,33 @@ export function ModelCatalogPage() {
       controller.abort()
     }
     fitAbortByRepoRef.current = {}
+    pendingFitRevealRepoRef.current = null
     setFitByRepo({})
     setFitErrorByRepo({})
     setFitLoadingByRepo({})
     setExpandedFitRepos({})
   }, [catalogContextKey])
+
+  // Bring auto-expanded Fit detail into view (and focus its heading) when the
+  // success state mounts — table rows near the viewport bottom can otherwise
+  // expand off-screen with no obvious completion signal.
+  useLayoutEffect(() => {
+    const repoId = pendingFitRevealRepoRef.current
+    if (!repoId || !expandedFitRepos[repoId] || !fitByRepo[repoId]) return
+    const detail = document.querySelector(
+      `[data-testid="${CSS.escape(`fit-detail-${repoId}`)}"]`,
+    )
+    if (!(detail instanceof HTMLElement)) return
+    pendingFitRevealRepoRef.current = null
+    if (typeof detail.scrollIntoView === 'function') {
+      detail.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+    }
+    const heading = detail.querySelector('.section-subheading')
+    if (heading instanceof HTMLElement) {
+      if (!heading.hasAttribute('tabindex')) heading.tabIndex = -1
+      heading.focus({ preventScroll: true })
+    }
+  }, [expandedFitRepos, fitByRepo])
 
   useEffect(() => {
     return () => {
@@ -905,6 +930,7 @@ export function ModelCatalogPage() {
           revision: requestRevision,
         },
       }))
+      pendingFitRevealRepoRef.current = repoId
       setExpandedFitRepos((prev) => ({ ...prev, [repoId]: true }))
     } catch (err) {
       if (!isCurrentAnalyzeTarget()) return
@@ -1667,9 +1693,10 @@ export function ModelCatalogPage() {
                             <div
                               className="catalog-fit-detail"
                               data-testid={`fit-detail-${repoId}`}
+                              tabIndex={-1}
                             >
                               <div className="catalog-fit-detail__head">
-                                <h3 className="section-subheading">
+                                <h3 className="section-subheading" tabIndex={-1}>
                                   Fit 상세 분석 (advisory)
                                 </h3>
                                 <p className="panel-hint" role="note">

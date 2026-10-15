@@ -143,6 +143,12 @@ function renderAt(path: string) {
 
 describe('ModelCatalogPage', () => {
   beforeEach(() => {
+    // jsdom lacks scrollIntoView; polyfill so Fit reveal layout effect is safe.
+    Object.defineProperty(Element.prototype, 'scrollIntoView', {
+      configurable: true,
+      writable: true,
+      value: vi.fn(),
+    })
     vi.spyOn(catalogApi, 'listHfCatalog')
     vi.spyOn(catalogApi, 'analyzeHfResourceFit')
     vi.spyOn(downloadsApi, 'startHfDownload')
@@ -176,6 +182,7 @@ describe('ModelCatalogPage', () => {
   afterEach(() => {
     cleanup()
     vi.restoreAllMocks()
+    Reflect.deleteProperty(Element.prototype, 'scrollIntoView')
     sessionStorage.clear()
   })
 
@@ -436,6 +443,10 @@ describe('ModelCatalogPage', () => {
 
   it('shows loading then auto-expands GPU detail; supports collapse and re-analyze', async () => {
     let resolveFit: ((v: ResourceFitAnalysis) => void) | null = null
+    const scrollIntoView = Element.prototype.scrollIntoView as ReturnType<
+      typeof vi.fn
+    >
+    scrollIntoView.mockClear()
     vi.mocked(catalogApi.listHfCatalog).mockResolvedValue(
       pageResult([
         makeItem({
@@ -472,6 +483,18 @@ describe('ModelCatalogPage', () => {
     )
 
     const detail = await screen.findByTestId('fit-detail-org/fit-ux')
+    await waitFor(() => {
+      expect(scrollIntoView).toHaveBeenCalled()
+    })
+    expect(
+      scrollIntoView.mock.calls.some((call) => {
+        const opts = call[0] as ScrollIntoViewOptions | undefined
+        return opts?.block === 'nearest'
+      }),
+    ).toBe(true)
+    expect(
+      within(detail).getByRole('heading', { name: /Fit 상세 분석/ }),
+    ).toHaveFocus()
     expect(within(detail).getByText('종합 결과')).toBeInTheDocument()
     expect(within(detail).getByText('GPU 0')).toBeInTheDocument()
     expect(within(detail).getByText('GPU 1')).toBeInTheDocument()
@@ -1608,7 +1631,7 @@ describe('ModelCatalogPage', () => {
       }),
     )
 
-    renderAt('/models/catalog?node_id=node-1')
+    renderAt('/models/catalog?q=llama&model_type=LLM&page=2&node_id=node-1')
     const row = (await screen.findByText('org/node1-only')).closest(
       'tr',
     ) as HTMLElement
@@ -1623,6 +1646,14 @@ describe('ModelCatalogPage', () => {
       'GPU0 has spare VRAM on node-1 with a very long advisory reason that should not stretch the table forever'
         .length,
     )
+    expect(catalogApi.listHfCatalog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        q: 'llama',
+        modelType: 'LLM',
+        page: 2,
+        nodeId: 'node-1',
+      }),
+    )
 
     await userEvent.selectOptions(screen.getByLabelText('Node'), 'node-2')
     expect(
@@ -1635,6 +1666,15 @@ describe('ModelCatalogPage', () => {
     expect(
       within(row).getByRole('button', { name: 'Download' }),
     ).toBeDisabled()
+    // Node change alone reloads catalog — keeps search/type, resets page=1.
+    expect(catalogApi.listHfCatalog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        q: 'llama',
+        modelType: 'LLM',
+        page: 1,
+        nodeId: 'node-2',
+      }),
+    )
 
     await userEvent.click(within(row).getByRole('button', { name: 'Fit 분석' }))
     await userEvent.click(within(row).getByRole('button', { name: 'Download' }))

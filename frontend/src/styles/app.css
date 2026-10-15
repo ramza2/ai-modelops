@@ -939,6 +939,14 @@ th {
   display: grid;
   gap: 0.75rem;
   min-width: 0;
+  /* Keep auto-expanded Fit detail clear of sticky AppShell chrome. */
+  scroll-margin-top: 4.5rem;
+  outline: none;
+}
+
+.catalog-fit-detail .section-subheading:focus {
+  outline: 2px solid var(--border);
+  outline-offset: 2px;
 }
 
 .catalog-fit-detail__head .section-subheading {
