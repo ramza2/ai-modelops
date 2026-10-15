@@ -346,7 +346,12 @@ export function EndpointDetailPage() {
     if (!endpointId || unpublishing || switching || previewing || refreshing) {
       return
     }
-    const active = endpoint?.active_route
+    if (!endpoint) {
+      setUnpublishError('Endpoint를 불러온 뒤 다시 시도하세요.')
+      closeUnpublishDialog()
+      return
+    }
+    const active = endpoint.active_route
     if (!active?.deployment_id || !unpublishExpectedDepId) {
       setUnpublishError('ACTIVE Route가 없습니다. 재조회 후 다시 시도하세요.')
       closeUnpublishDialog()
