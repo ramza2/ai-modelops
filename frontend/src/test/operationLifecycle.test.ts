@@ -5,10 +5,13 @@ import {
   healthWaitElapsedMsFromFinishedAt,
   isActiveOperationStatus,
   isDeploymentReadyForPublish,
+  isDeploymentStoppedForSync,
   isFailedOperationStatus,
   OPERATION_POLL_MS,
   operationPollConfig,
+  resolveDetailLifecyclePhase,
   resolveWizardLifecyclePhase,
+  shouldPollDetailLifecycle,
   shouldPollWizardLifecycle,
 } from '../utils/operationLifecycle'
 
@@ -164,6 +167,85 @@ describe('operationLifecycle', () => {
     expect(shouldPollWizardLifecycle('failed')).toBe(false)
     expect(shouldPollWizardLifecycle('health_timeout')).toBe(false)
     expect(shouldPollWizardLifecycle('idle')).toBe(false)
+  })
+
+  it('resolves Detail STOP lifecycle phases without inventing health', () => {
+    expect(isDeploymentStoppedForSync({ runtime_status: 'STOPPED' })).toBe(true)
+    expect(isDeploymentStoppedForSync({ runtime_status: 'RUNNING' })).toBe(false)
+    expect(isDeploymentStoppedForSync({ runtime_status: 'HEALTHY' })).toBe(false)
+    expect(isDeploymentStoppedForSync(null)).toBe(false)
+
+    expect(
+      resolveDetailLifecyclePhase({
+        operationType: 'START',
+        operationStatus: 'RUNNING',
+        hasOperationId: true,
+        deploymentStopped: false,
+        stopWaitElapsedMs: null,
+      }),
+    ).toBe('operation_active')
+    expect(
+      resolveDetailLifecyclePhase({
+        operationType: 'START',
+        operationStatus: 'SUCCEEDED',
+        hasOperationId: true,
+        deploymentStopped: false,
+        stopWaitElapsedMs: null,
+      }),
+    ).toBe('idle')
+
+    expect(
+      resolveDetailLifecyclePhase({
+        operationType: 'STOP',
+        operationStatus: 'FAILED',
+        hasOperationId: true,
+        deploymentStopped: false,
+        stopWaitElapsedMs: null,
+      }),
+    ).toBe('failed')
+    expect(
+      resolveDetailLifecyclePhase({
+        operationType: 'STOP',
+        operationStatus: 'CANCELLED',
+        hasOperationId: true,
+        deploymentStopped: false,
+        stopWaitElapsedMs: null,
+      }),
+    ).toBe('failed')
+    expect(
+      resolveDetailLifecyclePhase({
+        operationType: 'STOP',
+        operationStatus: 'SUCCEEDED',
+        hasOperationId: true,
+        deploymentStopped: false,
+        stopWaitElapsedMs: 1000,
+      }),
+    ).toBe('stop_wait')
+    expect(
+      resolveDetailLifecyclePhase({
+        operationType: 'STOP',
+        operationStatus: 'SUCCEEDED',
+        hasOperationId: true,
+        deploymentStopped: true,
+        stopWaitElapsedMs: 1000,
+      }),
+    ).toBe('stopped')
+    expect(
+      resolveDetailLifecyclePhase({
+        operationType: 'STOP',
+        operationStatus: 'SUCCEEDED',
+        hasOperationId: true,
+        deploymentStopped: false,
+        stopWaitElapsedMs: operationPollConfig.healthWaitMaxMs,
+      }),
+    ).toBe('stop_timeout')
+
+    expect(shouldPollDetailLifecycle('operation_active')).toBe(true)
+    expect(shouldPollDetailLifecycle('stop_wait')).toBe(true)
+    expect(shouldPollDetailLifecycle('stopped')).toBe(false)
+    expect(shouldPollDetailLifecycle('failed')).toBe(false)
+    expect(shouldPollDetailLifecycle('stop_timeout')).toBe(false)
+    expect(shouldPollDetailLifecycle('idle')).toBe(false)
   })
 
   it('formats Operation errors without inventing text', () => {

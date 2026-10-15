@@ -116,6 +116,67 @@ export function shouldPollWizardLifecycle(
   return phase === 'operation_active' || phase === 'health_wait'
 }
 
+/** True when Deployment runtime_status reports STOPPED (API value only). */
+export function isDeploymentStoppedForSync(
+  dep:
+    | {
+        runtime_status?: string | null
+      }
+    | null
+    | undefined,
+): boolean {
+  if (!dep?.runtime_status) return false
+  return dep.runtime_status.toUpperCase() === 'STOPPED'
+}
+
+/**
+ * Deployment Detail lifecycle poll phases (P1-8G).
+ * STOP SUCCEEDED may enter stop_wait until runtime_status is STOPPED
+ * (or timeout). START/RESTART never invent a stop-sync wait.
+ */
+export type DetailLifecyclePhase =
+  | 'idle'
+  | 'operation_active'
+  | 'stop_wait'
+  | 'stopped'
+  | 'failed'
+  | 'stop_timeout'
+
+export function resolveDetailLifecyclePhase(input: {
+  operationType: string | null | undefined
+  operationStatus: string | null | undefined
+  hasOperationId: boolean
+  deploymentStopped: boolean
+  stopWaitElapsedMs: number | null
+  healthWaitMaxMs?: number
+}): DetailLifecyclePhase {
+  if (!input.hasOperationId) return 'idle'
+  if (isFailedOperationStatus(input.operationStatus)) return 'failed'
+  if (isActiveOperationStatus(input.operationStatus)) return 'operation_active'
+
+  const type = (input.operationType || '').toUpperCase()
+  if (type === 'STOP' && input.operationStatus === 'SUCCEEDED') {
+    if (input.deploymentStopped) return 'stopped'
+    const max = input.healthWaitMaxMs ?? operationPollConfig.healthWaitMaxMs
+    if (
+      input.stopWaitElapsedMs != null &&
+      input.stopWaitElapsedMs >= max
+    ) {
+      return 'stop_timeout'
+    }
+    return 'stop_wait'
+  }
+
+  // START/RESTART SUCCEEDED (or unknown) — no post-success Deployment wait here.
+  return 'idle'
+}
+
+export function shouldPollDetailLifecycle(
+  phase: DetailLifecyclePhase,
+): boolean {
+  return phase === 'operation_active' || phase === 'stop_wait'
+}
+
 export function formatOperationError(
   error: { code: string | null; message: string | null } | null | undefined,
 ): string {

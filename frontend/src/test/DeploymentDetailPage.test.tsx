@@ -171,6 +171,7 @@ describe('DeploymentDetailPage', () => {
   afterEach(() => {
     cleanup()
     operationPollConfig.ms = 4000
+    operationPollConfig.healthWaitMaxMs = 5 * 60 * 1000
     vi.restoreAllMocks()
   })
 
@@ -555,5 +556,176 @@ describe('DeploymentDetailPage', () => {
     })
     expect(screen.queryByText('stale')).not.toBeInTheDocument()
     expect(screen.queryByRole('link', { name: 'op-a' })).not.toBeInTheDocument()
+  })
+
+  it('keeps polling after STOP SUCCEEDED until runtime_status is STOPPED', async () => {
+    operationPollConfig.ms = 40
+    const user = userEvent.setup()
+    let stopSyncPhase: 'active' | 'lag' | 'done' = 'active'
+    vi.mocked(deploymentsApi.getDeployment).mockImplementation(async () => {
+      if (stopSyncPhase === 'done') {
+        return makeDeployment({
+          desired_state: 'STOPPED',
+          runtime_status: 'STOPPED',
+          health_status: 'UNKNOWN',
+        })
+      }
+      return makeDeployment({
+        desired_state: stopSyncPhase === 'lag' ? 'STOPPED' : 'RUNNING',
+        runtime_status: 'RUNNING',
+        health_status: stopSyncPhase === 'lag' ? 'UNKNOWN' : 'HEALTHY',
+      })
+    })
+    vi.mocked(modelsApi.getModelVersion).mockResolvedValue(makeVersion())
+    vi.mocked(nodesApi.getNode).mockResolvedValue(makeNode())
+    vi.mocked(deploymentsApi.stopDeployment).mockResolvedValue(
+      makeOp({
+        id: 'op-stop',
+        operation_type: 'STOP',
+        status: 'QUEUED',
+        current_step: 'STOP_CONTAINER',
+      }),
+    )
+    vi.mocked(operationsApi.getOperation).mockImplementation(async () => {
+      if (stopSyncPhase === 'active') {
+        stopSyncPhase = 'lag'
+      }
+      return makeOpDetail({
+        id: 'op-stop',
+        operation_type: 'STOP',
+        status: 'SUCCEEDED',
+        current_step: 'FINALIZE',
+        // Recent finished_at so stop_wait is not immediately timed out.
+        finished_at: new Date().toISOString(),
+      })
+    })
+
+    renderDetail()
+    await screen.findByRole('button', { name: 'Stop' })
+    await user.click(screen.getByRole('button', { name: 'Stop' }))
+    expect(
+      await screen.findByRole('link', { name: 'op-stop' }),
+    ).toBeInTheDocument()
+
+    expect(await screen.findByTestId('stop-sync-wait')).toBeInTheDocument()
+    // Health stays Backend value — not invented as STOPPED/HEALTHY.
+    expect(screen.getByText(/알 수 없음/)).toBeInTheDocument()
+
+    stopSyncPhase = 'done'
+    await waitFor(() => {
+      expect(screen.queryByTestId('stop-sync-wait')).not.toBeInTheDocument()
+    })
+    // Runtime Status badge (not Desired State) should show STOPPED.
+    expect(screen.getAllByText(/중지/).length).toBeGreaterThan(0)
+
+    const callsAfterStopped = vi.mocked(operationsApi.getOperation).mock.calls
+      .length
+    await new Promise((r) => setTimeout(r, 120))
+    expect(vi.mocked(operationsApi.getOperation).mock.calls.length).toBe(
+      callsAfterStopped,
+    )
+  })
+
+  it('does not enter stop-sync wait when STOP Operation fails', async () => {
+    operationPollConfig.ms = 40
+    const user = userEvent.setup()
+    vi.mocked(deploymentsApi.getDeployment).mockResolvedValue(
+      makeDeployment({
+        desired_state: 'RUNNING',
+        runtime_status: 'RUNNING',
+        health_status: 'HEALTHY',
+      }),
+    )
+    vi.mocked(modelsApi.getModelVersion).mockResolvedValue(makeVersion())
+    vi.mocked(nodesApi.getNode).mockResolvedValue(makeNode())
+    vi.mocked(deploymentsApi.stopDeployment).mockResolvedValue(
+      makeOp({
+        id: 'op-stop-fail',
+        operation_type: 'STOP',
+        status: 'QUEUED',
+      }),
+    )
+    vi.mocked(operationsApi.getOperation).mockResolvedValue(
+      makeOpDetail({
+        id: 'op-stop-fail',
+        operation_type: 'STOP',
+        status: 'FAILED',
+        current_step: 'STOP_CONTAINER',
+        finished_at: new Date().toISOString(),
+        error: { code: 'STOP_FAILED', message: 'container still up' },
+      }),
+    )
+
+    renderDetail()
+    await user.click(await screen.findByRole('button', { name: 'Stop' }))
+    expect(
+      await screen.findByRole('link', { name: 'op-stop-fail' }),
+    ).toBeInTheDocument()
+    expect(
+      await screen.findByText(/container still up/),
+    ).toBeInTheDocument()
+    expect(screen.queryByTestId('stop-sync-wait')).not.toBeInTheDocument()
+    expect(
+      screen.queryByText(/STOP 상태 동기화 대기 시간 초과/),
+    ).not.toBeInTheDocument()
+
+    const callsAfterFail = vi.mocked(operationsApi.getOperation).mock.calls
+      .length
+    await new Promise((r) => setTimeout(r, 120))
+    expect(vi.mocked(operationsApi.getOperation).mock.calls.length).toBe(
+      callsAfterFail,
+    )
+  })
+
+  it('ends stop-sync wait after timeout and offers manual refresh', async () => {
+    operationPollConfig.ms = 40
+    operationPollConfig.healthWaitMaxMs = 80
+    const user = userEvent.setup()
+    const finishedAt = new Date(Date.now() - 200).toISOString()
+    vi.mocked(deploymentsApi.getDeployment).mockResolvedValue(
+      makeDeployment({
+        desired_state: 'STOPPED',
+        runtime_status: 'RUNNING',
+        health_status: 'DEGRADED',
+      }),
+    )
+    vi.mocked(modelsApi.getModelVersion).mockResolvedValue(makeVersion())
+    vi.mocked(nodesApi.getNode).mockResolvedValue(makeNode())
+    vi.mocked(deploymentsApi.stopDeployment).mockResolvedValue(
+      makeOp({
+        id: 'op-stop-lag',
+        operation_type: 'STOP',
+        status: 'QUEUED',
+      }),
+    )
+    vi.mocked(operationsApi.getOperation).mockResolvedValue(
+      makeOpDetail({
+        id: 'op-stop-lag',
+        operation_type: 'STOP',
+        status: 'SUCCEEDED',
+        current_step: 'FINALIZE',
+        finished_at: finishedAt,
+      }),
+    )
+
+    renderDetail()
+    await user.click(await screen.findByRole('button', { name: 'Stop' }))
+    expect(
+      await screen.findByRole('link', { name: 'op-stop-lag' }),
+    ).toBeInTheDocument()
+    expect(
+      await screen.findByText(/STOP 상태 동기화 대기 시간 초과/),
+    ).toBeInTheDocument()
+    expect(screen.getAllByText(/저하/).length).toBeGreaterThan(0)
+    expect(
+      screen.getByRole('button', { name: '다시 시도' }),
+    ).toBeInTheDocument()
+
+    const callsAfterTimeout = vi.mocked(operationsApi.getOperation).mock.calls
+      .length
+    await new Promise((r) => setTimeout(r, 120))
+    expect(vi.mocked(operationsApi.getOperation).mock.calls.length).toBe(
+      callsAfterTimeout,
+    )
   })
 })
