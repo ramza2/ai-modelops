@@ -93,15 +93,19 @@ re-run is BLOCKED/FAIL.
 
 | Check | Status | Evidence |
 |---|---|---|
-| Isolated environment | _(fill after run)_ | `isolation_check.sh`; loopback binds; exact URL parse |
-| HOT E2E | _(fill after run)_ | `test_hot_switch_e2e_route_and_gateway` |
-| COLD E2E | _(fill after run)_ | `test_cold_switch_e2e_drain_and_serving` |
-| Failure / Recovery | _(fill after run)_ | `test_hot_target_start_failure_preserves_source` |
-| Operation / Step / Route | _(fill after run)_ | Operation detail + `routing_state.version` |
-| Gateway real HTTP request | _(fill after run)_ | Gateway `/v1/embeddings` + Mock `instance_id` |
-| Idempotency | _(fill after run)_ | Same `Idempotency-Key` → same `operation_id` |
-| Cleanup | _(fill after run)_ | `scripts/down.sh` removes only `modelops-p18k` |
-| Docker bridge (container↔container) | _(fill after run)_ | `up.sh` probe; BLOCKED if timeout without host changes |
+| Isolated environment | PASS | `isolation_check.sh` (exact URL parse + `127.0.0.1:HOST:CONTAINER` binds); docker port maps to `127.0.0.1` only |
+| HOT E2E | PASS | `test_hot_switch_e2e_route_and_gateway` |
+| COLD E2E | PASS | `test_cold_switch_e2e_drain_and_serving` |
+| Failure / Recovery | PASS | `test_hot_target_start_failure_preserves_source` |
+| Operation / Step / Route | PASS | covered by HOT/COLD success assertions |
+| Gateway real HTTP request | PASS | Gateway `/v1/embeddings` + Mock `instance_id` in HOT/COLD |
+| Idempotency | PASS | same `Idempotency-Key` → same `operation_id` in HOT/COLD |
+| Cleanup | PASS | `scripts/down.sh` removed only `modelops-p18k` |
+| Docker bridge (container↔container) | PASS | `up.sh` probe OK; harness did **not** change host sysctl |
+
+Recorded pytest (safety final): **4 passed**
+(`/opt/cursor/artifacts/p1-8k-e2e-final.log`).
+External / suffix-bypass URL probes rejected by `isolation_check.sh` (exit 1).
 
 ---
 
