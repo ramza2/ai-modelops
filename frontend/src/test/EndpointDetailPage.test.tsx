@@ -617,12 +617,12 @@ describe('EndpointDetailPage', () => {
     await waitFor(() => {
       expect(endpointsApi.getEndpoint).toHaveBeenCalledTimes(2)
     })
-    // Successful re-read invalidates preview; DRAINING blocks further enqueue UI.
+    // Successful re-read invalidates preview; in-flight Switch blocks enqueue UI.
     expect(screen.queryByText('preview_only')).not.toBeInTheDocument()
     expect(
       screen.queryByRole('button', { name: 'Switch Enqueue' }),
     ).not.toBeInTheDocument()
-    expect(screen.getByText(/traffic_state가 DRAINING/)).toBeInTheDocument()
+    expect(screen.getByTestId('switch-op-active')).toBeInTheDocument()
   })
 
   it('mutually excludes refresh/preview/switch while enqueue is in flight', async () => {
@@ -1305,7 +1305,9 @@ describe('EndpointDetailPage', () => {
       }),
     )
     renderDetail('/endpoints/e1?switch_operation_id=op-sw')
-    expect(await screen.findByText(/ROLLED_BACK/)).toBeInTheDocument()
+    expect(await screen.findByTestId('switch-op-terminal')).toHaveTextContent(
+      /ROLLED_BACK/,
+    )
     cleanup()
 
     vi.mocked(operationsApi.getOperation).mockResolvedValue(
@@ -1315,9 +1317,9 @@ describe('EndpointDetailPage', () => {
       }),
     )
     renderDetail('/endpoints/e1?switch_operation_id=op-sw')
-    expect(
-      await screen.findByText(/MANUAL_INTERVENTION_REQUIRED|수동 개입/),
-    ).toBeInTheDocument()
+    expect(await screen.findByTestId('switch-op-terminal')).toHaveTextContent(
+      /MANUAL_INTERVENTION_REQUIRED/,
+    )
   })
 
   it('blocks duplicate Switch Enqueue while tracked Operation is active', async () => {
@@ -1420,7 +1422,9 @@ describe('EndpointDetailPage', () => {
     expect(
       await screen.findByText(/마지막 정상값을 유지/),
     ).toBeInTheDocument()
-    expect(screen.getByText(/DRAIN/)).toBeInTheDocument()
+    expect(screen.getByTestId('switch-operation-result')).toHaveTextContent(
+      /DRAIN/,
+    )
 
     failPoll = false
     await user.click(screen.getByRole('button', { name: '새로고침' }))
