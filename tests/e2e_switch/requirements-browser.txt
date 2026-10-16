@@ -1,0 +1,4 @@
+# P1-8L Admin UI browser E2E (Chromium via Playwright).
+# Install: pip install -r tests/e2e_switch/requirements-browser.txt
+# Then:    python -m playwright install --with-deps chromium
+playwright>=1.48,<2

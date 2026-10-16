@@ -44,12 +44,13 @@ if [[ "${bridge_ok}" -ne 1 ]]; then
 fi
 echo "OK: Docker bridge container-to-container TCP works"
 
-echo "== waiting for backend/gateway/fake-na health on loopback =="
-for i in $(seq 1 90); do
+echo "== waiting for backend/gateway/fake-na/frontend health on loopback =="
+for i in $(seq 1 120); do
   if curl -sf "http://127.0.0.1:28000/health" >/dev/null \
     && curl -sf "http://127.0.0.1:28080/health" >/dev/null \
-    && curl -sf "http://127.0.0.1:28100/health" >/dev/null; then
-    echo "services healthy after ${i}s"
+    && curl -sf "http://127.0.0.1:28100/health" >/dev/null \
+    && curl -sf "http://127.0.0.1:28081/health" >/dev/null; then
+    echo "services healthy after ${i}s (incl. frontend :28081)"
     "${ROOT}/tests/e2e_switch/scripts/isolation_check.sh"
     exit 0
   fi

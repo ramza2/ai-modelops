@@ -7,6 +7,7 @@ may optionally call bound Mock Runtime URLs over the compose network.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 import uuid
@@ -31,6 +32,8 @@ _containers: dict[str, dict[str, Any]] = {}
 _upstreams: dict[str, str] = {}
 # Queued failures: "start"|"health"|"probe" -> remaining fail counts or lists
 _fail_next: dict[str, list[str]] = {}
+# Queued delays: action -> list of (deployment_id|"*", delay_ms)
+_delay_next: dict[str, list[tuple[str, int]]] = {}
 _calls: list[dict[str, Any]] = []
 _vram_free_mb = VRAM_FREE_MB
 _source_used_vram_mb = 0
@@ -86,6 +89,15 @@ class BindRequest(BaseModel):
 class FailNextRequest(BaseModel):
     action: str = Field(min_length=1)  # start|health|probe|prepare
     deployment_id: str | None = None
+    times: int = Field(default=1, ge=1, le=20)
+
+
+class DelayNextRequest(BaseModel):
+    """Test-only artificial latency for deterministic RUNNING UI restore (P1-8L)."""
+
+    action: str = Field(min_length=1)  # start|stop|prepare|health|probe|create
+    deployment_id: str | None = None
+    delay_ms: int = Field(default=5000, ge=0, le=120_000)
     times: int = Field(default=1, ge=1, le=20)
 
 
@@ -200,6 +212,19 @@ def _pop_fail(action: str, deployment_id: str) -> bool:
     return False
 
 
+async def _maybe_delay(action: str, deployment_id: str) -> None:
+    queued = _delay_next.get(action) or []
+    if not queued:
+        return
+    for i, (target, delay_ms) in enumerate(list(queued)):
+        if target in {deployment_id, "*"}:
+            queued.pop(i)
+            _delay_next[action] = queued
+            if delay_ms > 0:
+                await asyncio.sleep(delay_ms / 1000.0)
+            return
+
+
 @app.get("/internal/v1/deployments/{deployment_id}", response_model=None)
 async def get_deployment(deployment_id: str):
     ctr = _containers.get(deployment_id)
@@ -212,6 +237,7 @@ async def get_deployment(deployment_id: str):
 async def prepare(deployment_id: str, request: Request):
     body = await request.json()
     _record("POST", request.url.path, body)
+    await _maybe_delay("prepare", deployment_id)
     if _pop_fail("prepare", deployment_id):
         return _error(409, "IMAGE_NOT_READY", "fake prepare failure")
     artifacts = body.get("artifacts") or []
@@ -236,6 +262,7 @@ async def prepare(deployment_id: str, request: Request):
 async def create(deployment_id: str, request: Request):
     body = await request.json()
     _record("POST", request.url.path, body)
+    await _maybe_delay("create", deployment_id)
     existing = _containers.get(deployment_id)
     if existing is not None:
         return JSONResponse(status_code=200, content=existing)
@@ -269,6 +296,7 @@ async def start(deployment_id: str, request: Request):
         except Exception:  # noqa: BLE001
             body = None
     _record("POST", request.url.path, body)
+    await _maybe_delay("start", deployment_id)
     if _pop_fail("start", deployment_id):
         return _error(500, "CONTAINER_START_FAILED", "fake start failure")
     ctr = _containers.get(deployment_id)
@@ -296,6 +324,7 @@ async def stop(deployment_id: str, request: Request):
     except Exception:  # noqa: BLE001
         body = None
     _record("POST", request.url.path, body)
+    await _maybe_delay("stop", deployment_id)
     ctr = _containers.get(deployment_id)
     if ctr is None:
         return _error(404, "CONTAINER_NOT_FOUND", "missing")
@@ -480,6 +509,18 @@ async def harness_fail_next(body: FailNextRequest) -> dict[str, Any]:
     return {"action": key, "queued": list(bucket)}
 
 
+@app.post("/harness/delay")
+async def harness_delay(body: DelayNextRequest) -> dict[str, Any]:
+    key = body.action.strip().lower()
+    target = body.deployment_id or "*"
+    bucket = _delay_next.setdefault(key, [])
+    bucket.extend([(target, int(body.delay_ms))] * int(body.times))
+    return {
+        "action": key,
+        "queued": [{"deployment_id": t, "delay_ms": d} for t, d in bucket],
+    }
+
+
 @app.post("/harness/vram")
 async def harness_vram(body: VramRequest) -> dict[str, Any]:
     global _vram_free_mb, _source_used_vram_mb, _source_deployment_id
@@ -507,6 +548,7 @@ async def harness_reset() -> dict[str, str]:
     _containers.clear()
     _upstreams.clear()
     _fail_next.clear()
+    _delay_next.clear()
     _calls.clear()
     global _vram_free_mb, _source_used_vram_mb, _source_deployment_id
     _vram_free_mb = VRAM_FREE_MB

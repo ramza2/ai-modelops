@@ -26,6 +26,7 @@ fi
 export P18K_BACKEND_URL="${P18K_BACKEND_URL:-http://127.0.0.1:28000}"
 export P18K_GATEWAY_URL="${P18K_GATEWAY_URL:-http://127.0.0.1:28080}"
 export P18K_FAKE_NA_URL="${P18K_FAKE_NA_URL:-http://127.0.0.1:28100}"
+export P18K_FRONTEND_URL="${P18K_FRONTEND_URL:-http://127.0.0.1:28081}"
 export P18K_DATABASE_URL="${P18K_DATABASE_URL:-postgresql+asyncpg://p18k:p18k-isolated@127.0.0.1:25432/modelops_p18k}"
 
 # Prefer explicit harness interpreter, else active venv, else python3 -m pytest.
