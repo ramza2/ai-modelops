@@ -6,6 +6,19 @@ PROJECT="modelops-p18k"
 
 "${ROOT}/tests/e2e_switch/scripts/isolation_check.sh"
 
+# Some Cloud Agent VMs filter bridge traffic via iptables and break
+# container-to-container TCP on user-defined bridges. Disable that path for
+# the harness only (does not enable host networking or privileged mode).
+if command -v sysctl >/dev/null; then
+  if [[ -w /proc/sys/net/bridge/bridge-nf-call-iptables ]]; then
+    sysctl -w net.bridge.bridge-nf-call-iptables=0 >/dev/null
+    sysctl -w net.bridge.bridge-nf-call-ip6tables=0 >/dev/null || true
+  elif command -v sudo >/dev/null; then
+    sudo sysctl -w net.bridge.bridge-nf-call-iptables=0 >/dev/null
+    sudo sysctl -w net.bridge.bridge-nf-call-ip6tables=0 >/dev/null || true
+  fi
+fi
+
 echo "== P1-8K compose up (project=${PROJECT}) =="
 docker compose -p "${PROJECT}" -f "${COMPOSE_FILE}" up -d --build --remove-orphans
 

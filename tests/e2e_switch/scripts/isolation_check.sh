@@ -18,22 +18,24 @@ command -v docker >/dev/null || die "docker not found"
 docker info >/dev/null 2>&1 || die "docker daemon not reachable"
 
 # Compose file must not request privileged / host network / GPU / docker.sock / ops mounts.
-if grep -Eiq 'privileged\s*:\s*true' "${COMPOSE_FILE}"; then
+# Strip YAML comments before scanning so explanatory notes cannot false-positive.
+_compose_nocomment="$(grep -vE '^\s*#' "${COMPOSE_FILE}" || true)"
+if printf '%s\n' "${_compose_nocomment}" | grep -Eiq 'privileged\s*:\s*true'; then
   die "compose enables privileged"
 fi
-if grep -Eiq 'network_mode\s*:\s*host' "${COMPOSE_FILE}"; then
+if printf '%s\n' "${_compose_nocomment}" | grep -Eiq 'network_mode\s*:\s*host'; then
   die "compose uses host network"
 fi
-if grep -Eiq 'nvidia|gpus\s*:|runtime\s*:\s*nvidia' "${COMPOSE_FILE}"; then
-  die "compose requests NVIDIA / GPU runtime"
+if printf '%s\n' "${_compose_nocomment}" | grep -Eiq '(^|[^A-Za-z])nvidia([^A-Za-z]|$)|gpus\s*:|runtime\s*:\s*nvidia'; then
+  die "compose requests GPU vendor runtime"
 fi
-if grep -Eq '/var/run/docker\.sock|docker\.sock' "${COMPOSE_FILE}"; then
+if printf '%s\n' "${_compose_nocomment}" | grep -Eq '/var/run/docker\.sock|docker\.sock'; then
   die "compose mounts docker.sock"
 fi
-if grep -Eq '/data/modelops/models' "${COMPOSE_FILE}"; then
+if printf '%s\n' "${_compose_nocomment}" | grep -Eq '/data/modelops/models'; then
   die "compose mounts ops model path /data/modelops/models"
 fi
-if grep -Eiq 'deploy-server\.sh|docker-compose\.server\.yml' "${COMPOSE_FILE}"; then
+if printf '%s\n' "${_compose_nocomment}" | grep -Eiq 'deploy-server\.sh|docker-compose\.server\.yml'; then
   die "compose references ops deploy artifacts"
 fi
 
@@ -43,9 +45,18 @@ grep -q 'modelops_p18k_control' "${COMPOSE_FILE}" || die "dedicated control netw
 grep -q 'modelops_p18k_pgdata' "${COMPOSE_FILE}" || die "dedicated volume missing"
 
 # Host publish ports must stay in the reserved 25xxx/28xxx band (not 5432/8000/8080).
-if grep -E '["'\'']?[0-9]+:(5432|8000|8080|8100)["'\'']?' "${COMPOSE_FILE}" | grep -Evq '25[0-9]{3}|28[0-9]{3}'; then
-  die "host port mapping collides with default ops/local ports"
+_host_ports="$(printf '%s\n' "${_compose_nocomment}" | grep -E '^\s*-\s*"?[0-9]+:[0-9]+"?\s*$' || true)"
+if [[ -z "${_host_ports}" ]]; then
+  die "no host port mappings found"
 fi
+while IFS= read -r mapping; do
+  [[ -z "${mapping}" ]] && continue
+  host_port="$(printf '%s' "${mapping}" | sed -E 's/.*"([0-9]+):[0-9]+".*/\1/; t; s/.*-[[:space:]]*([0-9]+):[0-9]+.*/\1/')"
+  case "${host_port}" in
+    25[0-9][0-9][0-9]|28[0-9][0-9][0-9]) ;;
+    *) die "host port ${host_port} outside reserved 25xxx/28xxx band (${mapping})" ;;
+  esac
+done <<< "${_host_ports}"
 grep -q '25432:5432' "${COMPOSE_FILE}" || die "expected host postgres port 25432"
 grep -q '28000:8000' "${COMPOSE_FILE}" || die "expected host backend port 28000"
 grep -q '28080:8080' "${COMPOSE_FILE}" || die "expected host gateway port 28080"

@@ -18,15 +18,22 @@ services:
       POSTGRES_USER: p18k
       POSTGRES_PASSWORD: p18k-isolated
       POSTGRES_DB: modelops_p18k
+      PGPASSWORD: p18k-isolated
     ports:
       - "25432:5432"
     volumes:
       - modelops_p18k_pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U p18k -d modelops_p18k"]
+      # Require TCP accept after initdb finishes (unix pg_isready can race).
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -h 127.0.0.1 -U p18k -d modelops_p18k && psql -h 127.0.0.1 -U p18k -d modelops_p18k -c 'SELECT 1' >/dev/null",
+        ]
       interval: 3s
       timeout: 5s
-      retries: 20
+      retries: 30
+      start_period: 10s
     networks:
       - modelops_p18k_control
 
@@ -100,9 +107,18 @@ services:
         condition: service_healthy
       fake-node-agent:
         condition: service_healthy
-    command: >
-      sh -c "alembic upgrade head &&
-             uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    command:
+      - /bin/sh
+      - -c
+      - |
+        i=0
+        until python -c "import socket; socket.create_connection(('postgres',5432),2).close()"; do
+          i=$$((i+1))
+          if [ "$$i" -gt 60 ]; then echo "postgres TCP not ready"; exit 1; fi
+          sleep 1
+        done
+        alembic upgrade head
+        exec uvicorn app.main:app --host 0.0.0.0 --port 8000
     ports:
       - "28000:8000"
     networks:

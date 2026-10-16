@@ -95,6 +95,10 @@ class VramRequest(BaseModel):
     source_deployment_id: str | None = None
 
 
+class GpuRequest(BaseModel):
+    gpu_uuid: str = Field(min_length=1)
+
+
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):  # noqa: ANN001
     path = request.url.path
@@ -196,16 +200,16 @@ def _pop_fail(action: str, deployment_id: str) -> bool:
     return False
 
 
-@app.get("/internal/v1/deployments/{deployment_id}")
-async def get_deployment(deployment_id: str) -> dict[str, Any] | JSONResponse:
+@app.get("/internal/v1/deployments/{deployment_id}", response_model=None)
+async def get_deployment(deployment_id: str):
     ctr = _containers.get(deployment_id)
     if ctr is None:
         return _error(404, "CONTAINER_NOT_FOUND", "not found")
     return ctr
 
 
-@app.post("/internal/v1/deployments/{deployment_id}/prepare")
-async def prepare(deployment_id: str, request: Request) -> dict[str, Any] | JSONResponse:
+@app.post("/internal/v1/deployments/{deployment_id}/prepare", response_model=None)
+async def prepare(deployment_id: str, request: Request):
     body = await request.json()
     _record("POST", request.url.path, body)
     if _pop_fail("prepare", deployment_id):
@@ -228,8 +232,8 @@ async def prepare(deployment_id: str, request: Request) -> dict[str, Any] | JSON
     }
 
 
-@app.post("/internal/v1/deployments/{deployment_id}/create", status_code=201)
-async def create(deployment_id: str, request: Request) -> dict[str, Any] | JSONResponse:
+@app.post("/internal/v1/deployments/{deployment_id}/create", status_code=201, response_model=None)
+async def create(deployment_id: str, request: Request):
     body = await request.json()
     _record("POST", request.url.path, body)
     existing = _containers.get(deployment_id)
@@ -256,8 +260,8 @@ async def create(deployment_id: str, request: Request) -> dict[str, Any] | JSONR
     return ctr
 
 
-@app.post("/internal/v1/deployments/{deployment_id}/start")
-async def start(deployment_id: str, request: Request) -> dict[str, Any] | JSONResponse:
+@app.post("/internal/v1/deployments/{deployment_id}/start", response_model=None)
+async def start(deployment_id: str, request: Request):
     body = None
     if request.headers.get("content-type", "").startswith("application/json"):
         try:
@@ -284,8 +288,8 @@ async def start(deployment_id: str, request: Request) -> dict[str, Any] | JSONRe
     return ctr
 
 
-@app.post("/internal/v1/deployments/{deployment_id}/stop")
-async def stop(deployment_id: str, request: Request) -> dict[str, Any] | JSONResponse:
+@app.post("/internal/v1/deployments/{deployment_id}/stop", response_model=None)
+async def stop(deployment_id: str, request: Request):
     body = None
     try:
         body = await request.json()
@@ -303,14 +307,14 @@ async def stop(deployment_id: str, request: Request) -> dict[str, Any] | JSONRes
     return ctr
 
 
-@app.post("/internal/v1/deployments/{deployment_id}/restart")
-async def restart(deployment_id: str, request: Request) -> dict[str, Any] | JSONResponse:
+@app.post("/internal/v1/deployments/{deployment_id}/restart", response_model=None)
+async def restart(deployment_id: str, request: Request):
     _ = await start(deployment_id, request)
     return _containers[deployment_id]
 
 
-@app.delete("/internal/v1/deployments/{deployment_id}")
-async def remove(deployment_id: str) -> Response | JSONResponse:
+@app.delete("/internal/v1/deployments/{deployment_id}", response_model=None)
+async def remove(deployment_id: str):
     ctr = _containers.get(deployment_id)
     if ctr is None:
         return _error(404, "CONTAINER_NOT_FOUND", "missing")
@@ -320,12 +324,12 @@ async def remove(deployment_id: str) -> Response | JSONResponse:
     return Response(status_code=204)
 
 
-@app.get("/internal/v1/deployments/{deployment_id}/health")
+@app.get("/internal/v1/deployments/{deployment_id}/health", response_model=None)
 async def deployment_health(
     deployment_id: str,
     health_path: str = "/health",
     timeout_seconds: float = 5.0,
-) -> dict[str, Any] | JSONResponse:
+):
     _record("GET", f"/internal/v1/deployments/{deployment_id}/health", None)
     ctr = _containers.get(deployment_id)
     if ctr is None:
@@ -387,8 +391,8 @@ async def deployment_health(
     }
 
 
-@app.post("/internal/v1/deployments/{deployment_id}/probe")
-async def probe(deployment_id: str, request: Request) -> dict[str, Any] | JSONResponse:
+@app.post("/internal/v1/deployments/{deployment_id}/probe", response_model=None)
+async def probe(deployment_id: str, request: Request):
     body = await request.json()
     _record("POST", request.url.path, body)
     ctr = _containers.get(deployment_id)
@@ -489,6 +493,13 @@ async def harness_vram(body: VramRequest) -> dict[str, Any]:
         "source_used_vram_mb": _source_used_vram_mb,
         "source_deployment_id": _source_deployment_id,
     }
+
+
+@app.post("/harness/gpu")
+async def harness_gpu(body: GpuRequest) -> dict[str, Any]:
+    global GPU_UUID
+    GPU_UUID = body.gpu_uuid
+    return {"gpu_uuid": GPU_UUID}
 
 
 @app.post("/harness/reset")

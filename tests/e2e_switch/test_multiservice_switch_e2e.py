@@ -25,7 +25,6 @@ DATABASE_URL = os.environ.get(
     "P18K_DATABASE_URL",
     "postgresql+asyncpg://p18k:p18k-isolated@127.0.0.1:25432/modelops_p18k",
 )
-GPU_UUID = "GPU-P18K-FAKE-0"
 SOURCE_UPSTREAM = "http://mock-runtime-source:9000"
 TARGET_UPSTREAM = "http://mock-runtime-target:9000"
 
@@ -62,6 +61,7 @@ async def _seed_world(
 ) -> dict[str, Any]:
     """Seed EMBEDDING Source/Target + SERVING Endpoint for Switch."""
     suffix = uuid.uuid4().hex[:8]
+    gpu_uuid = f"GPU-P18K-{suffix}"
     node_id = uuid.uuid4()
     gpu_id = uuid.uuid4()
     model_id = uuid.uuid4()
@@ -101,7 +101,7 @@ async def _seed_world(
             )
             """
         ),
-        {"id": str(gpu_id), "node_id": str(node_id), "gpu_uuid": GPU_UUID},
+        {"id": str(gpu_id), "node_id": str(node_id), "gpu_uuid": gpu_uuid},
     )
     await session.execute(
         text(
@@ -253,6 +253,7 @@ async def _seed_world(
     await session.commit()
     return {
         "suffix": suffix,
+        "gpu_uuid": gpu_uuid,
         "node_id": node_id,
         "source_id": src_dep,
         "target_id": tgt_dep,
@@ -266,6 +267,10 @@ async def _seed_world(
 def _bind_fake_na(fixture: dict[str, Any], *, hot_vram: bool = True) -> None:
     with httpx.Client(timeout=10.0) as c:
         c.post(f"{FAKE_NA}/harness/reset").raise_for_status()
+        c.post(
+            f"{FAKE_NA}/harness/gpu",
+            json={"gpu_uuid": fixture["gpu_uuid"]},
+        ).raise_for_status()
         c.post(
             f"{FAKE_NA}/harness/vram",
             json={
@@ -296,6 +301,25 @@ def _bind_fake_na(fixture: dict[str, Any], *, hot_vram: bool = True) -> None:
         ).raise_for_status()
 
 
+def _wait_gateway_alias(alias: str, *, timeout_s: float = 30.0) -> None:
+    """Wait until Gateway routing poller/reload observes the seeded Alias."""
+    deadline = time.time() + timeout_s
+    last_status = None
+    with httpx.Client(timeout=10.0) as c:
+        # Encourage faster pickup beyond the 0.5s poller.
+        try:
+            c.post(f"{GATEWAY}/internal/v1/routes/reload")
+        except httpx.HTTPError:
+            pass
+        while time.time() < deadline:
+            r = c.get(f"{GATEWAY}/internal/v1/routes/{alias}/runtime")
+            last_status = r.status_code
+            if r.status_code == 200:
+                return
+            time.sleep(0.3)
+    raise AssertionError(f"gateway never learned alias {alias} (last={last_status})")
+
+
 def _switch(
     *,
     endpoint_id: uuid.UUID,
@@ -314,7 +338,6 @@ def _switch(
             "health_timeout_seconds": 60,
             "vram_release_timeout_seconds": 20,
             "gateway_apply_timeout_seconds": 30,
-            "safety_margin_mb": 1024,
         },
         timeout=30.0,
     )
@@ -413,6 +436,7 @@ async def test_hot_switch_e2e_route_and_gateway(db) -> None:
         fixture = await _seed_world(session, strategy_hint="HOT")
         version_before = await _read_routing_version(session)
     _bind_fake_na(fixture, hot_vram=True)
+    _wait_gateway_alias(fixture["alias"])
 
     # Pre-switch Gateway must hit Source mock.
     pre = _gateway_embeddings(fixture["alias"])
@@ -498,6 +522,7 @@ async def test_cold_switch_e2e_drain_and_serving(db) -> None:
         version_before = await _read_routing_version(session)
     # COLD can use either HOT-available or COLD-only VRAM; use cold-only headroom.
     _bind_fake_na(fixture, hot_vram=False)
+    _wait_gateway_alias(fixture["alias"])
 
     pre = _gateway_embeddings(fixture["alias"])
     assert pre.status_code == 200, pre.text
@@ -570,6 +595,7 @@ async def test_hot_target_start_failure_preserves_source(db) -> None:
         fixture = await _seed_world(session, strategy_hint="HOT-FAIL")
         version_before = await _read_routing_version(session)
     _bind_fake_na(fixture, hot_vram=True)
+    _wait_gateway_alias(fixture["alias"])
     with httpx.Client(timeout=10.0) as c:
         c.post(
             f"{FAKE_NA}/harness/fail-next",

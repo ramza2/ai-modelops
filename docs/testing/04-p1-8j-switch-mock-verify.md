@@ -50,7 +50,7 @@ Fixture pattern: each suite defaults `MODELOPS_DATABASE_URL` to localhost
 | 8J-07 | Frontend Switch poll / F5 tracking (links to Operation UX) | PASS | `frontend/src/test/EndpointDetailPage.test.tsx` — poll QUEUED→RUNNING→SUCCEEDED; F5 restore + resume poll; terminal stop; fail-closed restore; first-Terminal Endpoint/Route refresh | UI unit (mocked APIs) |
 | 8J-08 | Gateway drain / LKG / traffic_state (routing plane) | PASS | `gateway/tests/test_gateway_routing.py` (`test_draining_blocks_new_and_reports_drain_complete`, `test_snapshot_reload_and_lkg`, routing error matrix); `test_gateway_m5_d2b1_drain.py` (deployment inflight cutover) | Component Mock |
 | 8J-09 | Cross-feature Cold cancel / retry / MIR reconcile | PASS | `worker/tests/test_m5_switch_regression.py`; cancel/reconcile suites (see §4) | Component Mock |
-| 8J-10 | Single-process Backend+Worker+Gateway+real Mock Runtime E2E Switch | PENDING | No multi-service compose Switch harness in this slice; Worker uses FakeGateway/FakeNodeAgent | Gap |
+| 8J-10 | Multi-service Backend+Worker+Gateway+Mock Runtime Switch (Compose) | PASS | P1-8K harness: `docs/testing/05-p1-8k-multiservice-e2e.md`; `tests/e2e_switch/` (4 pytest PASSED). Still Mock/Fake-NA — not ops GPU. | Multi-service Mock |
 | 8J-11 | Ops RTX A4000 / real vLLM HOT or COLD Switch | PENDING | Server Gate E/F under `02-final-hardening-server-integration.md` | Server |
 | 8J-12 | Admin UI Switch against live Control Plane | PENDING | Vitest mocks Management API; no LAN Admin Switch run here | Server / manual |
 
@@ -122,11 +122,12 @@ No new Switch test modules were added (coverage already sufficient).
 - Real NVIDIA driver / VRAM release wait on A4000
 - Real managed container start/stop/health/probe during Switch
 - Gateway LISTEN/NOTIFY + live Traefik path during Switch
-- Compose multi-container Switch against Mock Runtime image
 - Concurrent production traffic during Drain
 - Ops Endpoint Alias / Qwen3 / VLM / BGE-M3 Route changes
 
-Those remain **PENDING** until server Gate evidence is recorded. Mock green ≠ ops Switch success.
+Compose multi-container Mock Switch is covered by P1-8K
+(`docs/testing/05-p1-8k-multiservice-e2e.md`). Ops GPU / Admin UI remain
+**PENDING**. Mock green ≠ ops Switch success.
 
 ---
 
@@ -137,4 +138,5 @@ Those remain **PENDING** until server Gate evidence is recorded. Mock green ≠ 
 - [x] Supporting cancel/reconcile + Deployment drain suites green
 - [x] Matrix distinguishes component Mock PASS vs server PENDING
 - [x] No duplicate Switch tests; no ops POST / GPU / Route mutation
-- [ ] 8J-10..8J-12 cleared only with server or multi-service E2E evidence
+- [x] 8J-10 multi-service Mock Switch covered by P1-8K (`05-p1-8k-multiservice-e2e.md`)
+- [ ] 8J-11..8J-12 cleared only with server / live Admin evidence

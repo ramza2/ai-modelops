@@ -27,8 +27,8 @@ app = FastAPI(title=f"ModelOps Mock Runtime ({INSTANCE_ID})")
 _calls: list[dict[str, Any]] = []
 
 
-@app.get("/health")
-async def health() -> dict[str, str] | JSONResponse:
+@app.get("/health", response_model=None)
+async def health():
     if FAIL_HEALTH:
         return JSONResponse(status_code=503, content={"status": "UNHEALTHY"})
     return {"status": "ok", "instance_id": INSTANCE_ID}
@@ -42,8 +42,8 @@ async def list_models() -> dict[str, Any]:
     }
 
 
-@app.post("/v1/embeddings")
-async def embeddings(request: Request) -> dict[str, Any] | JSONResponse:
+@app.post("/v1/embeddings", response_model=None)
+async def embeddings(request: Request):
     body = await request.json()
     _calls.append(
         {
@@ -79,8 +79,8 @@ async def embeddings(request: Request) -> dict[str, Any] | JSONResponse:
     }
 
 
-@app.post("/v1/chat/completions")
-async def chat(request: Request) -> dict[str, Any] | JSONResponse:
+@app.post("/v1/chat/completions", response_model=None)
+async def chat(request: Request):
     body = await request.json()
     _calls.append(
         {
