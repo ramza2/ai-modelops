@@ -843,6 +843,42 @@ describe('EndpointDetailPage', () => {
       ).not.toBeInTheDocument()
     })
     expect(screen.getByText(/비활성/)).toBeInTheDocument()
+    // load('refresh') bumps readGen; busy must still clear afterward.
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '새로고침' })).not.toBeDisabled()
+    })
+  })
+
+  it('clears Unpublish busy after success refresh so actions restore', async () => {
+    const user = userEvent.setup()
+    vi.mocked(endpointsApi.getEndpoint)
+      .mockResolvedValueOnce(makeEndpoint())
+      .mockResolvedValue(makeEndpoint())
+    vi.mocked(endpointsApi.listEndpointRoutes).mockResolvedValue({
+      items: [makeRoute({ id: 'r1' })],
+      total: 1,
+    })
+    vi.mocked(deploymentsApi.listDeployments).mockResolvedValue(
+      pageResult([
+        makeDeployment({ id: 'target-dep', name: 'target-candidate' }),
+      ]),
+    )
+    vi.mocked(decommissionApi.unpublishEndpoint).mockResolvedValue(
+      makeUnpublishResult({ changed: true }),
+    )
+    renderDetail()
+    await user.click(await screen.findByTestId('unpublish-open'))
+    await user.type(
+      screen.getByLabelText(/현재 Alias를 입력/),
+      'chat-main',
+    )
+    await user.click(screen.getByTestId('unpublish-confirm'))
+    expect(await screen.findByTestId('unpublish-result')).toBeInTheDocument()
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '새로고침' })).not.toBeDisabled()
+    })
+    expect(screen.getByTestId('unpublish-open')).not.toBeDisabled()
+    expect(screen.getByLabelText('Target Deployment')).not.toBeDisabled()
   })
 
   it('shows changed=false and non-PASSED Gateway verification accurately', async () => {
@@ -969,6 +1005,38 @@ describe('EndpointDetailPage', () => {
       expect(endpointsApi.getEndpoint).toHaveBeenCalledTimes(2)
     })
     expect(await screen.findByRole('link', { name: 'other-prod' })).toBeInTheDocument()
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '새로고침' })).not.toBeDisabled()
+    })
+    expect(screen.getByTestId('unpublish-open')).not.toBeDisabled()
+  })
+
+  it('clears Unpublish busy after generic error refresh', async () => {
+    const user = userEvent.setup()
+    vi.mocked(endpointsApi.getEndpoint).mockResolvedValue(makeEndpoint())
+    vi.mocked(endpointsApi.listEndpointRoutes).mockResolvedValue({
+      items: [makeRoute({ id: 'r1' })],
+      total: 1,
+    })
+    vi.mocked(deploymentsApi.listDeployments).mockResolvedValue(pageResult([]))
+    vi.mocked(decommissionApi.unpublishEndpoint).mockRejectedValue(
+      new ApiError('upstream timeout', { status: 504, code: 'TIMEOUT' }),
+    )
+    renderDetail()
+    await user.click(await screen.findByTestId('unpublish-open'))
+    await user.type(
+      screen.getByLabelText(/현재 Alias를 입력/),
+      'chat-main',
+    )
+    await user.click(screen.getByTestId('unpublish-confirm'))
+    expect(
+      await screen.findByText(/실행 결과를 추정하지 않습니다/),
+    ).toBeInTheDocument()
+    expect(screen.queryByTestId('unpublish-result')).not.toBeInTheDocument()
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '새로고침' })).not.toBeDisabled()
+    })
+    expect(screen.getByTestId('unpublish-open')).not.toBeDisabled()
   })
 
   it('restores ACTIVE Route from GET Endpoint after remount (F5)', async () => {
@@ -1035,17 +1103,24 @@ describe('EndpointDetailPage', () => {
     await waitFor(() => {
       expect(decommissionApi.unpublishEndpoint).toHaveBeenCalledTimes(1)
     })
+    expect(screen.getByRole('button', { name: '새로고침' })).toBeDisabled()
 
     cleanup()
     renderDetail('/endpoints/e2')
     expect(
       await screen.findByRole('heading', { level: 2, name: 'Chat Other' }),
     ).toBeInTheDocument()
+    // New Endpoint must not inherit prior Unpublish busy.
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '새로고침' })).not.toBeDisabled()
+    })
+    expect(screen.getByTestId('unpublish-open')).not.toBeDisabled()
     resolveUnpublish(makeUnpublishResult({ changed: true }))
     await new Promise((r) => setTimeout(r, 50))
     expect(screen.queryByTestId('unpublish-result')).not.toBeInTheDocument()
     expect(
       screen.getByRole('heading', { level: 2, name: 'Chat Other' }),
     ).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '새로고침' })).not.toBeDisabled()
   })
 })

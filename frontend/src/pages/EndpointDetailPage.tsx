@@ -305,6 +305,8 @@ export function EndpointDetailPage() {
     closeUnpublishDialog()
     setUnpublishResult(null)
     setUnpublishError(null)
+    // Drop prior Endpoint's Unpublish busy; do not leave buttons stuck.
+    setUnpublishing(false)
     void load('initial')
     return () => {
       abortRef.current?.abort()
@@ -374,9 +376,12 @@ export function EndpointDetailPage() {
     unpublishAbortRef.current?.abort()
     const controller = new AbortController()
     unpublishAbortRef.current = controller
-    const gen = readGenRef.current
+    // Ownership for this POST: Endpoint ID only. Do not gate busy-clear on
+    // readGen — load('refresh') after Unpublish intentionally bumps it.
     const epId = endpointId
     const expectedDep = unpublishExpectedDepId
+    const stillThisEndpoint = () =>
+      !controller.signal.aborted && activeEndpointIdRef.current === epId
 
     setUnpublishing(true)
     setUnpublishError(null)
@@ -390,24 +395,12 @@ export function EndpointDetailPage() {
         },
         controller.signal,
       )
-      if (
-        controller.signal.aborted ||
-        gen !== readGenRef.current ||
-        activeEndpointIdRef.current !== epId
-      ) {
-        return
-      }
+      if (!stillThisEndpoint()) return
       setUnpublishResult(result)
       closeUnpublishDialog()
       await load('refresh')
     } catch (err) {
-      if (
-        controller.signal.aborted ||
-        gen !== readGenRef.current ||
-        activeEndpointIdRef.current !== epId
-      ) {
-        return
-      }
+      if (!stillThisEndpoint()) return
       if (err instanceof DOMException && err.name === 'AbortError') return
 
       if (
@@ -437,11 +430,8 @@ export function EndpointDetailPage() {
       closeUnpublishDialog()
       await load('refresh')
     } finally {
-      if (
-        !controller.signal.aborted &&
-        gen === readGenRef.current &&
-        activeEndpointIdRef.current === epId
-      ) {
+      // Refresh bumps readGen; still clear busy when this Endpoint owns the work.
+      if (activeEndpointIdRef.current === epId) {
         setUnpublishing(false)
       }
     }
