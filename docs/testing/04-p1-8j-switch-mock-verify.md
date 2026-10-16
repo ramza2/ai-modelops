@@ -2,9 +2,9 @@
 
 ## 1. Purpose
 
-Verify HOT and COLD Switch end-to-end **on isolated Mock / repository
-evidence only** — no ops GPU, real model runtimes, ops PostgreSQL, or live
-Endpoint Route mutation.
+Verify HOT and COLD Switch with **isolated component-level Mock tests /
+repository evidence only** — no ops GPU, real model runtimes, ops
+PostgreSQL, or live Endpoint Route mutation.
 
 This checklist **reuses** existing suites; it does not add duplicate Switch
 tests. It records PASS/FAIL/PENDING and separates component Mock depth from
