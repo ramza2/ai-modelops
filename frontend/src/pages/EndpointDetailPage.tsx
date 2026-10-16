@@ -413,6 +413,28 @@ export function EndpointDetailPage() {
   const loadRef = useRef(load)
   loadRef.current = load
 
+  /**
+   * First time a Switch Operation is observed as terminal for this id,
+   * re-read Endpoint + Route History once. SUCCEEDED ≠ invent ACTIVE Route;
+   * load() failures keep prior snapshot / error UI.
+   */
+  const refreshEndpointOnFirstTerminal = useCallback(
+    async (
+      opId: string,
+      status: string,
+      stillCurrent: () => boolean,
+    ): Promise<void> => {
+      if (!isTerminalOperationStatus(status)) return
+      if (terminalRefreshOpIdRef.current === opId) return
+      if (!stillCurrent()) return
+      terminalRefreshOpIdRef.current = opId
+      await loadRef.current('refresh')
+      // Ignore late completion if Endpoint/Operation identity changed.
+      if (!stillCurrent()) return
+    },
+    [],
+  )
+
   useEffect(() => {
     closeUnpublishDialog()
     setUnpublishResult(null)
@@ -465,7 +487,7 @@ export function EndpointDetailPage() {
       switchOperationIdParamRef.current === opId
 
     void getOperation(opId, controller.signal)
-      .then((data) => {
+      .then(async (data) => {
         if (!stillCurrent()) return
         if (!isSwitchOperationForEndpoint(data, epId) || data.id !== opId) {
           setLastOperation(null)
@@ -479,13 +501,13 @@ export function EndpointDetailPage() {
         setLastOperation(tracked)
         setSwitchOpPollWarning(null)
         setSwitchOpRestoreError(null)
-        if (
-          isTerminalOperationStatus(tracked.status) &&
-          terminalRefreshOpIdRef.current !== tracked.id
-        ) {
-          // Show final Operation result; ACTIVE Route still comes from GET Endpoint.
-          terminalRefreshOpIdRef.current = tracked.id
-        }
+        // F5 may finish Endpoint GET before Operation; re-read Routes once
+        // when Terminal is first confirmed (do not invent ACTIVE Route).
+        await refreshEndpointOnFirstTerminal(
+          tracked.id,
+          tracked.status,
+          stillCurrent,
+        )
       })
       .catch((err: unknown) => {
         if (!stillCurrent()) return
@@ -519,7 +541,12 @@ export function EndpointDetailPage() {
     return () => {
       controller.abort()
     }
-  }, [endpointId, switchOperationIdParam, syncSwitchOperationQuery])
+  }, [
+    endpointId,
+    switchOperationIdParam,
+    syncSwitchOperationQuery,
+    refreshEndpointOnFirstTerminal,
+  ])
 
   // Poll while tracked Switch Operation is in-flight (4s).
   useEffect(() => {
@@ -571,14 +598,19 @@ export function EndpointDetailPage() {
           setLastOperation(tracked)
           setSwitchOpPollWarning(null)
           setLastUpdated(new Date())
-          if (
-            isTerminalOperationStatus(tracked.status) &&
-            terminalRefreshOpIdRef.current !== opId
-          ) {
-            terminalRefreshOpIdRef.current = opId
-            // SUCCEEDED display ≠ Route change; re-read Endpoint/Routes once.
-            await loadRef.current('refresh')
-          }
+          const stillCurrent = () =>
+            !cancelled &&
+            !controller.signal.aborted &&
+            gen === switchOpFetchGenRef.current &&
+            activeEndpointIdRef.current === epId &&
+            switchOperationIdParamRef.current === opId &&
+            trackedSwitchOpIdRef.current === opId
+          // SUCCEEDED display ≠ Route change; re-read Endpoint/Routes once.
+          await refreshEndpointOnFirstTerminal(
+            opId,
+            tracked.status,
+            stillCurrent,
+          )
         })
         .catch((err: unknown) => {
           if (
@@ -609,6 +641,7 @@ export function EndpointDetailPage() {
     lastOperation?.status,
     switchOperationIdParam,
     syncSwitchOperationQuery,
+    refreshEndpointOnFirstTerminal,
   ])
 
   // Close confirm dialog if ACTIVE Route disappears or its Deployment changes.
@@ -830,6 +863,12 @@ export function EndpointDetailPage() {
       syncSwitchOperationQuery(tracked.id)
       // Do not auto-retry on uncertain errors; Endpoint refresh is separate.
       await load('refresh')
+      if (activeEndpointIdRef.current !== endpointId) return
+      // If enqueue already returned Terminal, this refresh covers Routes —
+      // mark so a concurrent restore GET does not duplicate.
+      if (isTerminalOperationStatus(tracked.status)) {
+        terminalRefreshOpIdRef.current = tracked.id
+      }
     } catch (err) {
       if (activeEndpointIdRef.current !== endpointId) return
       if (err instanceof DOMException && err.name === 'AbortError') return
@@ -896,13 +935,14 @@ export function EndpointDetailPage() {
           const controller = new AbortController()
           switchOpAbortRef.current = controller
 
+          const stillCurrent = () =>
+            !controller.signal.aborted &&
+            gen === switchOpFetchGenRef.current &&
+            activeEndpointIdRef.current === epId &&
+            (!opId || switchOperationIdParamRef.current === opId)
+
           await load('refresh')
-          if (
-            gen !== switchOpFetchGenRef.current ||
-            activeEndpointIdRef.current !== epId
-          ) {
-            return
-          }
+          if (!stillCurrent()) return
           if (!opId) return
           // URL may have changed during Endpoint refresh — drop stale Op fetch.
           if (switchOperationIdParamRef.current !== opId) return
@@ -910,9 +950,7 @@ export function EndpointDetailPage() {
           try {
             const data = await getOperation(opId, controller.signal)
             if (
-              controller.signal.aborted ||
-              gen !== switchOpFetchGenRef.current ||
-              activeEndpointIdRef.current !== epId ||
+              !stillCurrent() ||
               switchOperationIdParamRef.current !== opId ||
               data.id !== opId
             ) {
@@ -925,14 +963,23 @@ export function EndpointDetailPage() {
               clearTrackedSwitchOperation({ clearWarning: true })
               return
             }
-            setLastOperation(toSwitchOperation(data))
+            const tracked = toSwitchOperation(data)
+            setLastOperation(tracked)
             setSwitchOpPollWarning(null)
             setSwitchOpRestoreError(null)
+            // Endpoint GET ran before Operation; if Terminal is first seen here,
+            // re-read Endpoint/Routes once so ACTIVE Route is not stale.
+            await refreshEndpointOnFirstTerminal(
+              tracked.id,
+              tracked.status,
+              () =>
+                stillCurrent() &&
+                switchOperationIdParamRef.current === opId &&
+                trackedSwitchOpIdRef.current === tracked.id,
+            )
           } catch (err: unknown) {
             if (
-              controller.signal.aborted ||
-              gen !== switchOpFetchGenRef.current ||
-              activeEndpointIdRef.current !== epId ||
+              !stillCurrent() ||
               switchOperationIdParamRef.current !== opId
             ) {
               return
