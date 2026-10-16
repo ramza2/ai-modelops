@@ -8,6 +8,8 @@ import {
   isDeploymentReadyForPublish,
   isDeploymentStoppedForSync,
   isFailedOperationStatus,
+  isSwitchOperationForEndpoint,
+  isTerminalOperationStatus,
   OPERATION_POLL_MS,
   operationPollConfig,
   parseTrustworthyFinishedAtMs,
@@ -50,6 +52,38 @@ describe('operationLifecycle', () => {
     expect(isFailedOperationStatus('SUCCEEDED')).toBe(false)
     expect(isFailedOperationStatus('RUNNING')).toBe(false)
     expect(isFailedOperationStatus(null)).toBe(false)
+  })
+
+  it('classifies terminal Operation statuses and Switch Endpoint ownership', () => {
+    expect(isTerminalOperationStatus('SUCCEEDED')).toBe(true)
+    expect(isTerminalOperationStatus('FAILED')).toBe(true)
+    expect(isTerminalOperationStatus('CANCELLED')).toBe(true)
+    expect(isTerminalOperationStatus('ROLLED_BACK')).toBe(true)
+    expect(isTerminalOperationStatus('MANUAL_INTERVENTION_REQUIRED')).toBe(
+      true,
+    )
+    expect(isTerminalOperationStatus('RUNNING')).toBe(false)
+    expect(isTerminalOperationStatus('QUEUED')).toBe(false)
+    expect(isTerminalOperationStatus(null)).toBe(false)
+
+    expect(
+      isSwitchOperationForEndpoint(
+        { operation_type: 'SWITCH', endpoint_alias_id: 'e1' },
+        'e1',
+      ),
+    ).toBe(true)
+    expect(
+      isSwitchOperationForEndpoint(
+        { operation_type: 'STOP', endpoint_alias_id: 'e1' },
+        'e1',
+      ),
+    ).toBe(false)
+    expect(
+      isSwitchOperationForEndpoint(
+        { operation_type: 'SWITCH', endpoint_alias_id: 'e2' },
+        'e1',
+      ),
+    ).toBe(false)
   })
 
   it('requires RUNNING desired/runtime and HEALTHY for Publish readiness', () => {
