@@ -47,6 +47,10 @@ const LABELS: Record<string, string> = {
   TIGHT: '빠듯',
   INSUFFICIENT: '부족',
   READY: '준비 완료',
+  PASSED: '통과',
+  ROUTING_PENDING: '라우팅 대기',
+  ROUTE_STILL_ACTIVE: 'Route 잔존',
+  GATEWAY_UNAVAILABLE: 'Gateway 불가',
 }
 
 const TONE: Record<string, string> = {
@@ -60,7 +64,11 @@ const TONE: Record<string, string> = {
   MATCH: 'ok',
   FIT: 'ok',
   READY: 'ok',
+  PASSED: 'ok',
   RUNNING: 'info',
+  ROUTING_PENDING: 'warn',
+  ROUTE_STILL_ACTIVE: 'warn',
+  GATEWAY_UNAVAILABLE: 'bad',
   QUEUED: 'info',
   RESOLVING: 'info',
   DOWNLOADING: 'info',
