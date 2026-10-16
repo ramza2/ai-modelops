@@ -19,3 +19,6 @@ Concise index of Cold Switch invariants → existing tests. Does not replace
 | Terminal Operation / non-terminal Job mismatch without side effects | `worker/tests/test_cold_switch.py`, `worker/tests/test_cold_switch_cancel.py` |
 
 Out of scope for this matrix: HOT / AUTO / ALTERNATE_NODE / Admin UI.
+
+HOT + Admin Switch poll/F5 Mock verification index:
+`docs/testing/04-p1-8j-switch-mock-verify.md`.
