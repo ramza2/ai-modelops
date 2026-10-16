@@ -152,6 +152,8 @@ export function EndpointDetailPage() {
   const [switchOpPollWarning, setSwitchOpPollWarning] = useState<string | null>(
     null,
   )
+  /** True while a URL restore GET for switch_operation_id is in flight. */
+  const [switchOpRestoring, setSwitchOpRestoring] = useState(false)
 
   const [unpublishOpen, setUnpublishOpen] = useState(false)
   const [unpublishAliasInput, setUnpublishAliasInput] = useState('')
@@ -172,6 +174,10 @@ export function EndpointDetailPage() {
   activeEndpointIdRef.current = endpointId
   const trackedSwitchOpIdRef = useRef<string | null>(null)
   trackedSwitchOpIdRef.current = lastOperation?.id ?? null
+  const switchOperationIdParamRef = useRef(switchOperationIdParam)
+  switchOperationIdParamRef.current = switchOperationIdParam
+  /** Bumped on every Switch Operation fetch so older responses cannot win. */
+  const switchOpFetchGenRef = useRef(0)
   const terminalRefreshOpIdRef = useRef<string | null>(null)
   const refreshingRef = useRef(false)
   refreshingRef.current = refreshing
@@ -183,10 +189,25 @@ export function EndpointDetailPage() {
   const switchBlockedReason = endpoint
     ? switchWorkflowBlockedReason(endpoint)
     : null
+  const switchOpVerified = Boolean(
+    switchOperationIdParam &&
+      lastOperation &&
+      lastOperation.id === switchOperationIdParam &&
+      isSwitchOperationForEndpoint(lastOperation, endpointId),
+  )
+  /**
+   * Fail-closed: URL tracks a Switch Operation but we do not yet hold a
+   * verified snapshot for that id → block Switch/Unpublish until restore
+   * succeeds (or URL is cleared for definitive 404/mismatch).
+   */
+  const switchTrackingUnresolved = Boolean(
+    switchOperationIdParam && !switchOpVerified,
+  )
   const trackedSwitchActive = isActiveOperationStatus(lastOperation?.status)
   const canSwitchWorkflow =
     switchBlockedReason === null &&
     !trackedSwitchActive &&
+    !switchTrackingUnresolved &&
     !unpublishOpen &&
     !unpublishing
 
@@ -206,9 +227,11 @@ export function EndpointDetailPage() {
   )
 
   const clearTrackedSwitchOperation = useCallback(
-    (opts?: { clearQuery?: boolean }) => {
+    (opts?: { clearQuery?: boolean; clearWarning?: boolean }) => {
       setLastOperation(null)
-      setSwitchOpPollWarning(null)
+      if (opts?.clearWarning !== false) {
+        setSwitchOpPollWarning(null)
+      }
       terminalRefreshOpIdRef.current = null
       if (opts?.clearQuery !== false) {
         syncSwitchOperationQuery(null)
@@ -400,7 +423,9 @@ export function EndpointDetailPage() {
     setLastOperation(null)
     setSwitchOpRestoreError(null)
     setSwitchOpPollWarning(null)
+    setSwitchOpRestoring(false)
     terminalRefreshOpIdRef.current = null
+    switchOpFetchGenRef.current += 1
     void load('initial')
     return () => {
       abortRef.current?.abort()
@@ -414,23 +439,35 @@ export function EndpointDetailPage() {
   useEffect(() => {
     const epId = endpointId
     const opId = switchOperationIdParam
-    if (!epId || !opId) return
+    if (!epId || !opId) {
+      setSwitchOpRestoring(false)
+      return
+    }
 
     switchOpAbortRef.current?.abort()
     const controller = new AbortController()
     switchOpAbortRef.current = controller
+    const gen = ++switchOpFetchGenRef.current
     setSwitchOpRestoreError(null)
+    setSwitchOpRestoring(true)
+    // Do not display a previous Operation while restoring a different URL id.
+    if (
+      trackedSwitchOpIdRef.current &&
+      trackedSwitchOpIdRef.current !== opId
+    ) {
+      setLastOperation(null)
+    }
+
+    const stillCurrent = () =>
+      !controller.signal.aborted &&
+      gen === switchOpFetchGenRef.current &&
+      activeEndpointIdRef.current === epId &&
+      switchOperationIdParamRef.current === opId
 
     void getOperation(opId, controller.signal)
       .then((data) => {
-        if (
-          controller.signal.aborted ||
-          activeEndpointIdRef.current !== epId ||
-          switchOperationIdParam !== opId
-        ) {
-          return
-        }
-        if (!isSwitchOperationForEndpoint(data, epId)) {
+        if (!stillCurrent()) return
+        if (!isSwitchOperationForEndpoint(data, epId) || data.id !== opId) {
           setLastOperation(null)
           setSwitchOpRestoreError(
             'URL의 Operation이 이 Endpoint의 SWITCH가 아니므로 표시하지 않습니다.',
@@ -441,6 +478,7 @@ export function EndpointDetailPage() {
         const tracked = toSwitchOperation(data)
         setLastOperation(tracked)
         setSwitchOpPollWarning(null)
+        setSwitchOpRestoreError(null)
         if (
           isTerminalOperationStatus(tracked.status) &&
           terminalRefreshOpIdRef.current !== tracked.id
@@ -450,16 +488,10 @@ export function EndpointDetailPage() {
         }
       })
       .catch((err: unknown) => {
-        if (
-          controller.signal.aborted ||
-          activeEndpointIdRef.current !== epId ||
-          switchOperationIdParam !== opId
-        ) {
-          return
-        }
+        if (!stillCurrent()) return
         if (err instanceof DOMException && err.name === 'AbortError') return
-        setLastOperation(null)
         if (err instanceof ApiError && err.status === 404) {
+          setLastOperation(null)
           setSwitchOpRestoreError(
             'Switch Operation을 찾을 수 없습니다. URL 추적을 해제합니다.',
           )
@@ -472,16 +504,21 @@ export function EndpointDetailPage() {
             : err instanceof Error
               ? err.message
               : 'Switch Operation을 불러오지 못했습니다.'
+        // Keep last good snapshot for the same Endpoint/Operation id.
+        // Do not auto-clear URL or unblock — manual refresh must re-verify.
         setSwitchOpRestoreError(
-          `${message} 잘못된 상태를 표시하지 않습니다. 새로고침으로 다시 확인하세요.`,
+          `${message} 마지막 정상 Operation 값은 유지합니다. 새로고침으로 다시 확인하세요.`,
         )
+      })
+      .finally(() => {
+        if (gen === switchOpFetchGenRef.current) {
+          setSwitchOpRestoring(false)
+        }
       })
 
     return () => {
       controller.abort()
     }
-    // Intentionally depend on URL + endpoint identity only.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [endpointId, switchOperationIdParam, syncSwitchOperationQuery])
 
   // Poll while tracked Switch Operation is in-flight (4s).
@@ -490,6 +527,8 @@ export function EndpointDetailPage() {
     const opId = lastOperation?.id
     if (!epId || !opId) return
     if (!isActiveOperationStatus(lastOperation?.status)) return
+    // Only poll once URL tracking is verified for this Operation.
+    if (switchOperationIdParam !== opId) return
 
     let cancelled = false
     const timer = window.setInterval(() => {
@@ -504,22 +543,28 @@ export function EndpointDetailPage() {
       switchOpAbortRef.current?.abort()
       const controller = new AbortController()
       switchOpAbortRef.current = controller
+      const gen = ++switchOpFetchGenRef.current
       void getOperation(opId, controller.signal)
         .then(async (data) => {
           if (
             cancelled ||
             controller.signal.aborted ||
+            gen !== switchOpFetchGenRef.current ||
             activeEndpointIdRef.current !== epId ||
+            switchOperationIdParamRef.current !== opId ||
             trackedSwitchOpIdRef.current !== opId ||
             data.id !== opId
           ) {
             return
           }
           if (!isSwitchOperationForEndpoint(data, epId)) {
+            // Stop tracking but keep the mismatch warning on screen.
+            setLastOperation(null)
+            terminalRefreshOpIdRef.current = null
+            syncSwitchOperationQuery(null)
             setSwitchOpPollWarning(
-              'Polling 중 Operation 소속이 일치하지 않아 추적을 중단합니다.',
+              'Polling 중 Operation 소속이 일치하지 않아 추적을 중단합니다. 잘못된 Operation 결과는 표시하지 않습니다.',
             )
-            clearTrackedSwitchOperation()
             return
           }
           const tracked = toSwitchOperation(data)
@@ -539,7 +584,9 @@ export function EndpointDetailPage() {
           if (
             cancelled ||
             controller.signal.aborted ||
+            gen !== switchOpFetchGenRef.current ||
             activeEndpointIdRef.current !== epId ||
+            switchOperationIdParamRef.current !== opId ||
             trackedSwitchOpIdRef.current !== opId
           ) {
             return
@@ -560,7 +607,8 @@ export function EndpointDetailPage() {
     endpointId,
     lastOperation?.id,
     lastOperation?.status,
-    clearTrackedSwitchOperation,
+    switchOperationIdParam,
+    syncSwitchOperationQuery,
   ])
 
   // Close confirm dialog if ACTIVE Route disappears or its Deployment changes.
@@ -587,7 +635,8 @@ export function EndpointDetailPage() {
       !endpoint?.active_route?.deployment_id ||
       unpublishing ||
       switching ||
-      trackedSwitchActive
+      trackedSwitchActive ||
+      switchTrackingUnresolved
     ) {
       return
     }
@@ -604,7 +653,8 @@ export function EndpointDetailPage() {
       switching ||
       previewing ||
       refreshing ||
-      trackedSwitchActive
+      trackedSwitchActive ||
+      switchTrackingUnresolved
     ) {
       return
     }
@@ -705,6 +755,7 @@ export function EndpointDetailPage() {
       unpublishing ||
       unpublishOpen ||
       trackedSwitchActive ||
+      switchTrackingUnresolved ||
       !canSwitchWorkflow
     ) {
       return
@@ -746,7 +797,8 @@ export function EndpointDetailPage() {
       switching ||
       unpublishing ||
       unpublishOpen ||
-      trackedSwitchActive
+      trackedSwitchActive ||
+      switchTrackingUnresolved
     ) {
       return
     }
@@ -837,27 +889,64 @@ export function EndpointDetailPage() {
       description="Endpoint Alias, ACTIVE Route, Route 이력과 Preflight preview 기반 HOT/COLD Switch enqueue입니다. Preview는 분석 전용이며 Worker가 실행 직전 fresh Preflight를 다시 수행합니다."
       onRefresh={() => {
         void (async () => {
-          await load('refresh')
           const epId = endpointId
-          const opId = switchOperationIdParam
-          if (!epId || !opId) return
+          const opId = switchOperationIdParamRef.current
+          const gen = ++switchOpFetchGenRef.current
+          switchOpAbortRef.current?.abort()
+          const controller = new AbortController()
+          switchOpAbortRef.current = controller
+
+          await load('refresh')
+          if (
+            gen !== switchOpFetchGenRef.current ||
+            activeEndpointIdRef.current !== epId
+          ) {
+            return
+          }
+          if (!opId) return
+          // URL may have changed during Endpoint refresh — drop stale Op fetch.
+          if (switchOperationIdParamRef.current !== opId) return
+
           try {
-            const data = await getOperation(opId)
-            if (activeEndpointIdRef.current !== epId) return
-            if (switchOperationIdParam !== opId) return
+            const data = await getOperation(opId, controller.signal)
+            if (
+              controller.signal.aborted ||
+              gen !== switchOpFetchGenRef.current ||
+              activeEndpointIdRef.current !== epId ||
+              switchOperationIdParamRef.current !== opId ||
+              data.id !== opId
+            ) {
+              return
+            }
             if (!isSwitchOperationForEndpoint(data, epId)) {
               setSwitchOpRestoreError(
                 'URL의 Operation이 이 Endpoint의 SWITCH가 아니므로 표시하지 않습니다.',
               )
-              clearTrackedSwitchOperation()
+              clearTrackedSwitchOperation({ clearWarning: true })
               return
             }
             setLastOperation(toSwitchOperation(data))
             setSwitchOpPollWarning(null)
             setSwitchOpRestoreError(null)
           } catch (err: unknown) {
-            if (activeEndpointIdRef.current !== epId) return
+            if (
+              controller.signal.aborted ||
+              gen !== switchOpFetchGenRef.current ||
+              activeEndpointIdRef.current !== epId ||
+              switchOperationIdParamRef.current !== opId
+            ) {
+              return
+            }
             if (err instanceof DOMException && err.name === 'AbortError') return
+            if (err instanceof ApiError && err.status === 404) {
+              setLastOperation(null)
+              setSwitchOpRestoreError(
+                'Switch Operation을 찾을 수 없습니다. URL 추적을 해제합니다.',
+              )
+              syncSwitchOperationQuery(null)
+              return
+            }
+            // Preserve last good snapshot; stay fail-closed until verified.
             setSwitchOpPollWarning(
               'Switch Operation 재조회에 실패했습니다. 마지막 정상값을 유지합니다. 다시 새로고침하세요.',
             )
@@ -989,7 +1078,8 @@ export function EndpointDetailPage() {
                         busy ||
                         previewing ||
                         refreshing ||
-                        trackedSwitchActive
+                        trackedSwitchActive ||
+                        switchTrackingUnresolved
                       }
                       onClick={openUnpublishDialog}
                     >
@@ -1092,6 +1182,18 @@ export function EndpointDetailPage() {
               (`worker_must_revalidate`).
             </p>
 
+            {switchTrackingUnresolved ? (
+              <p
+                className="panel-hint"
+                role="status"
+                data-testid="switch-op-unresolved"
+              >
+                {switchOpRestoring
+                  ? 'URL의 Switch Operation을 확인하는 중입니다. 확인이 끝나기 전까지 Switch Enqueue, Preflight Preview, Unpublish는 차단됩니다.'
+                  : 'Switch Operation 추적이 아직 확인되지 않아 Switch/Unpublish를 차단합니다. 새로고침으로 다시 확인하세요.'}
+              </p>
+            ) : null}
+
             {trackedSwitchActive ? (
               <p className="panel-hint" role="status" data-testid="switch-op-active">
                 Switch Operation이 진행 중입니다 ({lastOperation?.status}
@@ -1111,19 +1213,23 @@ export function EndpointDetailPage() {
               />
             ) : null}
             {switchOpPollWarning ? (
-              <SectionError
-                title="Switch Operation 조회"
-                message={switchOpPollWarning}
-              />
+              <div data-testid="switch-op-poll-warning">
+                <SectionError
+                  title="Switch Operation 조회"
+                  message={switchOpPollWarning}
+                />
+              </div>
             ) : null}
 
             {!canSwitchWorkflow ? (
               <p className="metric-line" role="status">
-                {trackedSwitchActive
-                  ? '진행 중인 Switch Operation이 있어 Switch workflow를 사용할 수 없습니다.'
-                  : unpublishOpen || unpublishing
-                    ? 'Unpublish 진행 중에는 Switch를 사용할 수 없습니다.'
-                    : switchBlockedReason}
+                {switchTrackingUnresolved
+                  ? 'Switch Operation 확인 전이라 Switch workflow를 사용할 수 없습니다.'
+                  : trackedSwitchActive
+                    ? '진행 중인 Switch Operation이 있어 Switch workflow를 사용할 수 없습니다.'
+                    : unpublishOpen || unpublishing
+                      ? 'Unpublish 진행 중에는 Switch를 사용할 수 없습니다.'
+                      : switchBlockedReason}
               </p>
             ) : (
               <>

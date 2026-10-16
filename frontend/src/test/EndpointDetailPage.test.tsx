@@ -1477,4 +1477,266 @@ describe('EndpointDetailPage', () => {
       screen.getByRole('heading', { level: 2, name: 'Chat Other' }),
     ).toBeInTheDocument()
   })
+
+  it('fail-closes Switch/Unpublish while F5 Operation restore is still pending', async () => {
+    let resolveOp!: (value: OperationDetail) => void
+    vi.mocked(endpointsApi.getEndpoint).mockResolvedValue(makeEndpoint())
+    vi.mocked(endpointsApi.listEndpointRoutes).mockResolvedValue({
+      items: [makeRoute({ id: 'r1' })],
+      total: 1,
+    })
+    vi.mocked(deploymentsApi.listDeployments).mockResolvedValue(
+      pageResult([
+        makeDeployment({ id: 'target-dep', name: 'target-candidate' }),
+      ]),
+    )
+    vi.mocked(operationsApi.getOperation).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveOp = resolve
+        }),
+    )
+    renderDetail('/endpoints/e1?switch_operation_id=op-sw')
+    // Endpoint GET can finish first; actions stay blocked until Operation verified.
+    expect(
+      await screen.findByRole('heading', { level: 2, name: 'Chat Main' }),
+    ).toBeInTheDocument()
+    expect(await screen.findByTestId('switch-op-unresolved')).toBeInTheDocument()
+    expect(screen.getByTestId('unpublish-open')).toBeDisabled()
+    expect(
+      screen.queryByRole('button', { name: 'Switch Enqueue' }),
+    ).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole('button', { name: 'Preflight Preview' }),
+    ).not.toBeInTheDocument()
+
+    resolveOp(
+      makeOperationDetail({ status: 'RUNNING', current_step: 'DRAIN' }),
+    )
+    expect(await screen.findByTestId('switch-op-active')).toBeInTheDocument()
+    expect(screen.queryByTestId('switch-op-unresolved')).not.toBeInTheDocument()
+  })
+
+  it('keeps ACTIVE Operation snapshot when post-enqueue restore GET fails transiently', async () => {
+    const user = userEvent.setup()
+    let restoreFailed = false
+    vi.mocked(endpointsApi.getEndpoint).mockResolvedValue(makeEndpoint())
+    vi.mocked(endpointsApi.listEndpointRoutes).mockResolvedValue({
+      items: [makeRoute({ id: 'r1' })],
+      total: 1,
+    })
+    vi.mocked(deploymentsApi.listDeployments).mockResolvedValue(
+      pageResult([
+        makeDeployment({ id: 'target-dep', name: 'target-candidate' }),
+      ]),
+    )
+    vi.mocked(endpointsApi.createPreflightPreview).mockResolvedValue(
+      makePreview(),
+    )
+    vi.mocked(endpointsApi.switchEndpoint).mockResolvedValue(makeOp())
+    vi.mocked(operationsApi.getOperation).mockImplementation(async () => {
+      if (restoreFailed) {
+        throw new ApiError('restore boom', { status: 503 })
+      }
+      return makeOperationDetail({ status: 'QUEUED' })
+    })
+
+    renderDetail()
+    await user.selectOptions(
+      await screen.findByLabelText('Target Deployment'),
+      'target-dep',
+    )
+    await user.click(screen.getByRole('button', { name: 'Preflight Preview' }))
+    await user.click(await screen.findByRole('button', { name: 'Switch Enqueue' }))
+    expect(await screen.findByTestId('switch-operation-result')).toBeInTheDocument()
+    await waitFor(() => {
+      expect(screen.getByTestId('search-probe')).toHaveTextContent(
+        /switch_operation_id=op-sw/,
+      )
+    })
+
+    restoreFailed = true
+    // Force restore effect by remounting same URL state via cleanup+render with query.
+    cleanup()
+    // Seed last known path: render with URL; first GET fails but... we need snapshot.
+    // Simulate by rendering after enqueue path: open with URL and a prior successful
+    // getOperation once, then fail on the restore that follows remount.
+    restoreFailed = false
+    vi.mocked(operationsApi.getOperation)
+      .mockResolvedValueOnce(
+        makeOperationDetail({ status: 'RUNNING', current_step: 'DRAIN' }),
+      )
+      .mockRejectedValue(new ApiError('restore boom', { status: 503 }))
+    renderDetail('/endpoints/e1?switch_operation_id=op-sw')
+    expect(await screen.findByTestId('switch-op-active')).toBeInTheDocument()
+    // Trigger another restore by clicking refresh while GET fails — snapshot kept.
+    await user.click(screen.getByRole('button', { name: '새로고침' }))
+    expect(
+      await screen.findByText(/마지막 정상값을 유지/),
+    ).toBeInTheDocument()
+    expect(screen.getByTestId('switch-operation-result')).toHaveTextContent(
+      /DRAIN|RUNNING|실행/,
+    )
+    expect(screen.getByTestId('search-probe')).toHaveTextContent(
+      /switch_operation_id=op-sw/,
+    )
+  })
+
+  it('recovers Switch tracking via manual Refresh after restore failure', async () => {
+    const user = userEvent.setup()
+    let fail = true
+    vi.mocked(endpointsApi.getEndpoint).mockResolvedValue(makeEndpoint())
+    vi.mocked(endpointsApi.listEndpointRoutes).mockResolvedValue({
+      items: [makeRoute({ id: 'r1' })],
+      total: 1,
+    })
+    vi.mocked(deploymentsApi.listDeployments).mockResolvedValue(pageResult([]))
+    vi.mocked(operationsApi.getOperation).mockImplementation(async () => {
+      if (fail) throw new ApiError('temp down', { status: 503 })
+      return makeOperationDetail({
+        status: 'RUNNING',
+        current_step: 'DRAIN',
+      })
+    })
+    renderDetail('/endpoints/e1?switch_operation_id=op-sw')
+    expect(await screen.findByTestId('switch-op-unresolved')).toBeInTheDocument()
+    expect(
+      await screen.findByText(/마지막 정상 Operation 값은 유지/),
+    ).toBeInTheDocument()
+    // Fail-closed remains — no auto unblock.
+    expect(screen.getByTestId('unpublish-open')).toBeDisabled()
+
+    fail = false
+    await user.click(screen.getByRole('button', { name: '새로고침' }))
+    expect(await screen.findByTestId('switch-op-active')).toBeInTheDocument()
+    expect(screen.queryByTestId('switch-op-unresolved')).not.toBeInTheDocument()
+  })
+
+  it('keeps ownership-mismatch poll warning after stopping tracking', async () => {
+    operationPollConfig.ms = 40
+    let mismatched = false
+    vi.mocked(endpointsApi.getEndpoint).mockResolvedValue(makeEndpoint())
+    vi.mocked(endpointsApi.listEndpointRoutes).mockResolvedValue({
+      items: [makeRoute({ id: 'r1' })],
+      total: 1,
+    })
+    vi.mocked(deploymentsApi.listDeployments).mockResolvedValue(pageResult([]))
+    vi.mocked(operationsApi.getOperation).mockImplementation(async () => {
+      if (mismatched) {
+        return makeOperationDetail({
+          status: 'RUNNING',
+          endpoint_alias_id: 'other-endpoint',
+        })
+      }
+      return makeOperationDetail({
+        status: 'RUNNING',
+        current_step: 'DRAIN',
+      })
+    })
+    renderDetail('/endpoints/e1?switch_operation_id=op-sw')
+    expect(await screen.findByTestId('switch-op-active')).toBeInTheDocument()
+    mismatched = true
+    expect(
+      await screen.findByTestId('switch-op-poll-warning'),
+    ).toHaveTextContent(/소속이 일치하지 않아/)
+    expect(screen.queryByTestId('switch-operation-result')).not.toBeInTheDocument()
+    expect(screen.getByTestId('search-probe')).toHaveTextContent('(empty)')
+    // Warning must remain after tracking cleared.
+    await new Promise((r) => setTimeout(r, 80))
+    expect(screen.getByTestId('switch-op-poll-warning')).toBeInTheDocument()
+  })
+
+  it('ignores late Refresh Operation response after URL Operation ID changes', async () => {
+    const user = userEvent.setup()
+    let resolveRefreshOp!: (value: OperationDetail) => void
+    let holdRefresh = false
+    vi.mocked(endpointsApi.getEndpoint).mockResolvedValue(makeEndpoint())
+    vi.mocked(endpointsApi.listEndpointRoutes).mockResolvedValue({
+      items: [makeRoute({ id: 'r1' })],
+      total: 1,
+    })
+    vi.mocked(deploymentsApi.listDeployments).mockResolvedValue(pageResult([]))
+    vi.mocked(operationsApi.getOperation).mockImplementation(async (id) => {
+      if (holdRefresh && id === 'op-sw') {
+        return new Promise((resolve) => {
+          resolveRefreshOp = resolve
+        })
+      }
+      if (id === 'op-sw-2') {
+        return makeOperationDetail({
+          id: 'op-sw-2',
+          status: 'QUEUED',
+          current_step: 'VALIDATE',
+        })
+      }
+      return makeOperationDetail({
+        id: 'op-sw',
+        status: 'RUNNING',
+        current_step: 'DRAIN',
+      })
+    })
+
+    function SwapOpButton() {
+      const [, setParams] = useSearchParams()
+      return (
+        <button
+          type="button"
+          onClick={() => {
+            const next = new URLSearchParams()
+            next.set('switch_operation_id', 'op-sw-2')
+            setParams(next, { replace: true })
+          }}
+        >
+          swap-op
+        </button>
+      )
+    }
+
+    render(
+      <MemoryRouter initialEntries={['/endpoints/e1?switch_operation_id=op-sw']}>
+        <Routes>
+          <Route
+            path="/endpoints/:endpointId"
+            element={
+              <>
+                <SearchProbe />
+                <SwapOpButton />
+                <EndpointDetailPage />
+              </>
+            }
+          />
+        </Routes>
+      </MemoryRouter>,
+    )
+    expect(await screen.findByTestId('switch-op-active')).toBeInTheDocument()
+
+    holdRefresh = true
+    await user.click(screen.getByRole('button', { name: '새로고침' }))
+    await waitFor(() => {
+      expect(resolveRefreshOp).toBeTypeOf('function')
+    })
+
+    await user.click(screen.getByRole('button', { name: 'swap-op' }))
+    expect(await screen.findByTestId('search-probe')).toHaveTextContent(
+      /switch_operation_id=op-sw-2/,
+    )
+    expect(await screen.findByTestId('switch-operation-result')).toHaveTextContent(
+      /VALIDATE|QUEUED|대기/,
+    )
+
+    resolveRefreshOp(
+      makeOperationDetail({
+        id: 'op-sw',
+        status: 'SUCCEEDED',
+        current_step: 'FINALIZE',
+      }),
+    )
+    await new Promise((r) => setTimeout(r, 50))
+    expect(screen.getByTestId('switch-operation-result')).toHaveTextContent(
+      /VALIDATE|QUEUED|대기/,
+    )
+    expect(screen.getByTestId('switch-operation-result')).not.toHaveTextContent(
+      /FINALIZE/,
+    )
+  })
 })
