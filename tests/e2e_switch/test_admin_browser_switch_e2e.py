@@ -55,6 +55,8 @@ def _shot(page: Any, name: str) -> None:
 
 
 def _seed(strategy_hint: str) -> dict[str, Any]:
+    """Seed via a fresh event loop in a worker thread (pytest-asyncio may own the main loop)."""
+
     async def _run() -> dict[str, Any]:
         engine = create_async_engine(DATABASE_URL, future=True)
         sf = async_sessionmaker(engine, expire_on_commit=False, autoflush=False)
@@ -64,7 +66,13 @@ def _seed(strategy_hint: str) -> dict[str, Any]:
         finally:
             await engine.dispose()
 
-    return asyncio.run(_run())
+    def _thread_main() -> dict[str, Any]:
+        return asyncio.run(_run())
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(_thread_main).result(timeout=60)
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -138,9 +146,11 @@ def _open_endpoint(page: Any, endpoint_id: Any, *, op_id: str | None = None) -> 
     page.get_by_role("heading", name="ACTIVE Route").wait_for(timeout=45_000)
 
 
-def _select_target_and_preview(page: Any, target_name: str) -> None:
+def _select_target_and_preview(page: Any, *, target_id: Any, target_name: str) -> None:
     page.locator("#switch-target").wait_for(timeout=30_000)
-    page.locator("#switch-target").select_option(label=re.compile(re.escape(target_name)))
+    # Prefer stable option value (deployment UUID); label includes runtime/health noise.
+    page.locator("#switch-target").select_option(value=str(target_id))
+    assert target_name  # seed must expose name for screenshot/debug context
     page.get_by_role("button", name="Preflight Preview").click()
     page.get_by_role("heading", name="Preflight Preview").wait_for(timeout=45_000)
 
@@ -216,7 +226,9 @@ def test_a_endpoint_load_preflight(page: Any) -> None:
     _open_endpoint(page, fixture["endpoint_id"])
     href = _active_route_href(page)
     assert str(fixture["source_id"]) in href
-    _select_target_and_preview(page, fixture["target_name"])
+    _select_target_and_preview(
+        page, target_id=fixture["target_id"], target_name=fixture["target_name"]
+    )
     assert page.get_by_text("HOT_SWITCH_AVAILABLE").count() > 0
     _shot(page, "a-preflight-hot")
 
@@ -227,7 +239,9 @@ def test_b_hot_switch_browser(page: Any) -> None:
     wait_gateway_alias(fixture["alias"])
 
     _open_endpoint(page, fixture["endpoint_id"])
-    _select_target_and_preview(page, fixture["target_name"])
+    _select_target_and_preview(
+        page, target_id=fixture["target_id"], target_name=fixture["target_name"]
+    )
     _choose_strategy(page, "HOT")
     op_id = _enqueue_switch(page)
     backend_op = get_operation(op_id)
@@ -246,7 +260,9 @@ def test_c_cold_switch_browser(page: Any) -> None:
     wait_gateway_alias(fixture["alias"])
 
     _open_endpoint(page, fixture["endpoint_id"])
-    _select_target_and_preview(page, fixture["target_name"])
+    _select_target_and_preview(
+        page, target_id=fixture["target_id"], target_name=fixture["target_name"]
+    )
     assert page.get_by_text("COLD_SWITCH_ONLY").count() > 0
     _choose_strategy(page, "COLD")
     op_id = _enqueue_switch(page)
@@ -281,7 +297,9 @@ def test_d_f5_restore_while_running(page: Any, browser: Any) -> None:
     wait_gateway_alias(fixture["alias"])
 
     _open_endpoint(page, fixture["endpoint_id"])
-    _select_target_and_preview(page, fixture["target_name"])
+    _select_target_and_preview(
+        page, target_id=fixture["target_id"], target_name=fixture["target_name"]
+    )
     _choose_strategy(page, "HOT")
     op_id = _enqueue_switch(page)
 
@@ -333,7 +351,9 @@ def test_e_failure_preserves_source_ui(page: Any) -> None:
     wait_gateway_alias(fixture["alias"])
 
     _open_endpoint(page, fixture["endpoint_id"])
-    _select_target_and_preview(page, fixture["target_name"])
+    _select_target_and_preview(
+        page, target_id=fixture["target_id"], target_name=fixture["target_name"]
+    )
     _choose_strategy(page, "HOT")
     op_id = _enqueue_switch(page)
     status = _wait_ui_terminal(page, timeout_s=180.0)
@@ -361,7 +381,9 @@ def test_f_duplicate_enqueue_blocked_and_history(page: Any) -> None:
     wait_gateway_alias(fixture["alias"])
 
     _open_endpoint(page, fixture["endpoint_id"])
-    _select_target_and_preview(page, fixture["target_name"])
+    _select_target_and_preview(
+        page, target_id=fixture["target_id"], target_name=fixture["target_name"]
+    )
     _choose_strategy(page, "HOT")
     op_id = _enqueue_switch(page)
 

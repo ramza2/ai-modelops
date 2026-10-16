@@ -74,14 +74,17 @@ re-run is BLOCKED/FAIL.
 
 | Scenario | Status | Evidence |
 |---|---|---|
-| Isolation + frontend proxy | _(fill after run)_ | `isolation_check.sh`; `compose config`; `:28081` |
-| A. Endpoint load + Preflight | _(fill after run)_ | `test_a_endpoint_load_preflight` |
-| B. HOT Switch (browser) | _(fill after run)_ | `test_b_hot_switch_browser` |
-| C. COLD Switch (browser) | _(fill after run)_ | `test_c_cold_switch_browser` |
-| D. F5 restore while RUNNING | _(fill after run)_ | `test_d_f5_restore_while_running` + Fake NA delay |
-| E. Target start failure UI | _(fill after run)_ | `test_e_failure_preserves_source_ui` |
-| F. Duplicate enqueue / URL restore | _(fill after run)_ | `test_f_duplicate_enqueue_blocked_and_history` |
-| Cleanup | _(fill after run)_ | `down.sh` removes only `modelops-p18k` |
+| Isolation + frontend proxy | PASS | `isolation_check.sh`; `compose config`; `127.0.0.1:28081`; nginx → `backend:8000` |
+| A. Endpoint load + Preflight | PASS | `test_a_endpoint_load_preflight` + `a-preflight-hot.png` |
+| B. HOT Switch (browser) | PASS | `test_b_hot_switch_browser` + `b-hot-succeeded.png` |
+| C. COLD Switch (browser) | PASS | `test_c_cold_switch_browser` + `c-cold-succeeded.png` |
+| D. F5 restore while RUNNING | PASS | `test_d_f5_restore_while_running` + Fake NA `/harness/delay` + F5 screenshots |
+| E. Target start failure UI | PASS | `test_e_failure_preserves_source_ui` + `e-failure-source-preserved.png` |
+| F. Duplicate enqueue / URL restore | PASS | `test_f_duplicate_enqueue_blocked_and_history` + `f-terminal-history.png` |
+| Cleanup | PASS | `down.sh` removes only `modelops-p18k` |
+
+Recorded pytest: **6 passed** (`/opt/cursor/artifacts/p1-8l-browser-e2e-retry2.log`).
+Screenshots: `/opt/cursor/artifacts/p18l-browser/`.
 
 ---
 
