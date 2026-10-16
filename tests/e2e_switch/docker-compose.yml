@@ -1,4 +1,4 @@
-# P1-8K isolated multi-service Switch E2E harness.
+# P1-8K / P1-8L isolated multi-service Switch E2E harness.
 # ALWAYS invoke with: docker compose -p modelops-p18k -f tests/e2e_switch/docker-compose.yml ...
 # Do NOT reuse deploy/compose project name, networks, or volumes.
 #
@@ -8,6 +8,7 @@
 # - No /data/modelops/models mounts
 # - Dedicated project/network/volume names prefixed modelops-p18k
 # - Host publishes only as 127.0.0.1:25xxx|28xxx:container (avoid default 5432/8000/8080)
+# - Frontend (P1-8L) same-origin proxies only to compose service `backend`
 
 name: modelops-p18k
 
@@ -202,6 +203,31 @@ services:
     networks:
       - modelops_p18k_control
     restart: unless-stopped
+
+  # P1-8L: Admin UI — same nginx.conf proxies /api/ to compose service `backend` only.
+  frontend:
+    build:
+      context: ../../frontend
+      dockerfile: Dockerfile
+    ports:
+      - "127.0.0.1:28081:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - modelops_p18k_control
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "wget",
+          "-qO-",
+          "http://127.0.0.1/health",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
 
 networks:
   modelops_p18k_control:
