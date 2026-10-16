@@ -326,11 +326,23 @@ def test_d_f5_restore_while_running(page: Any, browser: Any) -> None:
         f"F5 requires Backend status RUNNING (got {pre_f5.get('status')!r}); "
         f"QUEUED-only is not PASS. op={pre_f5}"
     )
-    page.get_by_test_id("switch-op-active").wait_for(timeout=15_000)
-    assert "RUNNING" in page.get_by_test_id("switch-op-active").inner_text()
+    # Frontend polls ~4s; wait until UI banner reflects Backend RUNNING (not stale QUEUED).
+    ui_deadline = time.time() + 30
+    ui_text = ""
+    while time.time() < ui_deadline:
+        if get_operation(op_id).get("status") in TERMINAL:
+            pytest.fail("Operation left RUNNING before UI caught up for F5")
+        page.get_by_test_id("switch-op-active").wait_for(timeout=5_000)
+        ui_text = page.get_by_test_id("switch-op-active").inner_text()
+        if "RUNNING" in ui_text:
+            break
+        time.sleep(0.5)
+    assert "RUNNING" in ui_text, (
+        f"UI never showed RUNNING before F5 (last={ui_text!r}); Backend was RUNNING"
+    )
 
     _shot(page, "d-before-f5-running")
-    # Reload while still RUNNING (delay must still be holding start).
+    # Reload while Backend is still RUNNING (Fake NA start delay must still hold).
     assert get_operation(op_id)["status"] == "RUNNING", "status left RUNNING before reload"
     page.reload(wait_until="domcontentloaded")
 
