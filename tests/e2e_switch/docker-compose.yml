@@ -1,0 +1,198 @@
+# P1-8K isolated multi-service Switch E2E harness.
+# ALWAYS invoke with: docker compose -p modelops-p18k -f tests/e2e_switch/docker-compose.yml ...
+# Do NOT reuse deploy/compose project name, networks, or volumes.
+#
+# Isolation invariants (enforced by scripts/isolation_check.sh):
+# - No docker.sock mounts
+# - No NVIDIA / privileged / host network
+# - No /data/modelops/models mounts
+# - Dedicated project/network/volume names prefixed modelops-p18k
+# - Host ports only in the 28xxx range (avoid default 5432/8000/8080)
+
+name: modelops-p18k
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: p18k
+      POSTGRES_PASSWORD: p18k-isolated
+      POSTGRES_DB: modelops_p18k
+    ports:
+      - "25432:5432"
+    volumes:
+      - modelops_p18k_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U p18k -d modelops_p18k"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+    networks:
+      - modelops_p18k_control
+
+  mock-runtime-source:
+    build:
+      context: ./mock_runtime
+    environment:
+      MOCK_INSTANCE_ID: source
+      MOCK_SERVED_MODEL_NAME: served-src-p18k
+    networks:
+      - modelops_p18k_model
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9000/health')"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  mock-runtime-target:
+    build:
+      context: ./mock_runtime
+    environment:
+      MOCK_INSTANCE_ID: target
+      MOCK_SERVED_MODEL_NAME: served-tgt-p18k
+    networks:
+      - modelops_p18k_model
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9000/health')"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  fake-node-agent:
+    build:
+      context: ./fake_node_agent
+    environment:
+      NODE_AGENT_TOKEN: p18k-test-token
+      FAKE_GPU_UUID: GPU-P18K-FAKE-0
+      FAKE_VRAM_TOTAL_MB: "16000"
+      FAKE_VRAM_FREE_MB: "14000"
+    ports:
+      - "28100:8100"
+    networks:
+      - modelops_p18k_control
+      - modelops_p18k_model
+    depends_on:
+      mock-runtime-source:
+        condition: service_healthy
+      mock-runtime-target:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8100/health')"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  backend:
+    build:
+      context: ../../backend
+      dockerfile: Dockerfile
+    environment:
+      MODELOPS_DATABASE_URL: postgresql+asyncpg://p18k:p18k-isolated@postgres:5432/modelops_p18k
+      MODELOPS_ENVIRONMENT: p18k-e2e
+      MODELOPS_DEBUG: "false"
+      MODELOPS_NODE_AGENT_BASE_URL: http://fake-node-agent:8100
+      MODELOPS_NODE_AGENT_TOKEN: p18k-test-token
+      MODELOPS_NODE_AGENT_TIMEOUT_SECONDS: "10"
+      MODELOPS_DEFAULT_GPU_SAFETY_MARGIN_MB: "1024"
+      MODELOPS_GATEWAY_BASE_URL: http://gateway:8080
+    depends_on:
+      postgres:
+        condition: service_healthy
+      fake-node-agent:
+        condition: service_healthy
+    command: >
+      sh -c "alembic upgrade head &&
+             uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    ports:
+      - "28000:8000"
+    networks:
+      - modelops_p18k_control
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+  gateway:
+    build:
+      context: ../../gateway
+      dockerfile: Dockerfile
+    environment:
+      MODELOPS_DATABASE_URL: postgresql+asyncpg://p18k:p18k-isolated@postgres:5432/modelops_p18k
+      MODELOPS_ENVIRONMENT: p18k-e2e
+      MODELOPS_DEBUG: "false"
+      MODELOPS_UPSTREAM_TIMEOUT_SECONDS: "30"
+      MODELOPS_ROUTING_POLL_SECONDS: "0.5"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+      mock-runtime-source:
+        condition: service_healthy
+      mock-runtime-target:
+        condition: service_healthy
+    command: >
+      uvicorn app.main:app --host 0.0.0.0 --port 8080
+    ports:
+      - "28080:8080"
+    networks:
+      - modelops_p18k_control
+      - modelops_p18k_model
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health')"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+
+  worker:
+    build:
+      context: ../../worker
+      dockerfile: Dockerfile
+    environment:
+      MODELOPS_DATABASE_URL: postgresql+asyncpg://p18k:p18k-isolated@postgres:5432/modelops_p18k
+      MODELOPS_GATEWAY_BASE_URL: http://gateway:8080
+      MODELOPS_WORKER_ID: worker-p18k-1
+      MODELOPS_WORKER_POLL_SECONDS: "0.5"
+      MODELOPS_WORKER_MAX_ATTEMPTS: "3"
+      MODELOPS_WORKER_STALE_SECONDS: "120"
+      MODELOPS_WORKER_LOCK_REQUEUE_SECONDS: "2"
+      MODELOPS_NODE_AGENT_TOKEN: p18k-test-token
+      MODELOPS_NODE_AGENT_TIMEOUT_SECONDS: "30"
+      MODELOPS_NODE_AGENT_IMAGE_PULL_TIMEOUT_SECONDS: "30"
+      MODELOPS_PREPARE_HTTP_SAFETY_SECONDS: "5"
+      MODELOPS_HEALTH_TIMEOUT_SECONDS: "60"
+      MODELOPS_HEALTH_POLL_INTERVAL_SECONDS: "0.5"
+      MODELOPS_PROBE_TIMEOUT_SECONDS: "30"
+      MODELOPS_VRAM_RELEASE_TIMEOUT_SECONDS: "30"
+      MODELOPS_VRAM_RELEASE_POLL_INTERVAL_MS: "200"
+      MODELOPS_GATEWAY_TIMEOUT_SECONDS: "10"
+      MODELOPS_GATEWAY_APPLY_TIMEOUT_SECONDS: "30"
+      MODELOPS_DRAIN_TIMEOUT_SECONDS: "30"
+      MODELOPS_GATEWAY_POLL_INTERVAL_SECONDS: "0.5"
+      MODELOPS_DEFAULT_GPU_SAFETY_MARGIN_MB: "1024"
+      MODELOPS_RUNTIME_METRICS_ENABLED: "false"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+      gateway:
+        condition: service_healthy
+      fake-node-agent:
+        condition: service_healthy
+    networks:
+      - modelops_p18k_control
+    restart: unless-stopped
+
+networks:
+  modelops_p18k_control:
+    name: modelops_p18k_control
+  modelops_p18k_model:
+    name: modelops_p18k_model
+
+volumes:
+  modelops_p18k_pgdata:
+    name: modelops_p18k_pgdata
