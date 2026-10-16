@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Fail closed before any P1-8K Switch E2E traffic if isolation invariants break.
+# Does not mutate host sysctl/iptables and never uses sudo.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 COMPOSE_FILE="${ROOT}/tests/e2e_switch/docker-compose.yml"
 PROJECT="modelops-p18k"
-COMPOSE=(docker compose -p "${PROJECT}" -f "${COMPOSE_FILE}")
 
 die() {
   echo "P1-8K isolation check FAILED: $*" >&2
@@ -16,6 +16,7 @@ echo "== P1-8K isolation check =="
 
 command -v docker >/dev/null || die "docker not found"
 docker info >/dev/null 2>&1 || die "docker daemon not reachable"
+command -v python3 >/dev/null || die "python3 required for exact URL parsing"
 
 # Compose file must not request privileged / host network / GPU / docker.sock / ops mounts.
 # Strip YAML comments before scanning so explanatory notes cannot false-positive.
@@ -44,22 +45,28 @@ grep -q 'name: modelops-p18k' "${COMPOSE_FILE}" || die "compose project name mis
 grep -q 'modelops_p18k_control' "${COMPOSE_FILE}" || die "dedicated control network missing"
 grep -q 'modelops_p18k_pgdata' "${COMPOSE_FILE}" || die "dedicated volume missing"
 
-# Host publish ports must stay in the reserved 25xxx/28xxx band (not 5432/8000/8080).
-_host_ports="$(printf '%s\n' "${_compose_nocomment}" | grep -E '^\s*-\s*"?[0-9]+:[0-9]+"?\s*$' || true)"
+# Host publish ports MUST be loopback-bound: 127.0.0.1:<host>:<container>
+# and host ports must stay in the reserved 25xxx/28xxx band.
+_host_ports="$(printf '%s\n' "${_compose_nocomment}" | grep -E '^\s*-\s*"?127\.0\.0\.1:[0-9]+:[0-9]+"?\s*$' || true)"
 if [[ -z "${_host_ports}" ]]; then
-  die "no host port mappings found"
+  die "no loopback-bound host port mappings found (require 127.0.0.1:HOST:CONTAINER)"
+fi
+# Reject any unbound host publishes (0.0.0.0 / bare HOST:CONTAINER).
+if printf '%s\n' "${_compose_nocomment}" | grep -E '^\s*-\s*"?[0-9]+:[0-9]+"?\s*$' >/dev/null; then
+  die "found non-loopback host port mapping; all publishes must be 127.0.0.1:HOST:CONTAINER"
 fi
 while IFS= read -r mapping; do
   [[ -z "${mapping}" ]] && continue
-  host_port="$(printf '%s' "${mapping}" | sed -E 's/.*"([0-9]+):[0-9]+".*/\1/; t; s/.*-[[:space:]]*([0-9]+):[0-9]+.*/\1/')"
+  host_port="$(printf '%s' "${mapping}" | sed -E 's/.*"127\.0\.0\.1:([0-9]+):[0-9]+".*/\1/; t; s/.*127\.0\.0\.1:([0-9]+):[0-9]+.*/\1/')"
   case "${host_port}" in
     25[0-9][0-9][0-9]|28[0-9][0-9][0-9]) ;;
     *) die "host port ${host_port} outside reserved 25xxx/28xxx band (${mapping})" ;;
   esac
 done <<< "${_host_ports}"
-grep -q '25432:5432' "${COMPOSE_FILE}" || die "expected host postgres port 25432"
-grep -q '28000:8000' "${COMPOSE_FILE}" || die "expected host backend port 28000"
-grep -q '28080:8080' "${COMPOSE_FILE}" || die "expected host gateway port 28080"
+grep -q '127.0.0.1:25432:5432' "${COMPOSE_FILE}" || die "expected 127.0.0.1:25432:5432"
+grep -q '127.0.0.1:28000:8000' "${COMPOSE_FILE}" || die "expected 127.0.0.1:28000:8000"
+grep -q '127.0.0.1:28080:8080' "${COMPOSE_FILE}" || die "expected 127.0.0.1:28080:8080"
+grep -q '127.0.0.1:28100:8100' "${COMPOSE_FILE}" || die "expected 127.0.0.1:28100:8100"
 
 # Credentials must be harness-local (never ops placeholders that look production).
 grep -q 'p18k-isolated' "${COMPOSE_FILE}" || die "expected isolated DB password marker"
@@ -75,7 +82,7 @@ if docker volume inspect modelops_pgdata >/dev/null 2>&1; then
   echo "note: volume modelops_pgdata exists; P1-8K uses modelops_p18k_pgdata only"
 fi
 
-# If the project is already up, verify container labels/networks.
+# If the project is already up, verify container labels/networks/binds.
 if docker ps --filter "label=com.docker.compose.project=${PROJECT}" --format '{{.Names}}' | grep -q .; then
   while read -r cid; do
     [[ -z "${cid}" ]] && continue
@@ -89,24 +96,60 @@ if docker ps --filter "label=com.docker.compose.project=${PROJECT}" --format '{{
   done < <(docker ps -q --filter "label=com.docker.compose.project=${PROJECT}")
 fi
 
-# Target addresses for host-side tests.
+# Target addresses for host-side tests (defaults are loopback-only).
 export P18K_BACKEND_URL="${P18K_BACKEND_URL:-http://127.0.0.1:28000}"
 export P18K_GATEWAY_URL="${P18K_GATEWAY_URL:-http://127.0.0.1:28080}"
 export P18K_FAKE_NA_URL="${P18K_FAKE_NA_URL:-http://127.0.0.1:28100}"
 export P18K_DATABASE_URL="${P18K_DATABASE_URL:-postgresql+asyncpg://p18k:p18k-isolated@127.0.0.1:25432/modelops_p18k}"
 
-case "${P18K_BACKEND_URL}" in
-  *127.0.0.1:28000*|*localhost:28000*) ;;
-  *) die "P18K_BACKEND_URL must target isolated backend :28000 (got ${P18K_BACKEND_URL})" ;;
-esac
-case "${P18K_GATEWAY_URL}" in
-  *127.0.0.1:28080*|*localhost:28080*) ;;
-  *) die "P18K_GATEWAY_URL must target isolated gateway :28080 (got ${P18K_GATEWAY_URL})" ;;
-esac
-case "${P18K_DATABASE_URL}" in
-  *127.0.0.1:25432/modelops_p18k*|*localhost:25432/modelops_p18k*) ;;
-  *) die "P18K_DATABASE_URL must target isolated DB :25432/modelops_p18k" ;;
-esac
+# Exact scheme/host/port/path validation — no substring bypass.
+python3 - <<'PY' || die "target URL validation failed"
+import os
+import sys
+from urllib.parse import urlparse, unquote
+
+def fail(msg: str) -> None:
+    print(msg, file=sys.stderr)
+    raise SystemExit(1)
+
+def require_http(name: str, url: str, port: int) -> None:
+    p = urlparse(url)
+    if p.scheme != "http":
+        fail(f"{name}: scheme must be http (got {p.scheme!r})")
+    if p.hostname != "127.0.0.1":
+        fail(f"{name}: hostname must be exactly 127.0.0.1 (got {p.hostname!r})")
+    if p.port != port:
+        fail(f"{name}: port must be {port} (got {p.port!r})")
+    if p.username or p.password:
+        fail(f"{name}: must not embed credentials")
+    if p.path not in ("", "/"):
+        fail(f"{name}: path must be empty (got {p.path!r})")
+    if p.query or p.fragment:
+        fail(f"{name}: query/fragment not allowed")
+
+def require_db(url: str) -> None:
+    p = urlparse(url)
+    if p.scheme != "postgresql+asyncpg":
+        fail(f"P18K_DATABASE_URL: scheme must be postgresql+asyncpg (got {p.scheme!r})")
+    if p.hostname != "127.0.0.1":
+        fail(f"P18K_DATABASE_URL: hostname must be exactly 127.0.0.1 (got {p.hostname!r})")
+    if p.port != 25432:
+        fail(f"P18K_DATABASE_URL: port must be 25432 (got {p.port!r})")
+    if (p.username or "") != "p18k":
+        fail(f"P18K_DATABASE_URL: username must be p18k (got {p.username!r})")
+    if unquote(p.password or "") != "p18k-isolated":
+        fail("P18K_DATABASE_URL: password must be harness-local p18k-isolated")
+    if p.path != "/modelops_p18k":
+        fail(f"P18K_DATABASE_URL: database path must be /modelops_p18k (got {p.path!r})")
+    if p.query or p.fragment:
+        fail("P18K_DATABASE_URL: query/fragment not allowed")
+
+require_http("P18K_BACKEND_URL", os.environ["P18K_BACKEND_URL"], 28000)
+require_http("P18K_GATEWAY_URL", os.environ["P18K_GATEWAY_URL"], 28080)
+require_http("P18K_FAKE_NA_URL", os.environ["P18K_FAKE_NA_URL"], 28100)
+require_db(os.environ["P18K_DATABASE_URL"])
+print("OK: target URLs parse as loopback harness endpoints")
+PY
 
 echo "OK: isolation invariants satisfied"
 echo "  project=${PROJECT}"

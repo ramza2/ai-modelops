@@ -7,7 +7,7 @@
 # - No NVIDIA / privileged / host network
 # - No /data/modelops/models mounts
 # - Dedicated project/network/volume names prefixed modelops-p18k
-# - Host ports only in the 28xxx range (avoid default 5432/8000/8080)
+# - Host publishes only as 127.0.0.1:25xxx|28xxx:container (avoid default 5432/8000/8080)
 
 name: modelops-p18k
 
@@ -20,7 +20,7 @@ services:
       POSTGRES_DB: modelops_p18k
       PGPASSWORD: p18k-isolated
     ports:
-      - "25432:5432"
+      - "127.0.0.1:25432:5432"
     volumes:
       - modelops_p18k_pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -74,7 +74,7 @@ services:
       FAKE_VRAM_TOTAL_MB: "16000"
       FAKE_VRAM_FREE_MB: "14000"
     ports:
-      - "28100:8100"
+      - "127.0.0.1:28100:8100"
     networks:
       - modelops_p18k_control
       - modelops_p18k_model
@@ -120,7 +120,7 @@ services:
         alembic upgrade head
         exec uvicorn app.main:app --host 0.0.0.0 --port 8000
     ports:
-      - "28000:8000"
+      - "127.0.0.1:28000:8000"
     networks:
       - modelops_p18k_control
     healthcheck:
@@ -152,7 +152,7 @@ services:
     command: >
       uvicorn app.main:app --host 0.0.0.0 --port 8080
     ports:
-      - "28080:8080"
+      - "127.0.0.1:28080:8080"
     networks:
       - modelops_p18k_control
       - modelops_p18k_model

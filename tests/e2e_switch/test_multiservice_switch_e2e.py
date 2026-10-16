@@ -12,6 +12,7 @@ import os
 import time
 import uuid
 from typing import Any
+from urllib.parse import unquote, urlparse
 
 import httpx
 import pytest
@@ -29,12 +30,29 @@ SOURCE_UPSTREAM = "http://mock-runtime-source:9000"
 TARGET_UPSTREAM = "http://mock-runtime-target:9000"
 
 
+def _require_http_loopback(name: str, url: str, port: int) -> None:
+    parsed = urlparse(url)
+    assert parsed.scheme == "http", f"{name} scheme={parsed.scheme!r}"
+    assert parsed.hostname == "127.0.0.1", f"{name} host={parsed.hostname!r}"
+    assert parsed.port == port, f"{name} port={parsed.port!r}"
+    assert not parsed.username and not parsed.password, f"{name} must not embed credentials"
+    assert parsed.path in ("", "/"), f"{name} path={parsed.path!r}"
+    assert not parsed.query and not parsed.fragment, f"{name} query/fragment forbidden"
+
+
 def _assert_isolated_targets() -> None:
-    assert ":28000" in BACKEND, BACKEND
-    assert ":28080" in GATEWAY, GATEWAY
-    assert ":28100" in FAKE_NA, FAKE_NA
-    assert ":25432" in DATABASE_URL and "modelops_p18k" in DATABASE_URL, DATABASE_URL
-    assert "p18k-isolated" in DATABASE_URL, DATABASE_URL
+    """Exact scheme/host/port checks — substring matching is intentionally rejected."""
+    _require_http_loopback("P18K_BACKEND_URL", BACKEND, 28000)
+    _require_http_loopback("P18K_GATEWAY_URL", GATEWAY, 28080)
+    _require_http_loopback("P18K_FAKE_NA_URL", FAKE_NA, 28100)
+    db = urlparse(DATABASE_URL)
+    assert db.scheme == "postgresql+asyncpg", db.scheme
+    assert db.hostname == "127.0.0.1", db.hostname
+    assert db.port == 25432, db.port
+    assert db.username == "p18k", db.username
+    assert unquote(db.password or "") == "p18k-isolated", "unexpected DB password"
+    assert db.path == "/modelops_p18k", db.path
+    assert not db.query and not db.fragment
 
 
 @pytest.fixture(scope="session", autouse=True)

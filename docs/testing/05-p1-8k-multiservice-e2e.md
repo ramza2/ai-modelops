@@ -25,11 +25,11 @@ Status legend: `PASS` | `FAIL` | `BLOCKED` | `PENDING` | `N/A`
 | Piece | Role |
 |---|---|
 | Compose project `modelops-p18k` | Dedicated control + model networks, volume `modelops_p18k_pgdata` |
-| `postgres` | Isolated DB `modelops_p18k` (host `25432`) |
-| `backend` | Management API + Alembic (host `28000`) |
+| `postgres` | Isolated DB `modelops_p18k` (loopback `127.0.0.1:25432`) |
+| `backend` | Management API + Alembic (loopback `127.0.0.1:28000`) |
 | `worker` | Claims Operation jobs; calls Fake NA + Gateway |
-| `gateway` | Route snapshot poller + `/v1/embeddings` proxy (host `28080`) |
-| `fake-node-agent` | Lifecycle/preflight/health/probe **without** Docker Engine (host `28100`) |
+| `gateway` | Route snapshot poller + `/v1/embeddings` proxy (loopback `127.0.0.1:28080`) |
+| `fake-node-agent` | Lifecycle/preflight/health/probe **without** Docker Engine (loopback `127.0.0.1:28100`) |
 | `mock-runtime-source` / `mock-runtime-target` | CPU OpenAI-compatible runtimes (`instance_id=source\|target`) |
 
 Paths:
@@ -42,12 +42,27 @@ Forbidden by design (checked in `isolation_check.sh`):
 
 - docker.sock mounts, privileged, host network, NVIDIA runtime
 - `/data/modelops/models` mounts
+- non-loopback host publishes (all binds are `127.0.0.1:HOST:CONTAINER`)
 - default ports `5432` / `8000` / `8080` on the host
 - ops compose project/network/volume names
+- host sysctl / iptables mutation from harness scripts (no `sudo`)
 
 ---
 
-## 3. How to run
+## 3. Isolation invariants (host unchanged)
+
+The harness must not change host networking policy:
+
+- `up.sh` / `isolation_check.sh` / `run_e2e.sh` never call `sysctl`, `iptables`, or `sudo`
+- Host publishes are loopback-only (`127.0.0.1:…`)
+- Target URLs are validated by exact URL parse (`scheme` / `hostname=127.0.0.1` / port / DB name) — not substring matching
+- If Docker user-bridge container-to-container TCP fails, `up.sh` exits **2 (`BLOCKED`)** and tears down the project without modifying the host
+
+Operators who need to repair Docker bridge forwarding must do so **outside** this harness.
+
+---
+
+## 4. How to run
 
 ```bash
 # Full cycle (up → pytest → down, project modelops-p18k only)
@@ -55,45 +70,42 @@ Forbidden by design (checked in `isolation_check.sh`):
 
 # Or stepwise
 ./tests/e2e_switch/scripts/isolation_check.sh
-./tests/e2e_switch/scripts/up.sh
+./tests/e2e_switch/scripts/up.sh   # exit 2 => BLOCKED (bridge)
 P18K_BACKEND_URL=http://127.0.0.1:28000 \
 P18K_GATEWAY_URL=http://127.0.0.1:28080 \
 P18K_FAKE_NA_URL=http://127.0.0.1:28100 \
 P18K_DATABASE_URL=postgresql+asyncpg://p18k:p18k-isolated@127.0.0.1:25432/modelops_p18k \
-  pytest tests/e2e_switch/test_multiservice_switch_e2e.py -v
+  python3 -m pytest tests/e2e_switch/test_multiservice_switch_e2e.py -v
 ./tests/e2e_switch/scripts/down.sh
 ```
 
-Optional: `P18K_KEEP_UP=1 ./tests/e2e_switch/scripts/run_e2e.sh` leaves the
-stack running after tests.
+Optional:
 
-### Environment note (Cloud Agent / broken bridge forwarding)
-
-If container-to-container TCP times out while published host ports work,
-`up.sh` sets `net.bridge.bridge-nf-call-iptables=0` (and ip6tables) so
-user-defined bridge L2 forwarding works. This does **not** enable host
-network mode, privileged containers, or docker.sock mounts.
+- `P18K_KEEP_UP=1` — leave compose project running after `run_e2e.sh`
+- `P18K_PYTHON=/path/to/python` — explicit interpreter for `python -m pytest`
 
 ---
 
-## 4. Scenario matrix (this Cloud Agent run)
+## 5. Scenario matrix
+
+Update statuses only from the latest harness run. Do not keep stale PASS when a
+re-run is BLOCKED/FAIL.
 
 | Check | Status | Evidence |
 |---|---|---|
-| Isolated environment | PASS | `isolation_check.sh` before/after up; project `modelops-p18k`; DB `127.0.0.1:25432/modelops_p18k`; ports 28xxx/25432; no docker.sock/NVIDIA/privileged/host-network |
-| HOT E2E | PASS | `test_hot_switch_e2e_route_and_gateway` — enqueue via Management API, Worker SUCCEEDED, ACTIVE route → Target, Gateway `instance_id=target` |
-| COLD E2E | PASS | `test_cold_switch_e2e_drain_and_serving` — DRAIN/STOP/VRAM/START/ACTIVATE/RESTORE steps SUCCEEDED, traffic SERVING, Gateway → target |
-| Failure / Recovery | PASS | `test_hot_target_start_failure_preserves_source` — Fake NA start failures; Source ACTIVE + SERVING; Gateway still `instance_id=source` |
-| Operation / Step / Route | PASS | Operation detail steps all SUCCEEDED (HOT/COLD); `routing_state.version` increases on success; unchanged on HOT start failure |
-| Gateway real HTTP request | PASS | Pre/post `POST /v1/embeddings` through Gateway; Mock Runtime `instance_id` proves Source→Target cutover |
-| Idempotency | PASS | Same `Idempotency-Key` replay returns the same `operation_id` (HOT + COLD) |
-| Cleanup | PASS | `scripts/down.sh` removes project `modelops-p18k` containers/networks/volume only |
-
-Recorded pytest: **4 passed** (`/opt/cursor/artifacts/p1-8k-e2e-pytest.log`).
+| Isolated environment | _(fill after run)_ | `isolation_check.sh`; loopback binds; exact URL parse |
+| HOT E2E | _(fill after run)_ | `test_hot_switch_e2e_route_and_gateway` |
+| COLD E2E | _(fill after run)_ | `test_cold_switch_e2e_drain_and_serving` |
+| Failure / Recovery | _(fill after run)_ | `test_hot_target_start_failure_preserves_source` |
+| Operation / Step / Route | _(fill after run)_ | Operation detail + `routing_state.version` |
+| Gateway real HTTP request | _(fill after run)_ | Gateway `/v1/embeddings` + Mock `instance_id` |
+| Idempotency | _(fill after run)_ | Same `Idempotency-Key` → same `operation_id` |
+| Cleanup | _(fill after run)_ | `scripts/down.sh` removes only `modelops-p18k` |
+| Docker bridge (container↔container) | _(fill after run)_ | `up.sh` probe; BLOCKED if timeout without host changes |
 
 ---
 
-## 5. What this does **not** prove (PENDING)
+## 6. What this does **not** prove (PENDING)
 
 | Item | Status |
 |---|---|
@@ -105,9 +117,9 @@ Recorded pytest: **4 passed** (`/opt/cursor/artifacts/p1-8k-e2e-pytest.log`).
 
 ---
 
-## 6. Ops impact
+## 7. Ops impact
 
 None. Harness uses dedicated credentials (`p18k` / `p18k-isolated` /
-`p18k-test-token`), dedicated ports, and dedicated compose names. Cleanup
+`p18k-test-token`), loopback-only ports, and dedicated compose names. Cleanup
 targets only `-p modelops-p18k`. No `deploy-server.sh`, no ops `.env`, no
-ops Endpoint Route mutation.
+ops Endpoint Route mutation, no host sysctl changes.
