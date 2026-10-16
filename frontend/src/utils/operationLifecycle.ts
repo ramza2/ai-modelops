@@ -38,6 +38,40 @@ export function isFailedOperationStatus(
   return FAILED_OPERATION_STATUSES.has(status.toUpperCase())
 }
 
+/** Terminal Operation statuses where Switch Detail polling must stop. */
+const TERMINAL_OPERATION_STATUSES = new Set([
+  'SUCCEEDED',
+  'FAILED',
+  'CANCELLED',
+  'ROLLED_BACK',
+  'MANUAL_INTERVENTION_REQUIRED',
+])
+
+export function isTerminalOperationStatus(
+  status: string | null | undefined,
+): boolean {
+  if (!status) return false
+  return TERMINAL_OPERATION_STATUSES.has(status.toUpperCase())
+}
+
+/** True when Operation is a SWITCH owned by the given Endpoint Alias id. */
+export function isSwitchOperationForEndpoint(
+  op:
+    | {
+        operation_type?: string | null
+        endpoint_alias_id?: string | null
+      }
+    | null
+    | undefined,
+  endpointId: string,
+): boolean {
+  if (!op || !endpointId) return false
+  return (
+    (op.operation_type || '').toUpperCase() === 'SWITCH' &&
+    op.endpoint_alias_id === endpointId
+  )
+}
+
 export function isDeploymentReadyForPublish(
   dep:
     | {
