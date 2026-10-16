@@ -78,13 +78,16 @@ re-run is BLOCKED/FAIL.
 | A. Endpoint load + Preflight | PASS | `test_a_endpoint_load_preflight` + `a-preflight-hot.png` |
 | B. HOT Switch (browser) | PASS | `test_b_hot_switch_browser` + `b-hot-succeeded.png` |
 | C. COLD Switch (browser) | PASS | `test_c_cold_switch_browser` + `c-cold-succeeded.png` |
-| D. F5 restore while RUNNING | PASS | Backend `RUNNING` required before `page.reload()`; same `switch_operation_id` + in-flight UI after F5; then SUCCEEDED + Target ACTIVE; new Browser Context restore (`d-new-browser-context-restore.png`) |
+| D. F5 restore while RUNNING | PASS | Backend + UI `RUNNING` required before `page.reload()` (QUEUED-only ≠ PASS); same `switch_operation_id` + RUNNING after F5; then SUCCEEDED + Target ACTIVE; new Browser Context restore |
 | E. Target start failure UI | PASS | `test_e_failure_preserves_source_ui` + `e-failure-source-preserved.png` |
 | F. Duplicate enqueue / URL restore | PASS | `test_f_duplicate_enqueue_blocked_and_history` + `f-terminal-history.png` |
 | Cleanup | PASS | `down.sh` removes only `modelops-p18k` |
 
-Recorded pytest: **6 passed** (`/opt/cursor/artifacts/p1-8l-browser-e2e-retry2.log`).
-Screenshots: `/opt/cursor/artifacts/p18l-browser/`.
+Recorded pytest (F5 accuracy recheck): **1 passed**
+(`test_d_f5_restore_while_running`, `/opt/cursor/artifacts/p1-8l-f5-retest.log`).
+Screenshots: `d-before-f5-running.png`, `d-after-f5-restored-running.png`,
+`d-after-f5-succeeded.png`, `d-new-browser-context-restore.png`
+under `/opt/cursor/artifacts/p18l-browser/`.
 
 ---
 
