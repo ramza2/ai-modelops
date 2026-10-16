@@ -286,12 +286,18 @@ def test_c_cold_switch_browser(page: Any) -> None:
 
 
 def test_d_f5_restore_while_running(page: Any, browser: Any) -> None:
+    """F5 while Backend status is RUNNING; QUEUED-only observation must not PASS.
+
+    After reload, the same switch_operation_id must restore with in-flight UI.
+    Separate assertion uses a new Browser Context (not a new Chromium process).
+    """
     fixture = _seed("UI-F5")
     bind_fake_na(fixture, hot_vram=True)
+    # Hold Target start long enough to observe RUNNING across reload + restore UI.
     harness_delay(
         action="start",
         deployment_id=str(fixture["target_id"]),
-        delay_ms=20_000,
+        delay_ms=35_000,
         times=1,
     )
     wait_gateway_alias(fixture["alias"])
@@ -303,24 +309,45 @@ def test_d_f5_restore_while_running(page: Any, browser: Any) -> None:
     _choose_strategy(page, "HOT")
     op_id = _enqueue_switch(page)
 
-    deadline = time.time() + 45
-    saw_inflight = False
+    # Fail closed: Backend must be RUNNING before F5. QUEUED alone is insufficient.
+    deadline = time.time() + 90
+    pre_f5: dict[str, Any] = {}
     while time.time() < deadline:
-        op = get_operation(op_id)
-        st = op.get("status")
+        pre_f5 = get_operation(op_id)
+        st = pre_f5.get("status")
+        if st == "RUNNING":
+            break
         if st in TERMINAL:
-            pytest.fail(f"Operation finished too fast for F5 restore: {op}")
-        if st in {"QUEUED", "RUNNING"}:
-            if page.get_by_test_id("switch-op-active").count() > 0 or st == "RUNNING":
-                saw_inflight = True
-                break
-        time.sleep(0.3)
-    assert saw_inflight, "never observed in-flight Switch Operation for F5"
+            pytest.fail(
+                f"Operation reached {st} before RUNNING; cannot validate F5 restore: {pre_f5}"
+            )
+        time.sleep(0.25)
+    assert pre_f5.get("status") == "RUNNING", (
+        f"F5 requires Backend status RUNNING (got {pre_f5.get('status')!r}); "
+        f"QUEUED-only is not PASS. op={pre_f5}"
+    )
+    page.get_by_test_id("switch-op-active").wait_for(timeout=15_000)
+    assert "RUNNING" in page.get_by_test_id("switch-op-active").inner_text()
 
-    _shot(page, "d-before-f5")
+    _shot(page, "d-before-f5-running")
+    # Reload while still RUNNING (delay must still be holding start).
+    assert get_operation(op_id)["status"] == "RUNNING", "status left RUNNING before reload"
     page.reload(wait_until="domcontentloaded")
+
     assert f"switch_operation_id={op_id}" in page.url
     page.get_by_test_id("switch-operation-result").wait_for(timeout=45_000)
+    # Restored progress UI for the same Operation (still RUNNING after F5).
+    page.get_by_test_id("switch-op-active").wait_for(timeout=30_000)
+    restored_active = page.get_by_test_id("switch-op-active").inner_text()
+    assert op_id in page.url
+    assert "RUNNING" in restored_active, (
+        f"after F5 expected RUNNING progress banner for {op_id}, got: {restored_active!r}"
+    )
+    post_reload = get_operation(op_id)
+    assert post_reload.get("status") == "RUNNING", (
+        f"after F5 Backend must still be RUNNING (got {post_reload.get('status')!r})"
+    )
+    _shot(page, "d-after-f5-restored-running")
 
     status = _wait_ui_terminal(page, timeout_s=180.0)
     assert status == "SUCCEEDED", get_operation(op_id)
@@ -328,14 +355,19 @@ def test_d_f5_restore_while_running(page: Any, browser: Any) -> None:
     _assert_active_matches_backend(page, fixture["endpoint_id"], fixture["target_id"])
     _shot(page, "d-after-f5-succeeded")
 
+    # New Browser Context restore (same Chromium browser process, fresh context).
     ctx2 = browser.new_context(base_url=FRONTEND, viewport={"width": 1440, "height": 900})
     try:
         p2 = ctx2.new_page()
-        p2.goto(endpoint_page_url(fixture["endpoint_id"], op_id=op_id), wait_until="domcontentloaded")
+        p2.goto(
+            endpoint_page_url(fixture["endpoint_id"], op_id=op_id),
+            wait_until="domcontentloaded",
+        )
         p2.get_by_test_id("switch-op-terminal").wait_for(timeout=45_000)
         assert "SUCCEEDED" in p2.get_by_test_id("switch-op-terminal").inner_text()
+        assert f"switch_operation_id={op_id}" in p2.url
         _assert_active_matches_backend(p2, fixture["endpoint_id"], fixture["target_id"])
-        _shot(p2, "d-browser-restart-restore")
+        _shot(p2, "d-new-browser-context-restore")
     finally:
         ctx2.close()
 

@@ -78,7 +78,7 @@ re-run is BLOCKED/FAIL.
 | A. Endpoint load + Preflight | PASS | `test_a_endpoint_load_preflight` + `a-preflight-hot.png` |
 | B. HOT Switch (browser) | PASS | `test_b_hot_switch_browser` + `b-hot-succeeded.png` |
 | C. COLD Switch (browser) | PASS | `test_c_cold_switch_browser` + `c-cold-succeeded.png` |
-| D. F5 restore while RUNNING | PASS | `test_d_f5_restore_while_running` + Fake NA `/harness/delay` + F5 screenshots |
+| D. F5 restore while RUNNING | PASS | Backend `RUNNING` required before `page.reload()`; same `switch_operation_id` + in-flight UI after F5; then SUCCEEDED + Target ACTIVE; new Browser Context restore (`d-new-browser-context-restore.png`) |
 | E. Target start failure UI | PASS | `test_e_failure_preserves_source_ui` + `e-failure-source-preserved.png` |
 | F. Duplicate enqueue / URL restore | PASS | `test_f_duplicate_enqueue_blocked_and_history` + `f-terminal-history.png` |
 | Cleanup | PASS | `down.sh` removes only `modelops-p18k` |
