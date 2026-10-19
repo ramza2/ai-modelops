@@ -23,6 +23,7 @@ from app.routing.store import RoutingStore
 from app.runtime.client_concurrency import ClientConcurrencyTracker
 from app.runtime.inflight import InflightTracker
 from app.runtime.invocation_log import InvocationLogWriter
+from app.runtime.token_count_limiter import TokenCountLimiter
 
 logger = logging.getLogger(__name__)
 REQUEST_ID_HEADER = "X-Request-ID"
@@ -40,6 +41,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     inflight = InflightTracker()
     client_concurrency = ClientConcurrencyTracker()
+    token_count_limiter = TokenCountLimiter(
+        max_concurrent=settings.token_count_max_concurrent
+    )
     invocation_logs = InvocationLogWriter(session_factory)
     http_client = httpx.AsyncClient()
 
@@ -56,6 +60,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.http_client = http_client
     app.state.inflight = inflight
     app.state.client_concurrency = client_concurrency
+    app.state.token_count_limiter = token_count_limiter
     app.state.invocation_logs = invocation_logs
     app.state.routing_listener = listener
     await store.start()
@@ -79,6 +84,7 @@ def create_app(
     routing_listener: RoutingNotifierListener | None = None,
     policy_store: PolicyStore | None = None,
     client_concurrency: ClientConcurrencyTracker | None = None,
+    token_count_limiter: TokenCountLimiter | None = None,
 ) -> FastAPI:
     """Create the Gateway app.
 
@@ -97,6 +103,9 @@ def create_app(
         app.state.inflight = inflight or InflightTracker()
         app.state.client_concurrency = (
             client_concurrency or ClientConcurrencyTracker()
+        )
+        app.state.token_count_limiter = token_count_limiter or TokenCountLimiter(
+            max_concurrent=settings.token_count_max_concurrent
         )
         app.state.invocation_logs = invocation_logs or InvocationLogWriter(None)
         app.state.routing_listener = routing_listener

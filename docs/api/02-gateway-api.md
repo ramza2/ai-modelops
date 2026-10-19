@@ -89,6 +89,11 @@ Cold Switch의 짧은 MAINTENANCE 동안 `/v1/models`에서 Alias를 숨길지 �
 
 즉 `is_enabled=true`인 Alias는 목록에 유지하되 실제 호출 시 503을 반환한다.
 
+관련 확장:
+
+- `GET /v1/models/{alias}/capabilities` — ACTIVE Route capability evidence (P1-11). See `08-gateway-model-capabilities.md`.
+- `POST /v1/token-count` — Alias prompt token count via trusted vLLM `/tokenize` (P1-12). See `09-gateway-token-count.md`. Token-count and a later Chat Completion may observe different ACTIVE Routes; clients must re-count or pin `deployment_id` / `routing_version` across the pair.
+
 ---
 
 ## 4. POST /v1/chat/completions

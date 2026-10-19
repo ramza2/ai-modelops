@@ -35,6 +35,14 @@ class Settings(BaseSettings):
     input_tokenize_max_response_bytes: int = Field(
         default=4 * 1024 * 1024, ge=1024
     )
+    # P1-12: public Alias token-count bounds (does not change model runtime).
+    token_count_max_request_bytes: int = Field(
+        default=1 * 1024 * 1024, ge=1024
+    )
+    token_count_max_concurrent: int = Field(default=32, ge=1, le=1024)
+    # Reuse tokenize timeout/response bounds unless overridden.
+    token_count_timeout_seconds: float | None = Field(default=None, gt=0)
+    token_count_max_response_bytes: int | None = Field(default=None, ge=1024)
 
 
 @lru_cache

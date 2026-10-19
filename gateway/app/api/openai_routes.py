@@ -26,14 +26,20 @@ from typing import Any, Final
 import httpx
 from fastapi import APIRouter, Request, Response
 
-from app.core.config import get_settings
+from app.core.config import Settings, get_settings
 from app.core.enums import ApiType
 from app.core.errors import ErrorCode, GatewayError
 from app.policy.input_tokens import (
     InputTokenCheckUnavailable,
     InputTokenLimitExceeded,
     InputTokenRequestInvalid,
+    count_vllm_chat_input_tokens,
     enforce_vllm_chat_input_token_limit,
+    is_trusted_vllm_runtime,
+)
+from app.policy.token_count import (
+    TokenCountRequestInvalid,
+    validate_token_count_request,
 )
 from app.policy.output_tokens import (
     OutputTokenFieldInvalid,
@@ -61,6 +67,11 @@ from app.runtime.inflight import InflightAdmission, InflightTracker
 from app.runtime.invocation_log import (
     InvocationLogWriter,
     build_invocation_record,
+)
+from app.runtime.token_count_limiter import (
+    TokenCountAdmission,
+    TokenCountConcurrencyLimitExceeded,
+    TokenCountLimiter,
 )
 from app.runtime.usage import extract_token_usage_from_json_bytes
 
@@ -112,6 +123,10 @@ def _inflight(request: Request) -> InflightTracker:
 
 def _client_concurrency(request: Request) -> ClientConcurrencyTracker:
     return request.app.state.client_concurrency
+
+
+def _token_count_limiter(request: Request) -> TokenCountLimiter:
+    return request.app.state.token_count_limiter
 
 
 def _invocation_logs(request: Request) -> InvocationLogWriter:
@@ -300,6 +315,176 @@ async def model_capabilities(alias: str, request: Request, response: Response) -
         "route_id": entry.route_id,
         "routing_version": snapshot.routing_version,
     }
+
+
+@router.post("/v1/token-count")
+async def token_count(request: Request, response: Response) -> dict[str, Any]:
+    """Alias-scoped prompt token count via the ACTIVE Route's vLLM /tokenize.
+
+    Reuses M6-B4 ``count_vllm_chat_input_tokens`` against one resolved
+    RouteEntry. Does **not** enforce B3/B4 client token limits and does **not**
+    consume M5 Chat inflight or B2 client concurrency slots. Text Chat only.
+    """
+    response.headers["Cache-Control"] = "no-store"
+    settings = get_settings()
+    body, request_bytes = await _read_json_body_bounded(
+        request, max_bytes=int(settings.token_count_max_request_bytes)
+    )
+    model = str(body.get("model") or "").strip()
+    if not model:
+        raise GatewayError(
+            "Request body field 'model' is required.",
+            code=ErrorCode.VALIDATION_ERROR,
+            http_status=422,
+            param="model",
+        )
+    try:
+        validate_token_count_request(body)
+    except TokenCountRequestInvalid as exc:
+        raise GatewayError(
+            str(exc.message),
+            code=ErrorCode.TOKEN_COUNT_UNSUPPORTED,
+            http_status=422,
+            param=exc.param,
+        ) from exc
+
+    limiter = _token_count_limiter(request)
+    try:
+        admission = await limiter.admit()
+    except TokenCountConcurrencyLimitExceeded as exc:
+        raise GatewayError(
+            "Token-count concurrency limit exceeded.",
+            code=ErrorCode.TOKEN_COUNT_LIMIT,
+            http_status=429,
+            param=None,
+            details={"limit": exc.limit, "current": exc.current},
+        ) from exc
+
+    try:
+        return await _token_count_resolved(
+            request,
+            body=body,
+            model=model,
+            request_bytes=request_bytes,
+            settings=settings,
+        )
+    finally:
+        await asyncio.shield(_release_token_count(request, admission))
+
+
+async def _token_count_resolved(
+    request: Request,
+    *,
+    body: dict[str, Any],
+    model: str,
+    request_bytes: int,
+    settings: Settings,
+) -> dict[str, Any]:
+    snapshot = _store(request).snapshot
+    if snapshot is not None and snapshot.using_last_known_good:
+        raise GatewayError(
+            "Current routing snapshot is unavailable for token-count.",
+            code=ErrorCode.TOKEN_COUNT_UNAVAILABLE,
+            http_status=503,
+            param="model",
+        )
+    entry = resolve_route(snapshot, alias=model, expected_api_type=ApiType.CHAT)
+    if not is_trusted_vllm_runtime(entry.runtime_type):
+        raise GatewayError(
+            "Token-count requires a trusted VLLM runtime on the ACTIVE route.",
+            code=ErrorCode.TOKEN_COUNT_UNAVAILABLE,
+            http_status=503,
+            param="model",
+            details={"runtime_type": entry.runtime_type},
+        )
+    context = entry.observed_context_window
+    if context is None:
+        raise GatewayError(
+            "Token-count requires verified context_window capability evidence.",
+            code=ErrorCode.TOKEN_COUNT_UNAVAILABLE,
+            http_status=503,
+            param="model",
+            details={
+                "status": "UNKNOWN",
+                "evidence_reason": entry.capability_evidence_reason,
+                "deployment_id": entry.deployment_id,
+            },
+        )
+    model_name = entry.upstream_model_name
+    if not model_name or not entry.upstream_base_url:
+        raise GatewayError(
+            "Token-count route is missing upstream model identity.",
+            code=ErrorCode.TOKEN_COUNT_UNAVAILABLE,
+            http_status=503,
+            param="model",
+        )
+
+    timeout = (
+        float(settings.token_count_timeout_seconds)
+        if settings.token_count_timeout_seconds is not None
+        else float(settings.input_tokenize_timeout_seconds)
+    )
+    max_response = (
+        int(settings.token_count_max_response_bytes)
+        if settings.token_count_max_response_bytes is not None
+        else int(settings.input_tokenize_max_response_bytes)
+    )
+    try:
+        prompt_tokens = await count_vllm_chat_input_tokens(
+            _http_client(request),
+            upstream_base_url=str(entry.upstream_base_url),
+            served_model_name=str(model_name),
+            request_body=body,
+            request_id=_request_id(request),
+            timeout_seconds=timeout,
+            max_response_bytes=max_response,
+        )
+    except InputTokenRequestInvalid as exc:
+        raise GatewayError(
+            str(exc.message),
+            code=ErrorCode.TOKEN_COUNT_UNSUPPORTED,
+            http_status=422,
+            param="messages",
+            details={"deployment_id": entry.deployment_id},
+        ) from exc
+    except InputTokenCheckUnavailable as exc:
+        logger.warning(
+            "token-count unavailable request_id=%s deployment_id=%s reason=%s "
+            "request_bytes=%s",
+            _request_id(request),
+            entry.deployment_id,
+            type(exc).__name__,
+            request_bytes,
+        )
+        raise GatewayError(
+            "Token-count unavailable for this route.",
+            code=ErrorCode.TOKEN_COUNT_UNAVAILABLE,
+            http_status=503,
+            param="messages",
+            details={
+                "reason": str(exc.message),
+                "deployment_id": entry.deployment_id,
+            },
+        ) from exc
+
+    # Never echo messages / token ids. Pin route identity for client budgeting.
+    assert snapshot is not None
+    return {
+        "object": "modelops.token_count",
+        "model": entry.alias,
+        "prompt_tokens": int(prompt_tokens),
+        "context_window": int(context),
+        "status": "VERIFIED",
+        "deployment_id": entry.deployment_id,
+        "route_id": entry.route_id,
+        "routing_version": snapshot.routing_version,
+    }
+
+
+async def _release_token_count(
+    request: Request, admission: TokenCountAdmission
+) -> None:
+    await _token_count_limiter(request).release(admission)
 
 
 @router.post("/v1/chat/completions")
@@ -902,6 +1087,13 @@ async def _proxy_streaming_chat(
 
 async def _read_json_body(request: Request) -> tuple[dict[str, Any], int]:
     """Parse JSON object body and return (payload, exact request byte length)."""
+    return await _read_json_body_bounded(request, max_bytes=None)
+
+
+async def _read_json_body_bounded(
+    request: Request, *, max_bytes: int | None
+) -> tuple[dict[str, Any], int]:
+    """Parse JSON object body; optionally reject oversized requests."""
     try:
         raw = await request.body()
     except Exception as exc:  # noqa: BLE001
@@ -912,6 +1104,14 @@ async def _read_json_body(request: Request) -> tuple[dict[str, Any], int]:
             param=None,
         ) from exc
     request_bytes = len(raw)
+    if max_bytes is not None and request_bytes > int(max_bytes):
+        raise GatewayError(
+            "Request body exceeds token-count size limit.",
+            code=ErrorCode.TOKEN_COUNT_LIMIT,
+            http_status=413,
+            param=None,
+            details={"request_bytes": request_bytes, "max_bytes": int(max_bytes)},
+        )
     try:
         payload = json.loads(raw.decode("utf-8") if raw else "null")
     except Exception as exc:  # noqa: BLE001
