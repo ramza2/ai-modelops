@@ -722,6 +722,109 @@ async def test_vllm_model_runner_create_reuse_and_normalize() -> None:
 
 
 @pytest.mark.asyncio
+async def test_auto_tool_choice_create_reuse_and_conflict() -> None:
+    """P1-9A: hermes+true persists; same config reuses; other tool cfg conflicts."""
+    engine = create_async_engine(_database_url(), pool_pre_ping=True)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with session_factory() as session:
+        seeded = await _seed_ready_cache(session, size_bytes=2_000_000_000)
+
+    fake = FakeResourcesAgent(gpu_uuids=[seeded["gpu_uuid"]], free_mb=14000)
+    app = _mount(create_app(), session_factory, fake)
+    transport = ASGITransport(app=app)
+    runtime_cfg = {
+        "max_model_len": 8192,
+        "max_num_seqs": 4,
+        "gpu_memory_utilization": 0.15,
+        "reasoning_parser": "qwen3",
+        "vllm_model_runner": "v1",
+        "enable_auto_tool_choice": True,
+        "tool_call_parser": "hermes",
+    }
+    create_body = {
+        "name": f"dep-at-{seeded['suffix']}",
+        "container_name": f"ctr-at-{seeded['suffix']}",
+        "gpu_device_ids": [str(seeded["gpu_id"])],
+        "acknowledge_unknown_fit": True,
+        "runtime_config": runtime_cfg,
+    }
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        created = await ac.post(
+            f"/api/v1/model-cache/{seeded['cache_id']}/deployment",
+            json=create_body,
+        )
+        assert created.status_code == 201, created.text
+        cfg = created.json()["deployment_config"]
+        assert cfg["enable_auto_tool_choice"] is True
+        assert cfg["tool_call_parser"] == "hermes"
+        assert cfg["reasoning_parser"] == "qwen3"
+        assert cfg["vllm_model_runner"] == "v1"
+        assert created.json()["reused"] is False
+        dep_id = created.json()["id"]
+
+        reuse = await ac.post(
+            f"/api/v1/model-cache/{seeded['cache_id']}/deployment",
+            json={
+                **create_body,
+                "runtime_config": {
+                    **runtime_cfg,
+                    "tool_call_parser": "HERMES",
+                },
+            },
+        )
+        assert reuse.status_code == 200
+        assert reuse.json()["reused"] is True
+        assert reuse.json()["id"] == dep_id
+        assert reuse.json()["deployment_config"]["tool_call_parser"] == "hermes"
+
+        bad_parser = await ac.post(
+            f"/api/v1/model-cache/{seeded['cache_id']}/deployment",
+            json={
+                **create_body,
+                "runtime_config": {
+                    **runtime_cfg,
+                    "tool_call_parser": "mistral",
+                },
+            },
+        )
+        assert bad_parser.status_code == 422
+
+        missing_parser = await ac.post(
+            f"/api/v1/model-cache/{seeded['cache_id']}/deployment",
+            json={
+                **create_body,
+                "runtime_config": {
+                    "max_model_len": 8192,
+                    "max_num_seqs": 4,
+                    "gpu_memory_utilization": 0.15,
+                    "enable_auto_tool_choice": True,
+                },
+            },
+        )
+        assert missing_parser.status_code == 422
+
+        conflict = await ac.post(
+            f"/api/v1/model-cache/{seeded['cache_id']}/deployment",
+            json={
+                **create_body,
+                "runtime_config": {
+                    "max_model_len": 8192,
+                    "max_num_seqs": 4,
+                    "gpu_memory_utilization": 0.15,
+                    "reasoning_parser": "qwen3",
+                    "vllm_model_runner": "v1",
+                },
+            },
+        )
+        assert conflict.status_code == 409
+        assert conflict.json()["error"]["code"] == "DEPLOYMENT_SPEC_CONFLICT"
+        changed = conflict.json()["error"]["details"]["changed_fields"]
+        assert "enable_auto_tool_choice" in changed or "tool_call_parser" in changed
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_missing_live_vram_is_unknown_explicit_zero_insufficient() -> None:
     engine = create_async_engine(_database_url(), pool_pre_ping=True)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)

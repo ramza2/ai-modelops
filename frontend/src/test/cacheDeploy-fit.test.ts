@@ -18,6 +18,8 @@ describe('cache deploy live GPU / fit safety', () => {
       runner: 'generate',
       reasoning_parser: null,
       vllm_model_runner: null,
+      enable_auto_tool_choice: null,
+      tool_call_parser: null,
     })
     for (const config of [
       { max_model_len: 8192, max_num_seqs: 1, gpu_memory_utilization: 0.85, quantization: 'awq', runner: 'generate' },
@@ -40,6 +42,15 @@ describe('cache deploy live GPU / fit safety', () => {
         quantization: 'awq',
         runner: 'generate',
         vllm_model_runner: 'v1',
+      },
+      {
+        max_model_len: 4096,
+        max_num_seqs: 1,
+        gpu_memory_utilization: 0.85,
+        quantization: 'awq',
+        runner: 'generate',
+        enable_auto_tool_choice: true,
+        tool_call_parser: 'hermes',
       },
     ]) {
       expect(fitInputFingerprint(['gpu-0'], '', config)).not.toBe(base)

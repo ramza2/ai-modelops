@@ -7,6 +7,7 @@ from app.runtime_adapters.base import (
     RuntimeBuildInput,
     RuntimeCreateSpec,
     VolumeSpec,
+    _merged_bool,
     _merged_choice,
     _merged_int,
     _merged_positive_int,
@@ -23,6 +24,9 @@ _REASONING_PARSER_ALLOWED = frozenset({"qwen3"})
 # VLLM_USE_V2_MODEL_RUNNER=0 so thinking_token_budget works with qwen3 parser.
 _VLLM_MODEL_RUNNER_ALLOWED = frozenset({"v1"})
 _VLLM_USE_V2_MODEL_RUNNER_ENV = "VLLM_USE_V2_MODEL_RUNNER"
+# Optional Auto Tool Calling (P1-9A). Default unset/false omits both flags.
+# When enable_auto_tool_choice is true, tool_call_parser is required (hermes).
+_TOOL_CALL_PARSER_ALLOWED = frozenset({"hermes"})
 # Explicit runner is needed for pooling/embedding runtimes such as BGE-M3.
 # Keep this allowlist narrow; normal generation runtimes omit the flag.
 _RUNNER_ALLOWED = frozenset({"generate", "pooling"})
@@ -64,6 +68,18 @@ class VLLMAdapter:
         vllm_model_runner = _merged_choice(
             cfg, "vllm_model_runner", allowed=_VLLM_MODEL_RUNNER_ALLOWED
         )
+        enable_auto_tool_choice = _merged_bool(cfg, "enable_auto_tool_choice")
+        tool_call_parser = _merged_choice(
+            cfg, "tool_call_parser", allowed=_TOOL_CALL_PARSER_ALLOWED
+        )
+        if enable_auto_tool_choice is True and tool_call_parser is None:
+            raise RuntimeAdapterError(
+                "tool_call_parser is required when enable_auto_tool_choice is true."
+            )
+        if enable_auto_tool_choice is not True and tool_call_parser is not None:
+            raise RuntimeAdapterError(
+                "tool_call_parser requires enable_auto_tool_choice=true."
+            )
         runner = _merged_choice(cfg, "runner", allowed=_RUNNER_ALLOWED)
 
         # Worker always emits CMD starting with the vLLM CLI subcommand
@@ -102,6 +118,9 @@ class VLLMAdapter:
             command.extend(["--scheduling-policy", scheduling_policy])
         if reasoning_parser is not None:
             command.extend(["--reasoning-parser", reasoning_parser])
+        if enable_auto_tool_choice is True and tool_call_parser is not None:
+            command.append("--enable-auto-tool-choice")
+            command.extend(["--tool-call-parser", tool_call_parser])
         if runner is not None:
             command.extend(["--runner", runner])
 

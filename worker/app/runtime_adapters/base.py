@@ -177,6 +177,21 @@ def _merged_choice(
     return normalized
 
 
+def _merged_bool(config: dict[str, Any], key: str) -> bool | None:
+    """Resolve an optional boolean from merged config.
+
+    Key absent → None (treat as default / omit dependent argv).
+    Key present → must be a real bool (not 0/1/\"true\" strings), else raise.
+    Explicit null is invalid (no fallback).
+    """
+    if key not in config:
+        return None
+    raw = config[key]
+    if not isinstance(raw, bool):
+        raise RuntimeAdapterError(f"{key} must be a boolean.")
+    return raw
+
+
 def resolve_probe_type_from_model(
     *, model_type: str | None, deployment_config: dict[str, Any]
 ) -> str:

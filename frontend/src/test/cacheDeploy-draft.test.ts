@@ -124,6 +124,48 @@ describe('P1-3 cache deploy draft persistence', () => {
     expect(readWizardDraft(store, cache, now)).toBeNull()
   })
 
+  it('persists auto tool choice + hermes and rejects invalid pairs', () => {
+    const store = memoryStorage()
+    const withTools: WizardDraft = {
+      ...sampleDraft(),
+      runtime: {
+        ...sampleDraft().runtime,
+        enable_auto_tool_choice: true,
+        tool_call_parser: 'hermes',
+      },
+    }
+    writeWizardDraft(store, withTools)
+    const read = readWizardDraft(store, cache, now)?.runtime
+    expect(read?.enable_auto_tool_choice).toBe(true)
+    expect(read?.tool_call_parser).toBe('hermes')
+
+    store.setItem(
+      wizardDraftKey(cache.id),
+      JSON.stringify({
+        ...withTools,
+        runtime: {
+          ...withTools.runtime,
+          enable_auto_tool_choice: true,
+          tool_call_parser: null,
+        },
+      }),
+    )
+    expect(readWizardDraft(store, cache, now)).toBeNull()
+
+    store.setItem(
+      wizardDraftKey(cache.id),
+      JSON.stringify({
+        ...withTools,
+        runtime: {
+          ...withTools.runtime,
+          enable_auto_tool_choice: false,
+          tool_call_parser: 'hermes',
+        },
+      }),
+    )
+    expect(readWizardDraft(store, cache, now)).toBeNull()
+  })
+
   it('keeps pending publish alias settings distinct from server-owned route status', () => {
     const store = memoryStorage()
     const draft = {

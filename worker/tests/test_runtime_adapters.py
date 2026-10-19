@@ -604,3 +604,177 @@ def test_generic_openai_unchanged_by_vllm_model_runner() -> None:
     )
     assert "VLLM_USE_V2_MODEL_RUNNER" not in spec.environment
 
+
+# ---------------------------------------------------------------------------
+# P1-9A enable_auto_tool_choice / tool_call_parser
+# ---------------------------------------------------------------------------
+
+
+def test_vllm_auto_tool_choice_unset_omitted() -> None:
+    spec = VLLMAdapter().build_create_spec(
+        RuntimeBuildInput(
+            runtime_image="vllm/vllm-openai:v0.24.0",
+            served_model_name="m",
+            model_path="/srv/models/x",
+        )
+    )
+    assert "--enable-auto-tool-choice" not in spec.command
+    assert "--tool-call-parser" not in spec.command
+
+
+def test_vllm_auto_tool_choice_false_omitted() -> None:
+    spec = VLLMAdapter().build_create_spec(
+        RuntimeBuildInput(
+            runtime_image="vllm/vllm-openai:v0.24.0",
+            served_model_name="m",
+            model_path="/srv/models/x",
+            deployment_config={"enable_auto_tool_choice": False},
+        )
+    )
+    assert "--enable-auto-tool-choice" not in spec.command
+    assert "--tool-call-parser" not in spec.command
+
+
+def test_vllm_auto_tool_choice_hermes_emitted_once() -> None:
+    spec = VLLMAdapter().build_create_spec(
+        RuntimeBuildInput(
+            runtime_image="vllm/vllm-openai:v0.24.0",
+            served_model_name="m",
+            model_path="/srv/models/x",
+            deployment_config={
+                "enable_auto_tool_choice": True,
+                "tool_call_parser": "hermes",
+            },
+        )
+    )
+    assert spec.command.count("--enable-auto-tool-choice") == 1
+    assert _flag_value(spec.command, "--tool-call-parser") == "hermes"
+    assert spec.command.count("--tool-call-parser") == 1
+
+
+def test_vllm_auto_tool_choice_with_qwen3_and_v1_runner() -> None:
+    spec = VLLMAdapter().build_create_spec(
+        RuntimeBuildInput(
+            runtime_image="vllm/vllm-openai:v0.24.0",
+            served_model_name="m",
+            model_path="/srv/models/x",
+            deployment_config={
+                "reasoning_parser": "qwen3",
+                "vllm_model_runner": "v1",
+                "enable_auto_tool_choice": True,
+                "tool_call_parser": "hermes",
+            },
+        )
+    )
+    assert _flag_value(spec.command, "--reasoning-parser") == "qwen3"
+    assert spec.environment["VLLM_USE_V2_MODEL_RUNNER"] == "0"
+    assert "--enable-auto-tool-choice" in spec.command
+    assert _flag_value(spec.command, "--tool-call-parser") == "hermes"
+
+
+@pytest.mark.parametrize("value", ["HERMES", " hermes ", "Hermes"])
+def test_vllm_tool_call_parser_normalized(value) -> None:
+    spec = VLLMAdapter().build_create_spec(
+        RuntimeBuildInput(
+            runtime_image="vllm/vllm-openai:v0.24.0",
+            served_model_name="m",
+            model_path="/srv/models/x",
+            deployment_config={
+                "enable_auto_tool_choice": True,
+                "tool_call_parser": value,
+            },
+        )
+    )
+    assert _flag_value(spec.command, "--tool-call-parser") == "hermes"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [None, "", "mistral", "llama3", "0", 0, True, False, [], {}],
+)
+def test_vllm_tool_call_parser_invalid_rejected(value) -> None:
+    with pytest.raises(RuntimeAdapterError, match="tool_call_parser"):
+        VLLMAdapter().build_create_spec(
+            RuntimeBuildInput(
+                runtime_image="vllm/vllm-openai:v0.24.0",
+                served_model_name="m",
+                model_path="/srv/models/x",
+                deployment_config={
+                    "enable_auto_tool_choice": True,
+                    "tool_call_parser": value,
+                },
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    "value",
+    [None, "true", "false", 1, 0, "1", [], {}],
+)
+def test_vllm_enable_auto_tool_choice_invalid_rejected(value) -> None:
+    with pytest.raises(RuntimeAdapterError, match="enable_auto_tool_choice"):
+        VLLMAdapter().build_create_spec(
+            RuntimeBuildInput(
+                runtime_image="vllm/vllm-openai:v0.24.0",
+                served_model_name="m",
+                model_path="/srv/models/x",
+                deployment_config={"enable_auto_tool_choice": value},
+            )
+        )
+
+
+def test_vllm_auto_tool_true_without_parser_rejected() -> None:
+    with pytest.raises(RuntimeAdapterError, match="tool_call_parser"):
+        VLLMAdapter().build_create_spec(
+            RuntimeBuildInput(
+                runtime_image="vllm/vllm-openai:v0.24.0",
+                served_model_name="m",
+                model_path="/srv/models/x",
+                deployment_config={"enable_auto_tool_choice": True},
+            )
+        )
+
+
+def test_vllm_tool_parser_without_enable_rejected() -> None:
+    with pytest.raises(RuntimeAdapterError, match="enable_auto_tool_choice"):
+        VLLMAdapter().build_create_spec(
+            RuntimeBuildInput(
+                runtime_image="vllm/vllm-openai:v0.24.0",
+                served_model_name="m",
+                model_path="/srv/models/x",
+                deployment_config={"tool_call_parser": "hermes"},
+            )
+        )
+
+
+def test_vllm_auto_tool_explicit_null_enable_no_fallback() -> None:
+    with pytest.raises(RuntimeAdapterError, match="enable_auto_tool_choice"):
+        VLLMAdapter().build_create_spec(
+            RuntimeBuildInput(
+                runtime_image="vllm/vllm-openai:v0.24.0",
+                served_model_name="m",
+                model_path="/srv/models/x",
+                runtime_config={
+                    "enable_auto_tool_choice": True,
+                    "tool_call_parser": "hermes",
+                },
+                deployment_config={"enable_auto_tool_choice": None},
+            )
+        )
+
+
+def test_generic_openai_unchanged_by_auto_tool_choice() -> None:
+    spec = GenericOpenAIAdapter().build_create_spec(
+        RuntimeBuildInput(
+            runtime_image="example/openai-runtime:tag",
+            served_model_name="embed-model",
+            model_path="/srv/ai-models/embed/rev",
+            deployment_config={
+                "enable_auto_tool_choice": True,
+                "tool_call_parser": "hermes",
+            },
+        )
+    )
+    assert "--enable-auto-tool-choice" not in spec.command
+    assert "--tool-call-parser" not in spec.command
+

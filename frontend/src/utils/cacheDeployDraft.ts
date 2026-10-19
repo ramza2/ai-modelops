@@ -69,6 +69,7 @@ const validRuntime = (v: unknown): v is CacheDeployRuntimeConfig => {
     'scheduling_policy',
     'reasoning_parser',
     'vllm_model_runner',
+    'tool_call_parser',
   ]) {
     if (v[field] != null && !validText(v[field])) return false
   }
@@ -79,6 +80,22 @@ const validRuntime = (v: unknown): v is CacheDeployRuntimeConfig => {
   if (v.vllm_model_runner != null) {
     const normalized = String(v.vllm_model_runner).trim().toLowerCase()
     if (normalized !== 'v1') return false
+  }
+  if (
+    v.enable_auto_tool_choice != null &&
+    typeof v.enable_auto_tool_choice !== 'boolean'
+  ) {
+    return false
+  }
+  if (v.tool_call_parser != null) {
+    const normalized = String(v.tool_call_parser).trim().toLowerCase()
+    if (normalized !== 'hermes') return false
+  }
+  if (v.enable_auto_tool_choice === true && v.tool_call_parser == null) {
+    return false
+  }
+  if (v.enable_auto_tool_choice !== true && v.tool_call_parser != null) {
+    return false
   }
   return true
 }

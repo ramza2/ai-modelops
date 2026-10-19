@@ -17,6 +17,8 @@ export const RUNTIME_REVIEW_KEYS = [
   'quantization',
   'reasoning_parser',
   'vllm_model_runner',
+  'enable_auto_tool_choice',
+  'tool_call_parser',
   'probe_type',
   'health_path',
   'tensor_parallel_size',

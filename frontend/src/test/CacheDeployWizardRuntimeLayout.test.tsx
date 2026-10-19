@@ -462,6 +462,8 @@ describe('CacheDeployWizardPage Runtime layout (P1-5A / P1-8C)', () => {
         tensor_parallel_size: 1,
         reasoning_parser: 'qwen3',
         vllm_model_runner: 'v1',
+        enable_auto_tool_choice: true,
+        tool_call_parser: 'hermes',
       },
       selectedGpuIds: ['gpu-0'],
       expectedVramMb: '',
@@ -479,6 +481,8 @@ describe('CacheDeployWizardPage Runtime layout (P1-5A / P1-8C)', () => {
     expect(screen.getByDisplayValue('2048')).toBeInTheDocument()
     expect(screen.getByLabelText('Reasoning Parser')).toHaveValue('qwen3')
     expect(screen.getByLabelText('vLLM Model Runner')).toHaveValue('v1')
+    expect(screen.getByLabelText('Auto Tool Choice')).toHaveValue('true')
+    expect(screen.getByLabelText('Tool Call Parser')).toHaveValue('hermes')
 
     await userEvent.click(screen.getByRole('button', { name: 'Next: GPU' }))
     await screen.findByRole('heading', { level: 2, name: /3\. GPU/ })
@@ -495,6 +499,9 @@ describe('CacheDeployWizardPage Runtime layout (P1-5A / P1-8C)', () => {
     expect(applied).toHaveTextContent('qwen3')
     expect(applied).toHaveTextContent('vllm_model_runner')
     expect(applied).toHaveTextContent('v1')
+    expect(applied).toHaveTextContent('enable_auto_tool_choice')
+    expect(applied).toHaveTextContent('tool_call_parser')
+    expect(applied).toHaveTextContent('hermes')
     const unset = within(summary).getByTestId('runtime-review-unset')
     expect(unset).toHaveTextContent('dtype')
     expect(unset).toHaveTextContent('quantization')

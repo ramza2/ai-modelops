@@ -6,7 +6,7 @@ import uuid
 from typing import Any
 
 from fastapi import APIRouter, Depends, Query, Response, status
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_session
@@ -18,6 +18,8 @@ router = APIRouter(prefix="/api/v1/model-cache", tags=["model-cache"])
 _REASONING_PARSER_ALLOWED = frozenset({"qwen3"})
 # Optional vLLM V1 model runner pin (P1-7E). Unset = image default (auto/V2).
 _VLLM_MODEL_RUNNER_ALLOWED = frozenset({"v1"})
+# Optional Auto Tool Calling (P1-9A). Default unset/false omits CLI flags.
+_TOOL_CALL_PARSER_ALLOWED = frozenset({"hermes"})
 
 
 def get_download_service(
@@ -47,6 +49,9 @@ class CacheDeployRuntimeConfig(BaseModel):
     reasoning_parser: str | None = Field(default=None, max_length=32)
     # Optional V1 model runner pin (P1-7E). Unset = do not set env (auto).
     vllm_model_runner: str | None = Field(default=None, max_length=32)
+    # Optional Auto Tool Calling (P1-9A). Default false/unset omits flags.
+    enable_auto_tool_choice: bool | None = Field(default=None)
+    tool_call_parser: str | None = Field(default=None, max_length=32)
 
     @field_validator("reasoning_parser", mode="before")
     @classmethod
@@ -75,6 +80,42 @@ class CacheDeployRuntimeConfig(BaseModel):
         if normalized not in _VLLM_MODEL_RUNNER_ALLOWED:
             raise ValueError("vllm_model_runner must be unset or one of: v1")
         return normalized
+
+    @field_validator("enable_auto_tool_choice", mode="before")
+    @classmethod
+    def _normalize_enable_auto_tool_choice(cls, value: Any) -> bool | None:
+        if value is None:
+            return None
+        if not isinstance(value, bool):
+            raise ValueError("enable_auto_tool_choice must be a boolean or unset")
+        return value
+
+    @field_validator("tool_call_parser", mode="before")
+    @classmethod
+    def _normalize_tool_call_parser(cls, value: Any) -> str | None:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError("tool_call_parser must be unset or one of: hermes")
+        normalized = value.strip().lower()
+        if normalized == "":
+            return None
+        if normalized not in _TOOL_CALL_PARSER_ALLOWED:
+            raise ValueError("tool_call_parser must be unset or one of: hermes")
+        return normalized
+
+    @model_validator(mode="after")
+    def _require_parser_when_auto_tool_enabled(self) -> CacheDeployRuntimeConfig:
+        enabled = self.enable_auto_tool_choice is True
+        if enabled and self.tool_call_parser is None:
+            raise ValueError(
+                "tool_call_parser is required when enable_auto_tool_choice is true"
+            )
+        if not enabled and self.tool_call_parser is not None:
+            raise ValueError(
+                "tool_call_parser requires enable_auto_tool_choice=true"
+            )
+        return self
 
 
 class CreateCacheDeploymentRequest(BaseModel):

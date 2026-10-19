@@ -141,6 +141,12 @@ string. Validate:
 Downloaded ≠ Deployed ≠ Published still applies: these Runtime options only
 affect Managed creates / recreate paths that include them.
 
+## Related: Auto Tool Calling (P1-9A)
+
+Optional `--enable-auto-tool-choice` / `--tool-call-parser hermes` is documented
+in `03-vllm-auto-tool-calling.md`. It composes with `reasoning_parser=qwen3` and
+`vllm_model_runner=v1` but is independently optional (default OFF).
+
 ## Follow-ups (out of scope)
 
 If Parser auto token initialization fails for a model family, investigate
