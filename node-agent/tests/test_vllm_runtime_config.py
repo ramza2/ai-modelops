@@ -139,6 +139,34 @@ def test_parse_modelops_entrypoint() -> None:
     assert "secret" not in blob
 
 
+def test_parse_managed_docker_serve_cmd_and_capability_flags() -> None:
+    command = [
+        "serve", "/models/current", "--max-model-len", "8192",
+        "--reasoning-parser", "qwen3",
+        "--enable-auto-tool-choice", "--tool-call-parser", "hermes",
+        "--max-num-seqs", "2",
+    ]
+    result = parse_vllm_runtime_config(command)
+    assert result["entrypoint"] == "VLLM"
+    assert result["values"]["max_model_len"] == 8192
+    assert result["values"]["reasoning_parser"] == "qwen3"
+    assert result["values"]["enable_auto_tool_choice"] is True
+    assert result["values"]["tool_call_parser"] == "hermes"
+    assert set(["reasoning_parser", "enable_auto_tool_choice", "tool_call_parser"]).issubset(
+        set(result["explicit_fields"])
+    )
+    assert result["invalid_fields"] == []
+    assert "/models/current" not in str(result)
+
+    unknown = parse_vllm_runtime_config([
+        "serve", "/private", "--reasoning-parser", "unsupported",
+        "--tool-call-parser", "unsupported",
+    ])
+    assert "reasoning_parser" in unknown["invalid_fields"]
+    assert "tool_call_parser" in unknown["invalid_fields"]
+    assert "/private" not in str(unknown)
+
+
 def test_parse_vllm_serve_entrypoint() -> None:
     cmd = [
         "vllm",
@@ -250,6 +278,9 @@ def test_parse_unknown_flags_ignored() -> None:
         "dtype",
         "quantization",
         "scheduling_policy",
+        "reasoning_parser",
+        "tool_call_parser",
+        "enable_auto_tool_choice",
     }
     assert result["values"]["max_model_len"] == 1024
     assert "/secret" not in str(result)
