@@ -445,7 +445,7 @@ def _sanitize_runtime_config(raw: Any) -> dict[str, Any] | None:
     }
 
 
-def _sanitize_config_value(field: str, value: Any) -> int | float | str | None:
+def _sanitize_config_value(field: str, value: Any) -> int | float | str | bool | None:
     if value is None:
         return None
     if field in {"max_model_len", "max_num_seqs", "tensor_parallel_size"}:
