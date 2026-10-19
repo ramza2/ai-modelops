@@ -18,6 +18,9 @@ CAPACITY_FIELDS = (
     "dtype",
     "quantization",
     "scheduling_policy",
+    "reasoning_parser",
+    "tool_call_parser",
+    "enable_auto_tool_choice",
 )
 
 # Flag token → capacity field. Short -tp is the documented TP alias.
@@ -30,6 +33,9 @@ _FLAG_TO_FIELD: dict[str, str] = {
     "--dtype": "dtype",
     "--quantization": "quantization",
     "--scheduling-policy": "scheduling_policy",
+    "--reasoning-parser": "reasoning_parser",
+    "--tool-call-parser": "tool_call_parser",
+    "--enable-auto-tool-choice": "enable_auto_tool_choice",
 }
 
 _OPENAI_API_SERVER_MODULE = "vllm.entrypoints.openai.api_server"
@@ -60,6 +66,11 @@ def parse_vllm_runtime_config(command: list[str] | None) -> dict[str, Any]:
         token = tokens[i]
         field: str | None = None
         raw_value: str | None = None
+
+        if token == "--enable-auto-tool-choice":
+            raw_by_field["enable_auto_tool_choice"] = "true"
+            i += 1
+            continue
 
         if "=" in token and token.startswith("-"):
             flag, _, value = token.partition("=")
@@ -150,6 +161,10 @@ def _detect_entrypoint(tokens: list[str]) -> str:
                 ):
                     return "VLLM"
                 return "VLLM"
+    # Docker Config.Cmd is often ["serve", ...] with Config.Entrypoint=["vllm"].
+    # Only Managed vLLM containers reach this parser's observation path.
+    if lower and lower[0] == "serve":
+        return "VLLM"
     # vllm serve ...
     if lower and (lower[0] == "vllm" or lower[0].endswith("/vllm")):
         if len(lower) >= 2 and lower[1] == "serve":
@@ -167,6 +182,12 @@ def _normalize_field(field: str, raw: str) -> int | float | str | None:
         return text if text else None
     if field == "scheduling_policy":
         return _scheduling_policy(text)
+    if field == "reasoning_parser":
+        return text.lower() if text.lower() == "qwen3" else None
+    if field == "tool_call_parser":
+        return text.lower() if text.lower() == "hermes" else None
+    if field == "enable_auto_tool_choice":
+        return True if text.lower() == "true" else None
     return None
 
 
