@@ -457,3 +457,120 @@ async def test_managed_runtime_port_patch_keeps_derived_upstream(ctx) -> None:
     assert keep.status_code == 200
     assert keep.json()["runtime_port"] == 9100
     assert keep.json()["upstream_base_url"] == "http://custom-upstream:7000"
+
+
+@pytest.mark.asyncio
+async def test_deployment_auto_tool_calling_create_patch_and_reject(ctx) -> None:
+    """P1-9B: Deployment create/update persist + validate tool-calling fields.
+
+    Metadata only — does not start or recreate containers.
+    """
+    client: AsyncClient = ctx["client"]
+    suffix = ctx["suffix"]
+
+    # Unset config keeps prior keys only (no tool-calling fields injected).
+    plain = await client.post(
+        "/api/v1/deployments",
+        json={
+            "name": f"tool-plain-{suffix}",
+            "model_version_id": ctx["version_id"],
+            "node_id": ctx["node_a_id"],
+            "deployment_type": "MANAGED",
+            "container_name": f"ctr-tool-plain-{suffix}",
+            "runtime_port": 8000,
+            "deployment_config": {
+                "max_model_len": 4096,
+                "reasoning_parser": "qwen3",
+            },
+        },
+    )
+    assert plain.status_code == 201, plain.text
+    plain_cfg = plain.json()["deployment_config"]
+    assert plain_cfg["max_model_len"] == 4096
+    assert plain_cfg["reasoning_parser"] == "qwen3"
+    assert "enable_auto_tool_choice" not in plain_cfg
+    assert "tool_call_parser" not in plain_cfg
+
+    created = await client.post(
+        "/api/v1/deployments",
+        json={
+            "name": f"tool-on-{suffix}",
+            "model_version_id": ctx["version_id"],
+            "node_id": ctx["node_a_id"],
+            "deployment_type": "MANAGED",
+            "container_name": f"ctr-tool-on-{suffix}",
+            "runtime_port": 8001,
+            "deployment_config": {
+                "reasoning_parser": "qwen3",
+                "vllm_model_runner": "v1",
+                "enable_auto_tool_choice": True,
+                "tool_call_parser": "HERMES",
+            },
+        },
+    )
+    assert created.status_code == 201, created.text
+    cfg = created.json()["deployment_config"]
+    assert cfg["enable_auto_tool_choice"] is True
+    assert cfg["tool_call_parser"] == "hermes"
+    assert cfg["reasoning_parser"] == "qwen3"
+    assert cfg["vllm_model_runner"] == "v1"
+    deployment_id = created.json()["id"]
+
+    # PATCH is full replace: merge known keys then set tool calling.
+    patched = await client.patch(
+        f"/api/v1/deployments/{deployment_id}",
+        json={
+            "deployment_config": {
+                "reasoning_parser": "qwen3",
+                "vllm_model_runner": "v1",
+                "enable_auto_tool_choice": True,
+                "tool_call_parser": "hermes",
+                "max_model_len": 8192,
+            }
+        },
+    )
+    assert patched.status_code == 200, patched.text
+    patched_cfg = patched.json()["deployment_config"]
+    assert patched_cfg["enable_auto_tool_choice"] is True
+    assert patched_cfg["tool_call_parser"] == "hermes"
+    assert patched_cfg["max_model_len"] == 8192
+    assert patched_cfg["reasoning_parser"] == "qwen3"
+
+    # Invalid combinations fail closed (no persist).
+    bad_enable = await client.patch(
+        f"/api/v1/deployments/{deployment_id}",
+        json={"deployment_config": {"enable_auto_tool_choice": "true"}},
+    )
+    assert bad_enable.status_code == 422
+    assert bad_enable.json()["error"]["code"] == "VALIDATION_ERROR"
+
+    missing_parser = await client.patch(
+        f"/api/v1/deployments/{deployment_id}",
+        json={"deployment_config": {"enable_auto_tool_choice": True}},
+    )
+    assert missing_parser.status_code == 422
+
+    bad_parser = await client.patch(
+        f"/api/v1/deployments/{deployment_id}",
+        json={
+            "deployment_config": {
+                "enable_auto_tool_choice": True,
+                "tool_call_parser": "mistral",
+            }
+        },
+    )
+    assert bad_parser.status_code == 422
+
+    parser_only = await client.patch(
+        f"/api/v1/deployments/{deployment_id}",
+        json={"deployment_config": {"tool_call_parser": "hermes"}},
+    )
+    assert parser_only.status_code == 422
+
+    # Last successful config retained after rejected patches.
+    detail = await client.get(f"/api/v1/deployments/{deployment_id}")
+    assert detail.status_code == 200
+    retained = detail.json()["deployment_config"]
+    assert retained["enable_auto_tool_choice"] is True
+    assert retained["tool_call_parser"] == "hermes"
+    assert retained["max_model_len"] == 8192
