@@ -117,6 +117,32 @@ describe('ModelsPage', () => {
     })
   })
 
+  it('clears search, provider, type, active and resets page together', async () => {
+    const user = userEvent.setup()
+    vi.mocked(modelsApi.listModels).mockResolvedValue(pageResult([]))
+    renderAt('/models?q=qwen&provider=Qwen&model_type=LLM&active=false')
+    expect(await screen.findByRole('button', { name: '필터 초기화' })).toBeInTheDocument()
+    expect(screen.getByLabelText('Type')).toHaveValue('LLM')
+    expect(screen.getByLabelText('Active')).toHaveValue('INACTIVE')
+    await user.click(screen.getByRole('button', { name: '필터 초기화' }))
+    await waitFor(() => {
+      expect(screen.getByTestId('location-search')).toHaveTextContent(/^$/)
+      expect(screen.getByLabelText('Type')).toHaveValue('ALL')
+      expect(screen.getByLabelText('Active')).toHaveValue('ALL')
+      expect(screen.getByLabelText('검색')).toHaveValue('')
+      expect(screen.getByLabelText('Provider')).toHaveValue('')
+      expect(modelsApi.listModels).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          q: null,
+          provider: null,
+          modelType: null,
+          isActive: null,
+          page: 1,
+        }),
+      )
+    })
+  })
+
   it('submits q and provider search without keystroke requests', async () => {
     const user = userEvent.setup()
     vi.mocked(modelsApi.listModels).mockResolvedValue(pageResult([]))
