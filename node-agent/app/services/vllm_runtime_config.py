@@ -172,7 +172,7 @@ def _detect_entrypoint(tokens: list[str]) -> str:
     return "UNRECOGNIZED"
 
 
-def _normalize_field(field: str, raw: str) -> int | float | str | None:
+def _normalize_field(field: str, raw: str) -> int | float | str | bool | None:
     text = (raw or "").strip()
     if field in {"max_model_len", "max_num_seqs", "tensor_parallel_size"}:
         return _positive_int(text)
