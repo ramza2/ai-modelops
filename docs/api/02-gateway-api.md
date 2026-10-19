@@ -92,7 +92,7 @@ Cold Switch의 짧은 MAINTENANCE 동안 `/v1/models`에서 Alias를 숨길지 �
 관련 확장:
 
 - `GET /v1/models/{alias}/capabilities` — ACTIVE Route capability evidence (P1-11). See `08-gateway-model-capabilities.md`.
-- `POST /v1/token-count` — Alias prompt token count via trusted vLLM `/tokenize` (P1-12). See `09-gateway-token-count.md`. Token-count and a later Chat Completion may observe different ACTIVE Routes; clients must re-count or pin `deployment_id` / `routing_version` across the pair.
+- `POST /v1/token-count` — Alias prompt token count via trusted vLLM `/tokenize` (P1-12). See `09-gateway-token-count.md`. Token Count and Chat Completion are not atomically bound to one Deployment; `deployment_id` / `route_id` / `routing_version` are observational — re-count after any route change. Route Pinning is not provided.
 
 ---
 

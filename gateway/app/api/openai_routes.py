@@ -324,43 +324,47 @@ async def token_count(request: Request, response: Response) -> dict[str, Any]:
     Reuses M6-B4 ``count_vllm_chat_input_tokens`` against one resolved
     RouteEntry. Does **not** enforce B3/B4 client token limits and does **not**
     consume M5 Chat inflight or B2 client concurrency slots. Text Chat only.
+
+    Concurrency admission happens *before* body receive so oversized or slow
+    bodies still count against ``MODELOPS_TOKEN_COUNT_MAX_CONCURRENT``.
     """
     response.headers["Cache-Control"] = "no-store"
     settings = get_settings()
-    body, request_bytes = await _read_json_body_bounded(
-        request, max_bytes=int(settings.token_count_max_request_bytes)
-    )
-    model = str(body.get("model") or "").strip()
-    if not model:
-        raise GatewayError(
-            "Request body field 'model' is required.",
-            code=ErrorCode.VALIDATION_ERROR,
-            http_status=422,
-            param="model",
-        )
-    try:
-        validate_token_count_request(body)
-    except TokenCountRequestInvalid as exc:
-        raise GatewayError(
-            str(exc.message),
-            code=ErrorCode.TOKEN_COUNT_UNSUPPORTED,
-            http_status=422,
-            param=exc.param,
-        ) from exc
-
     limiter = _token_count_limiter(request)
+    admission: TokenCountAdmission | None = None
     try:
-        admission = await limiter.admit()
-    except TokenCountConcurrencyLimitExceeded as exc:
-        raise GatewayError(
-            "Token-count concurrency limit exceeded.",
-            code=ErrorCode.TOKEN_COUNT_LIMIT,
-            http_status=429,
-            param=None,
-            details={"limit": exc.limit, "current": exc.current},
-        ) from exc
+        try:
+            admission = await limiter.admit()
+        except TokenCountConcurrencyLimitExceeded as exc:
+            raise GatewayError(
+                "Token-count concurrency limit exceeded.",
+                code=ErrorCode.TOKEN_COUNT_LIMIT,
+                http_status=429,
+                param=None,
+                details={"limit": exc.limit, "current": exc.current},
+            ) from exc
 
-    try:
+        body, request_bytes = await _read_json_body_bounded(
+            request, max_bytes=int(settings.token_count_max_request_bytes)
+        )
+        model = str(body.get("model") or "").strip()
+        if not model:
+            raise GatewayError(
+                "Request body field 'model' is required.",
+                code=ErrorCode.VALIDATION_ERROR,
+                http_status=422,
+                param="model",
+            )
+        try:
+            validate_token_count_request(body)
+        except TokenCountRequestInvalid as exc:
+            raise GatewayError(
+                str(exc.message),
+                code=ErrorCode.TOKEN_COUNT_UNSUPPORTED,
+                http_status=422,
+                param=exc.param,
+            ) from exc
+
         return await _token_count_resolved(
             request,
             body=body,
@@ -369,7 +373,8 @@ async def token_count(request: Request, response: Response) -> dict[str, Any]:
             settings=settings,
         )
     finally:
-        await asyncio.shield(_release_token_count(request, admission))
+        if admission is not None:
+            await asyncio.shield(_release_token_count(request, admission))
 
 
 async def _token_count_resolved(
@@ -467,7 +472,8 @@ async def _token_count_resolved(
             },
         ) from exc
 
-    # Never echo messages / token ids. Pin route identity for client budgeting.
+    # Never echo messages / token ids. Route identity fields are observational
+    # only — this API does not pin the later Chat Completion to this Deployment.
     assert snapshot is not None
     return {
         "object": "modelops.token_count",
@@ -1086,14 +1092,10 @@ async def _proxy_streaming_chat(
 
 
 async def _read_json_body(request: Request) -> tuple[dict[str, Any], int]:
-    """Parse JSON object body and return (payload, exact request byte length)."""
-    return await _read_json_body_bounded(request, max_bytes=None)
+    """Parse JSON object body and return (payload, exact request byte length).
 
-
-async def _read_json_body_bounded(
-    request: Request, *, max_bytes: int | None
-) -> tuple[dict[str, Any], int]:
-    """Parse JSON object body; optionally reject oversized requests."""
+    Chat Completions / Embeddings path — unchanged unbounded ``request.body()``.
+    """
     try:
         raw = await request.body()
     except Exception as exc:  # noqa: BLE001
@@ -1103,15 +1105,95 @@ async def _read_json_body_bounded(
             http_status=422,
             param=None,
         ) from exc
-    request_bytes = len(raw)
-    if max_bytes is not None and request_bytes > int(max_bytes):
+    return _parse_json_object_body(raw)
+
+
+async def _read_json_body_bounded(
+    request: Request, *, max_bytes: int
+) -> tuple[dict[str, Any], int]:
+    """Parse JSON body for ``/v1/token-count`` with streaming size enforcement.
+
+    - Rejects when ``Content-Length`` clearly exceeds ``max_bytes`` before read.
+    - Streams the body and raises HTTP 413 as soon as accumulated bytes exceed
+      the limit (covers chunked transfer without buffering the full body first).
+    - Chat/Embeddings must keep using ``_read_json_body`` (unbounded).
+    """
+    limit = int(max_bytes)
+    if limit <= 0:
+        raise GatewayError(
+            "Token-count size limit is misconfigured.",
+            code=ErrorCode.INTERNAL_ERROR,
+            http_status=500,
+            param=None,
+        )
+
+    declared = _content_length_header(request)
+    if declared is not None and declared > limit:
         raise GatewayError(
             "Request body exceeds token-count size limit.",
             code=ErrorCode.TOKEN_COUNT_LIMIT,
             http_status=413,
             param=None,
-            details={"request_bytes": request_bytes, "max_bytes": int(max_bytes)},
+            details={"content_length": declared, "max_bytes": limit},
         )
+
+    chunks: list[bytes] = []
+    total = 0
+    try:
+        async for chunk in request.stream():
+            if not chunk:
+                continue
+            total += len(chunk)
+            if total > limit:
+                raise GatewayError(
+                    "Request body exceeds token-count size limit.",
+                    code=ErrorCode.TOKEN_COUNT_LIMIT,
+                    http_status=413,
+                    param=None,
+                    details={"request_bytes": total, "max_bytes": limit},
+                )
+            chunks.append(chunk)
+    except GatewayError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise GatewayError(
+            "Request body must be valid JSON.",
+            code=ErrorCode.VALIDATION_ERROR,
+            http_status=422,
+            param=None,
+        ) from exc
+
+    return _parse_json_object_body(b"".join(chunks))
+
+
+def _content_length_header(request: Request) -> int | None:
+    raw = request.headers.get("content-length")
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    try:
+        value = int(text)
+    except ValueError as exc:
+        raise GatewayError(
+            "Invalid Content-Length header.",
+            code=ErrorCode.VALIDATION_ERROR,
+            http_status=422,
+            param=None,
+        ) from exc
+    if value < 0:
+        raise GatewayError(
+            "Invalid Content-Length header.",
+            code=ErrorCode.VALIDATION_ERROR,
+            http_status=422,
+            param=None,
+        )
+    return value
+
+
+def _parse_json_object_body(raw: bytes) -> tuple[dict[str, Any], int]:
+    request_bytes = len(raw)
     try:
         payload = json.loads(raw.decode("utf-8") if raw else "null")
     except Exception as exc:  # noqa: BLE001

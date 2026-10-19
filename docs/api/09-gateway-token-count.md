@@ -78,16 +78,41 @@ Response:
 
 ## Route switch caveat (required client behavior)
 
-Token-count and a later Chat Completion are **separate requests**. Between
-them the ACTIVE Route / Deployment / `routing_version` may change (Hot/Cold
-Switch, restart). Clients that budget from `prompt_tokens` +
-`context_window` should:
+This API does **not** atomically bind Token Count and a later Chat Completion
+to the same Deployment. They are independent requests. ModelOps does **not**
+currently offer Route Pinning / sticky Deployment binding for the count→chat
+pair — do not treat response identity fields as a pinning feature.
 
-1. Prefer counting and completing against the same pinned
-   `deployment_id` / `routing_version`, or
-2. Re-count after observing a capability / route change.
+`deployment_id`, `route_id`, and `routing_version` are **observational**: they
+describe which ACTIVE Route produced this count so clients can detect change.
+They are not a lease, reservation, or guarantee that the next
+`/v1/chat/completions` will hit the same Deployment.
 
-Never assume a previous count remains valid across a route switch.
+Between count and chat the ACTIVE Route / Deployment / `routing_version` may
+change (Hot/Cold Switch, restart, rollback). Clients that budget from
+`prompt_tokens` + `context_window` should:
+
+1. Compare later capability / chat outcomes against the observed
+   `deployment_id` / `route_id` / `routing_version` from the count response.
+2. On any mismatch, unknown capability, or context-related failure
+   (`length` finish, context overflow, `TOKEN_COUNT_UNAVAILABLE` / capability
+   UNKNOWN): **re-count and re-budget** before continuing.
+3. Never reuse a previous `prompt_tokens` / `context_window` across a detected
+   route change.
+
+## Request body protection
+
+Concurrency admission for `/v1/token-count` is taken **before** the request
+body is received. Body size is enforced by:
+
+1. Early reject when `Content-Length` is present and exceeds the configured
+   maximum (HTTP 413).
+2. Streaming read that aborts as soon as accumulated bytes exceed the maximum
+   (HTTP 413), including chunked transfer without buffering the full body
+   first.
+
+Limiter slots are always released on 413, cancellation, validation failure,
+and success.
 
 ## Abuse / auth notes
 

@@ -391,7 +391,7 @@ async def test_token_count_route_switch_and_unknown_fail_closed() -> None:
 
 
 @pytest.mark.asyncio
-async def test_token_count_tokenizer_error_and_size_limit() -> None:
+async def test_token_count_tokenizer_error() -> None:
     upstream = FakeTokenizeUpstream()
     upstream.tokenize_status = 500
     app, _ = _app(routes={"qwen3-14b": _route()}, upstream=upstream)
@@ -408,16 +408,50 @@ async def test_token_count_tokenizer_error_and_size_limit() -> None:
         assert err.status_code == 503
         assert err.json()["error"]["code"] == "TOKEN_COUNT_UNAVAILABLE"
 
+
+@pytest.mark.asyncio
+async def test_token_count_content_length_early_reject_and_no_limiter_leak() -> None:
     from unittest.mock import patch
 
+    from app.api.openai_routes import _read_json_body_bounded
     from app.core.config import get_settings
+    from app.core.errors import GatewayError
 
+    class _Hdr:
+        def __init__(self, data: dict[str, str]) -> None:
+            self._data = {k.lower(): v for k, v in data.items()}
+
+        def get(self, key: str, default: str | None = None) -> str | None:
+            return self._data.get(key.lower(), default)
+
+    class _EarlyRejectRequest:
+        def __init__(self) -> None:
+            self.headers = _Hdr({"content-length": "1000"})
+            self.streamed = False
+
+        async def stream(self):
+            self.streamed = True
+            if False:  # pragma: no cover
+                yield b""
+
+    req = _EarlyRejectRequest()
+    with pytest.raises(GatewayError) as excinfo:
+        await _read_json_body_bounded(req, max_bytes=64)  # type: ignore[arg-type]
+    assert excinfo.value.http_status == 413
+    assert excinfo.value.code == "TOKEN_COUNT_LIMIT"
+    assert req.streamed is False
+
+    # End-to-end: oversized body under tiny limit releases the concurrency slot.
     tiny = get_settings().model_copy(update={"token_count_max_request_bytes": 64})
-    upstream2 = FakeTokenizeUpstream()
+    limiter = TokenCountLimiter(max_concurrent=2)
     with patch("app.api.openai_routes.get_settings", return_value=tiny):
-        app2, _ = _app(routes={"qwen3-14b": _route()}, upstream=upstream2)
+        app, _ = _app(
+            routes={"qwen3-14b": _route()},
+            upstream=FakeTokenizeUpstream(),
+            limiter=limiter,
+        )
         async with httpx.AsyncClient(
-            transport=ASGITransport(app=app2), base_url="http://test"
+            transport=ASGITransport(app=app), base_url="http://test"
         ) as client:
             huge = await client.post(
                 "/v1/token-count",
@@ -428,6 +462,137 @@ async def test_token_count_tokenizer_error_and_size_limit() -> None:
             )
             assert huge.status_code == 413
             assert huge.json()["error"]["code"] == "TOKEN_COUNT_LIMIT"
+            assert limiter.current == 0
+
+
+@pytest.mark.asyncio
+async def test_token_count_chunked_oversize_releases_limiter() -> None:
+    from unittest.mock import patch
+
+    from app.api.openai_routes import _read_json_body_bounded
+    from app.core.config import get_settings
+    from app.core.errors import GatewayError
+
+    class _Hdr:
+        def get(self, key: str, default: str | None = None) -> str | None:
+            return default
+
+    class _ChunkedRequest:
+        def __init__(self, chunks: list[bytes]) -> None:
+            self.headers = _Hdr()
+            self._chunks = chunks
+
+        async def stream(self):
+            for chunk in self._chunks:
+                yield chunk
+
+    # Streaming oversize without Content-Length — abort mid-stream.
+    with pytest.raises(GatewayError) as excinfo:
+        await _read_json_body_bounded(
+            _ChunkedRequest(  # type: ignore[arg-type]
+                [
+                    b'{"model":"qwen3-14b","messages":[{"role":"user","content":"',
+                    b"x" * 200,
+                    b'"}]}',
+                ]
+            ),
+            max_bytes=64,
+        )
+    assert excinfo.value.http_status == 413
+    assert "request_bytes" in (excinfo.value.details or {})
+
+    tiny = get_settings().model_copy(update={"token_count_max_request_bytes": 64})
+    limiter = TokenCountLimiter(max_concurrent=1)
+    with patch("app.api.openai_routes.get_settings", return_value=tiny):
+        app, _ = _app(
+            routes={"qwen3-14b": _route()},
+            upstream=FakeTokenizeUpstream(),
+            limiter=limiter,
+        )
+
+        async def oversized_chunks():
+            yield b'{"model":"qwen3-14b","messages":[{"role":"user","content":"'
+            yield b"x" * 200
+            yield b'"}]}'
+
+        async with httpx.AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            over = await client.post(
+                "/v1/token-count",
+                content=oversized_chunks(),
+                headers={"content-type": "application/json"},
+            )
+            assert over.status_code == 413
+            assert over.json()["error"]["code"] == "TOKEN_COUNT_LIMIT"
+            assert limiter.current == 0
+
+    # Normal request under default limit still succeeds afterward.
+    limiter2 = TokenCountLimiter(max_concurrent=2)
+    app2, _ = _app(
+        routes={"qwen3-14b": _route()},
+        upstream=FakeTokenizeUpstream(),
+        limiter=limiter2,
+    )
+    async with httpx.AsyncClient(
+        transport=ASGITransport(app=app2), base_url="http://test"
+    ) as client:
+        ok = await client.post(
+            "/v1/token-count",
+            json={
+                "model": "qwen3-14b",
+                "messages": [{"role": "user", "content": "ok"}],
+            },
+        )
+        assert ok.status_code == 200, ok.text
+        assert limiter2.current == 0
+
+
+@pytest.mark.asyncio
+async def test_token_count_concurrency_during_body_receive() -> None:
+    limiter = TokenCountLimiter(max_concurrent=1)
+    app, _ = _app(
+        routes={"qwen3-14b": _route()},
+        upstream=FakeTokenizeUpstream(),
+        limiter=limiter,
+    )
+    body_entered = asyncio.Event()
+    body_gate = asyncio.Event()
+
+    async def slow_body():
+        yield b'{"model":"qwen3-14b","messages":[{"role":"user","content":"'
+        body_entered.set()
+        await body_gate.wait()
+        yield b'hi"}]}'
+
+    async with httpx.AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        task = asyncio.create_task(
+            client.post(
+                "/v1/token-count",
+                content=slow_body(),
+                headers={"content-type": "application/json"},
+            )
+        )
+        await asyncio.wait_for(body_entered.wait(), timeout=2.0)
+        assert limiter.current == 1
+
+        limited = await client.post(
+            "/v1/token-count",
+            json={
+                "model": "qwen3-14b",
+                "messages": [{"role": "user", "content": "second"}],
+            },
+        )
+        assert limited.status_code == 429
+        assert limited.json()["error"]["code"] == "TOKEN_COUNT_LIMIT"
+        assert limiter.current == 1
+
+        body_gate.set()
+        first = await task
+        assert first.status_code == 200, first.text
+        assert limiter.current == 0
 
 
 @pytest.mark.asyncio
