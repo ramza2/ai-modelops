@@ -518,6 +518,9 @@ export type RuntimeInstance = {
 export type RuntimeSnapshot = {
   deployment_id: string
   deployment_name?: string | null
+  /** Lifecycle metadata returned by latest endpoint; absent on history rows. */
+  runtime_status?: string | null
+  retired_at?: string | null
   sampled_at: string | null
   availability: string
   kv_cache_usage_ratio: number | null

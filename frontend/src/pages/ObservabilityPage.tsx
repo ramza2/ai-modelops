@@ -44,6 +44,24 @@ function formatRatio(ratio: number | null | undefined): string {
   return `${ratio.toFixed(3)} (${(ratio * 100).toFixed(1)}%)`
 }
 
+/** Persisted metric availability is NOT the current lifecycle state. */
+export const RUNTIME_STALE_MS = 120_000
+
+export function displayedRuntimeAvailability(
+  row: RuntimeSnapshot,
+  now = Date.now(),
+): string {
+  if (row.retired_at) return 'RETIRED'
+  if (row.runtime_status && row.runtime_status !== 'RUNNING') {
+    return row.runtime_status
+  }
+  const sampled = row.sampled_at ? Date.parse(row.sampled_at) : NaN
+  if (!Number.isFinite(sampled) || sampled > now + 30_000 || now - sampled > RUNTIME_STALE_MS) {
+    return 'STALE'
+  }
+  return row.availability
+}
+
 export function ObservabilityPage() {
   const [searchParams, setSearchParams] = useSearchParams()
   const hours = parseBoundedInt(searchParams.get('hours'), {
@@ -52,6 +70,7 @@ export function ObservabilityPage() {
     defaultValue: 24,
   })
   const groupBy = parseGroupBy(searchParams.get('group_by'))
+  const includeInactive = searchParams.get('include_inactive') === 'true'
   const [draftHours, setDraftHours] = useState(String(hours))
 
   const [invocations, setInvocations] =
@@ -80,10 +99,11 @@ export function ObservabilityPage() {
   }, [hours])
 
   const syncUrl = useCallback(
-    (next: { hours: number; groupBy: GroupBy }) => {
+    (next: { hours: number; groupBy: GroupBy; includeInactive: boolean }) => {
       const params = new URLSearchParams()
       if (next.hours !== 24) params.set('hours', String(next.hours))
       if (next.groupBy !== 'client') params.set('group_by', next.groupBy)
+      if (next.includeInactive) params.set('include_inactive', 'true')
       setSearchParams(params, { replace: true })
     },
     [setSearchParams],
@@ -96,12 +116,13 @@ export function ObservabilityPage() {
       defaultValue: 24,
     })
     setDraftHours(String(nextHours))
-    syncUrl({ hours: nextHours, groupBy })
-  }, [draftHours, groupBy, syncUrl])
+    syncUrl({ hours: nextHours, groupBy, includeInactive })
+  }, [draftHours, groupBy, includeInactive, syncUrl])
 
   useEffect(() => {
     const rawHours = searchParams.get('hours')
     const rawGroup = searchParams.get('group_by')
+    const rawInactive = searchParams.get('include_inactive')
     let needsFix = false
     const fixed = new URLSearchParams()
 
@@ -119,6 +140,9 @@ export function ObservabilityPage() {
       if (parsedGroup !== 'client') fixed.set('group_by', parsedGroup)
       else if (rawGroup !== 'client') needsFix = true
     }
+
+    if (rawInactive === 'true') fixed.set('include_inactive', 'true')
+    else if (rawInactive !== null) needsFix = true
 
     if (needsFix) setSearchParams(fixed, { replace: true })
   }, [searchParams, setSearchParams])
@@ -172,7 +196,7 @@ export function ObservabilityPage() {
     else setRtRefreshing(true)
     setRtError(null)
     try {
-      const data = await getRuntimeLatest(null, controller.signal)
+      const data = await getRuntimeLatest(null, controller.signal, !includeInactive)
       if (controller.signal.aborted || gen !== rtGenRef.current) return
       setRuntimeItems(data.items)
       setLastUpdated(new Date())
@@ -194,7 +218,7 @@ export function ObservabilityPage() {
         setRtRefreshing(false)
       }
     }
-  }, [])
+  }, [includeInactive])
 
   useEffect(() => {
     void loadInvocations(invLoadedRef.current ? 'refresh' : 'initial')
@@ -251,7 +275,7 @@ export function ObservabilityPage() {
             id="obs-group-by"
             value={groupBy}
             onChange={(e) =>
-              syncUrl({ hours, groupBy: e.target.value as GroupBy })
+              syncUrl({ hours, groupBy: e.target.value as GroupBy, includeInactive })
             }
           >
             <option value="client">client</option>
@@ -353,10 +377,22 @@ export function ObservabilityPage() {
       <section className="detail-panel" aria-labelledby="runtime-latest-heading">
         <h2 id="runtime-latest-heading">Runtime Latest (persisted)</h2>
         <p className="panel-hint">
-          DB에 저장된 최신 Runtime metric snapshot입니다. Node Agent live scrape가
-          아니며, 상세/history/Capacity Profile은 Deployment observability로
-          이동합니다.
+          DB에 저장된 마지막 Runtime metric입니다(실시간 상태가 아닙니다).
+          기본 목록은 현재 RUNNING·미종료 Deployment만 표시합니다.
+          2분 넘게 갱신되지 않은 샘플은 STALE로 표시합니다.
+          과거 스냅샷과 상세/history는 삭제하지 않습니다.
         </p>
+        <label className="checkbox-label" htmlFor="obs-include-inactive">
+          <input
+            id="obs-include-inactive"
+            type="checkbox"
+            checked={includeInactive}
+            onChange={(e) =>
+              syncUrl({ hours, groupBy, includeInactive: e.target.checked })
+            }
+          />
+          종료·중지된 Deployment 포함 (과거 데이터)
+        </label>
         {rtError ? (
           <SectionError
             title={
@@ -401,7 +437,12 @@ export function ObservabilityPage() {
                     </td>
                     <td>{formatApiDateTime(row.sampled_at)}</td>
                     <td>
-                      <StatusBadge status={row.availability} />
+                      <StatusBadge status={displayedRuntimeAvailability(row)} />
+                      {displayedRuntimeAvailability(row) !== row.availability ? (
+                        <div className="secondary-text">
+                          수집 당시: {row.availability}
+                        </div>
+                      ) : null}
                     </td>
                     <td>{formatRatio(row.kv_cache_usage_ratio)}</td>
                     <td>{formatNum(row.num_requests_running, 0)}</td>
@@ -421,7 +462,9 @@ export function ObservabilityPage() {
         ) : null}
         {runtimeItems && runtimeItems.length === 0 ? (
           <p className="empty-state" role="status">
-            저장된 Runtime snapshot이 없습니다.
+            {includeInactive
+              ? '저장된 Runtime snapshot이 없습니다.'
+              : '현재 실행 중인 Deployment의 Runtime snapshot이 없습니다.'}
           </p>
         ) : null}
       </section>

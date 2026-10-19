@@ -28,7 +28,7 @@ class RuntimeMetricsObservabilityService:
         self._repo = RuntimeMetricsRepository(session)
 
     async def latest(
-        self, *, deployment_id: uuid.UUID | None = None
+        self, *, deployment_id: uuid.UUID | None = None, active_only: bool = False
     ) -> dict[str, Any]:
         if deployment_id is not None:
             if not await self._repo.deployment_exists(deployment_id):
@@ -44,7 +44,7 @@ class RuntimeMetricsObservabilityService:
                 }
             return {"items": [self._serialize(row)]}
 
-        rows = await self._repo.latest_all()
+        rows = await self._repo.latest_all(active_only=active_only)
         return {"items": [self._serialize(r) for r in rows]}
 
     async def history(
@@ -119,6 +119,8 @@ class RuntimeMetricsObservabilityService:
         if include_name:
             name = row.get("deployment_name")
             item["deployment_name"] = str(name) if name else None
+            item["runtime_status"] = row.get("runtime_status")
+            item["retired_at"] = _iso(row.get("retired_at"))
         return item
 
 

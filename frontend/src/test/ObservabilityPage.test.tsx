@@ -7,7 +7,7 @@ import type {
   InvocationSummaryResponse,
   RuntimeLatestResponse,
 } from '../api/types'
-import { ObservabilityPage } from '../pages/ObservabilityPage'
+import { ObservabilityPage, displayedRuntimeAvailability } from '../pages/ObservabilityPage'
 import * as observabilityApi from '../api/observability'
 import * as deploymentsApi from '../api/deployments'
 import * as clientsApi from '../api/clients'
@@ -59,7 +59,9 @@ function latest(
       {
         deployment_id: 'dep-1',
         deployment_name: 'chat-prod',
-        sampled_at: '2026-10-07T00:00:00Z',
+        sampled_at: new Date().toISOString(),
+        runtime_status: 'RUNNING',
+        retired_at: null,
         availability: 'PARTIAL',
         kv_cache_usage_ratio: 0.42,
         num_requests_running: 2,
@@ -112,9 +114,86 @@ describe('ObservabilityPage', () => {
     expect(modelsApi.getModel).not.toHaveBeenCalled()
   })
 
+  it('shows active deployments by default and retired snapshots only on opt-in', async () => {
+    const user = userEvent.setup()
+    const current = latest().items[0]
+    const retired = {
+      ...current,
+      deployment_id: 'dep-old',
+      deployment_name: 'all-MiniLM-L6-v2-managed',
+      sampled_at: '2026-10-15T03:57:42Z',
+      availability: 'AVAILABLE',
+      runtime_status: 'STOPPED',
+      retired_at: '2026-10-19T03:28:56Z',
+    }
+    vi.mocked(observabilityApi.getInvocationSummary).mockResolvedValue(summary())
+    vi.mocked(observabilityApi.getRuntimeLatest).mockImplementation(
+      async (_deploymentId, _signal, activeOnly) =>
+        latest({ items: activeOnly ? [current] : [current, retired] }),
+    )
+
+    renderAt('/observability')
+    expect(await screen.findByRole('link', { name: 'chat-prod' })).toBeInTheDocument()
+    expect(observabilityApi.getRuntimeLatest).toHaveBeenCalledWith(
+      null, expect.any(AbortSignal), true,
+    )
+    expect(screen.queryByRole('link', { name: 'all-MiniLM-L6-v2-managed' })).not.toBeInTheDocument()
+
+    await user.click(screen.getByLabelText('종료·중지된 Deployment 포함 (과거 데이터)'))
+    expect(await screen.findByRole('link', { name: 'all-MiniLM-L6-v2-managed' })).toBeInTheDocument()
+    expect(screen.getByText(/RETIRED/)).toBeInTheDocument()
+    expect(screen.getByText('수집 당시: AVAILABLE')).toBeInTheDocument()
+    expect(observabilityApi.getRuntimeLatest).toHaveBeenLastCalledWith(
+      null, expect.any(AbortSignal), false,
+    )
+    expect(screen.getByTestId('location-search')).toHaveTextContent('include_inactive=true')
+    expect(observabilityApi.getInvocationSummary).toHaveBeenCalledTimes(1)
+
+    await user.click(screen.getByLabelText('종료·중지된 Deployment 포함 (과거 데이터)'))
+    await waitFor(() => {
+      expect(screen.queryByRole('link', { name: 'all-MiniLM-L6-v2-managed' })).not.toBeInTheDocument()
+      expect(screen.getByTestId('location-search')).toHaveTextContent(/^$/)
+    })
+  })
+
+  it('does not show old AVAILABLE samples as current availability', () => {
+    const row = latest().items[0]
+    const now = Date.parse('2026-10-19T03:40:52Z')
+    expect(displayedRuntimeAvailability({
+      ...row,
+      availability: 'AVAILABLE',
+      sampled_at: '2026-10-15T03:57:42Z',
+    }, now)).toBe('STALE')
+    expect(displayedRuntimeAvailability({
+      ...row,
+      availability: 'AVAILABLE',
+      sampled_at: '2026-10-15T03:57:42Z',
+      retired_at: '2026-10-19T03:28:56Z',
+    }, now)).toBe('RETIRED')
+    expect(displayedRuntimeAvailability({
+      ...row,
+      availability: 'AVAILABLE',
+      sampled_at: new Date(now - 30_000).toISOString(),
+      runtime_status: 'STOPPED',
+    }, now)).toBe('STOPPED')
+    expect(displayedRuntimeAvailability({
+      ...row,
+      availability: 'AVAILABLE',
+      sampled_at: new Date(now - 30_000).toISOString(),
+    }, now)).toBe('AVAILABLE')
+    expect(displayedRuntimeAvailability({
+      ...row,
+      availability: 'AVAILABLE',
+      sampled_at: null,
+    }, now)).toBe('STALE')
+  })
+
   it.each([
     ['/observability?hours=48&group_by=alias', 'hours=48&group_by=alias'],
     ['/observability?hours=13', 'hours=13'],
+    ['/observability?include_inactive=false', ''],
+    ['/observability?include_inactive=TRUE', ''],
+    ['/observability?include_inactive=true', 'include_inactive=true'],
     ['/observability?hours=9999', ''],
     ['/observability?group_by=OTHER', ''],
     ['/observability?hours=024&group_by=DEPLOYMENT', 'group_by=deployment'],
