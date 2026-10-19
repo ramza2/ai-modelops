@@ -650,6 +650,11 @@ def test_vllm_auto_tool_choice_hermes_emitted_once() -> None:
     assert spec.command.count("--enable-auto-tool-choice") == 1
     assert _flag_value(spec.command, "--tool-call-parser") == "hermes"
     assert spec.command.count("--tool-call-parser") == 1
+    # Node Agent create payload carries opaque argv; flags must survive
+    # to_create_payload without Worker inventing Node Agent-side options.
+    payload = spec.to_create_payload()
+    assert payload["command"].count("--enable-auto-tool-choice") == 1
+    assert _flag_value(payload["command"], "--tool-call-parser") == "hermes"
 
 
 def test_vllm_auto_tool_choice_with_qwen3_and_v1_runner() -> None:

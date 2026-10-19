@@ -1,7 +1,7 @@
 # vLLM Auto Tool Calling (optional, v0.24.0)
 
-P1-9A adds optional Managed vLLM start flags for OpenAI-compatible Auto Tool
-Calling (Qwen3 / Hermes parser):
+P1-9A / P1-9B add optional Managed vLLM start flags for OpenAI-compatible Auto
+Tool Calling (Qwen3 / Hermes parser):
 
 ```text
 --enable-auto-tool-choice
@@ -11,9 +11,10 @@ Calling (Qwen3 / Hermes parser):
 Defaults in ModelOps are **unset / false** (both flags omitted). Existing
 Deployments without these fields keep prior create-spec behavior.
 
-**Status:** code + unit/API/UI tests in this change. **Real GPU container
-restart and live Gateway tool-calling verification are deferred until after
-merge** (mark as unverified on ops until then).
+**Status:** code + unit/API/UI tests. **Real GPU container restart and live
+Gateway tool-calling verification are deferred until after merge** (mark as
+unverified on ops until then). This change does **not** auto-recreate or
+mutate running ops containers.
 
 ## Runtime option vs request parameters
 
@@ -27,17 +28,35 @@ ModelOps does **not** inject `tools` / `tool_choice` into ordinary Chat
 requests. Gateway forwards client-supplied OpenAI-compatible fields; it must
 not drop or rewrite them beyond existing model rewrite / policy rules.
 
-Related Runtime options (unchanged):
+Related Runtime options (unchanged by this feature):
 
 - `reasoning_parser=qwen3` → `--reasoning-parser qwen3` (see
   `02-vllm-reasoning-parser.md`)
 - `vllm_model_runner=v1` → `VLLM_USE_V2_MODEL_RUNNER=0`
 
-## Cache Deploy / Deployment config
+Do not change GPU assignments, VRAM expectations, model path, Endpoint Alias,
+or Gateway routing when enabling Auto Tool Calling.
+
+## Config shapes
+
+### Cache Deploy `runtime_config`
 
 ```json
 {
   "runtime_config": {
+    "reasoning_parser": "qwen3",
+    "vllm_model_runner": "v1",
+    "enable_auto_tool_choice": true,
+    "tool_call_parser": "hermes"
+  }
+}
+```
+
+### Deployment `deployment_config` (create / PATCH)
+
+```json
+{
+  "deployment_config": {
     "reasoning_parser": "qwen3",
     "vllm_model_runner": "v1",
     "enable_auto_tool_choice": true,
@@ -53,38 +72,75 @@ Related Runtime options (unchanged):
 - `tool_call_parser`: omit / `null` / `"hermes"` (case-insensitive → `hermes`)
 - `enable_auto_tool_choice=true` **requires** `tool_call_parser`
 - `tool_call_parser` set while enable is not true → rejected
+- Management API create/PATCH normalizes and rejects invalid pairs before
+  persist (P1-9B)
 - Worker emits each of `--enable-auto-tool-choice` and `--tool-call-parser`
-  at most once when enabled
+  at most once when enabled; Node Agent receives them as opaque create
+  `command` argv (no Node Agent-specific tool-calling API)
 - Idempotent Cache Deploy treats both fields as create-critical (mismatch →
   `DEPLOYMENT_SPEC_CONFLICT`, never silent reuse)
+
+## Create / recreate path (no new ops workflow)
+
+Existing Managed lifecycle only:
+
+```text
+deployment_config persisted
+  → START / ENSURE_CONTAINER
+  → Worker VLLMAdapter.build_create_spec
+  → Node Agent create with command argv
+```
+
+`PATCH /api/v1/deployments/{id}` updates metadata only. It does **not** recreate
+a running container. argv changes apply on the next STOP→START recreate of a
+stopped/exited managed container.
+
+`PATCH` **replaces** `deployment_config` entirely (not a deep merge). Always
+`GET` the current Deployment, merge the two tool-calling fields into the
+existing object, then PATCH the full object.
 
 ## Applying to an existing MANAGED Deployment (e.g. Qwen3-14B-AWQ)
 
 Config changes do **not** mutate a running container in place. Temporary
-STOP/START recreate is expected for PoC.
+STOP/START recreate is expected for PoC. **Do not** run this from the PR
+merge alone.
 
 ### Before changing anything (read-only)
 
 Record the current Deployment identity for rollback:
 
 1. Management API `GET /api/v1/deployments/{id}` — note `deployment_config`,
-   `runtime_image`, `upstream_base_url`, `container_name`, GPU assignments
+   `runtime_image` / version refs, `upstream_base_url`, `container_name`,
+   GPU assignments
 2. Node Agent managed inspect (via Management refresh path) — note observed
    command/argv, image, model mount path
 3. Confirm Alias / ACTIVE Route still points at this Deployment
 
-Do **not** run STOP/START or edit ops GPU hosts from this PR merge alone.
-
 ### Apply procedure (post-merge, ops window)
 
-1. Persist Runtime config on the Deployment (Cache Deploy reuse with matching
-   create-critical identity, or update `deployment_config` through the
-   supported Management path):
-   - `enable_auto_tool_choice: true`
-   - `tool_call_parser: "hermes"`
-   - keep existing `reasoning_parser: "qwen3"` and `vllm_model_runner: "v1"`
-     if already required
-2. **STOP** the Deployment (container stopped/exited)
+1. Persist Runtime config on the Deployment via existing Management API only:
+
+   ```http
+   GET  /api/v1/deployments/{id}
+   PATCH /api/v1/deployments/{id}
+   ```
+
+   Body example (merge into the GET `deployment_config`; keep unrelated keys):
+
+   ```json
+   {
+     "deployment_config": {
+       "reasoning_parser": "qwen3",
+       "vllm_model_runner": "v1",
+       "enable_auto_tool_choice": true,
+       "tool_call_parser": "hermes"
+     }
+   }
+   ```
+
+   Alternatively use Cache Deploy reuse with matching create-critical identity.
+2. **STOP** the Deployment (container stopped/exited). Do not invent a new
+   “recreate” API.
 3. **START** again — Worker `ENSURE_CONTAINER` builds the current create-spec;
    stopped/exited containers are removed and recreated when argv/env drift
 4. RUNNING incompatible containers fail closed — stop first; never silent
@@ -124,3 +180,4 @@ Do **not** run STOP/START or edit ops GPU hosts from this PR merge alone.
 - Live RTX A4000 / vLLM 0.24.0 restart evidence
 - Expanding `tool_call_parser` allowlist beyond `hermes`
 - Gateway Alias changes or tool injection middleware
+- Auto-recreate of existing Qwen3 Deployments

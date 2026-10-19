@@ -21,6 +21,7 @@ from app.domain.models import Deployment, DeploymentGPUAssignment
 from app.repositories.deployments import DeploymentRepository
 from app.repositories.models import ModelVersionRepository
 from app.repositories.nodes import NodeRepository
+from app.services.vllm_auto_tool_calling import normalize_auto_tool_calling_config
 
 
 class DeploymentService:
@@ -119,6 +120,8 @@ class DeploymentService:
         if not upstream:
             upstream = self._derived_managed_upstream(container, runtime_port)
 
+        config = normalize_auto_tool_calling_config(dict(deployment_config or {}))
+
         deployment = Deployment(
             name=name,
             model_version_id=model_version_id,
@@ -130,7 +133,7 @@ class DeploymentService:
             container_name=container,
             upstream_base_url=upstream,
             runtime_port=runtime_port,
-            deployment_config_json=deployment_config or {},
+            deployment_config_json=config,
         )
         return await self._persist_with_gpus(deployment, gpu_assignments or [])
 
@@ -159,7 +162,7 @@ class DeploymentService:
             await self._require_node(node_id)
         await self._assert_unique_name(name)
 
-        config = dict(deployment_config or {})
+        config = normalize_auto_tool_calling_config(dict(deployment_config or {}))
         if health_path is not None:
             config["health_path"] = health_path
 
@@ -219,7 +222,12 @@ class DeploymentService:
                 raise ValidationError("upstream_base_url must not be empty.")
             deployment.upstream_base_url = upstream
         if deployment_config is not None:
-            deployment.deployment_config_json = deployment_config
+            # Full replace (not merge). Callers must GET + merge before PATCH
+            # when preserving unrelated keys. Tool-calling fields fail closed
+            # here; container argv only updates on later STOP→START recreate.
+            deployment.deployment_config_json = normalize_auto_tool_calling_config(
+                dict(deployment_config)
+            )
         if status_reason is not None:
             deployment.status_reason = status_reason
         deployment.updated_at = dt.datetime.now(tz=dt.UTC)
