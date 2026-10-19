@@ -21,6 +21,7 @@ from app.domain.models import (
     ModelVersion,
     RoutingState,
 )
+from app.routing.capability_evidence import evaluate_capabilities
 from app.routing.priority_evidence import (
     REASON_NO_RUNTIME_OBSERVATION,
     evaluate_priority_scheduler_evidence,
@@ -48,6 +49,11 @@ class RouteEntry:
     priority_scheduler_trusted: bool = False
     priority_scheduler_evidence_reason: str = REASON_NO_RUNTIME_OBSERVATION
     priority_scheduler_evidence_sampled_at: dt.datetime | None = None
+    observed_context_window: int | None = None
+    observed_supports_thinking: bool | None = None
+    observed_supports_tools: bool | None = None
+    capability_evidence_reason: str = "NO_CURRENT_CONTAINER_OBSERVATION"
+    capability_evidence_sampled_at: dt.datetime | None = None
 
     @property
     def upstream_model_name(self) -> str | None:
@@ -118,6 +124,7 @@ async def load_routing_snapshot(
             route_row = None
 
         trusted = False
+        capability = None
         evidence_reason = REASON_NO_RUNTIME_OBSERVATION
         evidence_sampled_at: dt.datetime | None = None
 
@@ -125,6 +132,19 @@ async def load_routing_snapshot(
             dep_id = str(dep_row.id)
             obs = latest_obs.get(dep_id)
             evidence_sampled_at = obs["sampled_at"] if obs is not None else None
+            capability = evaluate_capabilities(
+                deployment_type=getattr(dep_row, "deployment_type", None),
+                runtime_type=(
+                    str(version_row.runtime_type)
+                    if version_row is not None and version_row.runtime_type
+                    else None
+                ),
+                runtime_status=str(dep_row.runtime_status),
+                container_id=getattr(dep_row, "container_id", None),
+                last_started_at=getattr(dep_row, "last_started_at", None),
+                snapshot_sampled_at=obs["sampled_at"] if obs is not None else None,
+                metrics_json=obs["metrics_json"] if obs is not None else None,
+            )
             trusted, evidence_reason = evaluate_priority_scheduler_evidence(
                 deployment_type=getattr(dep_row, "deployment_type", None),
                 runtime_type=(
@@ -179,6 +199,15 @@ async def load_routing_snapshot(
             priority_scheduler_trusted=bool(trusted),
             priority_scheduler_evidence_reason=str(evidence_reason),
             priority_scheduler_evidence_sampled_at=evidence_sampled_at,
+            observed_context_window=capability.context_window if capability else None,
+            observed_supports_thinking=capability.supports_thinking if capability else None,
+            observed_supports_tools=capability.supports_tools if capability else None,
+            capability_evidence_reason=(
+                capability.reason if capability else "NO_ACTIVE_DEPLOYMENT"
+            ),
+            capability_evidence_sampled_at=(
+                capability.sampled_at if capability else None
+            ),
         )
 
     return RoutingSnapshot(
