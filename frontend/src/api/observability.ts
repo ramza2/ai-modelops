@@ -30,9 +30,14 @@ export async function getInvocationSummary(
 export async function getRuntimeLatest(
   deploymentId?: string | null,
   signal?: AbortSignal,
+  activeOnly = false,
 ): Promise<RuntimeLatestResponse> {
   return apiGet<RuntimeLatestResponse>('/api/v1/observability/runtime/latest', {
-    query: deploymentId ? { deployment_id: deploymentId } : undefined,
+    query: deploymentId
+      ? { deployment_id: deploymentId }
+      : activeOnly
+        ? { active_only: true }
+        : undefined,
     signal,
   })
 }
