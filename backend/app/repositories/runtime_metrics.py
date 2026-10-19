@@ -16,13 +16,19 @@ class RuntimeMetricsRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    async def latest_all(self) -> list[dict[str, Any]]:
-        """Latest snapshot per deployment (DISTINCT ON), with deployment name."""
+    async def latest_all(self, *, active_only: bool = False) -> list[dict[str, Any]]:
+        """Latest persisted sample per deployment; optionally show only active runtimes.
+
+        Historical samples are never rewritten or deleted. A retired/stopped
+        Deployment retains its final sample for explicit history access.
+        """
         stmt = text(
             """
             SELECT DISTINCT ON (s.deployment_id)
               s.deployment_id,
               d.name AS deployment_name,
+              d.runtime_status,
+              d.retired_at,
               s.sampled_at,
               s.availability,
               s.kv_cache_usage_ratio,
@@ -35,10 +41,11 @@ class RuntimeMetricsRepository:
               s.error_message
             FROM deployment_runtime_metric_snapshot s
             JOIN deployment d ON d.id = s.deployment_id
+            WHERE (:active_only = false OR (d.retired_at IS NULL AND d.runtime_status = 'RUNNING'))
             ORDER BY s.deployment_id, s.sampled_at DESC
             """
         )
-        result = await self._session.execute(stmt)
+        result = await self._session.execute(stmt, {"active_only": active_only})
         return [dict(row._mapping) for row in result]
 
     async def latest_one(self, deployment_id: uuid.UUID) -> dict[str, Any] | None:
@@ -46,6 +53,8 @@ class RuntimeMetricsRepository:
             select(
                 DeploymentRuntimeMetricSnapshot.deployment_id,
                 Deployment.name.label("deployment_name"),
+                Deployment.runtime_status,
+                Deployment.retired_at,
                 DeploymentRuntimeMetricSnapshot.sampled_at,
                 DeploymentRuntimeMetricSnapshot.availability,
                 DeploymentRuntimeMetricSnapshot.kv_cache_usage_ratio,
