@@ -57,13 +57,15 @@ async def invocation_capacity_summary(
 @router.get("/runtime/latest")
 async def runtime_metrics_latest(
     deployment_id: uuid.UUID | None = Query(default=None),
+    active_only: bool = Query(default=False),
     service: RuntimeMetricsObservabilityService = Depends(get_runtime_metrics_service),
 ) -> dict:
     """Latest Deployment runtime metric snapshot(s) from DB (M6-A2).
 
-    Does not trigger a live Node Agent scrape.
+    Does not trigger a live Node Agent scrape. active_only applies to the
+    unscoped list only; direct deployment_id lookup retains historical access.
     """
-    return await service.latest(deployment_id=deployment_id)
+    return await service.latest(deployment_id=deployment_id, active_only=active_only)
 
 
 @router.get("/runtime/deployments/{deployment_id}/history")
