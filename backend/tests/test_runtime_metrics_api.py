@@ -252,6 +252,53 @@ async def test_latest_all_and_one() -> None:
             params={"deployment_id": str(uuid.uuid4())},
         )
         assert missing.status_code == 404
+
+        # Keep historical latest snapshots, but omit non-running/retired
+        # deployments when the list explicitly requests active_only.
+        async with session_factory() as session:
+            await session.execute(
+                text(
+                    "UPDATE deployment SET runtime_status = 'STOPPED', "
+                    "retired_at = :retired_at WHERE id = :id"
+                ),
+                {"retired_at": seeded["now"], "id": seeded["dep_b"]},
+            )
+            await session.commit()
+
+        current = await c.get(
+            "/api/v1/observability/runtime/latest",
+            params={"active_only": "true"},
+        )
+        assert current.status_code == 200
+        current_ids = {item["deployment_id"] for item in current.json()["items"]}
+        assert seeded["dep_a"] in current_ids
+        assert seeded["dep_b"] not in current_ids
+
+        historical = await c.get(
+            "/api/v1/observability/runtime/latest",
+            params={"active_only": "false"},
+        )
+        assert historical.status_code == 200
+        history_by_id = {
+            item["deployment_id"]: item for item in historical.json()["items"]
+        }
+        assert seeded["dep_b"] in history_by_id
+        assert history_by_id[seeded["dep_b"]]["runtime_status"] == "STOPPED"
+        assert history_by_id[seeded["dep_b"]]["retired_at"] is not None
+        assert history_by_id[seeded["dep_b"]]["availability"] == "UNAVAILABLE"
+
+        # Direct latest lookup remains accessible for Retired Deployment.
+        retired_one = await c.get(
+            "/api/v1/observability/runtime/latest",
+            params={"deployment_id": seeded["dep_b"], "active_only": "true"},
+        )
+        assert retired_one.status_code == 200
+        assert retired_one.json()["items"][0]["deployment_id"] == seeded["dep_b"]
+        invalid_filter = await c.get(
+            "/api/v1/observability/runtime/latest",
+            params={"active_only": "invalid"},
+        )
+        assert invalid_filter.status_code == 422
     await engine.dispose()
 
 
