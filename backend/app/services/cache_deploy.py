@@ -68,6 +68,8 @@ _CREATE_CRITICAL_CFG_KEYS = (
     "gpu_memory_utilization",
     "reasoning_parser",
     "vllm_model_runner",
+    "enable_auto_tool_choice",
+    "tool_call_parser",
 )
 
 
@@ -517,11 +519,18 @@ class CacheDeployService:
         if key in {"served_model_name", "model_path", "dtype", "quantization", "runner"}:
             text = str(value).strip()
             return text if text else None
-        if key in {"reasoning_parser", "vllm_model_runner"}:
+        if key in {"reasoning_parser", "vllm_model_runner", "tool_call_parser"}:
             if not isinstance(value, str):
                 return value
             text = value.strip().lower()
             return text if text else None
+        if key == "enable_auto_tool_choice":
+            # Default false when unset so omit vs explicit false reuse cleanly.
+            if value is None:
+                return False
+            if isinstance(value, bool):
+                return value
+            return value
         return value
 
     def _create_critical_spec(

@@ -1039,6 +1039,77 @@ export function CacheDeployWizardPage() {
                   <option value="v1">V1</option>
                 </select>
               </label>
+              <label>
+                Auto Tool Choice (optional)
+                <span className="form-field-hint">
+                  vLLM OpenAI-compatible Auto Tool Calling. ON일 때만{' '}
+                  <code>--enable-auto-tool-choice</code>와 parser를 추가합니다.
+                  요청별 <code>tools</code>/<code>tool_choice</code>와 별개입니다.
+                </span>
+                <select
+                  aria-label="Auto Tool Choice"
+                  value={
+                    runtime.enable_auto_tool_choice === true
+                      ? 'true'
+                      : runtime.enable_auto_tool_choice === false
+                        ? 'false'
+                        : ''
+                  }
+                  onChange={(e) => {
+                    const v = e.target.value
+                    setRuntime((r) => {
+                      if (v === 'true') {
+                        return {
+                          ...r,
+                          enable_auto_tool_choice: true,
+                          tool_call_parser: r.tool_call_parser ?? 'hermes',
+                        }
+                      }
+                      if (v === 'false') {
+                        return {
+                          ...r,
+                          enable_auto_tool_choice: false,
+                          tool_call_parser: null,
+                        }
+                      }
+                      return {
+                        ...r,
+                        enable_auto_tool_choice: null,
+                        tool_call_parser: null,
+                      }
+                    })
+                  }}
+                >
+                  <option value="">OFF (default)</option>
+                  <option value="false">OFF</option>
+                  <option value="true">ON</option>
+                </select>
+              </label>
+              <label>
+                Tool Call Parser
+                <span className="form-field-hint">
+                  Auto Tool Choice ON일 때 필수. 현재 allowlist:{' '}
+                  <code>hermes</code> (Qwen3).
+                </span>
+                <select
+                  aria-label="Tool Call Parser"
+                  value={runtime.tool_call_parser ?? ''}
+                  disabled={runtime.enable_auto_tool_choice !== true}
+                  onChange={(e) =>
+                    setRuntime((r) => ({
+                      ...r,
+                      tool_call_parser: e.target.value || null,
+                    }))
+                  }
+                >
+                  <option value="">
+                    {runtime.enable_auto_tool_choice === true
+                      ? '선택하세요'
+                      : '(Auto Tool Choice OFF)'}
+                  </option>
+                  <option value="hermes">hermes</option>
+                </select>
+              </label>
             </div>
           </div>
 
@@ -1073,6 +1144,14 @@ export function CacheDeployWizardPage() {
               Qwen3 <code>thinking_token_budget</code> 등이 V2에서 거부될 때
               사용하세요. 호환성·성능·메모리 특성을 운영에서 검증하세요. 기존
               컨테이너는 STOP 후 START(ENSURE_CONTAINER)로 재생성되어야 적용됩니다.
+            </p>
+          ) : null}
+          {runtime.enable_auto_tool_choice === true ? (
+            <p className="panel-hint" role="note" data-testid="auto-tool-choice-note">
+              Auto Tool Choice ON은 Runtime 시작 옵션입니다. Gateway는 요청의{' '}
+              <code>tools</code>/<code>tool_choice</code>를 자동 주입하지 않으며
+              클라이언트가 보낸 값만 전달합니다. 기존 컨테이너는 STOP→START
+              재생성 후 적용됩니다. 실 GPU 검증은 머지 후 별도 진행합니다.
             </p>
           ) : null}
           {!runtimeFormValid ? (
@@ -1331,6 +1410,13 @@ export function CacheDeployWizardPage() {
               <p className="panel-hint" role="note">
                 V1 Model Runner가 포함됩니다 (vLLM 0.24.0 thinking_token_budget
                 호환 목적). 적용에는 STOP→START 재생성이 필요합니다.
+              </p>
+            ) : null}
+            {runtime.enable_auto_tool_choice === true ? (
+              <p className="panel-hint" role="note">
+                Auto Tool Choice(
+                <code>{runtime.tool_call_parser ?? '—'}</code>)가 Create
+                runtime_config에 포함됩니다. STOP→START 재생성이 필요합니다.
               </p>
             ) : null}
           </div>

@@ -55,6 +55,8 @@ export const RUNTIME_CONFIG_ALLOWLIST = [
   'scheduling_policy',
   'reasoning_parser',
   'vllm_model_runner',
+  'enable_auto_tool_choice',
+  'tool_call_parser',
 ] as const
 
 export type RuntimeConfigKey = (typeof RUNTIME_CONFIG_ALLOWLIST)[number]

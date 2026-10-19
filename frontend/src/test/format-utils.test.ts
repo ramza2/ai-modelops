@@ -53,6 +53,8 @@ describe('pickRuntimeConfigEntries', () => {
       max_num_seqs: 4,
       reasoning_parser: 'qwen3',
       vllm_model_runner: 'v1',
+      enable_auto_tool_choice: true,
+      tool_call_parser: 'hermes',
       secret_or_unknown: 'x',
       another: 1,
     })
@@ -60,6 +62,8 @@ describe('pickRuntimeConfigEntries', () => {
       'max_num_seqs',
       'reasoning_parser',
       'vllm_model_runner',
+      'enable_auto_tool_choice',
+      'tool_call_parser',
     ])
     expect(otherCount).toBe(2)
   })

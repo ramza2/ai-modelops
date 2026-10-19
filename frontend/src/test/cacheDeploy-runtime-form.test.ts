@@ -86,6 +86,8 @@ describe('cache deploy runtime form validation (P1-8C)', () => {
         'quantization',
         'reasoning_parser',
         'vllm_model_runner',
+        'enable_auto_tool_choice',
+        'tool_call_parser',
       ]),
     )
     expect(

@@ -1723,3 +1723,77 @@ async def test_parity_rejection_invocation_log_and_cleanup() -> None:
 
     await http_client.aclose()
     await engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# P1-9A: tools / tool_choice / thinking kwargs passthrough (no injection)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_p19a_tools_and_tool_choice_passthrough_unchanged() -> None:
+    """Gateway must forward client tools/tool_choice without mutation or injection."""
+    engine = create_async_engine(_database_url(), future=True)
+    session_factory = async_sessionmaker(
+        engine, expire_on_commit=False, autoflush=False
+    )
+    fake = FakeVllmUpstream(tokenize_count=1)
+    http_client = fake.as_client()
+    # Empty policy store → no client limits; still must not inject tools.
+    policy = _policy_store_with({})
+    seeded = await _seed_alias_route(session_factory, runtime_type="VLLM")
+    ctx = await _build_gw(
+        policy_store=policy, http_client=http_client, session_factory=session_factory
+    )
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    ]
+    async with AsyncClient(
+        transport=ASGITransport(app=ctx["app"]), base_url="http://gw.test"
+    ) as ac:
+        with_tools = await ac.post(
+            "/v1/chat/completions",
+            json={
+                "model": seeded["alias"],
+                "messages": [{"role": "user", "content": "weather?"}],
+                "tools": tools,
+                "tool_choice": "auto",
+                "chat_template_kwargs": {"enable_thinking": False},
+                "thinking_token_budget": 256,
+                "max_tokens": 64,
+            },
+        )
+        assert with_tools.status_code == 200, with_tools.text
+
+        plain = await ac.post(
+            "/v1/chat/completions",
+            json={
+                "model": seeded["alias"],
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 16,
+            },
+        )
+        assert plain.status_code == 200, plain.text
+
+    assert len(fake.chat_calls) == 2
+    tool_call = fake.chat_calls[0]
+    assert tool_call["tools"] == tools
+    assert tool_call["tool_choice"] == "auto"
+    assert tool_call["chat_template_kwargs"] == {"enable_thinking": False}
+    assert tool_call["thinking_token_budget"] == 256
+    assert tool_call["model"] == seeded["served"]
+
+    plain_call = fake.chat_calls[1]
+    assert "tools" not in plain_call
+    assert "tool_choice" not in plain_call
+    assert "chat_template_kwargs" not in plain_call
+    assert "thinking_token_budget" not in plain_call
+
+    await http_client.aclose()
+    await engine.dispose()

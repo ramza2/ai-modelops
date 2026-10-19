@@ -16,6 +16,10 @@ export type CacheDeployRuntimeConfig = {
   reasoning_parser?: string | null
   /** Optional V1 model runner pin. Unset = auto (image default). */
   vllm_model_runner?: string | null
+  /** Optional Auto Tool Calling (P1-9A). Default unset/false omits flags. */
+  enable_auto_tool_choice?: boolean | null
+  /** Required hermes when enable_auto_tool_choice is true. */
+  tool_call_parser?: string | null
 }
 
 export type CreateCacheDeploymentBody = {
@@ -167,6 +171,10 @@ export async function createDeploymentFromCache(
                 body.runtimeConfig.reasoning_parser ?? undefined,
               vllm_model_runner:
                 body.runtimeConfig.vllm_model_runner ?? undefined,
+              enable_auto_tool_choice:
+                body.runtimeConfig.enable_auto_tool_choice ?? undefined,
+              tool_call_parser:
+                body.runtimeConfig.tool_call_parser ?? undefined,
             }
           : undefined,
       },

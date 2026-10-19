@@ -20,6 +20,8 @@ export function fitInputFingerprint(
     runner: runtime.runner ?? null,
     reasoningParser: runtime.reasoning_parser ?? null,
     vllmModelRunner: runtime.vllm_model_runner ?? null,
+    enableAutoToolChoice: runtime.enable_auto_tool_choice ?? null,
+    toolCallParser: runtime.tool_call_parser ?? null,
   })
 }
 
