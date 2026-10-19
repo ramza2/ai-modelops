@@ -65,6 +65,8 @@ Base: `/v1`
 | Method | Path | 목적 |
 |---|---|---|
 | GET | `/v1/models` | 사용 가능한 논리 모델 Alias 목록 |
+| GET | `/v1/models/{alias}/capabilities` | Alias ACTIVE Route capability evidence (P1-11) |
+| POST | `/v1/token-count` | Alias prompt token count via trusted vLLM `/tokenize` (P1-12) |
 | POST | `/v1/chat/completions` | LLM/VLM Chat Completion (streaming + non-streaming) |
 | POST | `/v1/embeddings` | Embedding |
 | GET | `/health` | Gateway liveness |
