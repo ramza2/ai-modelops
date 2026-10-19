@@ -230,8 +230,8 @@ export function ModelsPage() {
     syncUrl({
       q: '',
       provider: '',
-      modelType,
-      isActive,
+      modelType: null,
+      isActive: null,
       page: 1,
     })
   }
@@ -343,7 +343,7 @@ export function ModelsPage() {
             검색
           </button>
           <button type="button" className="btn" onClick={onClearSearch}>
-            지우기
+            필터 초기화
           </button>
         </div>
       </form>
