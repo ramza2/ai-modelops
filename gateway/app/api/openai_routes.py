@@ -261,6 +261,47 @@ async def list_models(request: Request) -> dict[str, Any]:
     return {"object": "list", "data": data}
 
 
+@router.get("/v1/models/{alias}/capabilities")
+async def model_capabilities(alias: str, request: Request, response: Response) -> dict[str, Any]:
+    """Alias-scoped, read-only runtime capability evidence for client budgeting.
+
+    Unlike /v1/models this extension is ModelOps-specific. Never use requested
+    Registry/Deployment settings as an unverified effective context window.
+    """
+    response.headers["Cache-Control"] = "no-store"
+    snapshot = _store(request).snapshot
+    if snapshot is not None and snapshot.using_last_known_good:
+        raise GatewayError(
+            "Current routing capability snapshot is unavailable.",
+            code=ErrorCode.MODEL_UNAVAILABLE,
+            http_status=503,
+            param="model",
+        )
+    raw_entry = snapshot.get(alias) if snapshot else None
+    expected_type = (
+        ApiType(raw_entry.api_type)
+        if raw_entry is not None and raw_entry.api_type in (ApiType.CHAT.value, ApiType.EMBEDDING.value)
+        else ApiType.CHAT
+    )
+    entry = resolve_route(snapshot, alias=alias, expected_api_type=expected_type)
+    observed_at = entry.capability_evidence_sampled_at
+    context = entry.observed_context_window
+    return {
+        "id": entry.alias,
+        "object": "model.capabilities",
+        "status": "VERIFIED" if context is not None else "UNKNOWN",
+        "context_window": context,
+        "supports_thinking": entry.observed_supports_thinking,
+        "supports_tools": entry.observed_supports_tools,
+        "source": "CURRENT_CONTAINER_ARGV" if context is not None else "UNVERIFIED",
+        "evidence_reason": entry.capability_evidence_reason,
+        "observed_at": observed_at.isoformat().replace("+00:00", "Z") if observed_at else None,
+        "deployment_id": entry.deployment_id,
+        "route_id": entry.route_id,
+        "routing_version": snapshot.routing_version,
+    }
+
+
 @router.post("/v1/chat/completions")
 async def chat_completions(request: Request) -> Response:
     body, request_bytes = await _read_json_body(request)

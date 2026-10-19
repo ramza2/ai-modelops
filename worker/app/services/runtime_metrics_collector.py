@@ -383,6 +383,9 @@ _RUNTIME_CONFIG_FIELDS = (
     "dtype",
     "quantization",
     "scheduling_policy",
+    "reasoning_parser",
+    "tool_call_parser",
+    "enable_auto_tool_choice",
 )
 _RUNTIME_CONFIG_ENTRYPOINTS = frozenset({"VLLM", "UNRECOGNIZED"})
 _SCHEDULING_POLICY_ALLOWED = frozenset({"fcfs", "priority"})
@@ -442,7 +445,7 @@ def _sanitize_runtime_config(raw: Any) -> dict[str, Any] | None:
     }
 
 
-def _sanitize_config_value(field: str, value: Any) -> int | float | str | None:
+def _sanitize_config_value(field: str, value: Any) -> int | float | str | bool | None:
     if value is None:
         return None
     if field in {"max_model_len", "max_num_seqs", "tensor_parallel_size"}:
@@ -468,6 +471,12 @@ def _sanitize_config_value(field: str, value: Any) -> int | float | str | None:
     if field in {"dtype", "quantization"}:
         text = str(value).strip()
         return text if text else None
+    if field == "enable_auto_tool_choice":
+        return True if value is True else None
+    if field == "reasoning_parser":
+        return "qwen3" if value == "qwen3" else None
+    if field == "tool_call_parser":
+        return "hermes" if value == "hermes" else None
     if field == "scheduling_policy":
         if not isinstance(value, str):
             return None
