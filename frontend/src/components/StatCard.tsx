@@ -11,6 +11,13 @@ type StatCardProps = {
   loading?: boolean
 }
 
+/** Hide unit beside non-numeric placeholder values (keep 0 / positives). */
+function shouldShowUnit(value: string, unit: string | undefined): boolean {
+  if (!unit) return false
+  if (value === '미수집' || value === '확인 불가') return false
+  return true
+}
+
 export function StatCard({
   label,
   value,
@@ -19,6 +26,7 @@ export function StatCard({
   help,
   loading,
 }: StatCardProps) {
+  const showUnit = !loading && shouldShowUnit(value, unit)
   return (
     <article className="stat-card" aria-busy={loading || undefined}>
       <div className="stat-card__label-row">
@@ -31,7 +39,7 @@ export function StatCard({
         ) : (
           <>
             <span className="stat-card__value-text">{value}</span>
-            {unit ? <span className="stat-card__unit">{unit}</span> : null}
+            {showUnit ? <span className="stat-card__unit">{unit}</span> : null}
           </>
         )}
       </p>

@@ -587,8 +587,8 @@ export function ModelVersionDetailPage() {
             <p className="panel-hint" role="note">
               {MODEL_VERSION_DETAIL_FIELD_HELP.runtimeConfig} 실제 실행·관측
               설정은{' '}
-              <Link to="/deployments">모델 배포 상세</Link>의 Capacity Profile에서
-              확인하세요. 버전 ID만으로 특정 Deployment를 추정하지 않습니다.
+              <Link to="/deployments">모델 배포 목록에서 확인</Link>한 뒤 Capacity
+              Profile를 보세요. 버전 ID만으로 특정 Deployment를 추정하지 않습니다.
             </p>
             <dl className="meta-grid">
               {runtimeEntries.known.map(({ key, value }) => (

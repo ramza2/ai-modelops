@@ -166,9 +166,15 @@ describe('DashboardPage', () => {
     await waitFor(() => {
       expect(screen.getByText('등록된 Node가 없습니다.')).toBeInTheDocument()
     })
-    // 0 stays 0 for known zero counts
+    // 0 stays 0 for known zero counts, with unit still shown
     const online = screen.getByText('온라인 서버 (ONLINE Node)').closest('article')
     expect(online?.textContent).toMatch(/0/)
+    expect(online?.querySelector('.stat-card__unit')?.textContent).toBe('대')
+    // Placeholder values must not show 대/건 units
+    const missing = screen.getAllByText('미수집')[0]?.closest('article')
+    expect(missing?.querySelector('.stat-card__unit')).toBeNull()
+    const unavailable = screen.getAllByText('확인 불가')[0]?.closest('article')
+    expect(unavailable?.querySelector('.stat-card__unit')).toBeNull()
     expect(screen.getAllByText('미수집').length).toBeGreaterThan(0)
     expect(screen.getAllByText('확인 불가').length).toBeGreaterThan(0)
     expect(

@@ -171,7 +171,7 @@ describe('ModelVersionDetailPage', () => {
       screen.getAllByText(/Capacity Profile/).length,
     ).toBeGreaterThan(0)
     expect(
-      screen.getByRole('link', { name: '모델 배포 상세' }),
+      screen.getByRole('link', { name: '모델 배포 목록에서 확인' }),
     ).toHaveAttribute('href', '/deployments')
     expect(screen.queryByText(/Effective Runtime Config/i)).not.toBeInTheDocument()
     expect(screen.queryByText(/Actual Runtime Config/i)).not.toBeInTheDocument()
