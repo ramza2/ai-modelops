@@ -103,6 +103,7 @@ function renderDetail(path = '/model-versions/v1') {
         />
         <Route path="/models/:modelId" element={<div>Model detail</div>} />
         <Route path="/models" element={<div>Models list</div>} />
+        <Route path="/deployments" element={<div>Deployments list</div>} />
       </Routes>
     </MemoryRouter>,
   )
@@ -165,13 +166,57 @@ describe('ModelVersionDetailPage', () => {
         name: /Version Runtime Configuration/,
       }),
     ).toBeInTheDocument()
-    expect(screen.getAllByText(/저장된 정의값/).length).toBeGreaterThan(0)
+    expect(screen.getAllByText(/레지스트리 정의값/).length).toBeGreaterThan(0)
     expect(
-      screen.getAllByText(/Deployment Capacity Profile/).length,
+      screen.getAllByText(/Capacity Profile/).length,
     ).toBeGreaterThan(0)
+    expect(
+      screen.getByRole('link', { name: '모델 배포 상세' }),
+    ).toHaveAttribute('href', '/deployments')
     expect(screen.queryByText(/Effective Runtime Config/i)).not.toBeInTheDocument()
     expect(screen.queryByText(/Actual Runtime Config/i)).not.toBeInTheDocument()
     expect(screen.queryByText(/Current Runtime Config/i)).not.toBeInTheDocument()
+  })
+
+  it('shows 미등록 for null expected resources but keeps 0 and positives', async () => {
+    vi.mocked(modelsApi.getModelVersion).mockResolvedValue(
+      makeVersion({
+        expected_idle_vram_mb: null,
+        expected_peak_vram_mb: 0,
+        default_max_model_len: null,
+      }),
+    )
+    vi.mocked(modelsApi.getModel).mockResolvedValue(makeModel())
+    vi.mocked(modelsApi.listModelArtifacts).mockResolvedValue(pageResult([]))
+    renderDetail()
+    expect(
+      await screen.findByRole('heading', {
+        level: 2,
+        name: /Expected Resources/,
+      }),
+    ).toBeInTheDocument()
+    expect(screen.getAllByText('미등록').length).toBe(2)
+    expect(screen.getByText('0 MB')).toBeInTheDocument()
+    expect(screen.getByText(/다운로드·배포 오류가 아닙니다/)).toBeInTheDocument()
+    expect(screen.queryByText('8.0 GiB')).not.toBeInTheDocument()
+  })
+
+  it('explains empty runtime_config as registry unset, not a download error', async () => {
+    vi.mocked(modelsApi.getModelVersion).mockResolvedValue(
+      makeVersion({ runtime_config: {} }),
+    )
+    vi.mocked(modelsApi.getModel).mockResolvedValue(makeModel())
+    vi.mocked(modelsApi.listModelArtifacts).mockResolvedValue(pageResult([]))
+    renderDetail()
+    expect(
+      await screen.findByText(
+        /레지스트리에 별도 실행 설정이 등록되지 않았습니다/,
+      ),
+    ).toBeInTheDocument()
+    expect(screen.getByText(/다운로드·배포 오류가 아닙니다/)).toBeInTheDocument()
+    expect(
+      screen.queryByText('표시할 알려진 runtime_config 항목이 없습니다.'),
+    ).not.toBeInTheDocument()
   })
 
   it('handles malformed runtime config values safely', async () => {

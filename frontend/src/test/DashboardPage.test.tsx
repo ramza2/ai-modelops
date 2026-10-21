@@ -118,18 +118,63 @@ describe('DashboardPage', () => {
     vi.spyOn(dashboardApi, 'fetchDashboard').mockResolvedValue(baseSnap())
     renderPage()
     await waitFor(() => {
-      expect(screen.getByText('전체 Node')).toBeInTheDocument()
+      expect(screen.getByText('전체 서버 (Node)')).toBeInTheDocument()
     })
-    expect(screen.getByText('ONLINE Node')).toBeInTheDocument()
-    expect(screen.getByText('24h Requests')).toBeInTheDocument()
+    expect(screen.getByText('온라인 서버 (ONLINE Node)')).toBeInTheDocument()
+    expect(
+      screen.getByText('최근 24시간 요청 (24h Requests)'),
+    ).toBeInTheDocument()
     expect(screen.getByText('15')).toBeInTheDocument()
-    expect(screen.getByText('Active Operations')).toBeInTheDocument()
+    expect(
+      screen.getByText('진행 중인 작업 (Active Operations)'),
+    ).toBeInTheDocument()
     expect(screen.getByText('START')).toBeInTheDocument()
     expect(screen.getByText('STOP')).toBeInTheDocument()
     // newest-first API order preserved (START before STOP in DOM order)
     const rows = screen.getAllByRole('row')
     const text = rows.map((r) => r.textContent || '').join('\n')
     expect(text.indexOf('START')).toBeLessThan(text.indexOf('STOP'))
+  })
+
+  it('shows Health vs Ready Korean labels and status text', async () => {
+    vi.spyOn(dashboardApi, 'fetchDashboard').mockResolvedValue(baseSnap())
+    renderPage()
+    await waitFor(() => {
+      expect(screen.getByText('관리 시스템 Health')).toBeInTheDocument()
+    })
+    expect(screen.getByText('관리 시스템 Ready')).toBeInTheDocument()
+    expect(screen.getAllByText('정상').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('준비됨').length).toBeGreaterThan(0)
+  })
+
+  it('distinguishes zero counts from missing and unavailable', async () => {
+    vi.spyOn(dashboardApi, 'fetchDashboard').mockResolvedValue(
+      baseSnap({
+        nodesTotal: 0,
+        nodesOnline: 0,
+        nodesError: null,
+        deploymentsActive: null as unknown as number,
+        deploymentsError: null,
+        endpointsTotal: null as unknown as number,
+        endpointsError: 'endpoints unavailable',
+        operationsActive: 0,
+        operationsRecent: [],
+        invocations: { hours: 24, group_by: 'deployment', items: [] },
+      }),
+    )
+    renderPage()
+    await waitFor(() => {
+      expect(screen.getByText('등록된 Node가 없습니다.')).toBeInTheDocument()
+    })
+    // 0 stays 0 for known zero counts
+    const online = screen.getByText('온라인 서버 (ONLINE Node)').closest('article')
+    expect(online?.textContent).toMatch(/0/)
+    expect(screen.getByText('미수집')).toBeInTheDocument()
+    expect(screen.getByText('확인 불가')).toBeInTheDocument()
+    expect(
+      screen.getByText('최근 24시간 호출 기록이 없습니다.'),
+    ).toBeInTheDocument()
+    expect(screen.getByText('표시할 Operation이 없습니다.')).toBeInTheDocument()
   })
 
   it('shows empty states for zero results', async () => {
@@ -161,11 +206,13 @@ describe('DashboardPage', () => {
     )
     renderPage()
     await waitFor(() => {
-      expect(screen.getByText('전체 Node')).toBeInTheDocument()
+      expect(screen.getByText('전체 서버 (Node)')).toBeInTheDocument()
     })
-    expect(screen.getByText('ONLINE Node')).toBeInTheDocument()
+    expect(screen.getByText('온라인 서버 (ONLINE Node)')).toBeInTheDocument()
     expect(screen.getByText('summary unavailable')).toBeInTheDocument()
-    expect(screen.queryByText('24h Requests')).not.toBeInTheDocument()
+    expect(
+      screen.queryByText('최근 24시간 요청 (24h Requests)'),
+    ).not.toBeInTheDocument()
   })
 
   it('does not synthesize a global p95 label', async () => {
@@ -176,6 +223,9 @@ describe('DashboardPage', () => {
     })
     expect(screen.queryByText(/global p95/i)).not.toBeInTheDocument()
     expect(screen.getByText('120 ms')).toBeInTheDocument()
+    expect(
+      screen.getByText('응답시간 95백분위 (P95 Latency)'),
+    ).toBeInTheDocument()
   })
 
   it('shows loading then resolved content', async () => {
@@ -188,7 +238,7 @@ describe('DashboardPage', () => {
     expect(screen.getAllByText('불러오는 중').length).toBeGreaterThan(0)
     resolve(baseSnap())
     await waitFor(() => {
-      expect(screen.getByText('ONLINE Node')).toBeInTheDocument()
+      expect(screen.getByText('온라인 서버 (ONLINE Node)')).toBeInTheDocument()
     })
   })
 
@@ -260,7 +310,7 @@ describe('DashboardPage', () => {
     const user = userEvent.setup()
     renderPage()
     await waitFor(() => {
-      expect(screen.getByText('ONLINE Node')).toBeInTheDocument()
+      expect(screen.getByText('온라인 서버 (ONLINE Node)')).toBeInTheDocument()
     })
     const stampBefore = screen.getByText(/마지막 갱신/).textContent
     await user.click(screen.getByRole('button', { name: '새로고침' }))
@@ -268,7 +318,7 @@ describe('DashboardPage', () => {
       expect(screen.getByText('최근 새로고침 실패')).toBeInTheDocument()
     })
     expect(spy).toHaveBeenCalledTimes(2)
-    expect(screen.getByText('ONLINE Node')).toBeInTheDocument()
+    expect(screen.getByText('온라인 서버 (ONLINE Node)')).toBeInTheDocument()
     expect(screen.getByText('15')).toBeInTheDocument()
     expect(screen.getByText(/마지막 갱신/).textContent).toBe(stampBefore)
   })
@@ -285,7 +335,7 @@ describe('DashboardPage', () => {
     await waitFor(() => {
       expect(screen.getByText('summary unavailable')).toBeInTheDocument()
     })
-    expect(screen.getByText('ONLINE Node')).toBeInTheDocument()
+    expect(screen.getByText('온라인 서버 (ONLINE Node)')).toBeInTheDocument()
     expect(screen.queryByText('최근 새로고침 실패')).not.toBeInTheDocument()
     expect(screen.getByText(/마지막 갱신/)).not.toHaveTextContent('—')
   })

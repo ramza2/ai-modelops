@@ -285,7 +285,7 @@ a:focus-visible {
 
 .stat-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(168px, 1fr));
   gap: 0.75rem;
 }
 
@@ -295,26 +295,75 @@ a:focus-visible {
   border-radius: 8px;
   padding: 0.75rem;
   min-height: 4.5rem;
+  min-width: 0;
+}
+
+.stat-card__label-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.35rem;
 }
 
 .stat-card__label {
   margin: 0;
-  font-size: 0.8rem;
+  font-size: 0.85rem;
+  line-height: 1.35;
   color: var(--muted);
   font-weight: 500;
 }
 
 .stat-card__value {
-  margin: 0.35rem 0 0;
+  margin: 0.4rem 0 0;
   font-size: 1.35rem;
   font-weight: 650;
   letter-spacing: -0.02em;
+  line-height: 1.25;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+.stat-card__value-text {
+  display: inline;
+}
+
+.stat-card__unit {
+  margin-left: 0.25rem;
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: var(--muted);
+  letter-spacing: 0;
 }
 
 .stat-card__hint {
-  margin: 0.35rem 0 0;
+  margin: 0.4rem 0 0;
   color: var(--bad);
-  font-size: 0.8rem;
+  font-size: 0.85rem;
+  line-height: 1.35;
+}
+
+.panel__intro {
+  margin: 0 0 0.75rem;
+  color: var(--muted);
+  font-size: 0.92rem;
+  line-height: 1.45;
+}
+
+.table-cell-clip {
+  max-width: 14rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 640px) {
+  .stat-grid {
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  }
+
+  .table-cell-clip {
+    max-width: 9rem;
+  }
 }
 
 .table-wrap {

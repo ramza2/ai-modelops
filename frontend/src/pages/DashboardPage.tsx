@@ -5,12 +5,14 @@ import {
   type DashboardSnapshot,
 } from '../api/dashboard'
 import { AppShell } from '../components/AppShell'
+import { HelpHint } from '../components/HelpHint'
 import { LoadingBlock } from '../components/LoadingBlock'
 import { SectionError } from '../components/SectionError'
 import { StatCard } from '../components/StatCard'
 import { StatusBadge } from '../components/StatusBadge'
 import { formatApiDateTime, operationElapsed, shortId } from '../utils/date'
 import { formatInt, formatMs, formatPercent } from '../utils/number'
+import { DASHBOARD_FIELD_HELP } from '../utils/uiLabels'
 
 const REFRESH_MS = 15_000
 
@@ -20,7 +22,7 @@ function controlPlaneLabel(
   error: string | null,
 ): { text: string; status: string } {
   if (error) return { text: '확인 불가', status: 'UNKNOWN' }
-  if (!value) return { text: '—', status: 'UNKNOWN' }
+  if (!value) return { text: '미수집', status: 'UNKNOWN' }
   const raw = String(value.status || '').toUpperCase()
   if (kind === 'health') {
     if (raw === 'OK' || raw === 'HEALTHY' || raw === 'UP') {
@@ -32,6 +34,34 @@ function controlPlaneLabel(
     return { text: '준비됨', status: 'HEALTHY' }
   }
   return { text: raw || '오류', status: 'FAILED' }
+}
+
+/** Distinguish 0 / 미수집 / 확인 불가 without changing aggregation. */
+function countDisplay(
+  value: number | null | undefined,
+  sectionError: string | null | undefined,
+): string {
+  if (value === null || value === undefined) {
+    return sectionError ? '확인 불가' : '미수집'
+  }
+  return formatInt(value)
+}
+
+function rateDisplay(
+  value: number | null | undefined,
+  sectionError: string | null | undefined,
+): string {
+  if (sectionError) return '확인 불가'
+  if (value === null || value === undefined) return '미수집'
+  return formatPercent(value)
+}
+
+function metricCell(
+  value: number | null | undefined,
+  kind: 'int' | 'ms',
+): string {
+  if (value === null || value === undefined) return '미수집'
+  return kind === 'ms' ? formatMs(value) : formatInt(value)
 }
 
 export function DashboardPage() {
@@ -106,12 +136,39 @@ export function DashboardPage() {
 
   return (
     <AppShell
-      title="Dashboard"
-      description="Control Plane, 자원, Endpoint, Operation, 최근 24시간 호출 현황을 한눈에 확인합니다. (읽기 전용)"
+      title="대시보드"
+      description="관리 시스템·모델 배포·API 연결·작업·최근 24시간 호출 현황을 한눈에 확인합니다. (읽기 전용)"
       onRefresh={refresh}
       refreshing={refreshing || loading}
       lastUpdated={data?.fetchedAt ?? null}
     >
+      <p className="panel-hint" role="note">
+        {DASHBOARD_FIELD_HELP.overview}
+      </p>
+      <details className="help-glossary">
+        <summary>용어 및 상태 안내</summary>
+        <div className="help-glossary__items">
+          <HelpHint showTopic label="Health vs Ready">
+            {DASHBOARD_FIELD_HELP.healthVsReady}
+          </HelpHint>
+          <HelpHint showTopic label="배포·실행·Healthy">
+            {DASHBOARD_FIELD_HELP.deploymentStates}
+          </HelpHint>
+          <HelpHint showTopic label="API 연결·Traffic">
+            {DASHBOARD_FIELD_HELP.endpointTraffic}
+          </HelpHint>
+          <HelpHint showTopic label="24시간 호출 집계">
+            {DASHBOARD_FIELD_HELP.invocations}
+          </HelpHint>
+          <HelpHint showTopic label="P95">
+            {DASHBOARD_FIELD_HELP.p95}
+          </HelpHint>
+          <HelpHint showTopic label="0 / 미수집 / 확인 불가">
+            {DASHBOARD_FIELD_HELP.missingCounts}
+          </HelpHint>
+        </div>
+      </details>
+
       {fatal && !data ? (
         <SectionError
           title="Management API를 사용할 수 없습니다"
@@ -130,28 +187,34 @@ export function DashboardPage() {
 
       <section className="panel" aria-labelledby="cp-heading">
         <div className="panel__head">
-          <h2 id="cp-heading">Control Plane</h2>
+          <h2 id="cp-heading">관리 시스템 상태 (Control Plane)</h2>
         </div>
+        <p className="panel__intro">
+          Health는 프로세스 생존, Ready는 의존성 준비입니다. 자세한 차이는 「용어
+          및 상태 안내」를 보세요.
+        </p>
         {loading && !data ? (
           <LoadingBlock rows={2} />
         ) : (
           <div className="stat-grid">
             <StatCard
-              label="Backend Health"
+              label="관리 시스템 Health"
               value={health.text}
+              help={DASHBOARD_FIELD_HELP.healthVsReady}
               hint={data?.healthError || undefined}
             />
             <div className="stat-card">
-              <h3 className="stat-card__label">상태 배지</h3>
+              <h3 className="stat-card__label">Health 배지</h3>
               <StatusBadge status={health.status} label={health.text} />
             </div>
             <StatCard
-              label="Backend Readiness"
+              label="관리 시스템 Ready"
               value={ready.text}
+              help={DASHBOARD_FIELD_HELP.healthVsReady}
               hint={data?.readyError || undefined}
             />
             <div className="stat-card">
-              <h3 className="stat-card__label">준비 상태</h3>
+              <h3 className="stat-card__label">Ready 배지</h3>
               <StatusBadge status={ready.status} label={ready.text} />
             </div>
           </div>
@@ -160,8 +223,12 @@ export function DashboardPage() {
 
       <section className="panel" aria-labelledby="res-heading">
         <div className="panel__head">
-          <h2 id="res-heading">자원 요약</h2>
+          <h2 id="res-heading">서버·배포·API 연결 요약</h2>
         </div>
+        <p className="panel__intro">
+          등록·배포·실행·Healthy와 API 별칭 사용 설정·요청 처리(SERVING)는
+          서로 다른 개념입니다. 상세는 「용어 및 상태 안내」를 보세요.
+        </p>
         {loading && !data ? (
           <LoadingBlock />
         ) : (
@@ -176,35 +243,74 @@ export function DashboardPage() {
               <SectionError message={data.endpointsError} onRetry={refresh} />
             ) : null}
             <div className="stat-grid">
-              <StatCard label="전체 Node" value={formatInt(data?.nodesTotal)} />
-              <StatCard label="ONLINE Node" value={formatInt(data?.nodesOnline)} />
               <StatCard
-                label="Active Deployments"
-                value={formatInt(data?.deploymentsActive)}
+                label="전체 서버 (Node)"
+                value={countDisplay(data?.nodesTotal, data?.nodesError)}
+                unit="대"
               />
               <StatCard
-                label="Running"
-                value={formatInt(data?.deploymentsRunning)}
+                label="온라인 서버 (ONLINE Node)"
+                value={countDisplay(data?.nodesOnline, data?.nodesError)}
+                unit="대"
+                help={DASHBOARD_FIELD_HELP.missingCounts}
               />
               <StatCard
-                label="Healthy"
-                value={formatInt(data?.deploymentsHealthy)}
+                label="활성 모델 배포 (Active Deployments)"
+                value={countDisplay(
+                  data?.deploymentsActive,
+                  data?.deploymentsError,
+                )}
+                unit="건"
+                help={DASHBOARD_FIELD_HELP.deploymentStates}
               />
               <StatCard
-                label="전체 Endpoint"
-                value={formatInt(data?.endpointsTotal)}
+                label="실행 중인 모델 (Running)"
+                value={countDisplay(
+                  data?.deploymentsRunning,
+                  data?.deploymentsError,
+                )}
+                unit="건"
+                help={DASHBOARD_FIELD_HELP.deploymentStates}
               />
               <StatCard
-                label="Enabled"
-                value={formatInt(data?.endpointsEnabled)}
+                label="정상 모델 (Healthy)"
+                value={countDisplay(
+                  data?.deploymentsHealthy,
+                  data?.deploymentsError,
+                )}
+                unit="건"
+                help={DASHBOARD_FIELD_HELP.deploymentStates}
               />
               <StatCard
-                label="Serving"
-                value={formatInt(data?.endpointsServing)}
+                label="전체 API 연결 (Endpoint)"
+                value={countDisplay(data?.endpointsTotal, data?.endpointsError)}
+                unit="건"
               />
               <StatCard
-                label="Active Operations"
-                value={formatInt(data?.operationsActive)}
+                label="사용 설정 (Enabled)"
+                value={countDisplay(
+                  data?.endpointsEnabled,
+                  data?.endpointsError,
+                )}
+                unit="건"
+                help={DASHBOARD_FIELD_HELP.endpointTraffic}
+              />
+              <StatCard
+                label="요청 처리 중 (Serving)"
+                value={countDisplay(
+                  data?.endpointsServing,
+                  data?.endpointsError,
+                )}
+                unit="건"
+                help={DASHBOARD_FIELD_HELP.endpointTraffic}
+              />
+              <StatCard
+                label="진행 중인 작업 (Active Operations)"
+                value={countDisplay(
+                  data?.operationsActive,
+                  data?.operationsError,
+                )}
+                unit="건"
               />
             </div>
             {!loading && data && data.nodesTotal === 0 && !data.nodesError ? (
@@ -216,8 +322,12 @@ export function DashboardPage() {
 
       <section className="panel" aria-labelledby="inv-heading">
         <div className="panel__head">
-          <h2 id="inv-heading">24시간 호출</h2>
+          <h2 id="inv-heading">최근 24시간 호출</h2>
         </div>
+        <p className="panel__intro">
+          최근 24시간 Gateway 집계입니다(현재 실행 상태와 별개). 요청 성공률 ≠
+          Runtime HEALTHY. P95는 Deployment 단위입니다.
+        </p>
         {loading && !data ? (
           <LoadingBlock />
         ) : data?.invocationsError ? (
@@ -226,17 +336,24 @@ export function DashboardPage() {
           <>
             <div className="stat-grid">
               <StatCard
-                label="24h Requests"
+                label="최근 24시간 요청 (24h Requests)"
                 value={formatInt(inv.requestCount)}
-              />
-              <StatCard label="24h Errors" value={formatInt(inv.errorCount)} />
-              <StatCard
-                label="24h Success Rate"
-                value={formatPercent(inv.successRate)}
+                unit="건"
               />
               <StatCard
-                label="Token Usage Coverage"
-                value={formatPercent(inv.tokenCoverage)}
+                label="최근 24시간 오류 (24h Errors)"
+                value={formatInt(inv.errorCount)}
+                unit="건"
+              />
+              <StatCard
+                label="요청 성공률 (24h Success Rate)"
+                value={rateDisplay(inv.successRate, null)}
+                help={DASHBOARD_FIELD_HELP.invocations}
+              />
+              <StatCard
+                label="토큰 집계 포함률 (Token Coverage)"
+                value={rateDisplay(inv.tokenCoverage, null)}
+                help={DASHBOARD_FIELD_HELP.invocations}
               />
             </div>
             {inv.requestCount === 0 ? (
@@ -250,23 +367,28 @@ export function DashboardPage() {
                   </caption>
                   <thead>
                     <tr>
-                      <th scope="col">Deployment</th>
-                      <th scope="col">Requests</th>
-                      <th scope="col">Errors</th>
-                      <th scope="col">P95 Latency</th>
-                      <th scope="col">P95 Input Tokens</th>
+                      <th scope="col">모델 배포 (Deployment)</th>
+                      <th scope="col">요청 건수 (Requests)</th>
+                      <th scope="col">오류 (Errors)</th>
+                      <th scope="col">응답시간 95백분위 (P95 Latency)</th>
+                      <th scope="col">입력 토큰 95백분위 (P95 Input Tokens)</th>
                     </tr>
                   </thead>
                   <tbody>
                     {inv.topDeployments.map((row) => (
                       <tr key={row.group_key}>
-                        <td title={row.group_key}>
+                        <td
+                          className="table-cell-clip"
+                          title={row.group_key}
+                        >
                           {row.deployment_name || shortId(row.group_key, 12)}
                         </td>
                         <td>{formatInt(row.request_count)}</td>
                         <td>{formatInt(row.error_count)}</td>
-                        <td>{formatMs(row.latency_ms_p95 ?? null)}</td>
-                        <td>{formatInt(row.input_tokens_p95 ?? null)}</td>
+                        <td>{metricCell(row.latency_ms_p95 ?? null, 'ms')}</td>
+                        <td>
+                          {metricCell(row.input_tokens_p95 ?? null, 'int')}
+                        </td>
                       </tr>
                     ))}
                   </tbody>
@@ -293,12 +415,12 @@ export function DashboardPage() {
               <caption className="sr-only">최근 Operation 목록</caption>
               <thead>
                 <tr>
-                  <th scope="col">Type</th>
-                  <th scope="col">Status</th>
-                  <th scope="col">Target / Endpoint</th>
-                  <th scope="col">Started</th>
-                  <th scope="col">Duration</th>
-                  <th scope="col">Error</th>
+                  <th scope="col">작업 유형 (Type)</th>
+                  <th scope="col">상태 (Status)</th>
+                  <th scope="col">대상 (Target / Endpoint)</th>
+                  <th scope="col">시작 시각 (Started)</th>
+                  <th scope="col">경과 (Duration)</th>
+                  <th scope="col">오류 (Error)</th>
                 </tr>
               </thead>
               <tbody>
@@ -313,10 +435,18 @@ export function DashboardPage() {
                       <td>
                         <StatusBadge status={op.status} />
                       </td>
-                      <td title={target || undefined}>{shortId(target)}</td>
+                      <td
+                        className="table-cell-clip mono"
+                        title={target || undefined}
+                      >
+                        {shortId(target)}
+                      </td>
                       <td>{formatApiDateTime(op.started_at || op.created_at)}</td>
                       <td>{operationElapsed(op)}</td>
-                      <td title={op.error_message || undefined}>
+                      <td
+                        className="table-cell-clip"
+                        title={op.error_message || undefined}
+                      >
                         {op.error_code || '—'}
                       </td>
                     </tr>
