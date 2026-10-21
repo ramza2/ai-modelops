@@ -161,8 +161,8 @@ describe('ModelCachePage', () => {
     renderAt('/models/cache')
     expect(await screen.findByText('org/model')).toBeInTheDocument()
     expect(
-      screen.getByText(/캐시 READY ≠ 모델 실행 중 ≠ API 게시 완료/),
-    ).toBeInTheDocument()
+      screen.getAllByText(/캐시 READY ≠ 모델 실행 중 ≠ API 게시 완료/).length,
+    ).toBeGreaterThan(0)
     const deploy = screen.getByRole('link', { name: '배포 설정' })
     expect(deploy).toHaveAttribute('href', '/models/cache/cache-1/deploy')
 

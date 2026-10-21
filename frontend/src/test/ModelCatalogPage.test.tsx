@@ -471,7 +471,9 @@ describe('ModelCatalogPage', () => {
 
     await userEvent.click(within(row).getByRole('button', { name: 'Fit 분석' }))
     expect(row).toHaveAttribute('data-fit-loading', 'true')
-    expect(within(row).getByText(/Fit 분석 중/)).toBeInTheDocument()
+    expect(
+      within(row).getByText(/GPU 적합성\(Fit\) 분석 중/),
+    ).toBeInTheDocument()
     expect(within(row).getByRole('button', { name: '분석 중…' })).toBeDisabled()
 
     resolveFit!(
@@ -506,7 +508,9 @@ describe('ModelCatalogPage', () => {
     expect(within(detail).getByText('Assumes single-GPU placement')).toBeInTheDocument()
     expect(within(detail).getByText('추천 GPU 및 판단 근거')).toBeInTheDocument()
     expect(within(detail).getByText(/추천 GPU \(참고\)/)).toBeInTheDocument()
-    expect(within(detail).getByText(/Cache Deploy Wizard/)).toBeInTheDocument()
+    expect(
+      within(detail).getAllByText(/Cache Deploy Wizard/).length,
+    ).toBeGreaterThan(0)
     expect(within(detail).getAllByText('gpu-0').length).toBeGreaterThan(0)
     expect(
       within(detail).getAllByText(/서버 완료 시각이 아닙니다|서버 완료 시각 아님/)
@@ -668,7 +672,10 @@ describe('ModelCatalogPage', () => {
     ).toBeDisabled()
     expect(
       within(row).getByRole('button', { name: '다운로드' }),
-    ).toHaveAttribute('title', '디스크 공간이 부족합니다.')
+    ).toHaveAttribute(
+      'title',
+      '디스크 공간이 부족합니다(GPU 메모리 부족과 별개). 다운로드를 시작할 수 없습니다.',
+    )
 
     // Start a second analyze for A that will resolve after the list moves to B.
     await userEvent.click(within(row).getByRole('button', { name: '재분석' }))
