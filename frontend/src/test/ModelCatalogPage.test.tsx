@@ -205,13 +205,13 @@ describe('ModelCatalogPage', () => {
     expect(await screen.findByText('org/fit-model')).toBeInTheDocument()
     expect(screen.getByText('org/tight-model')).toBeInTheDocument()
     expect(screen.getAllByText(/적합/).length).toBeGreaterThan(0)
-    expect(screen.getAllByText(/빠듯/).length).toBeGreaterThan(0)
+    expect(screen.getAllByText(/여유 부족/).length).toBeGreaterThan(0)
 
-    const downloadButtons = screen.getAllByRole('button', { name: 'Download' })
+    const downloadButtons = screen.getAllByRole('button', { name: '다운로드' })
     expect(downloadButtons.every((b) => !(b as HTMLButtonElement).disabled)).toBe(
       true,
     )
-    expect(screen.queryByRole('button', { name: 'Deploy' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '배포 설정' })).not.toBeInTheDocument()
   })
 
   it('polls active download until READY and shows cache metadata', async () => {
@@ -242,7 +242,7 @@ describe('ModelCatalogPage', () => {
     const row = (await screen.findByText('org/dl-model')).closest('tr')
     expect(row).not.toBeNull()
     await userEvent.click(
-      within(row as HTMLElement).getByRole('button', { name: 'Download' }),
+      within(row as HTMLElement).getByRole('button', { name: '다운로드' }),
     )
 
     await waitFor(() => {
@@ -257,11 +257,11 @@ describe('ModelCatalogPage', () => {
     await waitFor(() => {
       expect(screen.getByText('/data/hf/org-dl-model')).toBeInTheDocument()
     })
-    expect(screen.getByText(/rev rev-ready/)).toBeInTheDocument()
+    expect(screen.getByText(/버전 rev-ready/)).toBeInTheDocument()
     expect(downloadsApi.getHfDownload).toHaveBeenCalled()
     // Default makeJob cache_status is PREPARING — Wizard link must not appear.
     expect(
-      screen.getByRole('link', { name: 'Model Cache 확인' }),
+      screen.getByRole('link', { name: '캐시 목록 확인' }),
     ).toHaveAttribute('href', '/models/cache?node_id=node-1')
     expect(
       screen.queryByRole('link', { name: '배포 설정' }),
@@ -284,10 +284,10 @@ describe('ModelCatalogPage', () => {
     renderAt('/models/catalog?node_id=node-1')
     const row = (await screen.findByText('org/fail-model')).closest('tr')
     await userEvent.click(
-      within(row as HTMLElement).getByRole('button', { name: 'Download' }),
+      within(row as HTMLElement).getByRole('button', { name: '다운로드' }),
     )
     expect(await screen.findByText('Hub timeout')).toBeInTheDocument()
-    await userEvent.click(screen.getByRole('button', { name: 'Retry download' }))
+    await userEvent.click(screen.getByRole('button', { name: '다시 다운로드' }))
     await waitFor(() => {
       expect(downloadsApi.startHfDownload).toHaveBeenCalledTimes(2)
     })
@@ -356,11 +356,11 @@ describe('ModelCatalogPage', () => {
 
     await waitFor(() => {
       expect(
-        within(vramRow).getByRole('button', { name: 'Download' }),
+        within(vramRow).getByRole('button', { name: '다운로드' }),
       ).not.toBeDisabled()
     })
     expect(
-      within(diskRow).getByRole('button', { name: 'Download' }),
+      within(diskRow).getByRole('button', { name: '다운로드' }),
     ).toBeDisabled()
   })
 
@@ -397,7 +397,7 @@ describe('ModelCatalogPage', () => {
     const checkbox = await screen.findByLabelText('설치 가능만')
     expect(checkbox).toBeDisabled()
 
-    await userEvent.selectOptions(screen.getByLabelText('Node'), 'node-1')
+    await userEvent.selectOptions(screen.getByLabelText(/대상 서버/), 'node-1')
     await waitFor(() => {
       expect(screen.getByLabelText('설치 가능만')).not.toBeDisabled()
     })
@@ -437,7 +437,7 @@ describe('ModelCatalogPage', () => {
     expect(within(detail).getAllByText(/부족/).length).toBeGreaterThan(0)
     expect(within(detail).getByText('Free VRAM too low')).toBeInTheDocument()
     expect(
-      within(row as HTMLElement).getByRole('button', { name: 'Download' }),
+      within(row as HTMLElement).getByRole('button', { name: '다운로드' }),
     ).not.toBeDisabled()
   })
 
@@ -493,7 +493,7 @@ describe('ModelCatalogPage', () => {
       }),
     ).toBe(true)
     expect(
-      within(detail).getByRole('heading', { name: /Fit 상세 분석/ }),
+      within(detail).getByRole('heading', { name: /GPU 적합성 상세 분석/ }),
     ).toHaveFocus()
     expect(within(detail).getByText('종합 결과')).toBeInTheDocument()
     expect(within(detail).getByText('GPU 0')).toBeInTheDocument()
@@ -603,7 +603,7 @@ describe('ModelCatalogPage', () => {
       expect(resolveLate).not.toBeNull()
     })
 
-    await userEvent.selectOptions(screen.getByLabelText('Node'), '')
+    await userEvent.selectOptions(screen.getByLabelText(/대상 서버/), '')
     resolveLate!(
       makeFitAnalysis({
         repository_id: 'org/stale-fit',
@@ -664,10 +664,10 @@ describe('ModelCatalogPage', () => {
     expect(await screen.findByTestId('fit-detail-org/rev-swap')).toBeInTheDocument()
     expect(screen.getByText('Disk full on rev-a')).toBeInTheDocument()
     expect(
-      within(row).getByRole('button', { name: 'Download' }),
+      within(row).getByRole('button', { name: '다운로드' }),
     ).toBeDisabled()
     expect(
-      within(row).getByRole('button', { name: 'Download' }),
+      within(row).getByRole('button', { name: '다운로드' }),
     ).toHaveAttribute('title', '디스크 공간이 부족합니다.')
 
     // Start a second analyze for A that will resolve after the list moves to B.
@@ -689,7 +689,7 @@ describe('ModelCatalogPage', () => {
 
     const rowB = screen.getByText('org/rev-swap').closest('tr') as HTMLElement
     expect(
-      within(rowB).getByRole('button', { name: 'Download' }),
+      within(rowB).getByRole('button', { name: '다운로드' }),
     ).not.toBeDisabled()
     expect(
       within(rowB).getByRole('button', { name: 'Fit 분석' }),
@@ -713,7 +713,7 @@ describe('ModelCatalogPage', () => {
     })
     expect(screen.queryByTestId('fit-detail-org/rev-swap')).not.toBeInTheDocument()
     expect(
-      within(rowB).getByRole('button', { name: 'Download' }),
+      within(rowB).getByRole('button', { name: '다운로드' }),
     ).not.toBeDisabled()
   })
 
@@ -758,7 +758,7 @@ describe('ModelCatalogPage', () => {
     ) as HTMLElement
     const failRow = screen.getByText('org/fail-fit').closest('tr') as HTMLElement
 
-    await userEvent.click(within(okRow).getByRole('button', { name: 'Download' }))
+    await userEvent.click(within(okRow).getByRole('button', { name: '다운로드' }))
     await waitFor(() => {
       expect(within(okRow).getByText(/진행률 20%/)).toBeInTheDocument()
     })
@@ -837,12 +837,12 @@ describe('ModelCatalogPage', () => {
     const row = (await screen.findByText('org/unknown-type')).closest('tr')
     expect(row).not.toBeNull()
     const download = within(row as HTMLElement).getByRole('button', {
-      name: 'Download',
+      name: '다운로드',
     })
     expect(download).toBeDisabled()
     expect(download).toHaveAttribute(
       'title',
-      'Select LLM/VLM/EMBEDDING before Download',
+      '모델 유형이 미확정입니다. LLM/VLM/EMBEDDING을 선택한 뒤 다운로드하세요.',
     )
 
     await userEvent.selectOptions(
@@ -891,7 +891,7 @@ describe('ModelCatalogPage', () => {
     const { unmount } = renderAt('/models/catalog?node_id=node-1')
     const row = (await screen.findByText('org/restore-model')).closest('tr')
     await userEvent.click(
-      within(row as HTMLElement).getByRole('button', { name: 'Download' }),
+      within(row as HTMLElement).getByRole('button', { name: '다운로드' }),
     )
     await waitFor(() => {
       expect(downloadsApi.startHfDownload).toHaveBeenCalledTimes(1)
@@ -968,7 +968,7 @@ describe('ModelCatalogPage', () => {
     expect(await screen.findByText('disk full')).toBeInTheDocument()
     expect(downloadsApi.startHfDownload).not.toHaveBeenCalled()
 
-    await userEvent.click(screen.getByRole('button', { name: 'Retry download' }))
+    await userEvent.click(screen.getByRole('button', { name: '다시 다운로드' }))
     await waitFor(() => {
       expect(downloadsApi.startHfDownload).toHaveBeenCalledTimes(1)
     })
@@ -1111,7 +1111,7 @@ describe('ModelCatalogPage', () => {
     expect(row).not.toBeNull()
     await waitFor(() => {
       expect(
-        within(row as HTMLElement).getByRole('button', { name: 'Restoring…' }),
+        within(row as HTMLElement).getByRole('button', { name: '복원 중…' }),
       ).toBeDisabled()
     })
     expect(downloadsApi.startHfDownload).not.toHaveBeenCalled()
@@ -1158,7 +1158,7 @@ describe('ModelCatalogPage', () => {
     renderAt('/models/catalog?node_id=node-1')
     const row = (await screen.findByText('org/poll-warn')).closest('tr')
     await userEvent.click(
-      within(row as HTMLElement).getByRole('button', { name: 'Download' }),
+      within(row as HTMLElement).getByRole('button', { name: '다운로드' }),
     )
     await waitFor(() => {
       expect(screen.getByText(/진행률 15%/)).toBeInTheDocument()
@@ -1230,7 +1230,7 @@ describe('ModelCatalogPage', () => {
     expect(
       within(
         (screen.getByText('org/corrupt-draft').closest('tr') as HTMLElement),
-      ).getByRole('button', { name: 'Download' }),
+      ).getByRole('button', { name: '다운로드' }),
     ).not.toBeDisabled()
     expect(downloadsApi.getHfDownload).not.toHaveBeenCalled()
     expect(downloadsApi.startHfDownload).not.toHaveBeenCalled()
@@ -1299,7 +1299,7 @@ describe('ModelCatalogPage', () => {
     renderAt('/models/catalog?node_id=node-1')
     const row = (await screen.findByText('org/slow-poll')).closest('tr')
     await userEvent.click(
-      within(row as HTMLElement).getByRole('button', { name: 'Download' }),
+      within(row as HTMLElement).getByRole('button', { name: '다운로드' }),
     )
     await waitFor(() => {
       expect(downloadsApi.getHfDownload).toHaveBeenCalledTimes(1)
@@ -1362,7 +1362,7 @@ describe('ModelCatalogPage', () => {
     renderAt('/models/catalog?node_id=node-1')
     const row = (await screen.findByText('org/terminal-poll')).closest('tr')
     await userEvent.click(
-      within(row as HTMLElement).getByRole('button', { name: 'Download' }),
+      within(row as HTMLElement).getByRole('button', { name: '다운로드' }),
     )
     expect(await screen.findByText('/data/hf/terminal')).toBeInTheDocument()
     const callsAfterReady = vi.mocked(downloadsApi.getHfDownload).mock.calls
@@ -1396,7 +1396,7 @@ describe('ModelCatalogPage', () => {
     const view = renderAt('/models/catalog?node_id=node-1')
     const row = (await screen.findByText('org/late-unmount')).closest('tr')
     await userEvent.click(
-      within(row as HTMLElement).getByRole('button', { name: 'Download' }),
+      within(row as HTMLElement).getByRole('button', { name: '다운로드' }),
     )
     await waitFor(() => {
       expect(downloadsApi.getHfDownload).toHaveBeenCalled()
@@ -1475,18 +1475,18 @@ describe('ModelCatalogPage', () => {
     renderAt('/models/catalog?node_id=node-1')
     const row = (await screen.findByText('org/node-switch')).closest('tr')
     await userEvent.click(
-      within(row as HTMLElement).getByRole('button', { name: 'Download' }),
+      within(row as HTMLElement).getByRole('button', { name: '다운로드' }),
     )
     await waitFor(() => {
       expect(downloadsApi.startHfDownload).toHaveBeenCalled()
     })
 
-    await userEvent.selectOptions(screen.getByLabelText('Node'), 'node-2')
+    await userEvent.selectOptions(screen.getByLabelText(/대상 서버/), 'node-2')
     await waitFor(() => {
       expect(
         within(
           (screen.getByText('org/node-switch').closest('tr') as HTMLElement),
-        ).getByRole('button', { name: 'Download' }),
+        ).getByRole('button', { name: '다운로드' }),
       ).not.toBeDisabled()
     })
     resolvePoll(
@@ -1636,7 +1636,7 @@ describe('ModelCatalogPage', () => {
       'tr',
     ) as HTMLElement
     expect(
-      within(row).getByRole('button', { name: 'Download' }),
+      within(row).getByRole('button', { name: '다운로드' }),
     ).not.toBeDisabled()
     const reason = within(row).getByTitle(
       /GPU0 has spare VRAM on node-1 with a very long advisory reason/,
@@ -1655,7 +1655,7 @@ describe('ModelCatalogPage', () => {
       }),
     )
 
-    await userEvent.selectOptions(screen.getByLabelText('Node'), 'node-2')
+    await userEvent.selectOptions(screen.getByLabelText(/대상 서버/), 'node-2')
     expect(
       await screen.findByText(/카탈로그를 다시 불러오는 중/),
     ).toBeInTheDocument()
@@ -1664,7 +1664,7 @@ describe('ModelCatalogPage', () => {
       within(row).getByRole('button', { name: 'Fit 분석' }),
     ).toBeDisabled()
     expect(
-      within(row).getByRole('button', { name: 'Download' }),
+      within(row).getByRole('button', { name: '다운로드' }),
     ).toBeDisabled()
     // Node change alone reloads catalog — keeps search/type, resets page=1.
     expect(catalogApi.listHfCatalog).toHaveBeenCalledWith(
@@ -1677,7 +1677,7 @@ describe('ModelCatalogPage', () => {
     )
 
     await userEvent.click(within(row).getByRole('button', { name: 'Fit 분석' }))
-    await userEvent.click(within(row).getByRole('button', { name: 'Download' }))
+    await userEvent.click(within(row).getByRole('button', { name: '다운로드' }))
     expect(catalogApi.analyzeHfResourceFit).not.toHaveBeenCalled()
     expect(downloadsApi.startHfDownload).not.toHaveBeenCalled()
 
@@ -1697,7 +1697,7 @@ describe('ModelCatalogPage', () => {
     expect(
       within(
         (screen.getByText('org/node2-only').closest('tr') as HTMLElement),
-      ).getByRole('button', { name: 'Download' }),
+      ).getByRole('button', { name: '다운로드' }),
     ).not.toBeDisabled()
   })
 
@@ -1760,12 +1760,12 @@ describe('ModelCatalogPage', () => {
     renderAt('/models/catalog?node_id=node-1')
     expect(await screen.findByText('org/initial-node1')).toBeInTheDocument()
 
-    await userEvent.selectOptions(screen.getByLabelText('Node'), '')
-    await userEvent.selectOptions(screen.getByLabelText('Node'), 'node-1')
+    await userEvent.selectOptions(screen.getByLabelText(/대상 서버/), '')
+    await userEvent.selectOptions(screen.getByLabelText(/대상 서버/), 'node-1')
     await waitFor(() => {
       expect(node1Calls).toBeGreaterThan(1)
     })
-    await userEvent.selectOptions(screen.getByLabelText('Node'), 'node-2')
+    await userEvent.selectOptions(screen.getByLabelText(/대상 서버/), 'node-2')
     expect(await screen.findByText('org/fast-node2')).toBeInTheDocument()
 
     resolveNode1Reload(
@@ -1814,25 +1814,25 @@ describe('ModelCatalogPage', () => {
     const row = (await screen.findByText('org/ready-cache')).closest(
       'tr',
     ) as HTMLElement
-    await userEvent.click(within(row).getByRole('button', { name: 'Download' }))
+    await userEvent.click(within(row).getByRole('button', { name: '다운로드' }))
     const wizard = await screen.findByRole('link', { name: '배포 설정' })
     expect(wizard).toHaveAttribute(
       'href',
       '/models/cache/cache-ready-42/deploy',
     )
     expect(
-      screen.queryByRole('link', { name: 'Model Cache 확인' }),
+      screen.queryByRole('link', { name: '캐시 목록 확인' }),
     ).not.toBeInTheDocument()
-    expect(screen.getByText(/Downloaded ≠ Deployed ≠ Published/)).toBeInTheDocument()
+    expect(screen.getByText(/READY는 대상 서버에 파일 캐시가 준비된 상태/)).toBeInTheDocument()
 
     expect(
-      within(row).getByRole('button', { name: 'Downloaded' }),
+      within(row).getByRole('button', { name: '다운로드됨' }),
     ).toBeDisabled()
-    await userEvent.click(within(row).getByRole('button', { name: 'Downloaded' }))
+    await userEvent.click(within(row).getByRole('button', { name: '다운로드됨' }))
     expect(downloadsApi.startHfDownload).toHaveBeenCalledTimes(1)
   })
 
-  it('shows Model Cache 확인 when READY but cache is not confirmed READY', async () => {
+  it('shows 캐시 목록 확인 when READY but cache is not confirmed READY', async () => {
     vi.mocked(catalogApi.listHfCatalog).mockResolvedValue(
       pageResult([makeItem({ repository_id: 'org/ready-nocache' })]),
     )
@@ -1851,9 +1851,9 @@ describe('ModelCatalogPage', () => {
     const row = (await screen.findByText('org/ready-nocache')).closest(
       'tr',
     ) as HTMLElement
-    await userEvent.click(within(row).getByRole('button', { name: 'Download' }))
+    await userEvent.click(within(row).getByRole('button', { name: '다운로드' }))
     expect(
-      await screen.findByRole('link', { name: 'Model Cache 확인' }),
+      await screen.findByRole('link', { name: '캐시 목록 확인' }),
     ).toHaveAttribute('href', '/models/cache?node_id=node-1')
     expect(
       screen.queryByRole('link', { name: '배포 설정' }),
@@ -1892,7 +1892,7 @@ describe('ModelCatalogPage', () => {
     ).toHaveAttribute('href', '/models/cache/cache-f5/deploy')
     expect(downloadsApi.startHfDownload).not.toHaveBeenCalled()
     expect(
-      screen.getByRole('button', { name: 'Downloaded' }),
+      screen.getByRole('button', { name: '다운로드됨' }),
     ).toBeDisabled()
   })
 
@@ -1929,7 +1929,7 @@ describe('ModelCatalogPage', () => {
       screen.queryByRole('link', { name: '배포 설정' }),
     ).not.toBeInTheDocument()
     expect(
-      screen.queryByRole('link', { name: 'Model Cache 확인' }),
+      screen.queryByRole('link', { name: '캐시 목록 확인' }),
     ).not.toBeInTheDocument()
   })
 
@@ -1977,10 +1977,10 @@ describe('ModelCatalogPage', () => {
     const secondRow = screen.getByText('org/second').closest('tr') as HTMLElement
     await waitFor(() => {
       expect(
-        within(firstRow).getByRole('button', { name: 'Restoring…' }),
+        within(firstRow).getByRole('button', { name: '복원 중…' }),
       ).toBeDisabled()
       expect(
-        within(secondRow).getByRole('button', { name: 'Restoring…' }),
+        within(secondRow).getByRole('button', { name: '복원 중…' }),
       ).toBeDisabled()
     })
     expect(downloadsApi.startHfDownload).not.toHaveBeenCalled()

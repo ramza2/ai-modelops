@@ -23,11 +23,17 @@ import type {
   ResourceFitAnalysis,
 } from '../api/types'
 import { AppShell } from '../components/AppShell'
+import { HelpHint, TermLabel } from '../components/HelpHint'
 import { LoadingBlock } from '../components/LoadingBlock'
 import { Pagination } from '../components/Pagination'
 import { SectionError } from '../components/SectionError'
 import { StatusBadge } from '../components/StatusBadge'
 import { TruncatedValue } from '../components/TruncatedValue'
+import {
+  CATALOG_FIELD_HELP,
+  FIT_RESULT_HELP,
+  MODEL_TYPE_HELP,
+} from '../utils/uiLabels'
 import {
   catalogDownloadTrackKey,
   clearCatalogDownloadDraft,
@@ -130,7 +136,7 @@ function catalogFitSummaryReason(item: HfCatalogModel): string {
   if (item.resource_fit?.result) {
     return `목록 요약 ${item.resource_fit.result} (advisory)`
   }
-  return 'Node를 선택하면 Fit 분석으로 상세 결과를 확인할 수 있습니다.'
+  return '대상 서버를 선택하면 GPU 적합성(Fit) 분석으로 상세 결과를 확인할 수 있습니다.'
 }
 
 function formatMb(value: number | null | undefined): string {
@@ -164,10 +170,19 @@ function downloadDisabledReason(
   nodeId: string,
   detail?: ResourceFitAnalysis | null,
 ): string | undefined {
-  if (!nodeId) return 'Node를 선택하세요.'
+  if (!nodeId) return '먼저 대상 서버(Node)를 선택하세요.'
   if (isDiskInsufficientForDownload(detail)) {
-    return '디스크 공간이 부족합니다.'
+    return '디스크 공간이 부족합니다(GPU 메모리 부족과 별개). 다운로드를 시작할 수 없습니다.'
   }
+  return undefined
+}
+
+function fitResultHelp(result: string | null | undefined): string | undefined {
+  const code = (result || '').toUpperCase()
+  if (code === 'FIT') return FIT_RESULT_HELP.FIT
+  if (code === 'TIGHT') return FIT_RESULT_HELP.TIGHT
+  if (code === 'INSUFFICIENT') return FIT_RESULT_HELP.INSUFFICIENT
+  if (code === 'UNKNOWN') return FIT_RESULT_HELP.UNKNOWN
   return undefined
 }
 
@@ -996,7 +1011,7 @@ export function ModelCatalogPage() {
     )
     if (!modelType) {
       setError(
-        `${item.repository_id}: model type is unknown. Select LLM/VLM/EMBEDDING before Download.`,
+        `${item.repository_id}: 모델 유형이 확정되지 않았습니다. LLM/VLM/EMBEDDING을 선택한 뒤 다운로드하세요.`,
       )
       return
     }
@@ -1172,16 +1187,19 @@ export function ModelCatalogPage() {
       <div className="secondary-text catalog-download-status">
         <StatusBadge status={job.status} />
         {isActiveDownloadStatus(job.status) ? (
-          <div>
-            {job.progress_percent != null
-              ? `진행률 ${job.progress_percent}%`
-              : '진행률 없음 (서버 미제공)'}
-          </div>
+          <>
+            <div>
+              {job.progress_percent != null
+                ? `진행률 ${job.progress_percent}%`
+                : '진행률 없음 (서버 미제공 · 임의 %를 만들지 않음)'}
+            </div>
+            <p className="panel-hint">{CATALOG_FIELD_HELP.downloadPolling}</p>
+          </>
         ) : null}
         {bytesLine ? <div>{bytesLine}</div> : null}
         {status === 'READY' ? (
           <div>
-            {job.resolved_revision ? `rev ${job.resolved_revision}` : null}
+            {job.resolved_revision ? `버전 ${job.resolved_revision}` : null}
             {job.size_bytes != null ? ` · ${formatBytes(job.size_bytes)}` : null}
           </div>
         ) : null}
@@ -1194,10 +1212,7 @@ export function ModelCatalogPage() {
         ) : null}
         {status === 'READY' && trackMatched ? (
           <div className="catalog-download-next">
-            <p className="panel-hint">
-              Downloaded ≠ Deployed ≠ Published. 다운로드 READY는 캐시 준비일 뿐
-              모델 실행·Alias 게시 성공을 의미하지 않습니다.
-            </p>
+            <p className="panel-hint">{CATALOG_FIELD_HELP.downloadReady}</p>
             {cacheReadyForDeploy && job.node_model_cache_id ? (
               <Link
                 className="btn"
@@ -1208,21 +1223,24 @@ export function ModelCatalogPage() {
             ) : (
               <>
                 <p className="secondary-text">
-                  Cache ID가 없거나 캐시가 아직 READY로 확인되지 않았습니다. Model
-                  Cache에서 준비 상태를 확인하세요.
+                  캐시 ID가 없거나 캐시가 아직 READY로 확인되지 않았습니다.
+                  「다운로드한 모델 관리」에서 준비 상태를 확인하세요.
                 </p>
                 <Link
                   className="btn btn--ghost"
                   to={`/models/cache?node_id=${encodeURIComponent(nodeId)}`}
                 >
-                  Model Cache 확인
+                  캐시 목록 확인
                 </Link>
               </>
             )}
           </div>
         ) : null}
         {job.error_message && (status === 'FAILED' || status === 'CANCELED') ? (
-          <div>{job.error_message}</div>
+          <div>
+            <span className="secondary-text">다운로드 실패 원인: </span>
+            {job.error_message}
+          </div>
         ) : null}
         {tracked.lastSuccessAt ? (
           <div>
@@ -1232,6 +1250,7 @@ export function ModelCatalogPage() {
         ) : null}
         {pollWarning ? (
           <p className="catalog-fit-error" role="status">
+            <span className="secondary-text">상태 조회 실패(다운로드 자체와 별개): </span>
             {pollWarning}{' '}
             <button
               type="button"
@@ -1249,7 +1268,7 @@ export function ModelCatalogPage() {
             disabled={!nodeId || starting || restoring || catalogListPending}
             onClick={() => void onDownload(item)}
           >
-            Retry download
+            다시 다운로드
           </button>
         ) : null}
       </div>
@@ -1258,22 +1277,34 @@ export function ModelCatalogPage() {
 
   return (
     <AppShell
-      title="Model Catalog"
-      description="Hugging Face 모델을 검색하고 Node에 다운로드합니다. FIT는 자문용이며, 다운로드 READY는 배포·게시 성공을 의미하지 않습니다."
+      title="모델 검색 및 다운로드"
+      description="Hugging Face에서 모델을 찾고, 대상 서버에 파일을 받습니다. GPU 적합성(Fit)은 참고용이며, 다운로드 READY는 배포·API 게시 완료가 아닙니다."
       onRefresh={() => void load('refresh')}
       refreshing={refreshing}
       lastUpdated={lastUpdated}
     >
       <div className="toolbar toolbar--wrap" style={{ marginBottom: '0.75rem' }}>
         <Link className="btn btn--ghost" to="/models">
-          ← Models / Versions
+          ← 모델 관리
         </Link>
         <Link className="btn btn--ghost" to="/models/cache">
-          Model Cache
+          다운로드한 모델 관리
         </Link>
-        <span className="secondary-text">
-          FIT 결과는 자문용이며 배포 성공을 보장하지 않습니다.
-        </span>
+      </div>
+
+      <p className="panel-hint" role="note">
+        {CATALOG_FIELD_HELP.overview}{' '}
+        {CATALOG_FIELD_HELP.diskVsVram}
+      </p>
+      <div className="toolbar toolbar--wrap" style={{ marginBottom: '0.75rem' }}>
+        <HelpHint label="GPU 적합성(Fit)">{CATALOG_FIELD_HELP.fit}</HelpHint>
+        <HelpHint label="LLM">{MODEL_TYPE_HELP.LLM}</HelpHint>
+        <HelpHint label="VLM">{MODEL_TYPE_HELP.VLM}</HelpHint>
+        <HelpHint label="Embedding">{MODEL_TYPE_HELP.EMBEDDING}</HelpHint>
+        <HelpHint label="FIT">{FIT_RESULT_HELP.FIT}</HelpHint>
+        <HelpHint label="TIGHT">{FIT_RESULT_HELP.TIGHT}</HelpHint>
+        <HelpHint label="INSUFFICIENT">{FIT_RESULT_HELP.INSUFFICIENT}</HelpHint>
+        <HelpHint label="UNKNOWN">{FIT_RESULT_HELP.UNKNOWN}</HelpHint>
       </div>
 
       <form className="toolbar toolbar--wrap" onSubmit={onSubmitSearch}>
@@ -1284,11 +1315,16 @@ export function ModelCatalogPage() {
             type="search"
             value={draftQ}
             onChange={(e) => setDraftQ(e.target.value)}
-            placeholder="repository / keyword"
+            placeholder="모델 저장소 / 키워드"
           />
         </label>
-        <label className="toolbar__field" htmlFor="catalog-type">
-          <span>Type</span>
+        <div className="toolbar__field">
+          <div className="toolbar__field-head">
+            <label htmlFor="catalog-type">
+              모델 유형 <span className="term-label__api">(Type)</span>
+            </label>
+            <HelpHint label="모델 유형">{CATALOG_FIELD_HELP.modelType}</HelpHint>
+          </div>
           <select
             id="catalog-type"
             value={modelType ?? 'ALL'}
@@ -1304,14 +1340,19 @@ export function ModelCatalogPage() {
               })
             }}
           >
-            <option value="ALL">ALL</option>
-            <option value="LLM">LLM</option>
-            <option value="VLM">VLM</option>
-            <option value="EMBEDDING">EMBEDDING</option>
+            <option value="ALL">전체</option>
+            <option value="LLM">LLM — 언어 모델</option>
+            <option value="VLM">VLM — 비전·언어</option>
+            <option value="EMBEDDING">EMBEDDING — 임베딩</option>
           </select>
-        </label>
-        <label className="toolbar__field" htmlFor="catalog-node">
-          <span>Node</span>
+        </div>
+        <div className="toolbar__field">
+          <div className="toolbar__field-head">
+            <label htmlFor="catalog-node">
+              대상 서버 <span className="term-label__api">(Node)</span>
+            </label>
+            <HelpHint label="대상 서버">{CATALOG_FIELD_HELP.node}</HelpHint>
+          </div>
           <select
             id="catalog-node"
             value={nodeId}
@@ -1341,7 +1382,7 @@ export function ModelCatalogPage() {
               </option>
             ))}
           </select>
-        </label>
+        </div>
         <label className="toolbar__field" htmlFor="catalog-fit-only">
           <span>설치 가능만</span>
           <input
@@ -1378,7 +1419,7 @@ export function ModelCatalogPage() {
       {catalogListPending && items !== null ? (
         <p className="catalog-list-pending" role="status">
           {refreshing || !listMatchesContext
-            ? 'Node/필터 변경에 맞게 카탈로그를 다시 불러오는 중…'
+            ? '대상 서버/필터 변경에 맞게 카탈로그를 다시 불러오는 중…'
             : '카탈로그를 불러오는 중…'}
         </p>
       ) : null}
@@ -1396,12 +1437,48 @@ export function ModelCatalogPage() {
             <table className="data-table catalog-table">
               <thead>
                 <tr>
-                  <th scope="col">Repository</th>
-                  <th scope="col">Type</th>
-                  <th scope="col">Size / VRAM est.</th>
-                  <th scope="col">Fit</th>
-                  <th scope="col">Reason</th>
-                  <th scope="col">Next</th>
+                  <th scope="col">
+                    <TermLabel
+                      text="모델 저장소"
+                      apiTerm="Repository"
+                      help={CATALOG_FIELD_HELP.repository}
+                    />
+                  </th>
+                  <th scope="col">
+                    <TermLabel
+                      text="유형"
+                      apiTerm="Type"
+                      help={CATALOG_FIELD_HELP.modelType}
+                    />
+                  </th>
+                  <th scope="col">
+                    <TermLabel
+                      text="다운로드 크기 / 예상 GPU 메모리"
+                      apiTerm="Size / VRAM"
+                      help={CATALOG_FIELD_HELP.sizeVram}
+                    />
+                  </th>
+                  <th scope="col">
+                    <TermLabel
+                      text="GPU 적합성"
+                      apiTerm="Fit"
+                      help={CATALOG_FIELD_HELP.fit}
+                    />
+                  </th>
+                  <th scope="col">
+                    <TermLabel
+                      text="판정 근거"
+                      apiTerm="Reason"
+                      help={CATALOG_FIELD_HELP.reason}
+                    />
+                  </th>
+                  <th scope="col">
+                    <TermLabel
+                      text="작업"
+                      apiTerm="Next"
+                      help={CATALOG_FIELD_HELP.next}
+                    />
+                  </th>
                 </tr>
               </thead>
               <tbody>
@@ -1490,18 +1567,20 @@ export function ModelCatalogPage() {
                     ? catalogFitSummaryReason(item)
                     : '목록 갱신 중…'
                   const downloadTitle = catalogListPending
-                    ? '카탈로그 목록을 갱신하는 동안 Fit/Download를 실행할 수 없습니다.'
+                    ? '카탈로그 목록을 갱신하는 동안 Fit 분석·다운로드를 실행할 수 없습니다.'
                     : downloadReady
-                      ? '이미 다운로드 READY입니다. 아래 링크로 Model Cache / 배포 설정을 확인하세요.'
+                      ? '이미 다운로드 READY(캐시 준비)입니다. 아래 링크로 캐시·배포 설정을 확인하세요. 중복 다운로드는 시작하지 않습니다.'
                       : typeMissing
-                        ? 'Select LLM/VLM/EMBEDDING before Download'
+                        ? '모델 유형이 미확정입니다. LLM/VLM/EMBEDDING을 선택한 뒤 다운로드하세요.'
                         : downloadRestoring
                           ? '저장된 다운로드 Job 복원 중…'
                           : downloadDraftLocked && downloadPollWarning
-                            ? '다운로드 Job 복원 조회에 실패했습니다. 상태 다시 조회를 사용하세요.'
+                            ? '다운로드 Job 복원 조회에 실패했습니다. 「상태 다시 조회」를 사용하세요.(다운로드 실패와 별개)'
                             : downloadDraftLocked
-                              ? '저장된 다운로드 Job 복원 중…'
-                              : downloadDisabledReason(nodeId, analysis)
+                              ? '저장된 다운로드 Job 복원 중… 중복 요청을 막기 위해 버튼이 잠겨 있습니다.'
+                              : downloadActive
+                                ? '다운로드가 진행 중입니다. 상태가 자동으로 갱신됩니다.'
+                                : downloadDisabledReason(nodeId, analysis)
                   const downloadDisabled =
                     catalogListPending ||
                     !nodeId ||
@@ -1539,7 +1618,16 @@ export function ModelCatalogPage() {
                         </td>
                         <td>
                           {item.model_type ? (
-                            item.model_type
+                            <span>
+                              {item.model_type}
+                              {item.model_type === 'LLM'
+                                ? ' · 언어'
+                                : item.model_type === 'VLM'
+                                  ? ' · 비전·언어'
+                                  : item.model_type === 'EMBEDDING'
+                                    ? ' · 임베딩'
+                                    : ''}
+                            </span>
                           ) : (
                             <select
                               aria-label={`Type for ${repoId}`}
@@ -1551,10 +1639,12 @@ export function ModelCatalogPage() {
                                 }))
                               }
                             >
-                              <option value="">Select…</option>
-                              <option value="LLM">LLM</option>
-                              <option value="VLM">VLM</option>
-                              <option value="EMBEDDING">EMBEDDING</option>
+                              <option value="">유형 선택…</option>
+                              <option value="LLM">LLM — 언어 모델</option>
+                              <option value="VLM">VLM — 비전·언어</option>
+                              <option value="EMBEDDING">
+                                EMBEDDING — 임베딩
+                              </option>
                             </select>
                           )}
                         </td>
@@ -1564,15 +1654,17 @@ export function ModelCatalogPage() {
                           </div>
                           <div className="secondary-text">
                             {item.estimated_required_vram_mb != null
-                              ? `~${item.estimated_required_vram_mb} MiB VRAM`
-                              : 'VRAM unknown'}
+                              ? `예상 GPU 메모리 ~${item.estimated_required_vram_mb} MiB`
+                              : '예상 GPU 메모리 정보 없음'}
                           </div>
                         </td>
                         <td>
                           <div className="catalog-fit-summary">
                             <span className="secondary-text">목록 요약</span>
                             {catalogFit ? (
-                              <StatusBadge status={catalogFit} />
+                              <span title={fitResultHelp(catalogFit)}>
+                                <StatusBadge status={catalogFit} />
+                              </span>
                             ) : (
                               <span className="secondary-text">
                                 {listMatchesContext ? '—' : '갱신 중'}
@@ -1594,7 +1686,9 @@ export function ModelCatalogPage() {
                                 data-testid={`fit-row-status-${repoId}`}
                               >
                                 <span className="secondary-text">분석 완료</span>
-                                <StatusBadge status={analysis.result} />
+                                <span title={fitResultHelp(analysis.result)}>
+                                  <StatusBadge status={analysis.result} />
+                                </span>
                               </div>
                             ) : fitError ? (
                               <div
@@ -1651,18 +1745,18 @@ export function ModelCatalogPage() {
                               onClick={() => void onDownload(item)}
                             >
                               {downloadStarting
-                                ? 'Starting…'
+                                ? '시작 중…'
                                 : downloadRestoring
-                                  ? 'Restoring…'
+                                  ? '복원 중…'
                                   : downloadDraftLocked && downloadPollWarning
                                     ? '조회 실패'
                                     : downloadDraftLocked
-                                      ? 'Restoring…'
+                                      ? '복원 중…'
                                       : downloadActive
-                                        ? 'Downloading…'
+                                        ? '다운로드 중…'
                                         : downloadReady
-                                          ? 'Downloaded'
-                                          : 'Download'}
+                                          ? '다운로드됨'
+                                          : '다운로드'}
                             </button>
                           </div>
                           {analyzing ? (
@@ -1670,7 +1764,7 @@ export function ModelCatalogPage() {
                               className="secondary-text catalog-fit-loading"
                               role="status"
                             >
-                              Fit 분석 중… (advisory, 배포 실행 없음)
+                              GPU 적합성(Fit) 분석 중… (참고용 · 배포·실행 없음)
                             </p>
                           ) : null}
                           {fitError ? (
@@ -1697,14 +1791,19 @@ export function ModelCatalogPage() {
                             >
                               <div className="catalog-fit-detail__head">
                                 <h3 className="section-subheading" tabIndex={-1}>
-                                  Fit 상세 분석 (advisory)
+                                  GPU 적합성 상세 분석 (참고용)
                                 </h3>
                                 <p className="panel-hint" role="note">
-                                  현재 선택된 Node(<strong>{nodeLabel}</strong>)의
-                                  전체 GPU를 비교한 advisory 결과입니다. Catalog에서
-                                  GPU를 고르지 않으며, 실제 GPU 선택·Fresh Fit은
-                                  Cache Deploy Wizard에서 수행합니다. GPU VRAM을
-                                  합산하지 않고, Deployment를 실행하지 않습니다.
+                                  현재 선택된 대상 서버(
+                                  <strong>{nodeLabel}</strong>)의 GPU를 각각
+                                  비교한 참고 결과입니다. 이 화면에서는 GPU를
+                                  고르거나 모델을 실행하지 않습니다. 실제 GPU
+                                  선택·최종 Fit은 배포 설정(Cache Deploy
+                                  Wizard)에서 수행합니다. GPU 메모리(VRAM)를 여러
+                                  장 합산하지 않습니다.
+                                </p>
+                                <p className="panel-hint">
+                                  {fitResultHelp(analysis.result)}
                                 </p>
                               </div>
                               <dl className="config-kv-grid">
@@ -1718,7 +1817,7 @@ export function ModelCatalogPage() {
                                   </dd>
                                 </div>
                                 <div>
-                                  <dt>분석 Node</dt>
+                                  <dt>분석 대상 서버</dt>
                                   <dd>
                                     {nodeLabel}
                                     <div className="secondary-text mono">
@@ -1727,11 +1826,11 @@ export function ModelCatalogPage() {
                                   </dd>
                                 </div>
                                 <div>
-                                  <dt>모델 / revision</dt>
+                                  <dt>모델 / 모델 버전</dt>
                                   <dd className="mono">
                                     {analysis.repository_id}
                                     <div className="secondary-text">
-                                      revision{' '}
+                                      모델 버전{' '}
                                       {analysis.revision ||
                                         fitDetail.revision ||
                                         '—'}
@@ -1750,11 +1849,15 @@ export function ModelCatalogPage() {
                                   </dd>
                                 </div>
                                 <div>
-                                  <dt>예상 필요 VRAM</dt>
+                                  <dt>예상 필요 GPU 메모리</dt>
                                   <dd>
                                     {formatMb(
                                       analysis.estimated_required_vram_mb,
                                     )}
+                                    <div className="secondary-text">
+                                      예상값이며 실제 여유 VRAM·안전 여유와 다를 수
+                                      있습니다.
+                                    </div>
                                   </dd>
                                 </div>
                                 <div>
@@ -1764,11 +1867,14 @@ export function ModelCatalogPage() {
                                       status={diskFitLabel(analysis.disk_ok)}
                                     />
                                     <div className="secondary-text">
-                                      free {formatMb(analysis.disk_free_mb)}
+                                      여유 디스크 {formatMb(analysis.disk_free_mb)}
                                       {analysis.estimated_download_size_bytes !=
                                       null
-                                        ? ` · download est. ${formatBytes(analysis.estimated_download_size_bytes)}`
+                                        ? ` · 다운로드 크기 추정 ${formatBytes(analysis.estimated_download_size_bytes)}`
                                         : ''}
+                                    </div>
+                                    <div className="secondary-text">
+                                      {CATALOG_FIELD_HELP.diskVsVram}
                                     </div>
                                   </dd>
                                 </div>
@@ -1776,8 +1882,8 @@ export function ModelCatalogPage() {
 
                               <h4 className="section-subheading">GPU별 판정</h4>
                               <p className="panel-hint">
-                                GPU 0 / GPU 1을 각각 독립 카드로 표시합니다. free
-                                VRAM을 합산하지 않습니다.
+                                GPU 0 / GPU 1을 각각 독립 카드로 표시합니다. 여유
+                                GPU 메모리(VRAM)를 합산하지 않습니다.
                               </p>
                               {analysis.gpu_results.length > 0 ? (
                                 <div
@@ -1817,14 +1923,14 @@ export function ModelCatalogPage() {
                                         ) : null}
                                         <dl className="catalog-fit-gpu-card__metrics">
                                           <div>
-                                            <dt>Free / Total VRAM</dt>
+                                            <dt>여유 / 전체 GPU 메모리</dt>
                                             <dd>
                                               {formatMb(gpu.vram_free_mb)} /{' '}
                                               {formatMb(gpu.vram_total_mb)}
                                             </dd>
                                           </div>
                                           <div>
-                                            <dt>예상 필요 VRAM</dt>
+                                            <dt>예상 필요 GPU 메모리</dt>
                                             <dd>
                                               {formatMb(
                                                 gpu.estimated_required_vram_mb,
@@ -1832,7 +1938,7 @@ export function ModelCatalogPage() {
                                             </dd>
                                           </div>
                                           <div>
-                                            <dt>Safety margin</dt>
+                                            <dt>안전 여유 (safety margin)</dt>
                                             <dd>
                                               {formatMb(gpu.safety_margin_mb)}
                                             </dd>
@@ -1880,9 +1986,10 @@ export function ModelCatalogPage() {
                                     추천 GPU 및 판단 근거
                                   </h4>
                                   <p className="panel-hint">
-                                    Node 전체 GPU 비교의 참고 제안입니다. Catalog는
-                                    GPU를 선택하지 않으며, Deploy Wizard에서 실제
-                                    GPU를 고르고 Fresh Fit을 수행합니다.
+                                    대상 서버 전체 GPU 비교의 참고 제안입니다. 이
+                                    화면은 GPU를 선택하지 않으며, 배포
+                                    설정(Cache Deploy Wizard)에서 실제 GPU를
+                                    고르고 최종 Fit을 수행합니다.
                                   </p>
                                   <ul className="catalog-fit-list">
                                     {analysis.suggested_gpu_device_ids.map(
@@ -1915,7 +2022,7 @@ export function ModelCatalogPage() {
                               <div className="catalog-fit-detail__lists">
                                 <div>
                                   <h4 className="section-subheading">
-                                    종합 Reasons
+                                    종합 판정 근거 (Reasons)
                                   </h4>
                                   <ul className="catalog-fit-list">
                                     {analysis.reasons.length > 0 ? (
@@ -1937,7 +2044,9 @@ export function ModelCatalogPage() {
                                   </ul>
                                 </div>
                                 <div>
-                                  <h4 className="section-subheading">Warnings</h4>
+                                  <h4 className="section-subheading">
+                                    경고 (Warnings)
+                                  </h4>
                                   <ul className="catalog-fit-list">
                                     {analysis.warnings.length > 0 ? (
                                       analysis.warnings.map((w) => (
@@ -1959,7 +2068,7 @@ export function ModelCatalogPage() {
                                 </div>
                                 <div>
                                   <h4 className="section-subheading">
-                                    Assumptions
+                                    전제 (Assumptions)
                                   </h4>
                                   <ul className="catalog-fit-list">
                                     {analysis.assumptions.length > 0 ? (
