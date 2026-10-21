@@ -3,7 +3,10 @@ import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import type { Deployment, ModelSummary, ModelVersion, OperationDetail } from '../api/types'
-import { DecommissionWizardPage } from '../pages/DecommissionWizardPage'
+import {
+  DecommissionWizardPage,
+  isGatewayVerificationPassed,
+} from '../pages/DecommissionWizardPage'
 import * as decommissionApi from '../api/decommission'
 import * as deploymentsApi from '../api/deployments'
 import * as modelsApi from '../api/models'
@@ -550,5 +553,289 @@ describe('DecommissionWizardPage', () => {
     expect(
       screen.getByRole('button', { name: '버전 보관 확인…' }),
     ).not.toBeDisabled()
+  })
+
+  it('disables cancel while revalidate/execute is in flight', async () => {
+    const user = userEvent.setup()
+    let resolveStatus!: (value: DecommissionStatus) => void
+    mockHappyLoad()
+    renderWizard('/deployments/d1/decommission?step=unpublish')
+    await user.click(
+      await screen.findByRole('button', { name: 'API 연결 해제 확인…' }),
+    )
+    const dialog = await screen.findByTestId('danger-confirm-dialog')
+    await user.click(within(dialog).getByRole('checkbox'))
+
+    vi.mocked(decommissionApi.getDecommissionStatus).mockImplementation(
+      () =>
+        new Promise<DecommissionStatus>((resolve) => {
+          resolveStatus = resolve
+        }),
+    )
+    await user.click(
+      within(dialog).getByRole('button', { name: '연결 해제 실행' }),
+    )
+    expect(
+      within(dialog).getByRole('button', { name: '취소' }),
+    ).toBeDisabled()
+    expect(
+      within(dialog).getByRole('button', { name: '실행 중…' }),
+    ).toBeDisabled()
+    // Fail closed on revalidate: abort without POST.
+    resolveStatus(
+      makeStatus({
+        active_routes: [],
+        can_unpublish: false,
+        can_stop: true,
+        blockers: [],
+      }),
+    )
+    expect(await screen.findByText(/상태가 변경되었습니다/)).toBeInTheDocument()
+    expect(decommissionApi.unpublishEndpoint).not.toHaveBeenCalled()
+    expect(
+      within(screen.getByTestId('danger-confirm-dialog')).getByRole('button', {
+        name: '취소',
+      }),
+    ).not.toBeDisabled()
+  })
+
+  it('dedupes rapid double confirm so Unpublish POST runs at most once', async () => {
+    const user = userEvent.setup()
+    mockHappyLoad()
+    let resolveUnpublish!: (value: decommissionApi.UnpublishResult) => void
+    vi.mocked(decommissionApi.unpublishEndpoint).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveUnpublish = resolve
+        }),
+    )
+    renderWizard('/deployments/d1/decommission?step=unpublish')
+    await user.click(
+      await screen.findByRole('button', { name: 'API 연결 해제 확인…' }),
+    )
+    const dialog = await screen.findByTestId('danger-confirm-dialog')
+    await user.click(within(dialog).getByRole('checkbox'))
+    const confirmBtn = within(dialog).getByRole('button', {
+      name: '연결 해제 실행',
+    })
+    await user.click(confirmBtn)
+    await user.click(confirmBtn)
+    await waitFor(() => {
+      expect(decommissionApi.unpublishEndpoint).toHaveBeenCalledTimes(1)
+    })
+    resolveUnpublish({
+      endpoint: {
+        id: 'ep-1',
+        alias: 'chat-prod',
+        api_type: 'CHAT',
+      },
+      previous_route: null,
+      routing_version: 3,
+      changed: true,
+      gateway_verification: { status: 'PASSED' },
+    })
+    await waitFor(() => {
+      expect(
+        screen.getByRole('heading', { name: /3\. 모델 실행 중지/ }),
+      ).toBeInTheDocument()
+    })
+  })
+
+  it('advances to Stop only when Gateway verification is PASSED', async () => {
+    const user = userEvent.setup()
+    let statusCalls = 0
+    vi.mocked(decommissionApi.getDecommissionStatus).mockImplementation(
+      async () => {
+        statusCalls += 1
+        // 1 load + 2 revalidate before POST keep fingerprint; later refresh clears routes.
+        if (statusCalls <= 2) return makeStatus()
+        return makeStatus({
+          active_routes: [],
+          can_unpublish: false,
+          can_stop: true,
+          blockers: [],
+        })
+      },
+    )
+    vi.mocked(deploymentsApi.getDeployment).mockResolvedValue(makeDeployment())
+    vi.mocked(modelsApi.getModelVersion).mockResolvedValue(makeVersion())
+    vi.mocked(modelsApi.getModel).mockResolvedValue(makeModel())
+    vi.mocked(decommissionApi.unpublishEndpoint).mockResolvedValue({
+      endpoint: { id: 'ep-1', alias: 'chat-prod', api_type: 'CHAT' },
+      previous_route: null,
+      routing_version: 3,
+      changed: true,
+      gateway_verification: { status: 'PASSED' },
+    })
+    renderWizard('/deployments/d1/decommission?step=unpublish')
+    await user.click(
+      await screen.findByRole('button', { name: 'API 연결 해제 확인…' }),
+    )
+    await confirmAndRun(user)
+    expect(
+      await screen.findByRole('heading', { name: /3\. 모델 실행 중지/ }),
+    ).toBeInTheDocument()
+    expect(isGatewayVerificationPassed('PASSED')).toBe(true)
+  })
+
+  it.each([
+    'ROUTING_PENDING',
+    'ROUTE_STILL_ACTIVE',
+    'GATEWAY_UNAVAILABLE',
+    'SKIPPED',
+  ])(
+    'keeps Unpublish step and blocks Stop when Gateway verification is %s',
+    async (gwStatus) => {
+      const user = userEvent.setup()
+      let statusCalls = 0
+      vi.mocked(decommissionApi.getDecommissionStatus).mockImplementation(
+        async () => {
+          statusCalls += 1
+          if (statusCalls <= 2) return makeStatus()
+          return makeStatus({
+            active_routes: [],
+            can_unpublish: false,
+            can_stop: true,
+            blockers: [],
+          })
+        },
+      )
+      vi.mocked(deploymentsApi.getDeployment).mockResolvedValue(makeDeployment())
+      vi.mocked(modelsApi.getModelVersion).mockResolvedValue(makeVersion())
+      vi.mocked(modelsApi.getModel).mockResolvedValue(makeModel())
+      vi.mocked(decommissionApi.unpublishEndpoint).mockResolvedValue({
+        endpoint: { id: 'ep-1', alias: 'chat-prod', api_type: 'CHAT' },
+        previous_route: null,
+        routing_version: 3,
+        changed: true,
+        gateway_verification: { status: gwStatus },
+      })
+      renderWizard('/deployments/d1/decommission?step=unpublish')
+      await user.click(
+        await screen.findByRole('button', { name: 'API 연결 해제 확인…' }),
+      )
+      await confirmAndRun(user)
+      expect(
+        await screen.findByText(/Gateway 검증이 확인되지 않았습니다/),
+      ).toBeInTheDocument()
+      expect(
+        screen.getByRole('heading', { name: /2\. API 연결 해제/ }),
+      ).toBeInTheDocument()
+      expect(isGatewayVerificationPassed(gwStatus)).toBe(false)
+      await user.click(
+        screen.getByRole('button', { name: /^3\. 모델 실행 중지$/ }),
+      )
+      expect(
+        await screen.findByRole('heading', { name: /3\. 모델 실행 중지/ }),
+      ).toBeInTheDocument()
+      expect(
+        screen.getByRole('button', { name: '모델 중지 확인…' }),
+      ).toBeDisabled()
+      expect(
+        screen.getByText(/Gateway 검증 미완료 — Stop 차단/),
+      ).toBeInTheDocument()
+    },
+  )
+
+  it('aborts Archive Version when Deployment model_version_id changes', async () => {
+    const user = userEvent.setup()
+    mockHappyLoad(
+      makeStatus({
+        active_routes: [],
+        runtime_status: 'STOPPED',
+        container_present: false,
+        retired_at: '2026-10-08T00:00:00Z',
+        can_retire: false,
+        blockers: [],
+      }),
+    )
+    renderWizard('/deployments/d1/decommission?step=archive')
+    await user.click(
+      await screen.findByRole('button', { name: '버전 보관 확인…' }),
+    )
+    vi.mocked(deploymentsApi.getDeployment).mockResolvedValue(
+      makeDeployment({
+        model_version_id: 'v-changed',
+        runtime_status: 'STOPPED',
+        retired_at: '2026-10-08T00:00:00Z',
+      }),
+    )
+    vi.mocked(modelsApi.getModelVersion).mockResolvedValue(
+      makeVersion({ id: 'v-changed', model_id: 'm1' }),
+    )
+    await confirmAndRun(user)
+    expect(
+      await screen.findByText(/Model Version이 확인 대상과 다릅니다/),
+    ).toBeInTheDocument()
+    expect(decommissionApi.archiveModelVersion).not.toHaveBeenCalled()
+  })
+
+  it('aborts Archive Model when Version is no longer archived at revalidate', async () => {
+    const user = userEvent.setup()
+    vi.mocked(decommissionApi.getDecommissionStatus).mockResolvedValue(
+      makeStatus({
+        active_routes: [],
+        runtime_status: 'STOPPED',
+        container_present: false,
+        retired_at: '2026-10-08T00:00:00Z',
+        can_retire: false,
+        blockers: [],
+      }),
+    )
+    vi.mocked(deploymentsApi.getDeployment).mockResolvedValue(
+      makeDeployment({
+        runtime_status: 'STOPPED',
+        retired_at: '2026-10-08T00:00:00Z',
+      }),
+    )
+    vi.mocked(modelsApi.getModelVersion).mockResolvedValue(
+      makeVersion({ archived_at: '2026-10-08T00:00:00Z' }),
+    )
+    vi.mocked(modelsApi.getModel).mockResolvedValue(makeModel())
+
+    renderWizard('/deployments/d1/decommission?step=archive')
+    await user.click(
+      await screen.findByRole('button', { name: '모델 보관 확인…' }),
+    )
+    vi.mocked(modelsApi.getModelVersion).mockResolvedValue(
+      makeVersion({ archived_at: null }),
+    )
+    await confirmAndRun(user)
+    expect(
+      await screen.findByText(/아직 Archived가 아닙니다/),
+    ).toBeInTheDocument()
+    expect(decommissionApi.archiveModel).not.toHaveBeenCalled()
+  })
+
+  it('blocks Purge while a lifecycle Operation is active', async () => {
+    mockHappyLoad(
+      makeStatus({
+        active_routes: [],
+        can_unpublish: false,
+        can_stop: false,
+        can_remove_container: false,
+        can_retire: false,
+        can_purge_cache: true,
+        runtime_status: 'STOPPED',
+        container_present: false,
+        retired_at: '2026-10-08T00:00:00Z',
+        active_operation: {
+          operation_id: 'op-rm-1',
+          operation_type: 'REMOVE',
+          status: 'RUNNING',
+        },
+        blockers: [],
+      }),
+    )
+    renderWizard('/deployments/d1/decommission?step=purge')
+    expect(
+      await screen.findByRole('heading', { name: /6\. 로컬 모델 캐시 삭제/ }),
+    ).toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: '로컬 캐시 삭제 확인…' }),
+    ).toBeDisabled()
+    expect(
+      screen.getByText(/진행 중인 Deployment Operation이 있습니다/),
+    ).toBeInTheDocument()
   })
 })

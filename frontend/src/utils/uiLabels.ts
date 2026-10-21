@@ -459,6 +459,8 @@ export const DECOMMISSION_FIELD_HELP = {
     '현재 상태 확인: ACTIVE Route, Runtime/Health, 컨테이너 존재, 캐시, 진행 중 Operation, Backend can_* / blockers를 조회합니다. 조회만 하며 상태를 변경하지 않습니다.',
   unpublish:
     'API 연결 해제(Unpublish): Gateway Alias의 ACTIVE Route만 제거합니다. 모델 컨테이너 중지·캐시 삭제·레지스트리 삭제와 다릅니다. 해당 Alias를 쓰는 업무 요청이 실패할 수 있습니다.',
+  gatewayVerify:
+    'DB Route 해제와 Gateway 실제 반영은 다릅니다. gateway_verification.status=PASSED 만 적용 확인으로 봅니다. ROUTING_PENDING·ROUTE_STILL_ACTIVE·GATEWAY_UNAVAILABLE·SKIPPED·null·알 수 없는 값은 확인 미완료이며, 이 세션에서는 Stop을 진행하지 마세요. F5/다른 브라우저에서는 Frontend 기억이 사라지므로 완전한 안전은 Backend 조건부 검증이 필요합니다.',
   stop:
     '모델 실행 중지(Stop): 컨테이너 중지 Operation을 접수합니다(202 Accepted ≠ 완료). Operation SUCCEEDED와 runtime_status=STOPPED는 다를 수 있습니다. ACTIVE Route가 있으면 중지를 진행하지 마세요.',
   remove:

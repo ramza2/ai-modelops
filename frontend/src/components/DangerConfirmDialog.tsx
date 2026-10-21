@@ -116,7 +116,12 @@ export function DangerConfirmDialog({
           <button
             type="button"
             className="btn"
-            disabled={submitting}
+            disabled={busy}
+            title={
+              busy
+                ? '재검증·실행 중에는 취소할 수 없습니다'
+                : undefined
+            }
             onClick={onCancel}
           >
             취소

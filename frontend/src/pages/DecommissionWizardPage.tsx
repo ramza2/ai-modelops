@@ -97,6 +97,20 @@ function isActiveOperationStatus(status: string | null | undefined): boolean {
   return s === 'QUEUED' || s === 'RUNNING' || s === 'ROLLING_BACK'
 }
 
+function hasActiveLifecycleOperation(st: DecommissionStatus): boolean {
+  return Boolean(
+    st.active_operation &&
+      isActiveOperationStatus(st.active_operation.status),
+  )
+}
+
+/** Only PASSED counts as Gateway apply confirmed. Everything else is incomplete. */
+export function isGatewayVerificationPassed(
+  status: string | null | undefined,
+): boolean {
+  return (status || '').toUpperCase() === 'PASSED'
+}
+
 function containerPresentLabel(value: boolean | null): string {
   if (value === true) return '있음 (true)'
   if (value === false) return '없음 (false)'
@@ -140,14 +154,30 @@ function fingerprintsEqual(a: StatusFingerprint, b: StatusFingerprint): boolean 
   )
 }
 
-function actionAllowed(kind: ConfirmKind, st: DecommissionStatus): boolean {
-  if (st.active_operation && isActiveOperationStatus(st.active_operation.status)) {
-    if (kind === 'stop' || kind === 'remove' || kind === 'retire') return false
+function actionAllowed(
+  kind: ConfirmKind,
+  st: DecommissionStatus,
+  opts?: { gatewayVerifyIncomplete?: boolean },
+): boolean {
+  // Do not assume safety while a Deployment lifecycle Operation is in flight.
+  // Especially block destructive Purge during Stop/Remove.
+  if (hasActiveLifecycleOperation(st)) {
+    if (
+      kind === 'stop' ||
+      kind === 'remove' ||
+      kind === 'retire' ||
+      kind === 'purge' ||
+      kind === 'archive_version' ||
+      kind === 'archive_model'
+    ) {
+      return false
+    }
   }
   switch (kind) {
     case 'unpublish':
       return st.can_unpublish && st.active_routes.length > 0
     case 'stop':
+      if (opts?.gatewayVerifyIncomplete) return false
       return (
         st.can_stop &&
         st.active_routes.length === 0 &&
@@ -173,17 +203,13 @@ function actionAllowed(kind: ConfirmKind, st: DecommissionStatus): boolean {
 
 function canAdvanceFromStop(st: DecommissionStatus): boolean {
   if (st.active_routes.length > 0) return false
-  if (st.active_operation && isActiveOperationStatus(st.active_operation.status)) {
-    return false
-  }
+  if (hasActiveLifecycleOperation(st)) return false
   // STOP SUCCEEDED alone is not enough — runtime must be STOPPED.
   return st.runtime_status === 'STOPPED'
 }
 
 function canAdvanceFromRemove(st: DecommissionStatus): boolean {
-  if (st.active_operation && isActiveOperationStatus(st.active_operation.status)) {
-    return false
-  }
+  if (hasActiveLifecycleOperation(st)) return false
   // null = UNKNOWN — never treat as removed.
   return st.container_present === false
 }
@@ -205,7 +231,7 @@ function gateReasonForStep(step: Step, st: DecommissionStatus): string | null {
       if (st.active_routes.length > 0) {
         return 'ACTIVE Route가 남아 있습니다. 먼저 API 연결 해제를 완료하세요.'
       }
-      if (st.active_operation && isActiveOperationStatus(st.active_operation.status)) {
+      if (hasActiveLifecycleOperation(st)) {
         return '진행 중인 Lifecycle Operation이 있습니다. 완료·실패를 확인한 뒤 진행하세요.'
       }
       if (st.runtime_status === 'STOPPED') {
@@ -222,7 +248,7 @@ function gateReasonForStep(step: Step, st: DecommissionStatus): string | null {
       if (st.runtime_status !== 'STOPPED' && st.deployment_type === 'MANAGED') {
         return '실행 상태가 STOPPED가 아닙니다. STOP Operation SUCCEEDED만으로 안전하지 않습니다.'
       }
-      if (st.active_operation && isActiveOperationStatus(st.active_operation.status)) {
+      if (hasActiveLifecycleOperation(st)) {
         return '진행 중인 Operation이 있어 컨테이너 제거를 시작할 수 없습니다.'
       }
       if (st.container_present === false) {
@@ -248,6 +274,9 @@ function gateReasonForStep(step: Step, st: DecommissionStatus): string | null {
       }
       return null
     case 'purge':
+      if (hasActiveLifecycleOperation(st)) {
+        return '진행 중인 Deployment Operation이 있습니다. 중지·제거가 끝나기 전에 캐시를 삭제하지 마세요.'
+      }
       if (!st.retired_at) {
         return '배포 퇴역이 끝나기 전입니다. 선택 단계이므로 건너뛸 수 있지만, 퇴역 완료 후 진행을 권장합니다.'
       }
@@ -260,6 +289,9 @@ function gateReasonForStep(step: Step, st: DecommissionStatus): string | null {
       }
       return null
     case 'archive':
+      if (hasActiveLifecycleOperation(st)) {
+        return '진행 중인 Operation이 있습니다. 레지스트리 보관은 Operation 종료 후 진행하세요.'
+      }
       if (!st.retired_at) {
         return '배포 퇴역 전에 레지스트리 보관을 단정하지 마세요. 선택 단계입니다.'
       }
@@ -307,9 +339,23 @@ export function DecommissionWizardPage() {
   const [purgeCompleted, setPurgeCompleted] = useState(false)
   const [archiveVersionDone, setArchiveVersionDone] = useState(false)
   const [archiveModelDone, setArchiveModelDone] = useState(false)
+  /** Session-only: Gateway verification incomplete after Unpublish (not durable across F5). */
+  const [gatewayVerifyIncomplete, setGatewayVerifyIncomplete] = useState(false)
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
 
   const abortRef = useRef<AbortController | null>(null)
+  /** Sync lock: set before any await in confirm→POST path. */
+  const confirmInFlightRef = useRef(false)
+  /** Bumped on close / deployment change to invalidate in-flight confirm work. */
+  const actionEpochRef = useRef(0)
+  const deploymentIdRef = useRef(deploymentId)
+  deploymentIdRef.current = deploymentId
+  const confirmTargetRef = useRef<{
+    versionId: string | null
+    modelId: string | null
+  }>({ versionId: null, modelId: null })
+  const gatewayVerifyIncompleteRef = useRef(false)
+  gatewayVerifyIncompleteRef.current = gatewayVerifyIncomplete
 
   const syncStep = useCallback(
     (next: Step, extra?: { operationId?: string | null }) => {
@@ -335,7 +381,7 @@ export function DecommissionWizardPage() {
       setStatus(st)
       setDeployment(dep)
       setLastUpdated(new Date())
-      return st
+      return { status: st, deployment: dep }
     },
     [deploymentId],
   )
@@ -354,16 +400,35 @@ export function DecommissionWizardPage() {
   )
 
   const closeConfirm = useCallback(() => {
+    // Invalidate any in-flight revalidate/POST for this dialog.
+    actionEpochRef.current += 1
+    confirmInFlightRef.current = false
+    confirmTargetRef.current = { versionId: null, modelId: null }
     setConfirmKind(null)
     setConfirmFingerprint(null)
     setConsent(false)
     setPurgeConfirm('')
     setRevalidating(false)
+    setBusy(false)
   }, [])
 
   const openConfirm = useCallback(
     (kind: ConfirmKind) => {
-      if (!status || busy) return
+      if (!status || busy || confirmInFlightRef.current) return
+      if (kind === 'archive_version' || kind === 'archive_model') {
+        if (!version?.id || !model?.id) {
+          setActionError(
+            `보관 대상 Version/Model을 확인할 수 없습니다. — ${ACTION_ERROR_GUIDANCE}`,
+          )
+          return
+        }
+        confirmTargetRef.current = {
+          versionId: version.id,
+          modelId: model.id,
+        }
+      } else {
+        confirmTargetRef.current = { versionId: null, modelId: null }
+      }
       setActionError(null)
       setStaleNotice(null)
       setConsent(false)
@@ -371,8 +436,16 @@ export function DecommissionWizardPage() {
       setConfirmFingerprint(fingerprintOf(status))
       setConfirmKind(kind)
     },
-    [status, busy],
+    [status, busy, version, model],
   )
+
+  type RevalidateOk = {
+    ok: true
+    status: DecommissionStatus
+    deployment: Deployment
+    version: ModelVersion | null
+    model: ModelSummary | null
+  }
 
   /**
    * Fresh GET before mutation. Frontend consent is not an atomic lock:
@@ -380,14 +453,19 @@ export function DecommissionWizardPage() {
    * can_* / blockers remain authoritative; do not claim Frontend-only safety.
    */
   const revalidateBeforeAction = useCallback(
-    async (
-      kind: ConfirmKind,
-    ): Promise<{ ok: true; status: DecommissionStatus } | { ok: false }> => {
+    async (kind: ConfirmKind, epoch: number): Promise<RevalidateOk | { ok: false }> => {
       setRevalidating(true)
       setStaleNotice(null)
+      const stillCurrent = () =>
+        epoch === actionEpochRef.current &&
+        deploymentIdRef.current === deploymentId
       try {
-        const st = await refreshStatus()
-        if (confirmFingerprint && !fingerprintsEqual(confirmFingerprint, fingerprintOf(st))) {
+        const { status: st, deployment: dep } = await refreshStatus()
+        if (!stillCurrent()) return { ok: false }
+        if (
+          confirmFingerprint &&
+          !fingerprintsEqual(confirmFingerprint, fingerprintOf(st))
+        ) {
           setConsent(false)
           setPurgeConfirm('')
           setConfirmFingerprint(fingerprintOf(st))
@@ -396,40 +474,103 @@ export function DecommissionWizardPage() {
           )
           return { ok: false }
         }
+
+        let ver: ModelVersion | null = version
+        let mod: ModelSummary | null = model
         if (kind === 'archive_version' || kind === 'archive_model') {
-          if (!deployment) {
+          const expectedVersionId = confirmTargetRef.current.versionId
+          const expectedModelId = confirmTargetRef.current.modelId
+          if (!expectedVersionId || !expectedModelId) {
             setActionError(
-              `레지스트리 대상을 확인할 수 없습니다. — ${ACTION_ERROR_GUIDANCE}`,
+              `보관 대상 ID를 확인할 수 없습니다. — ${ACTION_ERROR_GUIDANCE}`,
             )
             closeConfirm()
             return { ok: false }
           }
-          const { ver, mod } = await refreshRegistry(deployment)
+          if (dep.model_version_id !== expectedVersionId) {
+            setConsent(false)
+            setPurgeConfirm('')
+            setStaleNotice(
+              '최신 Deployment의 Model Version이 확인 대상과 다릅니다. POST를 중단했습니다. 대상을 다시 확인하세요.',
+            )
+            const refreshed = await refreshRegistry(dep)
+            if (!stillCurrent()) return { ok: false }
+            ver = refreshed.ver
+            mod = refreshed.mod
+            confirmTargetRef.current = {
+              versionId: ver.id,
+              modelId: mod.id,
+            }
+            setConfirmFingerprint(fingerprintOf(st))
+            return { ok: false }
+          }
+          const refreshed = await refreshRegistry(dep)
+          if (!stillCurrent()) return { ok: false }
+          ver = refreshed.ver
+          mod = refreshed.mod
+          if (ver.id !== expectedVersionId || mod.id !== expectedModelId) {
+            setConsent(false)
+            setStaleNotice(
+              '확인창 대상과 최신 Version/Model ID가 일치하지 않습니다. 동의를 초기화했습니다.',
+            )
+            confirmTargetRef.current = {
+              versionId: ver.id,
+              modelId: mod.id,
+            }
+            setConfirmFingerprint(fingerprintOf(st))
+            return { ok: false }
+          }
           if (kind === 'archive_version' && ver.archived_at) {
-            setStaleNotice('모델 버전이 이미 보관(Archived) 상태입니다. 중복 실행하지 않습니다.')
+            setStaleNotice(
+              '모델 버전이 이미 보관(Archived) 상태입니다. 중복 실행하지 않습니다.',
+            )
             setArchiveVersionDone(true)
             closeConfirm()
             return { ok: false }
           }
-          if (kind === 'archive_model' && !mod.is_active) {
-            setStaleNotice('모델이 이미 비활성(보관) 상태입니다. 중복 실행하지 않습니다.')
-            setArchiveModelDone(true)
-            closeConfirm()
-            return { ok: false }
+          if (kind === 'archive_model') {
+            if (!ver.archived_at) {
+              setConsent(false)
+              setStaleNotice(
+                '모델 보관 직전 Version이 아직 Archived가 아닙니다. 버전 보관을 먼저 완료하세요.',
+              )
+              setConfirmFingerprint(fingerprintOf(st))
+              return { ok: false }
+            }
+            if (!mod.is_active) {
+              setStaleNotice(
+                '모델이 이미 비활성(보관) 상태입니다. 중복 실행하지 않습니다.',
+              )
+              setArchiveModelDone(true)
+              closeConfirm()
+              return { ok: false }
+            }
           }
         }
-        if (!actionAllowed(kind, st)) {
+
+        if (
+          !actionAllowed(kind, st, {
+            gatewayVerifyIncomplete: gatewayVerifyIncompleteRef.current,
+          })
+        ) {
           setConsent(false)
           setPurgeConfirm('')
           setConfirmFingerprint(fingerprintOf(st))
           setStaleNotice(
-            '최신 Backend 판정으로 이 작업을 실행할 수 없습니다. can_* / blockers를 확인하세요.',
+            '최신 Backend 판정으로 이 작업을 실행할 수 없습니다. can_* / blockers / Gateway 검증을 확인하세요.',
           )
           return { ok: false }
         }
         setConfirmFingerprint(fingerprintOf(st))
-        return { ok: true, status: st }
+        return {
+          ok: true,
+          status: st,
+          deployment: dep,
+          version: ver,
+          model: mod,
+        }
       } catch (err) {
+        if (!stillCurrent()) return { ok: false }
         const message =
           err instanceof ApiError
             ? err.message
@@ -438,15 +579,17 @@ export function DecommissionWizardPage() {
         closeConfirm()
         return { ok: false }
       } finally {
-        setRevalidating(false)
+        if (stillCurrent()) setRevalidating(false)
       }
     },
     [
       refreshStatus,
       confirmFingerprint,
-      deployment,
+      version,
+      model,
       refreshRegistry,
       closeConfirm,
+      deploymentId,
     ],
   )
 
@@ -459,6 +602,14 @@ export function DecommissionWizardPage() {
   }, [stepParam, step, syncStep])
 
   useEffect(() => {
+    // New Deployment identity: drop confirm lock / session gateway flag.
+    actionEpochRef.current += 1
+    confirmInFlightRef.current = false
+    setGatewayVerifyIncomplete(false)
+    closeConfirm()
+  }, [deploymentId, closeConfirm])
+
+  useEffect(() => {
     abortRef.current?.abort()
     const controller = new AbortController()
     abortRef.current = controller
@@ -466,9 +617,7 @@ export function DecommissionWizardPage() {
     setError(null)
     void (async () => {
       try {
-        const st = await refreshStatus(controller.signal)
-        if (controller.signal.aborted) return
-        const dep = await getDeployment(deploymentId, controller.signal)
+        const { deployment: dep } = await refreshStatus(controller.signal)
         if (controller.signal.aborted) return
         await refreshRegistry(dep, controller.signal)
         if (controller.signal.aborted) return
@@ -485,7 +634,6 @@ export function DecommissionWizardPage() {
             )
           }
         }
-        void st
       } catch (err) {
         if (controller.signal.aborted) return
         setError(
@@ -527,85 +675,140 @@ export function DecommissionWizardPage() {
   }, [operationIdParam, operation?.status, refreshStatus])
 
   const runConfirmedAction = async () => {
-    if (!confirmKind || busy) return
+    // Sync lock before any await — blocks double confirm.
+    if (!confirmKind || confirmInFlightRef.current) return
+    if (busy) return
     const kind = confirmKind
     if (kind === 'purge' && purgeConfirm !== 'PURGE') {
       setActionError('정확한 PURGE 입력이 필요합니다. 번역·자동 입력하지 마세요.')
       return
     }
-    const validated = await revalidateBeforeAction(kind)
-    if (!validated.ok) return
+    confirmInFlightRef.current = true
+    const epoch = actionEpochRef.current
+    const lockedDeploymentId = deploymentId
+    const stillCurrent = () =>
+      epoch === actionEpochRef.current &&
+      deploymentIdRef.current === lockedDeploymentId &&
+      confirmInFlightRef.current
 
     setBusy(true)
     setActionError(null)
     try {
+      const validated = await revalidateBeforeAction(kind, epoch)
+      if (!stillCurrent()) return
+      if (!validated.ok) return
+
       if (kind === 'unpublish') {
         const route = validated.status.active_routes[0]
         if (!route) throw new Error('ACTIVE Route가 없습니다.')
+        if (!stillCurrent()) return
         const result = await unpublishEndpoint(route.endpoint_id, {
-          expectedDeploymentId: deploymentId,
+          expectedDeploymentId: lockedDeploymentId,
           reason: 'M7-D decommission unpublish',
           verifyGateway: true,
         })
+        if (!stillCurrent()) return
         setUnpublishResult(result)
+        const passed = isGatewayVerificationPassed(
+          result.gateway_verification?.status,
+        )
+        setGatewayVerifyIncomplete(!passed)
         await refreshStatus()
+        if (!stillCurrent()) return
         closeConfirm()
-        syncStep('stop')
+        if (passed) {
+          syncStep('stop')
+        } else {
+          const rawStatus =
+            result.gateway_verification?.status ?? 'null/없음'
+          setStaleNotice(
+            `DB Route 해제는 요청되었으나 Gateway 검증이 확인되지 않았습니다(status=${rawStatus}). PASSED가 아니면 적용 확인으로 보지 않습니다. 작업 이력과 Endpoint 연결 상태를 다시 확인하세요. 이 세션에서는 Stop을 진행하지 않습니다. (F5 후에는 Frontend 기억이 사라지며 완전한 안전은 Backend 조건부 검증이 필요합니다.)`,
+          )
+        }
       } else if (kind === 'stop') {
-        const enqueued = await stopDeployment(deploymentId)
+        if (!stillCurrent()) return
+        const enqueued = await stopDeployment(lockedDeploymentId)
+        if (!stillCurrent()) return
         syncStep('stop', { operationId: enqueued.id })
         try {
           const detail = await getOperation(enqueued.id)
+          if (!stillCurrent()) return
           setOperation(detail)
         } catch {
+          if (!stillCurrent()) return
           setActionError(
             `중지 작업은 접수되었을 수 있습니다(operation_id=${enqueued.id}). 작업 이력에서 확인하세요. 즉시 다시 중지하지 마세요.`,
           )
         }
         await refreshStatus()
+        if (!stillCurrent()) return
         closeConfirm()
       } else if (kind === 'remove') {
-        const enqueued = await removeDeployment(deploymentId)
+        if (!stillCurrent()) return
+        const enqueued = await removeDeployment(lockedDeploymentId)
+        if (!stillCurrent()) return
         syncStep('remove', { operationId: enqueued.id })
         try {
           const detail = await getOperation(enqueued.id)
+          if (!stillCurrent()) return
           setOperation(detail)
         } catch {
+          if (!stillCurrent()) return
           setActionError(
             `컨테이너 제거 작업은 접수되었을 수 있습니다(operation_id=${enqueued.id}). 작업 이력에서 확인하세요. 즉시 다시 제거하지 마세요.`,
           )
         }
         await refreshStatus()
+        if (!stillCurrent()) return
         closeConfirm()
       } else if (kind === 'retire') {
-        await retireDeployment(deploymentId)
+        if (!stillCurrent()) return
+        await retireDeployment(lockedDeploymentId)
+        if (!stillCurrent()) return
         await refreshStatus()
+        if (!stillCurrent()) return
         closeConfirm()
         syncStep('purge', { operationId: null })
       } else if (kind === 'purge') {
         const cacheId = validated.status.source_cache?.cache_id
         if (!cacheId) throw new Error('삭제할 캐시가 없습니다.')
+        if (!stillCurrent()) return
         await purgeModelCache(cacheId)
+        if (!stillCurrent()) return
         setPurgeCompleted(true)
         setPurgeSkipped(false)
         await refreshStatus()
+        if (!stillCurrent()) return
         closeConfirm()
         syncStep('archive')
       } else if (kind === 'archive_version') {
-        if (!version) throw new Error('모델 버전이 없습니다.')
-        const ver = await archiveModelVersion(version.id)
+        const versionId = validated.version?.id
+        if (!versionId) throw new Error('모델 버전 ID를 확인할 수 없습니다.')
+        if (!stillCurrent()) return
+        const ver = await archiveModelVersion(versionId)
+        if (!stillCurrent()) return
         setVersion(ver)
         setArchiveVersionDone(true)
         closeConfirm()
       } else if (kind === 'archive_model') {
-        if (!model) throw new Error('모델이 없습니다.')
-        const mod = await archiveModel(model.id)
+        const modelId = validated.model?.id
+        if (!modelId) throw new Error('모델 ID를 확인할 수 없습니다.')
+        if (!validated.version?.archived_at) {
+          setStaleNotice(
+            '모델 보관 직전 Version Archived 상태를 재확인할 수 없습니다. POST를 중단했습니다.',
+          )
+          return
+        }
+        if (!stillCurrent()) return
+        const mod = await archiveModel(modelId)
+        if (!stillCurrent()) return
         setModel(mod)
         setArchiveModelDone(true)
         closeConfirm()
         syncStep('done')
       }
     } catch (err) {
+      if (!stillCurrent()) return
       const message =
         err instanceof ApiError
           ? err.message
@@ -614,7 +817,11 @@ export function DecommissionWizardPage() {
             : '작업 실행에 실패했습니다.'
       setActionError(`원인: ${message} — ${ACTION_ERROR_GUIDANCE}`)
     } finally {
-      setBusy(false)
+      if (epoch === actionEpochRef.current) {
+        confirmInFlightRef.current = false
+        setBusy(false)
+        setRevalidating(false)
+      }
     }
   }
 
@@ -662,6 +869,8 @@ export function DecommissionWizardPage() {
     operation?.status === 'SUCCEEDED' &&
     (operation.operation_type || '').toUpperCase() === 'STOP' &&
     status.runtime_status !== 'STOPPED'
+  const allowOpts = { gatewayVerifyIncomplete }
+  const stopExecuteAllowed = actionAllowed('stop', status, allowOpts)
 
   const confirmMeta = confirmKind
     ? confirmDialogCopy(confirmKind, {
@@ -716,6 +925,9 @@ export function DecommissionWizardPage() {
           </HelpHint>
           <HelpHint showTopic label="비동기 Operation">
             {DECOMMISSION_FIELD_HELP.operationEnqueue}
+          </HelpHint>
+          <HelpHint showTopic label="Gateway 연결 해제 검증">
+            {DECOMMISSION_FIELD_HELP.gatewayVerify}
           </HelpHint>
         </div>
       </details>
@@ -837,12 +1049,24 @@ export function DecommissionWizardPage() {
           {stepGate ? (
             <p className="panel-hint panel-hint--warn">{stepGate}</p>
           ) : null}
+          {gatewayVerifyIncomplete ? (
+            <SectionError
+              title="Gateway 검증 미완료"
+              message={DECOMMISSION_FIELD_HELP.gatewayVerify}
+            />
+          ) : null}
           {!route ? (
             <>
               <p>이 배포를 가리키는 ACTIVE Route가 없습니다.</p>
               <button
                 type="button"
                 className="btn"
+                disabled={gatewayVerifyIncomplete}
+                title={
+                  gatewayVerifyIncomplete
+                    ? 'Gateway 검증 미완료 — 이 세션에서 Stop으로 진행하지 않습니다'
+                    : undefined
+                }
                 onClick={() => syncStep('stop')}
               >
                 모델 실행 중지로 계속
@@ -855,18 +1079,41 @@ export function DecommissionWizardPage() {
                 <span className="mono">{route.endpoint_id}</span>) 가 이 배포로
                 연결되어 있습니다. 연결 해제는 Route만 제거합니다.
               </p>
-              {unpublishResult?.gateway_verification ? (
-                <p>
-                  최근 Gateway 확인:{' '}
-                  <StatusBadge
-                    status={unpublishResult.gateway_verification.status}
-                  />
-                </p>
+              {unpublishResult ? (
+                <div className="panel-hint">
+                  <p>
+                    DB Route 해제 요청 결과:{' '}
+                    {unpublishResult.changed ? '변경됨' : '변경 없음'} ·
+                    routing_version={String(unpublishResult.routing_version)}
+                  </p>
+                  <p>
+                    Gateway 실제 반영 검증:{' '}
+                    {unpublishResult.gateway_verification ? (
+                      <>
+                        <StatusBadge
+                          status={unpublishResult.gateway_verification.status}
+                        />
+                        {isGatewayVerificationPassed(
+                          unpublishResult.gateway_verification.status,
+                        ) ? (
+                          <span> — 적용 확인(PASSED)</span>
+                        ) : (
+                          <span>
+                            {' '}
+                            — 확인 미완료 (PASSED만 성공으로 봅니다)
+                          </span>
+                        )}
+                      </>
+                    ) : (
+                      <span>없음(null) — 확인 미완료</span>
+                    )}
+                  </p>
+                </div>
               ) : null}
               <button
                 type="button"
                 className="btn"
-                disabled={busy || !actionAllowed('unpublish', status)}
+                disabled={busy || !actionAllowed('unpublish', status, allowOpts)}
                 onClick={() => openConfirm('unpublish')}
               >
                 API 연결 해제 확인…
@@ -882,6 +1129,12 @@ export function DecommissionWizardPage() {
           <p className="panel-hint">{DECOMMISSION_FIELD_HELP.stop}</p>
           {stepGate ? (
             <p className="panel-hint panel-hint--warn">{stepGate}</p>
+          ) : null}
+          {gatewayVerifyIncomplete ? (
+            <SectionError
+              title="Gateway 검증 미완료 — Stop 차단"
+              message="이 세션에서 Gateway 연결 해제 검증이 PASSED로 확인되지 않았습니다. 작업 이력·Endpoint 연결 상태를 재확인하세요. F5 후에는 Frontend 상태가 사라지며 완전한 안전은 Backend 조건부 검증이 필요합니다."
+            />
           ) : null}
           {status.active_routes.length > 0 ? (
             <SectionError
@@ -908,7 +1161,7 @@ export function DecommissionWizardPage() {
           <button
             type="button"
             className="btn"
-            disabled={busy || !actionAllowed('stop', status)}
+            disabled={busy || !stopExecuteAllowed}
             onClick={() => openConfirm('stop')}
           >
             모델 중지 확인…
@@ -955,7 +1208,7 @@ export function DecommissionWizardPage() {
           <button
             type="button"
             className="btn"
-            disabled={busy || !actionAllowed('remove', status)}
+            disabled={busy || !actionAllowed('remove', status, allowOpts)}
             onClick={() => openConfirm('remove')}
           >
             컨테이너 제거 확인…
@@ -992,7 +1245,9 @@ export function DecommissionWizardPage() {
             type="button"
             className="btn"
             disabled={
-              busy || Boolean(status.retired_at) || !actionAllowed('retire', status)
+              busy ||
+              Boolean(status.retired_at) ||
+              !actionAllowed('retire', status, allowOpts)
             }
             onClick={() => openConfirm('retire')}
           >
@@ -1056,7 +1311,7 @@ export function DecommissionWizardPage() {
           <button
             type="button"
             className="btn btn--danger"
-            disabled={busy || !actionAllowed('purge', status)}
+            disabled={busy || !actionAllowed('purge', status, allowOpts)}
             onClick={() => openConfirm('purge')}
           >
             로컬 캐시 삭제 확인…
@@ -1092,7 +1347,9 @@ export function DecommissionWizardPage() {
               <button
                 type="button"
                 className="btn"
-                disabled={busy || !status.retired_at}
+                disabled={
+                  busy || !actionAllowed('archive_version', status, allowOpts)
+                }
                 onClick={() => openConfirm('archive_version')}
               >
                 버전 보관 확인…
@@ -1110,7 +1367,11 @@ export function DecommissionWizardPage() {
               <button
                 type="button"
                 className="btn"
-                disabled={busy || !version?.archived_at || !status.retired_at}
+                disabled={
+                  busy ||
+                  !version?.archived_at ||
+                  !actionAllowed('archive_model', status, allowOpts)
+                }
                 onClick={() => openConfirm('archive_model')}
               >
                 모델 보관 확인…
@@ -1177,7 +1438,11 @@ export function DecommissionWizardPage() {
           error={null}
           confirmLabel={confirmMeta.confirmLabel}
           submittingLabel="실행 중…"
-          canConfirm={Boolean(status && actionAllowed(confirmKind, status))}
+          canConfirm={Boolean(
+            status &&
+              confirmKind &&
+              actionAllowed(confirmKind, status, allowOpts),
+          )}
           onCancel={closeConfirm}
           onConfirm={() => void runConfirmedAction()}
         />
