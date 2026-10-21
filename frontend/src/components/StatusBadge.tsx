@@ -14,7 +14,7 @@ const LABELS: Record<string, string> = {
   DRAINING: '드레인',
   MAINTENANCE: '유지보수',
   QUEUED: '대기',
-  RESOLVING: '해상 중',
+  RESOLVING: '확인 중',
   DOWNLOADING: '다운로드 중',
   MATERIALIZING: '구성 중',
   VERIFYING: '검증 중',
@@ -45,9 +45,9 @@ const LABELS: Record<string, string> = {
   UNSET: '미설정',
   INVALID_REQUESTED: '요청 무효',
   INVALID_OBSERVED: '관측 무효',
-  FIT: '적합',
-  TIGHT: '빠듯',
-  INSUFFICIENT: '부족',
+  FIT: '자원 적합',
+  TIGHT: '여유 부족 가능',
+  INSUFFICIENT: '자원 부족',
   READY: '준비 완료',
   PASSED: '통과',
   ROUTING_PENDING: '라우팅 대기',
@@ -115,14 +115,23 @@ const TONE: Record<string, string> = {
 type StatusBadgeProps = {
   status: string | null | undefined
   label?: string
+  /**
+   * Native tooltip / advisory title. Defaults to the status code so operators
+   * still see the API enum. Callers may pass a longer beginner explanation
+   * (e.g. Fit result help) without changing badge rendering.
+   */
+  title?: string
 }
 
-export function StatusBadge({ status, label }: StatusBadgeProps) {
+export function StatusBadge({ status, label, title }: StatusBadgeProps) {
   const code = (status || 'UNKNOWN').toUpperCase()
   const tone = TONE[code] || 'muted'
   const text = label || LABELS[code] || code
   return (
-    <span className={`status-badge status-badge--${tone}`} title={code}>
+    <span
+      className={`status-badge status-badge--${tone}`}
+      title={title ?? code}
+    >
       <span className="status-badge__dot" aria-hidden="true" />
       <span className="status-badge__text">
         {text}

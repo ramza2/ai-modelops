@@ -10,6 +10,7 @@ import {
 import { listNodes } from '../api/nodes'
 import type { HfDownloadJob, ModelCacheEntry, NodeSummary } from '../api/types'
 import { AppShell } from '../components/AppShell'
+import { HelpHint, TermLabel } from '../components/HelpHint'
 import { LoadingBlock } from '../components/LoadingBlock'
 import { Pagination } from '../components/Pagination'
 import { SectionError } from '../components/SectionError'
@@ -18,6 +19,7 @@ import { TruncatedValue } from '../components/TruncatedValue'
 import { formatApiDateTime } from '../utils/date'
 import { abbreviateMiddle } from '../utils/format'
 import { parsePositivePage } from '../utils/query'
+import { CACHE_FIELD_HELP, CATALOG_FIELD_HELP } from '../utils/uiLabels'
 
 const PAGE_SIZE = 20
 /** P1-8A: Cache page live download sync interval (Catalog remains 2s). */
@@ -462,28 +464,50 @@ export function ModelCachePage() {
 
   return (
     <AppShell
-      title="Model Cache"
-      description="Node에 다운로드된 Hugging Face 아티팩트 캐시입니다. Downloaded ≠ Deployed ≠ Published."
+      title="다운로드한 모델 관리"
+      description="대상 서버에 받아 둔 모델 파일(캐시)만 관리합니다. 캐시 READY ≠ 모델 실행 중 ≠ API 게시 완료입니다."
       onRefresh={() => void load('refresh')}
       refreshing={refreshing || purging}
       lastUpdated={lastUpdated}
     >
       <div className="toolbar toolbar--wrap" style={{ marginBottom: '0.75rem' }}>
         <Link className="btn btn--ghost" to="/models">
-          ← Models / Versions
+          ← 모델 관리
         </Link>
         <Link className="btn btn--ghost" to="/models/catalog">
-          Model Catalog
+          모델 검색 및 다운로드
         </Link>
-        <span className="secondary-text">
-          Purge는 Node Agent의 로컬 파일을 제거합니다. Registry Model/Version은
-          유지됩니다.
-        </span>
       </div>
 
+      <p className="panel-hint" role="note">
+        {CACHE_FIELD_HELP.overview} {CACHE_FIELD_HELP.deploy}
+      </p>
+      <details className="help-glossary">
+        <summary>용어 및 상태 안내</summary>
+        <div className="help-glossary__items">
+          <HelpHint showTopic label="캐시 상태">
+            {CACHE_FIELD_HELP.status}
+          </HelpHint>
+          <HelpHint showTopic label="다운로드 상태">
+            {CACHE_FIELD_HELP.progress} {CATALOG_FIELD_HELP.downloadReady}
+          </HelpHint>
+          <HelpHint showTopic label="캐시 삭제 안내">
+            {CACHE_FIELD_HELP.purge}
+          </HelpHint>
+          <HelpHint showTopic label="배포 가능 여부">
+            {CACHE_FIELD_HELP.deploy}
+          </HelpHint>
+        </div>
+      </details>
+
       <div className="toolbar toolbar--wrap" style={{ marginBottom: '0.75rem' }}>
-        <label className="toolbar__field" htmlFor="cache-node-filter">
-          <span>Node</span>
+        <div className="toolbar__field">
+          <div className="toolbar__field-head">
+            <label htmlFor="cache-node-filter">
+              대상 서버 <span className="term-label__api">(Node)</span>
+            </label>
+            <HelpHint label="대상 서버">{CATALOG_FIELD_HELP.node}</HelpHint>
+          </div>
           <select
             id="cache-node-filter"
             value={nodeId}
@@ -498,7 +522,7 @@ export function ModelCachePage() {
               </option>
             ))}
           </select>
-        </label>
+        </div>
       </div>
 
       {error ? (
@@ -523,7 +547,7 @@ export function ModelCachePage() {
       {cacheListPending && items !== null ? (
         <p className="catalog-list-pending" role="status">
           {refreshing || !listMatchesContext
-            ? 'Node/페이지 변경에 맞게 캐시 목록을 다시 불러오는 중…'
+            ? '대상 서버/페이지 변경에 맞게 캐시 목록을 다시 불러오는 중…'
             : '캐시 목록을 불러오는 중…'}
         </p>
       ) : null}
@@ -542,14 +566,44 @@ export function ModelCachePage() {
             <table className="data-table">
               <thead>
                 <tr>
-                  <th scope="col">Repository</th>
-                  <th scope="col">Revision</th>
-                  <th scope="col">Node</th>
-                  <th scope="col">Size</th>
-                  <th scope="col">Status</th>
-                  <th scope="col">Path</th>
-                  <th scope="col">Updated</th>
-                  <th scope="col">Actions</th>
+                  <th scope="col">
+                    <TermLabel
+                      text="모델 저장소"
+                      apiTerm="Repository"
+                      help={CATALOG_FIELD_HELP.repository}
+                    />
+                  </th>
+                  <th scope="col">
+                    <TermLabel
+                      text="모델 버전"
+                      apiTerm="Revision"
+                      help={CATALOG_FIELD_HELP.revision}
+                    />
+                  </th>
+                  <th scope="col">
+                    <TermLabel
+                      text="대상 서버"
+                      apiTerm="Node"
+                      help={CATALOG_FIELD_HELP.node}
+                    />
+                  </th>
+                  <th scope="col">
+                    <TermLabel text="크기" apiTerm="Size" />
+                  </th>
+                  <th scope="col">
+                    <TermLabel
+                      text="캐시 상태"
+                      apiTerm="Status"
+                      help={CACHE_FIELD_HELP.status}
+                    />
+                  </th>
+                  <th scope="col">
+                    <TermLabel text="로컬 경로" apiTerm="Path" />
+                  </th>
+                  <th scope="col">
+                    <TermLabel text="수정 시각" apiTerm="Updated" />
+                  </th>
+                  <th scope="col">작업</th>
                 </tr>
               </thead>
               <tbody>
@@ -601,7 +655,15 @@ export function ModelCachePage() {
                             <StatusBadge status={job.status} />{' '}
                             {job.progress_percent != null
                               ? `진행률 ${job.progress_percent}%`
-                              : '진행률 없음 (서버 미제공)'}
+                              : '진행률 없음 (서버 미제공 · 임의 %를 만들지 않음)'}
+                            {tracked?.lastSuccessAt ? (
+                              <div>
+                                마지막 상태 조회:{' '}
+                                {formatApiDateTime(
+                                  tracked.lastSuccessAt.toISOString(),
+                                )}
+                              </div>
+                            ) : null}
                           </div>
                         ) : null}
                         {listMatchesContext &&
@@ -613,7 +675,20 @@ export function ModelCachePage() {
                         row.status === 'PREPARING' &&
                         !row.active_download_job_id ? (
                           <div className="secondary-text">
-                            Active Download Job 없음 — READY로 추정하지 않습니다.
+                            활성 다운로드 Job 없음 — READY로 추정하지 않습니다.
+                          </div>
+                        ) : null}
+                        {listMatchesContext && row.status === 'READY' ? (
+                          <div className="secondary-text">
+                            캐시 준비 완료 · 배포 설정으로 이동할 수 있습니다
+                          </div>
+                        ) : null}
+                        {listMatchesContext &&
+                        row.status !== 'READY' &&
+                        row.status !== 'PREPARING' &&
+                        row.status !== 'FAILED' ? (
+                          <div className="secondary-text">
+                            아직 배포할 수 없는 캐시 상태입니다
                           </div>
                         ) : null}
                       </td>
@@ -642,10 +717,10 @@ export function ModelCachePage() {
                             }}
                             title={
                               !listMatchesContext
-                                ? '목록 갱신 중 — Deploy 불가'
+                                ? '목록 갱신 중 — 배포 설정 불가'
                                 : row.status === 'READY'
-                                  ? 'Deploy READY cache'
-                                  : 'Deploy requires READY cache'
+                                  ? '캐시 READY — 배포 설정으로 이동'
+                                  : '배포하려면 캐시가 READY여야 합니다'
                             }
                             style={
                               deployBlocked
@@ -653,7 +728,7 @@ export function ModelCachePage() {
                                 : undefined
                             }
                           >
-                            Deploy
+                            배포 설정
                           </Link>
                           <button
                             type="button"
@@ -661,8 +736,8 @@ export function ModelCachePage() {
                             disabled={purging || !listMatchesContext}
                             title={
                               !listMatchesContext
-                                ? '목록 갱신 중 — Purge 불가'
-                                : undefined
+                                ? '목록 갱신 중 — 로컬 캐시 삭제 불가'
+                                : '로컬 캐시 파일만 삭제합니다(레지스트리·실행 중 모델과 별개)'
                             }
                             onClick={() => {
                               if (!listMatchesContext) return
@@ -670,7 +745,7 @@ export function ModelCachePage() {
                               setPurgeTarget(row)
                             }}
                           >
-                            Purge
+                            로컬 캐시 삭제
                           </button>
                         </div>
                       </td>
@@ -697,19 +772,21 @@ export function ModelCachePage() {
           aria-labelledby="purge-cache-title"
         >
           <div className="modal-card">
-            <h2 id="purge-cache-title">캐시 Purge 확인</h2>
+            <h2 id="purge-cache-title">로컬 캐시 삭제 확인</h2>
             <p>
               <strong>{purgeTarget.repository_id}</strong> (
-              {purgeTarget.resolved_revision || 'revision unknown'}) on{' '}
-              {purgeTarget.node_name || purgeTarget.node_id}의 로컬 캐시를
-              삭제합니다.
+              {purgeTarget.resolved_revision || '버전 미상'}) — 대상 서버{' '}
+              {purgeTarget.node_name || purgeTarget.node_id}의{' '}
+              <strong>로컬 모델 파일만</strong> 삭제합니다.
             </p>
+            <p className="secondary-text">{CACHE_FIELD_HELP.purge}</p>
             <p className="secondary-text">
-              Downloaded cache ≠ Running deployment. 실행 중 Deployment가 이
-              버전을 사용 중이면 Purge가 거부될 수 있습니다.
+              캐시 파일 ≠ 실행 중 배포. 실행 중 Deployment가 이 버전을 쓰면 삭제가
+              거부될 수 있습니다. 모델 레지스트리(Model/Version)는 삭제되지
+              않습니다.
             </p>
             {purgeError ? (
-              <SectionError title="Purge 실패" message={purgeError} />
+              <SectionError title="로컬 캐시 삭제 실패" message={purgeError} />
             ) : null}
             <div className="toolbar__actions">
               <button
@@ -729,7 +806,7 @@ export function ModelCachePage() {
                 disabled={purging}
                 onClick={() => void onConfirmPurge()}
               >
-                {purging ? '삭제 중…' : 'Purge 확인'}
+                {purging ? '삭제 중…' : '삭제 확인'}
               </button>
             </div>
           </div>

@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import {
+  CACHE_FIELD_HELP,
+  CATALOG_FIELD_HELP,
   CLIENT_FIELD_HELP,
+  FIT_RESULT_HELP,
+  MODEL_TYPE_HELP,
   NAV_ITEMS,
   formatNullableLimit,
   formatPriorityDisplay,
@@ -61,5 +65,27 @@ describe('uiLabels (P1-13)', () => {
     expect(CLIENT_FIELD_HELP.isActive).toMatch(/정책 스냅샷/)
     expect(CLIENT_FIELD_HELP.isActive).toMatch(/client_app_id/)
     expect(CLIENT_FIELD_HELP.isActive).toMatch(/raw_client_key/)
+  })
+})
+
+describe('uiLabels (P1-14 catalog/cache)', () => {
+  it('explains model types and fit results in beginner Korean', () => {
+    expect(MODEL_TYPE_HELP.LLM).toMatch(/언어 모델/)
+    expect(MODEL_TYPE_HELP.VLM).toMatch(/비전/)
+    expect(MODEL_TYPE_HELP.EMBEDDING).toMatch(/벡터/)
+    expect(FIT_RESULT_HELP.FIT).toMatch(/배포 성공을 보장하지 않습니다/)
+    expect(FIT_RESULT_HELP.TIGHT).toMatch(/여유 부족/)
+    expect(FIT_RESULT_HELP.INSUFFICIENT).toMatch(/자원 부족/)
+    expect(FIT_RESULT_HELP.UNKNOWN).toMatch(/판단 정보 부족/)
+  })
+
+  it('keeps catalog/cache advisory boundaries clear', () => {
+    expect(CATALOG_FIELD_HELP.fit).toMatch(/합산하지 않습니다/)
+    expect(CATALOG_FIELD_HELP.fit).toMatch(/Deploy Wizard/)
+    expect(CATALOG_FIELD_HELP.downloadReady).toMatch(/파일 캐시/)
+    expect(CATALOG_FIELD_HELP.downloadReady).not.toMatch(/게시된 상태입니다\.$/)
+    expect(CACHE_FIELD_HELP.purge).toMatch(/로컬/)
+    expect(CACHE_FIELD_HELP.purge).toMatch(/레지스트리/)
+    expect(CACHE_FIELD_HELP.overview).toMatch(/캐시 READY/)
   })
 })

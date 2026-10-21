@@ -161,17 +161,20 @@ describe('ModelCachePage', () => {
     renderAt('/models/cache')
     expect(await screen.findByText('org/model')).toBeInTheDocument()
     expect(
-      screen.getByText(/Downloaded ≠ Deployed ≠ Published/),
-    ).toBeInTheDocument()
-    const deploy = screen.getByRole('link', { name: 'Deploy' })
+      screen.getAllByText(/캐시 READY ≠ 모델 실행 중 ≠ API 게시 완료/).length,
+    ).toBeGreaterThan(0)
+    await userEvent.click(screen.getByText('용어 및 상태 안내'))
+    expect(screen.getByText('캐시 삭제 안내')).toBeVisible()
+    expect(screen.getByText('다운로드 상태')).toBeVisible()
+    const deploy = screen.getByRole('link', { name: '배포 설정' })
     expect(deploy).toHaveAttribute('href', '/models/cache/cache-1/deploy')
 
-    await userEvent.click(screen.getByRole('button', { name: 'Purge' }))
+    await userEvent.click(screen.getByRole('button', { name: '로컬 캐시 삭제' }))
     expect(
-      await screen.findByRole('dialog', { name: /Purge 확인/i }),
+      await screen.findByRole('dialog', { name: /로컬 캐시 삭제 확인/i }),
     ).toBeInTheDocument()
 
-    await userEvent.click(screen.getByRole('button', { name: 'Purge 확인' }))
+    await userEvent.click(screen.getByRole('button', { name: '삭제 확인' }))
     await waitFor(() => {
       expect(downloadsApi.purgeModelCache).toHaveBeenCalledWith('cache-1')
     })
@@ -182,11 +185,11 @@ describe('ModelCachePage', () => {
       cachePage([makeCache({ id: 'cache-prep', status: 'PREPARING' })]),
     )
     renderAt('/models/cache')
-    const deploy = await screen.findByRole('link', { name: 'Deploy' })
+    const deploy = await screen.findByRole('link', { name: '배포 설정' })
     expect(deploy).toHaveAttribute('aria-disabled', 'true')
     expect(deploy).toHaveAttribute(
       'title',
-      'Deploy requires READY cache',
+      '배포하려면 캐시가 READY여야 합니다',
     )
   })
 
@@ -202,9 +205,9 @@ describe('ModelCachePage', () => {
     const row = (await screen.findByText('org/model')).closest('tr')
     expect(row).not.toBeNull()
     await userEvent.click(
-      within(row as HTMLElement).getByRole('button', { name: 'Purge' }),
+      within(row as HTMLElement).getByRole('button', { name: '로컬 캐시 삭제' }),
     )
-    await userEvent.click(screen.getByRole('button', { name: 'Purge 확인' }))
+    await userEvent.click(screen.getByRole('button', { name: '삭제 확인' }))
     expect(await screen.findByText('Cache in use')).toBeInTheDocument()
     expect(screen.getByRole('dialog')).toBeInTheDocument()
   })
@@ -266,7 +269,7 @@ describe('ModelCachePage', () => {
       },
       { timeout: CACHE_DOWNLOAD_POLL_MS + 2000 },
     )
-    const deploy = screen.getByRole('link', { name: 'Deploy' })
+    const deploy = screen.getByRole('link', { name: '배포 설정' })
     expect(deploy).not.toHaveAttribute('aria-disabled', 'true')
   })
 
@@ -346,7 +349,7 @@ describe('ModelCachePage', () => {
       expect(downloadsApi.getHfDownload).toHaveBeenCalled()
     })
 
-    await userEvent.selectOptions(screen.getByLabelText('Node'), 'node-2')
+    await userEvent.selectOptions(screen.getByLabelText(/대상 서버/), 'node-2')
     expect(await screen.findByText('org/other')).toBeInTheDocument()
     expect(screen.queryByTitle('PREPARING')).not.toBeInTheDocument()
 
@@ -585,9 +588,9 @@ describe('ModelCachePage', () => {
     const readyRow = screen.getByText('org/ready').closest('tr')
     expect(readyRow).not.toBeNull()
     await userEvent.click(
-      within(readyRow as HTMLElement).getByRole('button', { name: 'Purge' }),
+      within(readyRow as HTMLElement).getByRole('button', { name: '로컬 캐시 삭제' }),
     )
-    await userEvent.click(screen.getByRole('button', { name: 'Purge 확인' }))
+    await userEvent.click(screen.getByRole('button', { name: '삭제 확인' }))
     await waitFor(() => {
       expect(downloadsApi.purgeModelCache).toHaveBeenCalledWith('cache-ready')
     })
@@ -629,8 +632,8 @@ describe('ModelCachePage', () => {
     })
     const callsBefore = vi.mocked(downloadsApi.getHfDownload).mock.calls.length
 
-    await userEvent.click(screen.getByRole('button', { name: 'Purge' }))
-    await userEvent.click(screen.getByRole('button', { name: 'Purge 확인' }))
+    await userEvent.click(screen.getByRole('button', { name: '로컬 캐시 삭제' }))
+    await userEvent.click(screen.getByRole('button', { name: '삭제 확인' }))
     expect(await screen.findByText('busy')).toBeInTheDocument()
 
     await waitFor(
@@ -694,14 +697,14 @@ describe('ModelCachePage', () => {
 
     const readyRow = screen.getByText('org/ready-purge').closest('tr')
     await userEvent.click(
-      within(readyRow as HTMLElement).getByRole('button', { name: 'Purge' }),
+      within(readyRow as HTMLElement).getByRole('button', { name: '로컬 캐시 삭제' }),
     )
-    await userEvent.click(screen.getByRole('button', { name: 'Purge 확인' }))
+    await userEvent.click(screen.getByRole('button', { name: '삭제 확인' }))
     await waitFor(() => {
       expect(downloadsApi.purgeModelCache).toHaveBeenCalled()
     })
 
-    await userEvent.selectOptions(screen.getByLabelText('Node'), 'node-2')
+    await userEvent.selectOptions(screen.getByLabelText(/대상 서버/), 'node-2')
     expect(await screen.findByText('org/other')).toBeInTheDocument()
 
     resolveSlow(
@@ -858,13 +861,13 @@ describe('ModelCachePage', () => {
     const row = (await screen.findByText('org/node1-only')).closest(
       'tr',
     ) as HTMLElement
-    const deploy = within(row).getByRole('link', { name: 'Deploy' })
+    const deploy = within(row).getByRole('link', { name: '배포 설정' })
     expect(deploy).not.toHaveAttribute('aria-disabled', 'true')
     expect(
-      within(row).getByRole('button', { name: 'Purge' }),
+      within(row).getByRole('button', { name: '로컬 캐시 삭제' }),
     ).not.toBeDisabled()
 
-    await userEvent.selectOptions(screen.getByLabelText('Node'), 'node-2')
+    await userEvent.selectOptions(screen.getByLabelText(/대상 서버/), 'node-2')
     expect(
       await screen.findByText(/캐시 목록을 다시 불러오는 중/),
     ).toBeInTheDocument()
@@ -875,8 +878,8 @@ describe('ModelCachePage', () => {
     expect(row).toHaveAttribute('data-cache-stale', 'true')
     expect(within(row).getByText('목록 갱신 중…')).toBeInTheDocument()
     expect(deploy).toHaveAttribute('aria-disabled', 'true')
-    expect(deploy).toHaveAttribute('title', '목록 갱신 중 — Deploy 불가')
-    expect(within(row).getByRole('button', { name: 'Purge' })).toBeDisabled()
+    expect(deploy).toHaveAttribute('title', '목록 갱신 중 — 배포 설정 불가')
+    expect(within(row).getByRole('button', { name: '로컬 캐시 삭제' })).toBeDisabled()
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
     expect(downloadsApi.purgeModelCache).not.toHaveBeenCalled()
 
@@ -901,10 +904,10 @@ describe('ModelCachePage', () => {
     ) as HTMLElement
     expect(freshRow).not.toHaveAttribute('data-cache-stale')
     expect(
-      within(freshRow).getByRole('link', { name: 'Deploy' }),
+      within(freshRow).getByRole('link', { name: '배포 설정' }),
     ).not.toHaveAttribute('aria-disabled', 'true')
     expect(
-      within(freshRow).getByRole('button', { name: 'Purge' }),
+      within(freshRow).getByRole('button', { name: '로컬 캐시 삭제' }),
     ).not.toBeDisabled()
   })
 
@@ -944,12 +947,12 @@ describe('ModelCachePage', () => {
     const row = (await screen.findByText('org/ready-dialog')).closest(
       'tr',
     ) as HTMLElement
-    await userEvent.click(within(row).getByRole('button', { name: 'Purge' }))
+    await userEvent.click(within(row).getByRole('button', { name: '로컬 캐시 삭제' }))
     expect(
-      await screen.findByRole('dialog', { name: /Purge 확인/i }),
+      await screen.findByRole('dialog', { name: /로컬 캐시 삭제 확인/i }),
     ).toBeInTheDocument()
 
-    await userEvent.selectOptions(screen.getByLabelText('Node'), 'node-2')
+    await userEvent.selectOptions(screen.getByLabelText(/대상 서버/), 'node-2')
     await waitFor(() => {
       expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
     })
@@ -991,10 +994,10 @@ describe('ModelCachePage', () => {
       'tr',
     ) as HTMLElement
     expect(
-      within(staleRow).getByRole('link', { name: 'Deploy' }),
+      within(staleRow).getByRole('link', { name: '배포 설정' }),
     ).toHaveAttribute('aria-disabled', 'true')
     expect(
-      within(staleRow).getByRole('button', { name: 'Purge' }),
+      within(staleRow).getByRole('button', { name: '로컬 캐시 삭제' }),
     ).toBeDisabled()
 
     resolvePage2({
@@ -1014,7 +1017,7 @@ describe('ModelCachePage', () => {
     expect(
       within(
         screen.getByText('org/page2-0').closest('tr') as HTMLElement,
-      ).getByRole('button', { name: 'Purge' }),
+      ).getByRole('button', { name: '로컬 캐시 삭제' }),
     ).not.toBeDisabled()
   })
 
@@ -1053,8 +1056,8 @@ describe('ModelCachePage', () => {
     expect(await screen.findByText('org/all-nodes')).toBeInTheDocument()
 
     // Start slow node-1 fetch, then quickly switch to node-2 which resolves first.
-    await userEvent.selectOptions(screen.getByLabelText('Node'), 'node-1')
-    await userEvent.selectOptions(screen.getByLabelText('Node'), 'node-2')
+    await userEvent.selectOptions(screen.getByLabelText(/대상 서버/), 'node-1')
+    await userEvent.selectOptions(screen.getByLabelText(/대상 서버/), 'node-2')
     expect(await screen.findByText('org/fast-node2')).toBeInTheDocument()
 
     resolveSlowNode1(
