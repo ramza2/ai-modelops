@@ -154,7 +154,7 @@ describe('ModelDetailPage', () => {
     expect(
       await screen.findByRole('heading', { level: 2, name: 'Chat A' }),
     ).toBeInTheDocument()
-    expect(screen.getByText('versions down')).toBeInTheDocument()
+    expect(screen.getByText(/versions down/)).toBeInTheDocument()
     cleanup()
 
     vi.mocked(modelsApi.getModel)
@@ -167,7 +167,7 @@ describe('ModelDetailPage', () => {
     expect(await screen.findByRole('link', { name: 'keep-v' })).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: '새로고침' }))
     await waitFor(() => {
-      expect(screen.getByText('meta fail')).toBeInTheDocument()
+      expect(screen.getByText(/meta fail/)).toBeInTheDocument()
     })
     expect(screen.getByRole('link', { name: 'keep-v' })).toBeInTheDocument()
   })

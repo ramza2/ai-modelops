@@ -162,7 +162,7 @@ describe('ModelVersionDetailPage', () => {
     expect(
       await screen.findByRole('heading', {
         level: 2,
-        name: 'Version Runtime Configuration',
+        name: /Version Runtime Configuration/,
       }),
     ).toBeInTheDocument()
     expect(screen.getAllByText(/저장된 정의값/).length).toBeGreaterThan(0)
@@ -201,7 +201,7 @@ describe('ModelVersionDetailPage', () => {
       pageResult([makeArtifact({ id: 'a1' })]),
     )
     renderDetail()
-    expect(await screen.findByText('Archived')).toBeInTheDocument()
+    expect(await screen.findByText(/보관됨 \(Archived\)/)).toBeInTheDocument()
     expect(screen.getByText('WEIGHTS')).toBeInTheDocument()
     expect(screen.getByText('1.0 MiB')).toBeInTheDocument()
     cleanup()
@@ -224,7 +224,7 @@ describe('ModelVersionDetailPage', () => {
     expect(
       await screen.findByRole('heading', { level: 2, name: '1.0.0' }),
     ).toBeInTheDocument()
-    expect(screen.getByText('artifacts down')).toBeInTheDocument()
+    expect(screen.getByText(/artifacts down/)).toBeInTheDocument()
   })
 
   it('keeps Version visible when parent Model fails', async () => {
@@ -237,7 +237,7 @@ describe('ModelVersionDetailPage', () => {
     expect(
       await screen.findByRole('heading', { level: 2, name: '1.0.0' }),
     ).toBeInTheDocument()
-    expect(screen.getByText('parent fail')).toBeInTheDocument()
+    expect(screen.getByText(/parent fail/)).toBeInTheDocument()
     expect(
       screen.getByRole('link', { name: /Model m1|Model [a-f0-9]/i }),
     ).toBeInTheDocument()

@@ -5,12 +5,18 @@ import { getModel, listModelVersions } from '../api/models'
 import type { ModelDetail, ModelVersion } from '../api/types'
 import { ActiveBadge } from '../components/ActiveBadge'
 import { AppShell } from '../components/AppShell'
+import { HelpHint, TermLabel } from '../components/HelpHint'
 import { LoadingBlock } from '../components/LoadingBlock'
 import { Pagination } from '../components/Pagination'
 import { SectionError } from '../components/SectionError'
 import { formatApiDateTime } from '../utils/date'
 import { formatInt, formatMemoryMb } from '../utils/number'
 import { parsePositivePage } from '../utils/query'
+import {
+  MODEL_DETAIL_FIELD_HELP,
+  MODEL_TYPE_HELP,
+  userFacingLoadError,
+} from '../utils/uiLabels'
 
 const PAGE_SIZE = 20
 
@@ -188,8 +194,8 @@ export function ModelDetailPage() {
   if (modelNotFound) {
     return (
       <AppShell
-        title="Models / Versions"
-        description="Model Registry 상세"
+        title="등록된 모델 관리"
+        description="모델 상세"
         onRefresh={() => void load('refresh')}
         refreshing={false}
         lastUpdated={lastUpdated}
@@ -205,10 +211,21 @@ export function ModelDetailPage() {
     )
   }
 
+  const metaError = modelError
+    ? userFacingLoadError('모델 메타데이터', modelError, {
+        keptPrevious: model !== null,
+      })
+    : null
+  const versionsLoadError = versionsError
+    ? userFacingLoadError('모델 버전 목록', versionsError, {
+        keptPrevious: versions !== null,
+      })
+    : null
+
   return (
     <AppShell
-      title={model?.name ?? 'Model 상세'}
-      description="Model 메타데이터와 Version 이력입니다. Version의 runtime_config는 Registry 정의값입니다."
+      title={model?.name ?? '모델 상세'}
+      description="레지스트리 모델 정의와 버전 이력입니다. Version runtime_config는 저장 정의값이며 Deployment/observed 실행값과 다를 수 있습니다."
       onRefresh={() => void load('refresh')}
       refreshing={refreshing}
       lastUpdated={lastUpdated}
@@ -217,12 +234,41 @@ export function ModelDetailPage() {
         ← Models / Versions
       </Link>
 
+      <p className="panel-hint" role="note">
+        {MODEL_DETAIL_FIELD_HELP.overview}
+      </p>
+      <details className="help-glossary">
+        <summary>용어 및 상태 안내</summary>
+        <div className="help-glossary__items">
+          <HelpHint showTopic label="모델 vs 버전">
+            {MODEL_DETAIL_FIELD_HELP.modelVsVersion}
+          </HelpHint>
+          <HelpHint showTopic label="등록 상태">
+            {MODEL_DETAIL_FIELD_HELP.registration}
+          </HelpHint>
+          <HelpHint showTopic label="버전 보관 (Archived)">
+            {MODEL_DETAIL_FIELD_HELP.archived}
+          </HelpHint>
+          <HelpHint showTopic label="예상 자원">
+            {MODEL_DETAIL_FIELD_HELP.expectedResources}
+          </HelpHint>
+          <HelpHint showTopic label="모델 유형">
+            {MODEL_TYPE_HELP.LLM} {MODEL_TYPE_HELP.VLM}{' '}
+            {MODEL_TYPE_HELP.EMBEDDING}
+          </HelpHint>
+        </div>
+      </details>
+
       {modelLoading && !model ? (
-        <LoadingBlock label="Model 메타데이터를 불러오는 중…" />
+        <LoadingBlock label="모델 메타데이터를 불러오는 중…" />
       ) : null}
 
-      {modelError && !modelNotFound ? (
-        <SectionError title="Model 메타데이터 오류" message={modelError} />
+      {metaError && !modelNotFound ? (
+        <SectionError
+          title={metaError.title}
+          message={metaError.message}
+          action={metaError.action}
+        />
       ) : null}
 
       {model ? (
@@ -233,36 +279,54 @@ export function ModelDetailPage() {
           </div>
           <dl className="meta-grid">
             <div>
-              <dt>Slug</dt>
+              <dt>
+                <TermLabel text="식별자" apiTerm="Slug" />
+              </dt>
               <dd className="mono">{model.slug}</dd>
             </div>
             <div>
-              <dt>Model Type</dt>
+              <dt>
+                <TermLabel
+                  text="모델 유형"
+                  apiTerm="Model Type"
+                  help={`${MODEL_TYPE_HELP.LLM} ${MODEL_TYPE_HELP.VLM} ${MODEL_TYPE_HELP.EMBEDDING}`}
+                />
+              </dt>
               <dd>{model.model_type || '—'}</dd>
             </div>
             <div>
-              <dt>Provider</dt>
+              <dt>
+                <TermLabel text="제공자" apiTerm="Provider" />
+              </dt>
               <dd>{model.provider || '—'}</dd>
             </div>
             <div>
-              <dt>Source Type</dt>
+              <dt>
+                <TermLabel text="모델 출처" apiTerm="Source Type" />
+              </dt>
               <dd>{model.source_type || '—'}</dd>
             </div>
             <div>
-              <dt>License</dt>
+              <dt>
+                <TermLabel text="라이선스" apiTerm="License" />
+              </dt>
               <dd>{model.license_name || '—'}</dd>
             </div>
             <div>
-              <dt>Created</dt>
+              <dt>
+                <TermLabel text="생성 시각" apiTerm="Created" />
+              </dt>
               <dd>{formatApiDateTime(model.created_at)}</dd>
             </div>
             <div>
-              <dt>Updated</dt>
+              <dt>
+                <TermLabel text="수정 시각" apiTerm="Updated" />
+              </dt>
               <dd>{formatApiDateTime(model.updated_at)}</dd>
             </div>
           </dl>
           <div className="description-block">
-            <h3 className="section-subheading">Description</h3>
+            <h3 className="section-subheading">모델 설명 (Description)</h3>
             <p className="description-text">
               {model.description?.trim() ? model.description : '—'}
             </p>
@@ -272,7 +336,7 @@ export function ModelDetailPage() {
 
       <section className="detail-panel" aria-labelledby="versions-heading">
         <div className="detail-panel__header">
-          <h2 id="versions-heading">Versions</h2>
+          <h2 id="versions-heading">모델 버전 이력 (Versions)</h2>
           <label className="checkbox-label" htmlFor="include-archived">
             <input
               id="include-archived"
@@ -285,13 +349,21 @@ export function ModelDetailPage() {
             Archived 포함
           </label>
         </div>
+        <p className="panel-hint" role="note">
+          {MODEL_DETAIL_FIELD_HELP.versions}{' '}
+          {MODEL_DETAIL_FIELD_HELP.archived}
+        </p>
 
-        {versionsError ? (
-          <SectionError title="Version 목록 오류" message={versionsError} />
+        {versionsLoadError ? (
+          <SectionError
+            title={versionsLoadError.title}
+            message={versionsLoadError.message}
+            action={versionsLoadError.action}
+          />
         ) : null}
 
         {versionsLoading && versions === null ? (
-          <LoadingBlock label="Version 목록을 불러오는 중…" />
+          <LoadingBlock label="버전 목록을 불러오는 중…" />
         ) : null}
 
         {versions !== null && versions.length > 0 ? (
@@ -300,14 +372,41 @@ export function ModelDetailPage() {
               <table className="data-table">
                 <thead>
                   <tr>
-                    <th scope="col">Version</th>
-                    <th scope="col">Runtime</th>
-                    <th scope="col">Quantization</th>
-                    <th scope="col">DType</th>
-                    <th scope="col">Expected Peak VRAM</th>
-                    <th scope="col">Max Model Len</th>
-                    <th scope="col">Archived</th>
-                    <th scope="col">Updated</th>
+                    <th scope="col">
+                      <TermLabel text="버전" apiTerm="Version" />
+                    </th>
+                    <th scope="col">
+                      <TermLabel text="실행 환경" apiTerm="Runtime" />
+                    </th>
+                    <th scope="col">
+                      <TermLabel text="양자화" apiTerm="Quantization" />
+                    </th>
+                    <th scope="col">
+                      <TermLabel text="연산 형식" apiTerm="DType" />
+                    </th>
+                    <th scope="col">
+                      <TermLabel
+                        text="예상 최대 GPU 메모리"
+                        apiTerm="Expected Peak VRAM"
+                        help={MODEL_DETAIL_FIELD_HELP.expectedResources}
+                      />
+                    </th>
+                    <th scope="col">
+                      <TermLabel
+                        text="최대 문맥 길이"
+                        apiTerm="Max Model Len"
+                      />
+                    </th>
+                    <th scope="col">
+                      <TermLabel
+                        text="보관된 버전"
+                        apiTerm="Archived"
+                        help={MODEL_DETAIL_FIELD_HELP.archived}
+                      />
+                    </th>
+                    <th scope="col">
+                      <TermLabel text="수정 시각" apiTerm="Updated" />
+                    </th>
                   </tr>
                 </thead>
                 <tbody>

@@ -12,6 +12,7 @@ import type {
   ModelVersion,
 } from '../api/types'
 import { AppShell } from '../components/AppShell'
+import { HelpHint, TermLabel } from '../components/HelpHint'
 import { LoadingBlock } from '../components/LoadingBlock'
 import { Pagination } from '../components/Pagination'
 import { SectionError } from '../components/SectionError'
@@ -25,6 +26,10 @@ import {
 } from '../utils/format'
 import { formatInt, formatMemoryMb } from '../utils/number'
 import { parsePositivePage } from '../utils/query'
+import {
+  MODEL_VERSION_DETAIL_FIELD_HELP,
+  userFacingLoadError,
+} from '../utils/uiLabels'
 
 const PAGE_SIZE = 20
 
@@ -219,8 +224,8 @@ export function ModelVersionDetailPage() {
   if (versionNotFound) {
     return (
       <AppShell
-        title="Models / Versions"
-        description="Model Version 상세"
+        title="등록된 모델 관리"
+        description="모델 버전 상세"
         onRefresh={() => void load('refresh')}
         refreshing={false}
         lastUpdated={lastUpdated}
@@ -237,11 +242,26 @@ export function ModelVersionDetailPage() {
   }
 
   const runtimeEntries = pickRuntimeConfigEntries(version?.runtime_config)
+  const versionLoadError = versionError
+    ? userFacingLoadError('모델 버전', versionError, {
+        keptPrevious: version !== null,
+      })
+    : null
+  const artifactsLoadError = artifactsError
+    ? userFacingLoadError('모델 파일 정보', artifactsError, {
+        keptPrevious: artifacts !== null,
+      })
+    : null
+  const parentLoadError = parentWarning
+    ? userFacingLoadError('부모 모델', parentWarning, {
+        keptPrevious: parentModel !== null,
+      })
+    : null
 
   return (
     <AppShell
-      title={version?.version_label ?? 'Model Version 상세'}
-      description="Model Version에 저장된 Registry 정의값입니다. Deployment override 및 실제 실행 observed 값은 Deployment Capacity Profile에서 확인합니다."
+      title={version?.version_label ?? '모델 버전 상세'}
+      description="Model Version에 저장된 정의값(Registry)입니다. Deployment override 및 실제 실행 observed 값은 Deployment Capacity Profile에서 확인합니다."
       onRefresh={() => void load('refresh')}
       refreshing={refreshing}
       lastUpdated={lastUpdated}
@@ -265,7 +285,7 @@ export function ModelVersionDetailPage() {
       <div className="back-row">
         {version ? (
           <Link className="back-link" to={`/models/${version.model_id}`}>
-            ← Model
+            ← 부모 모델 (Model)
           </Link>
         ) : null}
         <Link className="back-link" to="/models">
@@ -273,24 +293,58 @@ export function ModelVersionDetailPage() {
         </Link>
       </div>
 
-      {parentWarning ? (
-        <SectionError title="부모 Model 경고" message={parentWarning} />
+      <p className="panel-hint" role="note">
+        {MODEL_VERSION_DETAIL_FIELD_HELP.overview}
+      </p>
+      <details className="help-glossary">
+        <summary>용어 및 상태 안내</summary>
+        <div className="help-glossary__items">
+          <HelpHint showTopic label="버전 실행 설정">
+            {MODEL_VERSION_DETAIL_FIELD_HELP.runtimeConfig}
+          </HelpHint>
+          <HelpHint showTopic label="예상 자원">
+            {MODEL_VERSION_DETAIL_FIELD_HELP.expectedResources}
+          </HelpHint>
+          <HelpHint showTopic label="모델 파일 (Artifacts)">
+            {MODEL_VERSION_DETAIL_FIELD_HELP.artifacts}
+          </HelpHint>
+          <HelpHint showTopic label="보관 (Archived)">
+            {MODEL_VERSION_DETAIL_FIELD_HELP.archived}
+          </HelpHint>
+          <HelpHint showTopic label="원본 식별값">
+            {MODEL_VERSION_DETAIL_FIELD_HELP.identifiers}
+          </HelpHint>
+          <HelpHint showTopic label="부모 모델">
+            {MODEL_VERSION_DETAIL_FIELD_HELP.parentModel}
+          </HelpHint>
+        </div>
+      </details>
+
+      {parentLoadError ? (
+        <SectionError
+          title={parentLoadError.title}
+          message={parentLoadError.message}
+          action={
+            parentModel
+              ? parentLoadError.action
+              : `${MODEL_VERSION_DETAIL_FIELD_HELP.parentModel} ${parentLoadError.action}`
+          }
+        />
       ) : null}
 
       {versionLoading && !version ? (
-        <LoadingBlock label="Model Version을 불러오는 중…" />
+        <LoadingBlock label="모델 버전을 불러오는 중…" />
       ) : null}
 
-      {versionError && !versionNotFound ? (
+      {versionLoadError && !versionNotFound ? (
         <SectionError
-          title={
-            version ? 'Version 새로고침 실패' : 'Model Version 오류'
-          }
+          title={versionLoadError.title}
           message={
             version
-              ? `기존 Version 정보를 표시하고 있습니다. 새로고침 실패: ${versionError}`
-              : versionError
+              ? `기존 Version 정보를 표시하고 있습니다. ${versionLoadError.message}`
+              : versionLoadError.message
           }
+          action={versionLoadError.action}
         />
       ) : null}
 
@@ -307,29 +361,51 @@ export function ModelVersionDetailPage() {
               >
                 <span className="status-badge__dot" aria-hidden="true" />
                 <span className="status-badge__text">
-                  {version.archived_at ? 'Archived' : 'Active Version'}
+                  {version.archived_at
+                    ? '보관됨 (Archived)'
+                    : '활성 버전 (Active Version)'}
                 </span>
               </span>
             </div>
             <dl className="meta-grid">
               <div>
-                <dt>Runtime Type</dt>
+                <dt>
+                  <TermLabel
+                    text="실행 환경 유형"
+                    apiTerm="Runtime Type"
+                  />
+                </dt>
                 <dd>{version.runtime_type || '—'}</dd>
               </div>
               <div>
-                <dt>Served Model Name</dt>
+                <dt>
+                  <TermLabel
+                    text="모델 실행 이름"
+                    apiTerm="Served Model Name"
+                    help={MODEL_VERSION_DETAIL_FIELD_HELP.identifiers}
+                  />
+                </dt>
                 <dd className="mono">{version.served_model_name || '—'}</dd>
               </div>
               <div>
-                <dt>Quantization</dt>
+                <dt>
+                  <TermLabel text="양자화 방식" apiTerm="Quantization" />
+                </dt>
                 <dd>{version.quantization || '—'}</dd>
               </div>
               <div>
-                <dt>DType</dt>
+                <dt>
+                  <TermLabel text="연산 형식" apiTerm="DType" />
+                </dt>
                 <dd>{version.dtype || '—'}</dd>
               </div>
               <div>
-                <dt>Source Repository</dt>
+                <dt>
+                  <TermLabel
+                    text="원본 저장소"
+                    apiTerm="Source Repository"
+                  />
+                </dt>
                 <dd>
                   <TruncatedValue
                     className="mono"
@@ -343,7 +419,12 @@ export function ModelVersionDetailPage() {
                 </dd>
               </div>
               <div>
-                <dt>Source Revision</dt>
+                <dt>
+                  <TermLabel
+                    text="원본 버전"
+                    apiTerm="Source Revision"
+                  />
+                </dt>
                 <dd>
                   <TruncatedValue
                     className="mono"
@@ -357,7 +438,9 @@ export function ModelVersionDetailPage() {
                 </dd>
               </div>
               <div>
-                <dt>Runtime Image</dt>
+                <dt>
+                  <TermLabel text="실행 이미지" apiTerm="Runtime Image" />
+                </dt>
                 <dd>
                   <TruncatedValue
                     className="mono"
@@ -371,7 +454,13 @@ export function ModelVersionDetailPage() {
                 </dd>
               </div>
               <div>
-                <dt>Runtime Image Digest</dt>
+                <dt>
+                  <TermLabel
+                    text="이미지 식별값"
+                    apiTerm="Runtime Image Digest"
+                    help={MODEL_VERSION_DETAIL_FIELD_HELP.identifiers}
+                  />
+                </dt>
                 <dd>
                   <TruncatedValue
                     className="mono"
@@ -385,7 +474,13 @@ export function ModelVersionDetailPage() {
                 </dd>
               </div>
               <div>
-                <dt>Archived At</dt>
+                <dt>
+                  <TermLabel
+                    text="보관 시각"
+                    apiTerm="Archived At"
+                    help={MODEL_VERSION_DETAIL_FIELD_HELP.archived}
+                  />
+                </dt>
                 <dd>
                   {version.archived_at
                     ? formatApiDateTime(version.archived_at)
@@ -393,11 +488,15 @@ export function ModelVersionDetailPage() {
                 </dd>
               </div>
               <div>
-                <dt>Created</dt>
+                <dt>
+                  <TermLabel text="생성 시각" apiTerm="Created" />
+                </dt>
                 <dd>{formatApiDateTime(version.created_at)}</dd>
               </div>
               <div>
-                <dt>Updated</dt>
+                <dt>
+                  <TermLabel text="수정 시각" apiTerm="Updated" />
+                </dt>
                 <dd>{formatApiDateTime(version.updated_at)}</dd>
               </div>
             </dl>
@@ -410,22 +509,40 @@ export function ModelVersionDetailPage() {
             className="detail-panel"
             aria-labelledby="expected-resources-heading"
           >
-            <h2 id="expected-resources-heading">Expected Resources</h2>
-            <p className="panel-hint">
-              Version에 저장된 예상 자원 정의입니다. 현재 GPU 가용성이나
-              Deployment Preflight 판정을 의미하지 않습니다.
+            <h2 id="expected-resources-heading">
+              예상 자원 (Expected Resources)
+            </h2>
+            <p className="panel-hint" role="note">
+              {MODEL_VERSION_DETAIL_FIELD_HELP.expectedResources} Version에
+              저장된 예상 자원 정의입니다. 현재 GPU 가용성이나 Deployment
+              Preflight 판정을 의미하지 않습니다.
             </p>
             <dl className="meta-grid">
               <div>
-                <dt>Expected Idle VRAM</dt>
+                <dt>
+                  <TermLabel
+                    text="예상 Idle VRAM"
+                    apiTerm="Expected Idle VRAM"
+                  />
+                </dt>
                 <dd>{formatMemoryMb(version.expected_idle_vram_mb)}</dd>
               </div>
               <div>
-                <dt>Expected Peak VRAM</dt>
+                <dt>
+                  <TermLabel
+                    text="예상 Peak VRAM"
+                    apiTerm="Expected Peak VRAM"
+                  />
+                </dt>
                 <dd>{formatMemoryMb(version.expected_peak_vram_mb)}</dd>
               </div>
               <div>
-                <dt>Default Max Model Len</dt>
+                <dt>
+                  <TermLabel
+                    text="기본 최대 문맥 길이"
+                    apiTerm="Default Max Model Len"
+                  />
+                </dt>
                 <dd>{formatInt(version.default_max_model_len)}</dd>
               </div>
             </dl>
@@ -435,11 +552,11 @@ export function ModelVersionDetailPage() {
             className="detail-panel"
             aria-labelledby="runtime-config-heading"
           >
-            <h2 id="runtime-config-heading">Version Runtime Configuration</h2>
-            <p className="panel-hint">
-              이 값은 Model Version에 저장된 정의값입니다. Deployment의
-              deployment_config가 일부 값을 override할 수 있으며, 실제 실행
-              컨테이너의 observed 값과도 다를 수 있습니다. 실행 적용 여부는
+            <h2 id="runtime-config-heading">
+              버전 실행 설정 (Version Runtime Configuration)
+            </h2>
+            <p className="panel-hint" role="note">
+              {MODEL_VERSION_DETAIL_FIELD_HELP.runtimeConfig} 실행 적용 여부는
               Deployment Capacity Profile에서 확인합니다.
             </p>
             <dl className="meta-grid">
@@ -472,18 +589,21 @@ export function ModelVersionDetailPage() {
       ) : null}
 
       <section className="detail-panel" aria-labelledby="artifacts-heading">
-        <h2 id="artifacts-heading">Artifacts</h2>
-        <p className="panel-hint">
-          Artifact Registry 메타데이터입니다. Node Model Cache 준비 상태와는
-          별개입니다.
+        <h2 id="artifacts-heading">모델 파일 정보 (Artifacts)</h2>
+        <p className="panel-hint" role="note">
+          {MODEL_VERSION_DETAIL_FIELD_HELP.artifacts}
         </p>
 
-        {artifactsError ? (
-          <SectionError title="Artifact 목록 오류" message={artifactsError} />
+        {artifactsLoadError ? (
+          <SectionError
+            title={artifactsLoadError.title}
+            message={artifactsLoadError.message}
+            action={artifactsLoadError.action}
+          />
         ) : null}
 
         {artifactsLoading && artifacts === null ? (
-          <LoadingBlock label="Artifact 목록을 불러오는 중…" />
+          <LoadingBlock label="모델 파일 정보를 불러오는 중…" />
         ) : null}
 
         {artifacts !== null && artifacts.length > 0 ? (
@@ -492,12 +612,32 @@ export function ModelVersionDetailPage() {
               <table className="data-table">
                 <thead>
                   <tr>
-                    <th scope="col">Type</th>
-                    <th scope="col">Source URI</th>
-                    <th scope="col">Revision</th>
-                    <th scope="col">Size</th>
-                    <th scope="col">Checksum</th>
-                    <th scope="col">Created</th>
+                    <th scope="col">
+                      <TermLabel text="유형" apiTerm="Type" />
+                    </th>
+                    <th scope="col">
+                      <TermLabel
+                        text="파일 원본 주소"
+                        apiTerm="Source URI"
+                        help={MODEL_VERSION_DETAIL_FIELD_HELP.identifiers}
+                      />
+                    </th>
+                    <th scope="col">
+                      <TermLabel text="개정" apiTerm="Revision" />
+                    </th>
+                    <th scope="col">
+                      <TermLabel text="크기" apiTerm="Size" />
+                    </th>
+                    <th scope="col">
+                      <TermLabel
+                        text="무결성 확인값"
+                        apiTerm="Checksum"
+                        help={MODEL_VERSION_DETAIL_FIELD_HELP.identifiers}
+                      />
+                    </th>
+                    <th scope="col">
+                      <TermLabel text="생성 시각" apiTerm="Created" />
+                    </th>
                   </tr>
                 </thead>
                 <tbody>
