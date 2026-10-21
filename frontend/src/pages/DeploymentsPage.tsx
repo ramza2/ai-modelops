@@ -4,12 +4,14 @@ import { ApiError } from '../api/client'
 import { listDeployments } from '../api/deployments'
 import type { Deployment } from '../api/types'
 import { AppShell } from '../components/AppShell'
+import { HelpHint, TermLabel } from '../components/HelpHint'
 import { LoadingBlock } from '../components/LoadingBlock'
 import { Pagination } from '../components/Pagination'
 import { SectionError } from '../components/SectionError'
 import { StatusBadge } from '../components/StatusBadge'
 import { formatApiDateTime, shortId } from '../utils/date'
 import { parsePositivePage } from '../utils/query'
+import { DEPLOYMENT_FIELD_HELP } from '../utils/uiLabels'
 
 const PAGE_SIZE = 20
 
@@ -255,7 +257,7 @@ export function DeploymentsPage() {
             ? err.message
             : err instanceof Error
               ? err.message
-              : 'Deployment 목록을 불러오지 못했습니다.'
+              : '모델 배포 목록을 불러오지 못했습니다.'
         setError(message)
         if (!hasLoadedRef.current) {
           setItems(null)
@@ -303,15 +305,47 @@ export function DeploymentsPage() {
 
   return (
     <AppShell
-      title="Deployments"
-      description="Deployment 메타데이터와 런타임/헬스 상태를 조회합니다. MANAGED lifecycle Start/Stop/Restart는 상세 페이지에서 비동기 Operation으로 enqueue합니다."
+      title="모델 배포 관리"
+      description="서버에 올린 모델 배포의 목표·실행·정상 동작 상태를 조회합니다. 시작·중지·재시작은 상세 페이지에서 비동기 작업으로 요청합니다."
       onRefresh={() => void load('refresh')}
       refreshing={refreshing}
       lastUpdated={lastUpdated}
     >
+      <p className="panel-hint" role="note">
+        {DEPLOYMENT_FIELD_HELP.overview}
+      </p>
+      <details className="help-glossary">
+        <summary>용어 및 상태 안내</summary>
+        <div className="help-glossary__items">
+          <HelpHint showTopic label="레지스트리 등록 vs 모델 배포">
+            {DEPLOYMENT_FIELD_HELP.registryVsDeploy}
+          </HelpHint>
+          <HelpHint showTopic label="MANAGED vs IMPORTED">
+            {DEPLOYMENT_FIELD_HELP.managedVsImported}
+          </HelpHint>
+          <HelpHint showTopic label="활성 배포 vs 실행 중">
+            {DEPLOYMENT_FIELD_HELP.activeVsRunning}
+          </HelpHint>
+          <HelpHint showTopic label="목표 상태 vs 실행 상태">
+            {DEPLOYMENT_FIELD_HELP.desiredVsRuntime}
+          </HelpHint>
+          <HelpHint showTopic label="Runtime vs Health">
+            {DEPLOYMENT_FIELD_HELP.runtimeVsHealth}
+          </HelpHint>
+          <HelpHint showTopic label="퇴역 (Retired)">
+            {DEPLOYMENT_FIELD_HELP.retired}
+          </HelpHint>
+        </div>
+      </details>
+
       <div className="toolbar toolbar--wrap">
-        <label className="toolbar__field" htmlFor="dep-type-filter">
-          <span>Type</span>
+        <div className="toolbar__field">
+          <div className="toolbar__field-head">
+            <label htmlFor="dep-type-filter">배포 유형</label>
+            <HelpHint label="배포 유형">
+              {DEPLOYMENT_FIELD_HELP.managedVsImported}
+            </HelpHint>
+          </div>
           <select
             id="dep-type-filter"
             value={deploymentType ?? 'ALL'}
@@ -329,13 +363,18 @@ export function DeploymentsPage() {
               })
             }}
           >
-            <option value="ALL">ALL</option>
-            <option value="MANAGED">MANAGED</option>
-            <option value="IMPORTED">IMPORTED</option>
+            <option value="ALL">전체</option>
+            <option value="MANAGED">MANAGED (관리형)</option>
+            <option value="IMPORTED">IMPORTED (가져옴)</option>
           </select>
-        </label>
-        <label className="toolbar__field" htmlFor="dep-runtime-filter">
-          <span>Runtime</span>
+        </div>
+        <div className="toolbar__field">
+          <div className="toolbar__field-head">
+            <label htmlFor="dep-runtime-filter">실행 상태</label>
+            <HelpHint label="실행 상태">
+              {DEPLOYMENT_FIELD_HELP.desiredVsRuntime}
+            </HelpHint>
+          </div>
           <select
             id="dep-runtime-filter"
             value={runtimeStatus ?? 'ALL'}
@@ -353,16 +392,21 @@ export function DeploymentsPage() {
               })
             }}
           >
-            <option value="ALL">ALL</option>
+            <option value="ALL">전체</option>
             {[...KNOWN_RUNTIME].map((s) => (
               <option key={s} value={s}>
                 {s}
               </option>
             ))}
           </select>
-        </label>
-        <label className="toolbar__field" htmlFor="dep-health-filter">
-          <span>Health</span>
+        </div>
+        <div className="toolbar__field">
+          <div className="toolbar__field-head">
+            <label htmlFor="dep-health-filter">정상 동작 상태</label>
+            <HelpHint label="정상 동작 상태">
+              {DEPLOYMENT_FIELD_HELP.runtimeVsHealth}
+            </HelpHint>
+          </div>
           <select
             id="dep-health-filter"
             value={healthStatus ?? 'ALL'}
@@ -380,16 +424,19 @@ export function DeploymentsPage() {
               })
             }}
           >
-            <option value="ALL">ALL</option>
+            <option value="ALL">전체</option>
             {[...KNOWN_HEALTH].map((s) => (
               <option key={s} value={s}>
                 {s}
               </option>
             ))}
           </select>
-        </label>
-        <label className="toolbar__field" htmlFor="dep-retired-filter">
-          <span>Retired</span>
+        </div>
+        <div className="toolbar__field">
+          <div className="toolbar__field-head">
+            <label htmlFor="dep-retired-filter">퇴역 여부</label>
+            <HelpHint label="퇴역 여부">{DEPLOYMENT_FIELD_HELP.retired}</HelpHint>
+          </div>
           <select
             id="dep-retired-filter"
             value={retiredLabel(retired)}
@@ -409,19 +456,19 @@ export function DeploymentsPage() {
               })
             }}
           >
-            <option value="ALL">ALL</option>
-            <option value="ACTIVE">ACTIVE</option>
-            <option value="RETIRED">RETIRED</option>
+            <option value="ALL">전체</option>
+            <option value="ACTIVE">활성 (ACTIVE)</option>
+            <option value="RETIRED">퇴역 (RETIRED)</option>
           </select>
-        </label>
+        </div>
       </div>
 
       {error ? (
-        <SectionError title="Deployment 목록 오류" message={error} />
+        <SectionError title="모델 배포 목록 오류" message={error} />
       ) : null}
 
       {loading && items === null ? (
-        <LoadingBlock label="Deployment 목록을 불러오는 중…" />
+        <LoadingBlock label="모델 배포 목록을 불러오는 중…" />
       ) : null}
 
       {items !== null && items.length > 0 ? (
@@ -430,15 +477,53 @@ export function DeploymentsPage() {
             <table className="data-table">
               <thead>
                 <tr>
-                  <th scope="col">Deployment</th>
-                  <th scope="col">Type</th>
-                  <th scope="col">Desired</th>
-                  <th scope="col">Runtime</th>
-                  <th scope="col">Health</th>
-                  <th scope="col">Node</th>
-                  <th scope="col">Version</th>
-                  <th scope="col">Retired</th>
-                  <th scope="col">Updated</th>
+                  <th scope="col">
+                    <TermLabel text="모델 배포" apiTerm="Deployment" />
+                  </th>
+                  <th scope="col">
+                    <TermLabel
+                      text="배포 유형"
+                      apiTerm="Type"
+                      help={DEPLOYMENT_FIELD_HELP.managedVsImported}
+                    />
+                  </th>
+                  <th scope="col">
+                    <TermLabel
+                      text="목표 상태"
+                      apiTerm="Desired"
+                      help={DEPLOYMENT_FIELD_HELP.desiredVsRuntime}
+                    />
+                  </th>
+                  <th scope="col">
+                    <TermLabel
+                      text="실행 상태"
+                      apiTerm="Runtime"
+                      help={DEPLOYMENT_FIELD_HELP.desiredVsRuntime}
+                    />
+                  </th>
+                  <th scope="col">
+                    <TermLabel
+                      text="정상 동작 상태"
+                      apiTerm="Health"
+                      help={DEPLOYMENT_FIELD_HELP.runtimeVsHealth}
+                    />
+                  </th>
+                  <th scope="col">
+                    <TermLabel text="대상 서버" apiTerm="Node" />
+                  </th>
+                  <th scope="col">
+                    <TermLabel text="모델 버전" apiTerm="Version" />
+                  </th>
+                  <th scope="col">
+                    <TermLabel
+                      text="퇴역 여부"
+                      apiTerm="Retired"
+                      help={DEPLOYMENT_FIELD_HELP.retired}
+                    />
+                  </th>
+                  <th scope="col">
+                    <TermLabel text="수정 시각" apiTerm="Updated" />
+                  </th>
                 </tr>
               </thead>
               <tbody>
@@ -451,7 +536,7 @@ export function DeploymentsPage() {
                       >
                         {dep.name}
                       </Link>
-                      <div className="secondary-text mono">
+                      <div className="secondary-text mono table-cell-clip">
                         {shortId(dep.id)}
                       </div>
                     </td>
@@ -517,13 +602,13 @@ export function DeploymentsPage() {
 
       {emptyDatabase ? (
         <p className="empty-state" role="status">
-          등록된 Deployment가 없습니다.
+          등록된 모델 배포가 없습니다.
         </p>
       ) : null}
 
       {emptyFiltered ? (
         <p className="empty-state" role="status">
-          필터 조건에 해당하는 Deployment가 없습니다.
+          필터 조건에 해당하는 모델 배포가 없습니다.
         </p>
       ) : null}
     </AppShell>

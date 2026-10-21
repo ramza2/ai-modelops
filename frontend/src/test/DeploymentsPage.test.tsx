@@ -106,16 +106,16 @@ describe('DeploymentsPage', () => {
     const user = userEvent.setup()
     vi.mocked(deploymentsApi.listDeployments).mockResolvedValue(pageResult([]))
     renderAt('/deployments?page=2')
-    await screen.findByLabelText('Type')
-    await user.selectOptions(screen.getByLabelText('Type'), 'MANAGED')
+    await screen.findByLabelText('배포 유형')
+    await user.selectOptions(screen.getByLabelText('배포 유형'), 'MANAGED')
     await waitFor(() => {
       const last = vi.mocked(deploymentsApi.listDeployments).mock.calls.at(-1)?.[0]
       expect(last?.deploymentType).toBe('MANAGED')
       expect(last?.page).toBe(1)
     })
-    await user.selectOptions(screen.getByLabelText('Runtime'), 'RUNNING')
-    await user.selectOptions(screen.getByLabelText('Health'), 'HEALTHY')
-    await user.selectOptions(screen.getByLabelText('Retired'), 'ACTIVE')
+    await user.selectOptions(screen.getByLabelText('실행 상태'), 'RUNNING')
+    await user.selectOptions(screen.getByLabelText('정상 동작 상태'), 'HEALTHY')
+    await user.selectOptions(screen.getByLabelText('퇴역 여부'), 'ACTIVE')
     await waitFor(() => {
       const last = vi.mocked(deploymentsApi.listDeployments).mock.calls.at(-1)?.[0]
       expect(last).toEqual(
@@ -152,7 +152,7 @@ describe('DeploymentsPage', () => {
     vi.mocked(deploymentsApi.listDeployments).mockResolvedValueOnce(pageResult([]))
     renderAt('/deployments')
     expect(
-      await screen.findByText('등록된 Deployment가 없습니다.'),
+      await screen.findByText('등록된 모델 배포가 없습니다.'),
     ).toBeInTheDocument()
     cleanup()
 

@@ -787,6 +787,17 @@ th {
   font-size: 0.9rem;
 }
 
+.panel-hint-list {
+  margin: 0 0 0.85rem;
+  padding-left: 1.25rem;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.panel-hint-list li {
+  margin: 0.25rem 0;
+}
+
 .checkbox-row {
   display: flex;
   align-items: flex-start;
