@@ -53,6 +53,15 @@ class ClientRepository:
     async def get(self, client_id: uuid.UUID) -> ClientApp | None:
         return await self._session.get(ClientApp, client_id)
 
+    async def get_for_update(self, client_id: uuid.UUID) -> ClientApp | None:
+        """Load ClientApp with row lock to serialize concurrent PATCH."""
+        stmt = (
+            select(ClientApp)
+            .where(ClientApp.id == client_id)
+            .with_for_update()
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
     async def get_by_key(self, client_key: str) -> ClientApp | None:
         stmt = select(ClientApp).where(ClientApp.client_key == client_key)
         return (await self._session.execute(stmt)).scalar_one_or_none()

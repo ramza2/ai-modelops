@@ -775,6 +775,40 @@ Inactive `ClientApp` or `is_enabled=false` policies are omitted from the Gateway
 
 ---
 
+## 22.2 client_mutation_idempotency (P1-22A)
+
+Durable Idempotency-Key records for **ClientApp** `POST` / `PATCH` only.
+Do **not** store Client mutations in `operation.idempotency_key`.
+
+| Column | Type | Null |
+|---|---|---:|
+| id | UUID | N |
+| idempotency_key | VARCHAR(255) | N |
+| http_method | VARCHAR(16) | N |
+| resource | VARCHAR(255) | N |
+| request_hash | VARCHAR(64) | N |
+| status | VARCHAR(32) | N |
+| response_status_code | INTEGER | Y |
+| response_body | JSONB | Y |
+| client_app_id | UUID | Y |
+| created_at | TIMESTAMPTZ | N |
+| updated_at | TIMESTAMPTZ | N |
+| completed_at | TIMESTAMPTZ | Y |
+
+### Constraints
+
+```text
+UNIQUE(idempotency_key)
+FK(client_app_id) → client_app.id
+status IN ('IN_PROGRESS', 'COMPLETED')
+http_method IN ('POST', 'PATCH')
+```
+
+`request_hash` is SHA-256 of canonical JSON for the normalized mutation payload
+(plus `client_id` for PATCH). Completed rows store the original success response for replay.
+
+---
+
 ## 23. invocation_log
 
 | Column | Type | Null |

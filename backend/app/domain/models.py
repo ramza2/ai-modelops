@@ -878,6 +878,51 @@ class ClientApp(Base):
     )
 
 
+class ClientMutationIdempotency(Base):
+    """Durable Idempotency-Key store for ClientApp POST/PATCH (P1-22A).
+
+    Separate from ``operation.idempotency_key`` — do not reuse Operation rows
+    for Client registry mutations.
+    """
+
+    __tablename__ = "client_mutation_idempotency"
+
+    id: Mapped[str] = _uuid_pk()
+    idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    http_method: Mapped[str] = mapped_column(String(16), nullable=False)
+    resource: Mapped[str] = mapped_column(String(255), nullable=False)
+    request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    response_status_code: Mapped[int | None] = mapped_column(Integer)
+    response_body: Mapped[dict | None] = mapped_column(JSONB)
+    client_app_id: Mapped[str | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("client_app.id")
+    )
+    created_at: Mapped[dt.datetime] = _created_at()
+    updated_at: Mapped[dt.datetime] = _updated_at()
+    completed_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "idempotency_key", name="uq_client_mutation_idempotency_key"
+        ),
+        CheckConstraint(
+            "status IN ('IN_PROGRESS', 'COMPLETED')",
+            name="ck_client_mutation_idempotency_status",
+        ),
+        CheckConstraint(
+            "http_method IN ('POST', 'PATCH')",
+            name="ck_client_mutation_idempotency_method",
+        ),
+        Index(
+            "ix_client_mutation_idempotency_client_app_id",
+            "client_app_id",
+        ),
+    )
+
+
 class ClientRuntimePolicy(Base):
     """Per-ClientApp runtime policy registry (M6-B1).
 

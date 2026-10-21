@@ -304,21 +304,33 @@ Location: /api/v1/operations/<operation-id>
 
 ## 12. Idempotency
 
-Management API의 비동기 Mutation은 `Idempotency-Key`를 지원한다.
+Management API mutation은 `Idempotency-Key`를 지원한다.
 
 ```http
 Idempotency-Key: <client-generated-unique-key>
 ```
 
-같은 key와 같은 의미의 요청이 재전송되면 기존 Operation을 반환한다.
+### 비동기 Operation enqueue
 
-같은 key로 다른 payload가 들어오면:
+같은 key와 같은 의미의 요청이 재전송되면 기존 Operation을 반환한다.
+저장소: `operation.idempotency_key`.
+
+### 동기 ClientApp 등록/수정 (P1-22A)
+
+`POST /api/v1/clients`, `PATCH /api/v1/clients/{client_id}`도 optional `Idempotency-Key`를 받는다.
+저장소: `client_mutation_idempotency` (Operation 저장소와 분리).
+
+같은 key + 같은 정규화 payload 재전송 → 최초 응답 재사용 (추가 row/`updated_at` 변경 없음).
+
+같은 key로 다른 payload/method/resource가 들어오면:
 
 ```text
 409 IDEMPOTENCY_KEY_CONFLICT
 ```
 
-을 반환한다.
+을 반환한다. `client_key` UNIQUE 충돌은 별도 코드 `CLIENT_KEY_CONFLICT`이다.
+
+헤더 생략 시 기존 non-idempotent 동작과 호환된다.
 
 Node Agent mutation에는 Worker가 생성한 `X-Operation-ID`와 `X-Step-ID`를 전달하고 Agent는 동일 side effect의 재실행을 안전하게 처리해야 한다.
 

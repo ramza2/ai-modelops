@@ -712,6 +712,19 @@ X-AI-Client: internal-search
 
 미등록 또는 헤더가 없는 요청도 차단하지 않는다.
 
+`is_active`는 등록 상태이며 Gateway 추론 차단 스위치가 아니다.
+
+### client_mutation_idempotency (P1-22A)
+
+ClientApp `POST` / `PATCH`용 영속 Idempotency-Key 저장소.
+`operation.idempotency_key`와 분리한다.
+
+- `idempotency_key` (UNIQUE)
+- `http_method` / `resource` / `request_hash`
+- `status` (`IN_PROGRESS` | `COMPLETED`)
+- `response_status_code` / `response_body`
+- `client_app_id` (nullable FK)
+
 ### invocation_log
 
 - `id`

@@ -73,6 +73,7 @@ async def test_client_crud_list_search(client) -> None:
         json={"client_key": key, "display_name": "Other"},
     )
     assert dup.status_code == 409
+    assert dup.json()["error"]["code"] == "CLIENT_KEY_CONFLICT"
 
     listed = await c.get("/api/v1/clients", params={"q": key, "is_active": True})
     assert listed.status_code == 200
@@ -325,3 +326,310 @@ async def test_concurrent_first_put_runtime_policy_is_atomic(client) -> None:
     assert int(row[3]) == 2048
     assert int(row[4]) == 4
     assert int(row[5]) == 0
+
+
+@pytest.mark.anyio
+async def test_create_idempotency_replay_and_conflict(client) -> None:
+    c = client["client"]
+    suffix = uuid.uuid4().hex[:8]
+    key = f"idem-create-{suffix}"
+    payload = {
+        "client_key": f"ck-{suffix}",
+        "display_name": f"Idem {suffix}",
+        "description": "first",
+    }
+    headers = {"Idempotency-Key": key}
+
+    first = await c.post("/api/v1/clients", json=payload, headers=headers)
+    assert first.status_code == 201, first.text
+    body1 = first.json()
+
+    second = await c.post("/api/v1/clients", json=payload, headers=headers)
+    assert second.status_code == 201, second.text
+    body2 = second.json()
+    assert body2 == body1
+
+    async with client["session_factory"]() as session:
+        count = int(
+            (
+                await session.execute(
+                    text(
+                        "SELECT COUNT(*) FROM client_app "
+                        "WHERE client_key = :k"
+                    ),
+                    {"k": f"ck-{suffix}"},
+                )
+            ).scalar_one()
+        )
+        idem_rows = int(
+            (
+                await session.execute(
+                    text(
+                        "SELECT COUNT(*) FROM client_mutation_idempotency "
+                        "WHERE idempotency_key = :k"
+                    ),
+                    {"k": key},
+                )
+            ).scalar_one()
+        )
+    assert count == 1
+    assert idem_rows == 1
+
+    conflict = await c.post(
+        "/api/v1/clients",
+        json={**payload, "display_name": "Different"},
+        headers=headers,
+    )
+    assert conflict.status_code == 409, conflict.text
+    assert conflict.json()["error"]["code"] == "IDEMPOTENCY_KEY_CONFLICT"
+
+
+@pytest.mark.anyio
+async def test_create_duplicate_client_key_distinct_from_idempotency(client) -> None:
+    c = client["client"]
+    suffix = uuid.uuid4().hex[:8]
+    payload = {
+        "client_key": f"dup-{suffix}",
+        "display_name": "One",
+    }
+    first = await c.post(
+        "/api/v1/clients",
+        json=payload,
+        headers={"Idempotency-Key": f"k1-{suffix}"},
+    )
+    assert first.status_code == 201, first.text
+
+    second = await c.post(
+        "/api/v1/clients",
+        json=payload,
+        headers={"Idempotency-Key": f"k2-{suffix}"},
+    )
+    assert second.status_code == 409, second.text
+    assert second.json()["error"]["code"] == "CLIENT_KEY_CONFLICT"
+
+
+@pytest.mark.anyio
+async def test_concurrent_create_same_idempotency_key_single_row(client) -> None:
+    c = client["client"]
+    suffix = uuid.uuid4().hex[:8]
+    payload = {
+        "client_key": f"race-idem-{suffix}",
+        "display_name": f"Race Idem {suffix}",
+    }
+    headers = {"Idempotency-Key": f"race-key-{suffix}"}
+
+    async def _once():
+        return await c.post("/api/v1/clients", json=payload, headers=headers)
+
+    results = await asyncio.gather(_once(), _once(), _once())
+    assert all(r.status_code == 201 for r in results), [r.text for r in results]
+    ids = {r.json()["id"] for r in results}
+    assert len(ids) == 1
+
+    async with client["session_factory"]() as session:
+        app_count = int(
+            (
+                await session.execute(
+                    text(
+                        "SELECT COUNT(*) FROM client_app "
+                        "WHERE client_key = :k"
+                    ),
+                    {"k": f"race-idem-{suffix}"},
+                )
+            ).scalar_one()
+        )
+        idem_count = int(
+            (
+                await session.execute(
+                    text(
+                        "SELECT COUNT(*) FROM client_mutation_idempotency "
+                        "WHERE idempotency_key = :k"
+                    ),
+                    {"k": f"race-key-{suffix}"},
+                )
+            ).scalar_one()
+        )
+    assert app_count == 1
+    assert idem_count == 1
+
+
+@pytest.mark.anyio
+async def test_patch_idempotency_preserves_updated_at(client) -> None:
+    c = client["client"]
+    suffix = uuid.uuid4().hex[:8]
+    created = await c.post(
+        "/api/v1/clients",
+        json={"client_key": f"patch-{suffix}", "display_name": "Before"},
+    )
+    assert created.status_code == 201, created.text
+    client_id = created.json()["id"]
+
+    headers = {"Idempotency-Key": f"patch-idem-{suffix}"}
+    first = await c.patch(
+        f"/api/v1/clients/{client_id}",
+        json={"display_name": "After", "description": "note"},
+        headers=headers,
+    )
+    assert first.status_code == 200, first.text
+    body1 = first.json()
+    assert body1["display_name"] == "After"
+    assert body1["description"] == "note"
+    updated_at = body1["updated_at"]
+
+    second = await c.patch(
+        f"/api/v1/clients/{client_id}",
+        json={"display_name": "After", "description": "note"},
+        headers=headers,
+    )
+    assert second.status_code == 200, second.text
+    body2 = second.json()
+    assert body2 == body1
+    assert body2["updated_at"] == updated_at
+
+    got = await c.get(f"/api/v1/clients/{client_id}")
+    assert got.status_code == 200
+    assert got.json()["updated_at"] == updated_at
+
+
+@pytest.mark.anyio
+async def test_patch_description_null_and_is_active_toggle(client) -> None:
+    c = client["client"]
+    suffix = uuid.uuid4().hex[:8]
+    created = await c.post(
+        "/api/v1/clients",
+        json={
+            "client_key": f"toggle-{suffix}",
+            "display_name": "T",
+            "description": "keep-me",
+        },
+    )
+    client_id = created.json()["id"]
+
+    # Omit description → preserve.
+    rename = await c.patch(
+        f"/api/v1/clients/{client_id}",
+        json={"display_name": "T2"},
+    )
+    assert rename.status_code == 200
+    assert rename.json()["description"] == "keep-me"
+
+    cleared = await c.patch(
+        f"/api/v1/clients/{client_id}",
+        json={"description": None},
+    )
+    assert cleared.status_code == 200
+    assert cleared.json()["description"] is None
+
+    off = await c.patch(
+        f"/api/v1/clients/{client_id}",
+        json={"is_active": False},
+    )
+    assert off.status_code == 200
+    assert off.json()["is_active"] is False
+
+    on = await c.patch(
+        f"/api/v1/clients/{client_id}",
+        json={"is_active": True},
+    )
+    assert on.status_code == 200
+    assert on.json()["is_active"] is True
+
+
+@pytest.mark.anyio
+async def test_patch_idempotency_conflict_and_invalid_key(client) -> None:
+    c = client["client"]
+    suffix = uuid.uuid4().hex[:8]
+    created = await c.post(
+        "/api/v1/clients",
+        json={"client_key": f"badkey-{suffix}", "display_name": "X"},
+    )
+    client_id = created.json()["id"]
+    headers = {"Idempotency-Key": f"patch-conflict-{suffix}"}
+
+    first = await c.patch(
+        f"/api/v1/clients/{client_id}",
+        json={"display_name": "A"},
+        headers=headers,
+    )
+    assert first.status_code == 200
+
+    conflict = await c.patch(
+        f"/api/v1/clients/{client_id}",
+        json={"display_name": "B"},
+        headers=headers,
+    )
+    assert conflict.status_code == 409
+    assert conflict.json()["error"]["code"] == "IDEMPOTENCY_KEY_CONFLICT"
+
+    invalid = await c.patch(
+        f"/api/v1/clients/{client_id}",
+        json={"display_name": "C"},
+        headers={"Idempotency-Key": "bad key with spaces"},
+    )
+    assert invalid.status_code == 422
+    assert invalid.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
+@pytest.mark.anyio
+async def test_create_without_idempotency_key_still_works(client) -> None:
+    c = client["client"]
+    suffix = uuid.uuid4().hex[:8]
+    resp = await c.post(
+        "/api/v1/clients",
+        json={
+            "client_key": f"legacy-{suffix}",
+            "display_name": f"Legacy {suffix}",
+        },
+    )
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["is_active"] is True
+
+    # No runtime policy auto-created.
+    pol = await c.get(f"/api/v1/clients/{resp.json()['id']}/runtime-policy")
+    assert pol.status_code == 200
+    assert pol.json()["policy"] is None
+
+
+@pytest.mark.anyio
+async def test_deactivate_then_reactivate_preserves_policy_with_idempotency(
+    client,
+) -> None:
+    c = client["client"]
+    suffix = uuid.uuid4().hex[:8]
+    created = await c.post(
+        "/api/v1/clients",
+        json={"client_key": f"pol-idem-{suffix}", "display_name": "P"},
+    )
+    client_id = created.json()["id"]
+    await c.put(
+        f"/api/v1/clients/{client_id}/runtime-policy",
+        json={"is_enabled": True, "max_concurrent_requests": 3, "priority": 2},
+    )
+    deact = await c.patch(
+        f"/api/v1/clients/{client_id}",
+        json={"is_active": False},
+        headers={"Idempotency-Key": f"deact-{suffix}"},
+    )
+    assert deact.status_code == 200
+    assert deact.json()["is_active"] is False
+
+    # Replay deactivate — same body, policy untouched.
+    deact2 = await c.patch(
+        f"/api/v1/clients/{client_id}",
+        json={"is_active": False},
+        headers={"Idempotency-Key": f"deact-{suffix}"},
+    )
+    assert deact2.status_code == 200
+    assert deact2.json() == deact.json()
+
+    react = await c.patch(
+        f"/api/v1/clients/{client_id}",
+        json={"is_active": True},
+        headers={"Idempotency-Key": f"react-{suffix}"},
+    )
+    assert react.status_code == 200
+    assert react.json()["is_active"] is True
+
+    pol = await c.get(f"/api/v1/clients/{client_id}/runtime-policy")
+    assert pol.json()["policy"]["max_concurrent_requests"] == 3
+    assert pol.json()["policy"]["priority"] == 2
