@@ -5,11 +5,13 @@ import { listModels } from '../api/models'
 import type { ModelSummary } from '../api/types'
 import { ActiveBadge } from '../components/ActiveBadge'
 import { AppShell } from '../components/AppShell'
+import { HelpHint, TermLabel } from '../components/HelpHint'
 import { LoadingBlock } from '../components/LoadingBlock'
 import { Pagination } from '../components/Pagination'
 import { SectionError } from '../components/SectionError'
 import { formatApiDateTime } from '../utils/date'
 import { parsePositivePage } from '../utils/query'
+import { MODEL_TYPE_HELP, WIZARD_FIELD_HELP } from '../utils/uiLabels'
 
 const PAGE_SIZE = 20
 const KNOWN_TYPES = new Set(['LLM', 'VLM', 'EMBEDDING'])
@@ -191,7 +193,7 @@ export function ModelsPage() {
             ? err.message
             : err instanceof Error
               ? err.message
-              : 'Model 목록을 불러오지 못했습니다.'
+              : '모델 목록을 불러오지 못했습니다.'
         setError(message)
         if (!hasLoadedRef.current) {
           setItems(null)
@@ -253,21 +255,25 @@ export function ModelsPage() {
 
   return (
     <AppShell
-      title="Models / Versions"
-      description="Model Registry에 등록된 Model 정의와 Version 이력을 조회합니다. Version runtime_config는 저장 정의값이며 Deployment/observed 실행값과 다를 수 있습니다."
+      title="등록된 모델 관리"
+      description="레지스트리에 등록된 모델 정의와 버전을 조회합니다. 지금 서버에서 실행 중인 모델(Deployment) 목록과 다릅니다. Version runtime_config는 저장 정의값이며 Deployment/observed 실행값과 다를 수 있습니다."
       onRefresh={() => void load('refresh')}
       refreshing={refreshing}
       lastUpdated={lastUpdated}
     >
+      <p className="panel-hint" role="note">
+        {WIZARD_FIELD_HELP.registryList}
+      </p>
+
       <div className="toolbar toolbar--wrap" style={{ marginBottom: '0.75rem' }}>
         <Link className="btn btn--primary" to="/models/catalog">
-          Add Model / Catalog
+          모델 검색 및 다운로드
         </Link>
         <Link className="btn btn--ghost" to="/models/cache">
-          Model Cache
+          다운로드한 모델 관리
         </Link>
         <span className="secondary-text">
-          Hugging Face 검색 · Download · Deploy는 M7-C
+          Hugging Face 검색 · 다운로드 · 배포 설정은 카탈로그/캐시에서 이어집니다
         </span>
       </div>
 
@@ -279,21 +285,31 @@ export function ModelsPage() {
             type="search"
             value={draftQ}
             onChange={(e) => setDraftQ(e.target.value)}
-            placeholder="slug / name / description"
+            placeholder="slug / 이름 / 설명"
           />
         </label>
         <label className="toolbar__field" htmlFor="model-search-provider">
-          <span>Provider</span>
+          <span>
+            제공자 <span className="term-label__api">(Provider)</span>
+          </span>
           <input
             id="model-search-provider"
             type="text"
             value={draftProvider}
             onChange={(e) => setDraftProvider(e.target.value)}
-            placeholder="exact provider"
+            placeholder="제공자(정확 일치)"
           />
         </label>
-        <label className="toolbar__field" htmlFor="model-type-filter">
-          <span>Type</span>
+        <div className="toolbar__field">
+          <div className="toolbar__field-head">
+            <label htmlFor="model-type-filter">
+              모델 유형 <span className="term-label__api">(Type)</span>
+            </label>
+            <HelpHint label="모델 유형">
+              {MODEL_TYPE_HELP.LLM} {MODEL_TYPE_HELP.VLM}{' '}
+              {MODEL_TYPE_HELP.EMBEDDING}
+            </HelpHint>
+          </div>
           <select
             id="model-type-filter"
             value={modelType ?? 'ALL'}
@@ -309,14 +325,16 @@ export function ModelsPage() {
               })
             }}
           >
-            <option value="ALL">ALL</option>
-            <option value="LLM">LLM</option>
-            <option value="VLM">VLM</option>
-            <option value="EMBEDDING">EMBEDDING</option>
+            <option value="ALL">전체</option>
+            <option value="LLM">LLM — 언어 모델</option>
+            <option value="VLM">VLM — 비전·언어</option>
+            <option value="EMBEDDING">EMBEDDING — 임베딩</option>
           </select>
-        </label>
+        </div>
         <label className="toolbar__field" htmlFor="model-active-filter">
-          <span>Active</span>
+          <span>
+            등록 상태 <span className="term-label__api">(Active)</span>
+          </span>
           <select
             id="model-active-filter"
             value={activeLabel(isActive)}
@@ -333,9 +351,9 @@ export function ModelsPage() {
               })
             }}
           >
-            <option value="ALL">ALL</option>
-            <option value="ACTIVE">ACTIVE</option>
-            <option value="INACTIVE">INACTIVE</option>
+            <option value="ALL">전체</option>
+            <option value="ACTIVE">활성 (ACTIVE)</option>
+            <option value="INACTIVE">비활성 (INACTIVE)</option>
           </select>
         </label>
         <div className="toolbar__actions">
@@ -349,11 +367,11 @@ export function ModelsPage() {
       </form>
 
       {error ? (
-        <SectionError title="Model 목록 오류" message={error} />
+        <SectionError title="모델 목록 오류" message={error} />
       ) : null}
 
       {loading && items === null ? (
-        <LoadingBlock label="Model 목록을 불러오는 중…" />
+        <LoadingBlock label="모델 목록을 불러오는 중…" />
       ) : null}
 
       {items !== null && items.length > 0 ? (
@@ -362,13 +380,27 @@ export function ModelsPage() {
             <table className="data-table">
               <thead>
                 <tr>
-                  <th scope="col">Model</th>
-                  <th scope="col">Type</th>
-                  <th scope="col">Provider</th>
-                  <th scope="col">Source</th>
-                  <th scope="col">Active</th>
-                  <th scope="col">License</th>
-                  <th scope="col">Updated</th>
+                  <th scope="col">
+                    <TermLabel text="모델" apiTerm="Model" />
+                  </th>
+                  <th scope="col">
+                    <TermLabel text="모델 유형" apiTerm="Type" />
+                  </th>
+                  <th scope="col">
+                    <TermLabel text="제공자" apiTerm="Provider" />
+                  </th>
+                  <th scope="col">
+                    <TermLabel text="모델 출처" apiTerm="Source" />
+                  </th>
+                  <th scope="col">
+                    <TermLabel text="등록 상태" apiTerm="Active" />
+                  </th>
+                  <th scope="col">
+                    <TermLabel text="라이선스" apiTerm="License" />
+                  </th>
+                  <th scope="col">
+                    <TermLabel text="수정 시각" apiTerm="Updated" />
+                  </th>
                 </tr>
               </thead>
               <tbody>
@@ -413,13 +445,13 @@ export function ModelsPage() {
 
       {emptyDatabase ? (
         <p className="empty-state" role="status">
-          등록된 Model이 없습니다.
+          등록된 모델이 없습니다.
         </p>
       ) : null}
 
       {emptyFiltered ? (
         <p className="empty-state" role="status">
-          검색/필터 조건에 해당하는 Model이 없습니다.
+          검색/필터 조건에 해당하는 모델이 없습니다.
         </p>
       ) : null}
     </AppShell>

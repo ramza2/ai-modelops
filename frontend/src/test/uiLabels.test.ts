@@ -6,6 +6,9 @@ import {
   FIT_RESULT_HELP,
   MODEL_TYPE_HELP,
   NAV_ITEMS,
+  RUNTIME_FIELD_HELP,
+  WIZARD_FIELD_HELP,
+  WIZARD_STEP_LABELS,
   formatNullableLimit,
   formatPriorityDisplay,
   formatStatusDisplay,
@@ -87,5 +90,27 @@ describe('uiLabels (P1-14 catalog/cache)', () => {
     expect(CACHE_FIELD_HELP.purge).toMatch(/로컬/)
     expect(CACHE_FIELD_HELP.purge).toMatch(/레지스트리/)
     expect(CACHE_FIELD_HELP.overview).toMatch(/캐시 READY/)
+  })
+})
+
+describe('uiLabels (P1-15 wizard/models)', () => {
+  it('keeps wizard step keys mapped to Korean display labels', () => {
+    expect(WIZARD_STEP_LABELS.cache).toMatch(/다운로드 모델 확인/)
+    expect(WIZARD_STEP_LABELS.runtime).toMatch(/모델 실행 설정/)
+    expect(WIZARD_STEP_LABELS.gpu).toMatch(/GPU 선택/)
+    expect(WIZARD_STEP_LABELS.review).toMatch(/배포 정보 생성/)
+    expect(WIZARD_STEP_LABELS.start).toMatch(/모델 실행/)
+    expect(WIZARD_STEP_LABELS.publish).toMatch(/API 연결/)
+    expect(WIZARD_STEP_LABELS.done).toMatch(/결과 확인/)
+  })
+
+  it('separates Create / Start / Publish impacts', () => {
+    expect(WIZARD_FIELD_HELP.create).toMatch(/컨테이너를 시작하지 않습니다/)
+    expect(WIZARD_FIELD_HELP.start).toMatch(/기동/)
+    expect(WIZARD_FIELD_HELP.publish).toMatch(/Alias/)
+    expect(WIZARD_FIELD_HELP.freshFit).toMatch(/실행하거나 GPU를 점유하지 않/)
+    expect(WIZARD_FIELD_HELP.tensorParallel).toMatch(/합치는 것과 다릅니다/)
+    expect(RUNTIME_FIELD_HELP.unsetKeepsDefault).toMatch(/자동 생성하지 않습니다/)
+    expect(WIZARD_FIELD_HELP.registryList).toMatch(/실행 중인 Deployment/)
   })
 })

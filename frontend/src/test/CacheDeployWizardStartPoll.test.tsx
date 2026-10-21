@@ -251,9 +251,9 @@ describe('CacheDeployWizardPage Start lifecycle poll (P1-4B)', () => {
       '/models/cache/cache-1/deploy?step=start&deployment_id=dep-1',
     )
     expect(
-      await screen.findByRole('button', { name: 'Start Deployment' }),
+      await screen.findByRole('button', { name: '모델 실행 요청' }),
     ).toBeInTheDocument()
-    await user.click(screen.getByRole('button', { name: 'Start Deployment' }))
+    await user.click(screen.getByRole('button', { name: '모델 실행 요청' }))
 
     expect(await screen.findByText(/자동 갱신/)).toBeInTheDocument()
     expect(screen.getByText('START_CONTAINER')).toBeInTheDocument()
@@ -266,10 +266,10 @@ describe('CacheDeployWizardPage Start lifecycle poll (P1-4B)', () => {
     depPhase = 'healthy'
     await waitFor(() => {
       expect(
-        screen.getByText(/RUNNING \+ HEALTHY입니다/),
+        screen.getByText(/RUNNING\)이고 Health가 정상\(HEALTHY\)/),
       ).toBeInTheDocument()
     })
-    expect(screen.getByRole('button', { name: 'Next: Publish' })).not.toBeDisabled()
+    expect(screen.getByRole('button', { name: '다음: API 연결 설정' })).not.toBeDisabled()
 
     const callsAfterReady = vi.mocked(operationsApi.getOperation).mock.calls.length
     await new Promise((r) => setTimeout(r, 120))
@@ -325,7 +325,7 @@ describe('CacheDeployWizardPage Start lifecycle poll (P1-4B)', () => {
       expect(opCalls).toBeGreaterThanOrEqual(3)
     })
     expect(await screen.findByText(/제한적으로 상태를 확인/)).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Next: Publish' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: '다음: API 연결 설정' })).toBeDisabled()
 
     resolveLate(
       makeOpDetail({
@@ -365,7 +365,7 @@ describe('CacheDeployWizardPage Start lifecycle poll (P1-4B)', () => {
     expect(await screen.findByText('Health 대기 시간 초과')).toBeInTheDocument()
     expect(screen.queryByText(/제한적으로 상태를 확인/)).not.toBeInTheDocument()
     expect(screen.queryByText('Operation 실패')).not.toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Next: Publish' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: '다음: API 연결 설정' })).toBeDisabled()
 
     const callsAfterTimeout = vi.mocked(operationsApi.getOperation).mock.calls.length
     await new Promise((r) => setTimeout(r, 120))
@@ -446,7 +446,7 @@ describe('CacheDeployWizardPage Start lifecycle poll (P1-4B)', () => {
 
     expect(await screen.findByText('Operation 실패')).toBeInTheDocument()
     expect(screen.getAllByText('E: boom').length).toBeGreaterThanOrEqual(1)
-    expect(screen.getByRole('button', { name: 'Next: Publish' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: '다음: API 연결 설정' })).toBeDisabled()
 
     const callsAfterFail = vi.mocked(operationsApi.getOperation).mock.calls.length
     await new Promise((r) => setTimeout(r, 120))
