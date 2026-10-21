@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react'
 import { NavLink, useLocation } from 'react-router-dom'
 import { formatClock } from '../utils/date'
+import { NAV_ITEMS } from '../utils/uiLabels'
 
 type AppShellProps = {
   title: string
@@ -43,6 +44,15 @@ export function AppShell({
     location.pathname === '/clients' ||
     location.pathname.startsWith('/clients/')
 
+  const activeByPath: Record<string, boolean> = {
+    '/models': modelsActive,
+    '/deployments': deploymentsActive,
+    '/endpoints': endpointsActive,
+    '/operations': operationsActive,
+    '/observability': observabilityActive,
+    '/clients': clientsActive,
+  }
+
   return (
     <div className="shell">
       <header className="shell__top">
@@ -68,71 +78,24 @@ export function AppShell({
       <div className="shell__body">
         <aside className="shell__nav" aria-label="주 메뉴">
           <nav>
-            <NavLink
-              to="/dashboard"
-              className={({ isActive }) =>
-                isActive ? 'nav-link nav-link--active' : 'nav-link'
-              }
-              end
-            >
-              Dashboard
-            </NavLink>
-            <NavLink
-              to="/nodes"
-              className={({ isActive }) =>
-                isActive ? 'nav-link nav-link--active' : 'nav-link'
-              }
-            >
-              Nodes / GPUs
-            </NavLink>
-            <NavLink
-              to="/models"
-              className={() =>
-                modelsActive ? 'nav-link nav-link--active' : 'nav-link'
-              }
-            >
-              Models / Versions
-            </NavLink>
-            <NavLink
-              to="/deployments"
-              className={() =>
-                deploymentsActive ? 'nav-link nav-link--active' : 'nav-link'
-              }
-            >
-              Deployments
-            </NavLink>
-            <NavLink
-              to="/endpoints"
-              className={() =>
-                endpointsActive ? 'nav-link nav-link--active' : 'nav-link'
-              }
-            >
-              Endpoints
-            </NavLink>
-            <NavLink
-              to="/operations"
-              className={() =>
-                operationsActive ? 'nav-link nav-link--active' : 'nav-link'
-              }
-            >
-              Operations
-            </NavLink>
-            <NavLink
-              to="/observability"
-              className={() =>
-                observabilityActive ? 'nav-link nav-link--active' : 'nav-link'
-              }
-            >
-              Observability
-            </NavLink>
-            <NavLink
-              to="/clients"
-              className={() =>
-                clientsActive ? 'nav-link nav-link--active' : 'nav-link'
-              }
-            >
-              Clients
-            </NavLink>
+            {NAV_ITEMS.map((item) => {
+              const forcedActive = activeByPath[item.to]
+              return (
+                <NavLink
+                  key={item.to}
+                  to={item.to}
+                  end={item.end}
+                  className={({ isActive }) => {
+                    const active =
+                      forcedActive !== undefined ? forcedActive : isActive
+                    return active ? 'nav-link nav-link--active' : 'nav-link'
+                  }}
+                >
+                  <span className="nav-link__label">{item.label}</span>
+                  <span className="nav-link__desc">{item.description}</span>
+                </NavLink>
+              )
+            })}
           </nav>
         </aside>
         <main className="shell__main">
