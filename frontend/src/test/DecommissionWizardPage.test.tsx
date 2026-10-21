@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
@@ -82,7 +82,7 @@ function makeDeployment(overrides: Partial<Deployment> = {}): Deployment {
   }
 }
 
-function makeVersion(): ModelVersion {
+function makeVersion(overrides: Partial<ModelVersion> = {}): ModelVersion {
   return {
     id: 'v1',
     model_id: 'm1',
@@ -102,10 +102,11 @@ function makeVersion(): ModelVersion {
     archived_at: null,
     created_at: '2026-10-01T00:00:00Z',
     updated_at: '2026-10-06T01:02:03Z',
+    ...overrides,
   }
 }
 
-function makeModel(): ModelSummary {
+function makeModel(overrides: Partial<ModelSummary> = {}): ModelSummary {
   return {
     id: 'm1',
     slug: 'demo',
@@ -118,7 +119,46 @@ function makeModel(): ModelSummary {
     is_active: true,
     created_at: '2026-10-01T00:00:00Z',
     updated_at: '2026-10-06T01:02:03Z',
+    ...overrides,
   }
+}
+
+function makeOp(
+  overrides: Partial<OperationDetail> = {},
+): OperationDetail {
+  return {
+    id: 'op-stop-1',
+    operation_type: 'STOP',
+    status: 'RUNNING',
+    switch_strategy: null,
+    endpoint_alias_id: null,
+    source_deployment_id: null,
+    target_deployment_id: 'd1',
+    current_step: 'STOP_CONTAINER',
+    retry_of_operation_id: null,
+    requested_by: null,
+    request_reason: null,
+    cancel_requested_at: null,
+    created_at: '2026-10-08T00:00:00Z',
+    started_at: '2026-10-08T00:00:01Z',
+    finished_at: null,
+    error: null,
+    steps: [],
+    ...overrides,
+  }
+}
+
+function mockHappyLoad(status: DecommissionStatus = makeStatus()) {
+  vi.mocked(decommissionApi.getDecommissionStatus).mockResolvedValue(status)
+  vi.mocked(deploymentsApi.getDeployment).mockResolvedValue(
+    makeDeployment({
+      runtime_status: status.runtime_status,
+      desired_state: status.desired_state,
+      retired_at: status.retired_at,
+    }),
+  )
+  vi.mocked(modelsApi.getModelVersion).mockResolvedValue(makeVersion())
+  vi.mocked(modelsApi.getModel).mockResolvedValue(makeModel())
 }
 
 function renderWizard(path = '/deployments/d1/decommission?step=inspect') {
@@ -134,6 +174,12 @@ function renderWizard(path = '/deployments/d1/decommission?step=inspect') {
       </Routes>
     </MemoryRouter>,
   )
+}
+
+async function confirmAndRun(user: ReturnType<typeof userEvent.setup>) {
+  const dialog = await screen.findByTestId('danger-confirm-dialog')
+  await user.click(within(dialog).getByRole('checkbox'))
+  await user.click(within(dialog).getByRole('button', { name: /실행/ }))
 }
 
 describe('DecommissionWizardPage', () => {
@@ -157,48 +203,105 @@ describe('DecommissionWizardPage', () => {
     vi.restoreAllMocks()
   })
 
-  it('renders inspect from persisted status and shows active-route blocker', async () => {
-    vi.mocked(decommissionApi.getDecommissionStatus).mockResolvedValue(
-      makeStatus(),
-    )
-    vi.mocked(deploymentsApi.getDeployment).mockResolvedValue(makeDeployment())
-    vi.mocked(modelsApi.getModelVersion).mockResolvedValue(makeVersion())
-    vi.mocked(modelsApi.getModel).mockResolvedValue(makeModel())
-
+  it('renders Korean inspect and active-route blocker', async () => {
+    mockHappyLoad()
     renderWizard()
     expect(
       await screen.findByRole('heading', {
-        name: /Decommission: chat-prod/,
+        name: /모델 종료·정리: chat-prod/,
       }),
     ).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: /1\. 현재 상태 확인/ })).toBeInTheDocument()
     expect(screen.getByText(/ACTIVE_ROUTE/)).toBeInTheDocument()
     expect(
-      screen.getAllByText(/Unpublished ≠ Stopped ≠ Removed/).length,
+      screen.getAllByText(/API 연결 해제 ≠ 모델 중지/).length,
     ).toBeGreaterThan(0)
   })
 
   it('forces Unpublish first when active route exists', async () => {
     const user = userEvent.setup()
-    vi.mocked(decommissionApi.getDecommissionStatus).mockResolvedValue(
-      makeStatus(),
-    )
-    vi.mocked(deploymentsApi.getDeployment).mockResolvedValue(makeDeployment())
-    vi.mocked(modelsApi.getModelVersion).mockResolvedValue(makeVersion())
-    vi.mocked(modelsApi.getModel).mockResolvedValue(makeModel())
-
+    mockHappyLoad()
     renderWizard()
-    await screen.findByText(/1\. Inspect/)
-    await user.click(screen.getByRole('button', { name: 'Next' }))
-    expect(await screen.findByText(/2\. Unpublish/)).toBeInTheDocument()
+    await screen.findByRole('heading', { name: /1\. 현재 상태 확인/ })
+    await user.click(screen.getByRole('button', { name: '다음' }))
+    expect(await screen.findByRole('heading', { name: /2\. API 연결 해제/ })).toBeInTheDocument()
     expect(
-      screen.getByRole('button', { name: 'Unpublish + verify Gateway' }),
+      screen.getByRole('button', { name: 'API 연결 해제 확인…' }),
     ).toBeInTheDocument()
     expect(screen.getByText('chat-prod', { selector: 'strong' })).toBeInTheDocument()
   })
 
-  it('disables Remove until stopped and shows purge confirmation', async () => {
+  it('blocks Stop execute while ACTIVE Route remains even via URL step', async () => {
+    mockHappyLoad(
+      makeStatus({
+        can_stop: false,
+        can_unpublish: true,
+      }),
+    )
+    renderWizard('/deployments/d1/decommission?step=stop')
+    expect(await screen.findByRole('heading', { name: /3\. 모델 실행 중지/ })).toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: '모델 중지 확인…' }),
+    ).toBeDisabled()
+    expect(screen.getByText('ACTIVE Route 잔존')).toBeInTheDocument()
+    expect(
+      screen.getByText(/API 연결 해제 전에는 모델 중지를 실행할 수 없습니다/),
+    ).toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: '다음: 모델 컨테이너 제거' }),
+    ).toBeDisabled()
+  })
+
+  it('does not advance from Stop on Operation SUCCEEDED alone', async () => {
+    mockHappyLoad(
+      makeStatus({
+        active_routes: [],
+        can_unpublish: false,
+        can_stop: false,
+        runtime_status: 'RUNNING',
+        blockers: [],
+      }),
+    )
+    vi.mocked(operationsApi.getOperation).mockResolvedValue(
+      makeOp({ status: 'SUCCEEDED', finished_at: '2026-10-08T00:01:00Z' }),
+    )
+    renderWizard(
+      '/deployments/d1/decommission?step=stop&operation_id=op-stop-1',
+    )
+    expect(await screen.findByRole('heading', { name: /3\. 모델 실행 중지/ })).toBeInTheDocument()
+    expect(
+      await screen.findByText(/STOP 완료 ≠ Runtime STOPPED/),
+    ).toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: '다음: 모델 컨테이너 제거' }),
+    ).toBeDisabled()
+  })
+
+  it('treats container_present null as UNKNOWN and blocks Retire advance', async () => {
+    mockHappyLoad(
+      makeStatus({
+        active_routes: [],
+        can_unpublish: false,
+        can_stop: false,
+        can_remove_container: false,
+        runtime_status: 'STOPPED',
+        container_present: null,
+        blockers: [],
+      }),
+    )
+    renderWizard('/deployments/d1/decommission?step=remove')
+    expect(
+      await screen.findByRole('heading', { name: /4\. 모델 컨테이너 제거/ }),
+    ).toBeInTheDocument()
+    expect(screen.getByText(/확인 불가 \(UNKNOWN/)).toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: '다음: 모델 배포 퇴역 처리' }),
+    ).toBeDisabled()
+  })
+
+  it('disables Remove until Backend allows and shows purge PURGE gate', async () => {
     const user = userEvent.setup()
-    vi.mocked(decommissionApi.getDecommissionStatus).mockResolvedValue(
+    mockHappyLoad(
       makeStatus({
         active_routes: [],
         can_unpublish: false,
@@ -213,17 +316,16 @@ describe('DecommissionWizardPage', () => {
         ],
       }),
     )
-    vi.mocked(deploymentsApi.getDeployment).mockResolvedValue(
-      makeDeployment({ runtime_status: 'RUNNING' }),
-    )
-    vi.mocked(modelsApi.getModelVersion).mockResolvedValue(makeVersion())
-    vi.mocked(modelsApi.getModel).mockResolvedValue(makeModel())
-
     renderWizard('/deployments/d1/decommission?step=remove')
-    expect(await screen.findByText(/4\. Remove Container/)).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Enqueue REMOVE' })).toBeDisabled()
+    expect(
+      await screen.findByRole('heading', { name: /4\. 모델 컨테이너 제거/ }),
+    ).toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: '컨테이너 제거 확인…' }),
+    ).toBeDisabled()
 
-    vi.mocked(decommissionApi.getDecommissionStatus).mockResolvedValue(
+    cleanup()
+    mockHappyLoad(
       makeStatus({
         active_routes: [],
         can_unpublish: false,
@@ -237,40 +339,23 @@ describe('DecommissionWizardPage', () => {
         blockers: [],
       }),
     )
-    cleanup()
     renderWizard('/deployments/d1/decommission?step=purge')
     expect(
-      await screen.findByText(/6\. Purge Cache \(optional, destructive\)/),
+      await screen.findByRole('heading', { name: /6\. 로컬 모델 캐시 삭제/ }),
     ).toBeInTheDocument()
-    expect(screen.getByText(/Retire ≠ Purge/)).toBeInTheDocument()
-    expect(screen.getByPlaceholderText('PURGE')).toBeInTheDocument()
-    await user.type(screen.getByPlaceholderText('PURGE'), 'NOPE')
+    expect(screen.getByText(/정확히 PURGE/)).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: '로컬 캐시 삭제 확인…' }))
+    const dialog = await screen.findByTestId('danger-confirm-dialog')
+    expect(within(dialog).getByPlaceholderText('PURGE')).toBeInTheDocument()
+    await user.type(within(dialog).getByPlaceholderText('PURGE'), 'NOPE')
+    await user.click(within(dialog).getByRole('checkbox'))
     expect(
-      screen.getByRole('button', { name: 'Purge local cache' }),
-    ).not.toBeDisabled()
+      within(dialog).getByRole('button', { name: '캐시 삭제 실행' }),
+    ).toBeDisabled()
   })
 
   it('resumes Stop operation from URL operation_id', async () => {
-    const op: OperationDetail = {
-      id: 'op-stop-1',
-      operation_type: 'STOP',
-      status: 'RUNNING',
-      switch_strategy: null,
-      endpoint_alias_id: null,
-      source_deployment_id: null,
-      target_deployment_id: 'd1',
-      current_step: 'STOP_CONTAINER',
-      retry_of_operation_id: null,
-      requested_by: null,
-      request_reason: null,
-      cancel_requested_at: null,
-      created_at: '2026-10-08T00:00:00Z',
-      started_at: '2026-10-08T00:00:01Z',
-      finished_at: null,
-      error: null,
-      steps: [],
-    }
-    vi.mocked(decommissionApi.getDecommissionStatus).mockResolvedValue(
+    mockHappyLoad(
       makeStatus({
         active_routes: [],
         can_unpublish: false,
@@ -289,15 +374,12 @@ describe('DecommissionWizardPage', () => {
         ],
       }),
     )
-    vi.mocked(deploymentsApi.getDeployment).mockResolvedValue(makeDeployment())
-    vi.mocked(modelsApi.getModelVersion).mockResolvedValue(makeVersion())
-    vi.mocked(modelsApi.getModel).mockResolvedValue(makeModel())
-    vi.mocked(operationsApi.getOperation).mockResolvedValue(op)
+    vi.mocked(operationsApi.getOperation).mockResolvedValue(makeOp())
 
     renderWizard(
       '/deployments/d1/decommission?step=stop&operation_id=op-stop-1',
     )
-    expect(await screen.findByText(/3\. Stop/)).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: /3\. 모델 실행 중지/ })).toBeInTheDocument()
     await waitFor(() => {
       expect(operationsApi.getOperation).toHaveBeenCalledWith(
         'op-stop-1',
@@ -308,10 +390,13 @@ describe('DecommissionWizardPage', () => {
       'href',
       '/operations/op-stop-1',
     )
+    expect(
+      screen.getByRole('button', { name: '모델 중지 확인…' }),
+    ).toBeDisabled()
   })
 
   it('disables Retire until route/container safe', async () => {
-    vi.mocked(decommissionApi.getDecommissionStatus).mockResolvedValue(
+    mockHappyLoad(
       makeStatus({
         active_routes: [],
         can_retire: false,
@@ -325,14 +410,145 @@ describe('DecommissionWizardPage', () => {
         ],
       }),
     )
-    vi.mocked(deploymentsApi.getDeployment).mockResolvedValue(
-      makeDeployment({ runtime_status: 'STOPPED' }),
-    )
-    vi.mocked(modelsApi.getModelVersion).mockResolvedValue(makeVersion())
-    vi.mocked(modelsApi.getModel).mockResolvedValue(makeModel())
-
     renderWizard('/deployments/d1/decommission?step=retire')
-    expect(await screen.findByText(/5\. Retire Deployment/)).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Retire' })).toBeDisabled()
+    expect(
+      await screen.findByRole('heading', { name: /5\. 모델 배포 퇴역 처리/ }),
+    ).toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: '배포 퇴역 확인…' }),
+    ).toBeDisabled()
+  })
+
+  it('revalidates before Unpublish and aborts when status goes stale', async () => {
+    const user = userEvent.setup()
+    mockHappyLoad()
+    renderWizard('/deployments/d1/decommission?step=unpublish')
+    await screen.findByRole('button', { name: 'API 연결 해제 확인…' })
+    await user.click(screen.getByRole('button', { name: 'API 연결 해제 확인…' }))
+
+    vi.mocked(decommissionApi.getDecommissionStatus).mockResolvedValue(
+      makeStatus({
+        active_routes: [],
+        can_unpublish: false,
+        can_stop: true,
+        blockers: [],
+      }),
+    )
+    await confirmAndRun(user)
+    expect(await screen.findByText(/상태가 변경되었습니다/)).toBeInTheDocument()
+    expect(decommissionApi.unpublishEndpoint).not.toHaveBeenCalled()
+  })
+
+  it('does not execute when preflight refresh fails', async () => {
+    const user = userEvent.setup()
+    mockHappyLoad()
+    renderWizard('/deployments/d1/decommission?step=unpublish')
+    await user.click(
+      await screen.findByRole('button', { name: 'API 연결 해제 확인…' }),
+    )
+    vi.mocked(decommissionApi.getDecommissionStatus).mockRejectedValueOnce(
+      new Error('network down'),
+    )
+    await confirmAndRun(user)
+    expect(
+      await screen.findByText(/최신 상태 조회에 실패|network down/),
+    ).toBeInTheDocument()
+    expect(decommissionApi.unpublishEndpoint).not.toHaveBeenCalled()
+  })
+
+  it('keeps operation_id when enqueue succeeds but detail fetch fails', async () => {
+    const user = userEvent.setup()
+    mockHappyLoad(
+      makeStatus({
+        active_routes: [],
+        can_unpublish: false,
+        can_stop: true,
+        blockers: [],
+      }),
+    )
+    vi.mocked(deploymentsApi.stopDeployment).mockResolvedValue({
+      id: 'op-new-stop',
+      operation_type: 'STOP',
+      status: 'QUEUED',
+      target_deployment_id: 'd1',
+      current_step: null,
+      created_at: '2026-10-08T00:00:00Z',
+      started_at: null,
+      finished_at: null,
+      error: null,
+    })
+    vi.mocked(operationsApi.getOperation).mockRejectedValue(
+      new Error('detail unavailable'),
+    )
+
+    renderWizard('/deployments/d1/decommission?step=stop')
+    await user.click(
+      await screen.findByRole('button', { name: '모델 중지 확인…' }),
+    )
+    await confirmAndRun(user)
+    expect(await screen.findByText(/접수되었을 수 있습니다/)).toBeInTheDocument()
+    expect(deploymentsApi.stopDeployment).toHaveBeenCalledTimes(1)
+    await waitFor(() => {
+      expect(operationsApi.getOperation).toHaveBeenCalledWith(
+        'op-new-stop',
+      )
+    })
+    // Do not urge an immediate second stop after uncertain detail fetch.
+    expect(screen.queryByText(/버튼을 다시 시도/)).not.toBeInTheDocument()
+  })
+
+  it('allows skipping purge and shows partial done summary', async () => {
+    const user = userEvent.setup()
+    mockHappyLoad(
+      makeStatus({
+        active_routes: [],
+        can_unpublish: false,
+        can_stop: false,
+        can_remove_container: false,
+        can_retire: false,
+        can_purge_cache: true,
+        runtime_status: 'STOPPED',
+        container_present: false,
+        retired_at: '2026-10-08T00:00:00Z',
+        blockers: [],
+      }),
+    )
+    renderWizard('/deployments/d1/decommission?step=purge')
+    await user.click(
+      await screen.findByRole('button', {
+        name: '건너뛰기 / 다음: 모델·버전 보관',
+      }),
+    )
+    expect(await screen.findByRole('heading', { name: /7\. 모델·버전 보관/ })).toBeInTheDocument()
+    await user.click(
+      screen.getByRole('button', { name: '정리 결과 확인으로' }),
+    )
+    expect(await screen.findByRole('heading', { name: /8\. 정리 결과 확인/ })).toBeInTheDocument()
+    expect(screen.getByText(/· 선택 단계 건너뜀/)).toBeInTheDocument()
+    expect(
+      screen.getByText(/필수 정리 항목은 확인되었습니다/),
+    ).toBeInTheDocument()
+    expect(screen.queryByText(/모든 정리 완료/)).not.toBeInTheDocument()
+  })
+
+  it('blocks archive model until version archived', async () => {
+    mockHappyLoad(
+      makeStatus({
+        active_routes: [],
+        runtime_status: 'STOPPED',
+        container_present: false,
+        retired_at: '2026-10-08T00:00:00Z',
+        can_retire: false,
+        blockers: [],
+      }),
+    )
+    renderWizard('/deployments/d1/decommission?step=archive')
+    expect(await screen.findByRole('heading', { name: /7\. 모델·버전 보관/ })).toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: '모델 보관 확인…' }),
+    ).toBeDisabled()
+    expect(
+      screen.getByRole('button', { name: '버전 보관 확인…' }),
+    ).not.toBeDisabled()
   })
 })

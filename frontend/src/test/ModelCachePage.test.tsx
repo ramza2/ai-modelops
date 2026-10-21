@@ -193,6 +193,30 @@ describe('ModelCachePage', () => {
     )
   })
 
+  it('disables purge for MISSING cache even if size_bytes remains', async () => {
+    vi.mocked(downloadsApi.listModelCaches).mockResolvedValue(
+      cachePage([
+        makeCache({
+          id: 'cache-missing',
+          status: 'MISSING',
+          size_bytes: 999_999,
+          local_path: '/data/models/gone',
+        }),
+      ]),
+    )
+    renderAt('/models/cache')
+    const row = (await screen.findByText('org/model')).closest(
+      'tr',
+    ) as HTMLElement
+    const purgeBtn = within(row).getByRole('button', { name: '이미 캐시 없음' })
+    expect(purgeBtn).toBeDisabled()
+    expect(purgeBtn).toHaveAttribute(
+      'title',
+      expect.stringMatching(/이미 캐시 없음|실제 파일/),
+    )
+    expect(downloadsApi.purgeModelCache).not.toHaveBeenCalled()
+  })
+
   it('shows purge error and keeps dialog open', async () => {
     vi.mocked(downloadsApi.listModelCaches).mockResolvedValue(
       cachePage([makeCache({ id: 'cache-2' })]),
