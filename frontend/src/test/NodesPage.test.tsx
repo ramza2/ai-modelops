@@ -99,10 +99,16 @@ describe('NodesPage', () => {
 
     renderAt('/nodes')
 
+    expect(
+      await screen.findByRole('heading', { level: 1, name: '서버 및 GPU' }),
+    ).toBeInTheDocument()
+    expect(screen.getByText('서버 호스트명')).toBeInTheDocument()
+    expect(screen.getByText('마지막 연결 확인')).toBeInTheDocument()
+    expect(screen.getByText('시스템 메모리')).toBeInTheDocument()
     expect(await screen.findByText('gpu-node-a')).toBeInTheDocument()
     expect(screen.getByText('gpu-node-b')).toBeInTheDocument()
-    expect(screen.getByText(/온라인/)).toBeInTheDocument()
-    expect(screen.getByText(/저하/)).toBeInTheDocument()
+    expect(screen.getAllByText(/온라인/).length).toBeGreaterThan(0)
+    expect(screen.getAllByText(/저하/).length).toBeGreaterThan(0)
     expect(screen.getByText('host-a.example.test')).toBeInTheDocument()
     expect(screen.getByText('staging')).toBeInTheDocument()
     // local timezone formatted — not raw ISO slice
@@ -166,7 +172,7 @@ describe('NodesPage', () => {
     vi.mocked(nodesApi.listNodes).mockResolvedValue(pageResult([]))
     renderAt('/nodes')
     expect(
-      await screen.findByText('등록된 Node가 없습니다.'),
+      await screen.findByText('등록된 서버가 없습니다.'),
     ).toBeInTheDocument()
   })
 
@@ -227,7 +233,7 @@ describe('NodesPage', () => {
     vi.mocked(nodesApi.listNodes).mockResolvedValue(pageResult([]))
     renderAt('/nodes?status=OFFLINE')
     expect(
-      await screen.findByText('선택한 상태에 해당하는 Node가 없습니다.'),
+      await screen.findByText('선택한 상태에 해당하는 서버가 없습니다.'),
     ).toBeInTheDocument()
   })
 
@@ -269,7 +275,7 @@ describe('NodesPage', () => {
       expect(screen.getByTestId('location-search')).toHaveTextContent('')
     })
     expect(
-      await screen.findByText('등록된 Node가 없습니다.'),
+      await screen.findByText('등록된 서버가 없습니다.'),
     ).toBeInTheDocument()
   })
 
@@ -284,7 +290,7 @@ describe('NodesPage', () => {
       )
     })
     expect(
-      await screen.findByText('선택한 상태에 해당하는 Node가 없습니다.'),
+      await screen.findByText('선택한 상태에 해당하는 서버가 없습니다.'),
     ).toBeInTheDocument()
   })
 })

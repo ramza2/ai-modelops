@@ -109,6 +109,44 @@ describe('EndpointsPage', () => {
     expect(modelsApi.getModelVersion).not.toHaveBeenCalled()
   })
 
+  it('shows neutral traffic for disabled and unrouted aliases; keeps SERVING for live', async () => {
+    vi.mocked(endpointsApi.listEndpoints).mockResolvedValue(
+      pageResult([
+        makeEndpoint({
+          id: 'e-disabled',
+          alias: 'minilm-test',
+          display_name: 'MiniLM',
+          is_enabled: false,
+          traffic_state: 'SERVING',
+          active_route: null,
+        }),
+        makeEndpoint({
+          id: 'e-unrouted',
+          alias: 'orphan',
+          display_name: 'Orphan',
+          is_enabled: true,
+          traffic_state: 'SERVING',
+          active_route: null,
+        }),
+        makeEndpoint({
+          id: 'e-live',
+          alias: 'chat-main',
+          display_name: 'Chat Main',
+        }),
+      ]),
+    )
+    renderAt('/endpoints')
+    await screen.findByRole('link', { name: 'MiniLM' })
+    const badges = screen.getAllByTestId('endpoint-traffic-display')
+    expect(badges).toHaveLength(3)
+    expect(badges[0]).toHaveTextContent('사용 중지')
+    expect(badges[0]).toHaveTextContent('Traffic: SERVING')
+    expect(badges[0].className).toContain('muted')
+    expect(badges[1]).toHaveTextContent('모델 미연결')
+    expect(badges[2]).toHaveTextContent(/서빙/)
+    expect(badges[2].querySelector('.status-badge--ok')).toBeTruthy()
+  })
+
   it('applies filters and submits search without keystroke requests', async () => {
     const user = userEvent.setup()
     vi.mocked(endpointsApi.listEndpoints).mockResolvedValue(pageResult([]))

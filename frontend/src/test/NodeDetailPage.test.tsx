@@ -104,9 +104,12 @@ describe('NodeDetailPage', () => {
     ).toBeInTheDocument()
     expect(screen.getByText('host-a.example.test')).toBeInTheDocument()
     expect(screen.getByText(/온라인/)).toBeInTheDocument()
-    expect(screen.getByText('CPU Utilization')).toBeInTheDocument()
+    expect(
+      screen.getByText('CPU 사용률 (CPU Utilization)'),
+    ).toBeInTheDocument()
     expect(screen.getByText('12.5%')).toBeInTheDocument()
-    expect(screen.getByText(/최근 수집 시각/)).toBeInTheDocument()
+    expect(screen.getAllByText(/자원 측정 시각/).length).toBeGreaterThan(0)
+    expect(screen.getAllByText(/마지막 연결 확인/).length).toBeGreaterThan(0)
     expect(screen.queryByText('2026-10-06T01:02:03Z')).not.toBeInTheDocument()
   })
 
@@ -154,8 +157,8 @@ describe('NodeDetailPage', () => {
     expect(await screen.findByText(/GPU 0 · GPU-A/)).toBeInTheDocument()
     expect(screen.getByText(/GPU 1 · GPU-B/)).toBeInTheDocument()
     expect(screen.getAllByText(/8\.0 GiB \/ 16\.0 GiB/).length).toBeGreaterThanOrEqual(2)
-    expect(screen.getByText(/Temperature:\s*42\.0 °C/)).toBeInTheDocument()
-    expect(screen.getByText(/Power:\s*80\.5 W/)).toBeInTheDocument()
+    expect(screen.getByText(/GPU 온도.*42\.0 °C/)).toBeInTheDocument()
+    expect(screen.getByText(/GPU 소비 전력.*80\.5 W/)).toBeInTheDocument()
   })
 
   it('does not aggregate free VRAM across GPUs', async () => {
@@ -217,7 +220,7 @@ describe('NodeDetailPage', () => {
 
     renderDetail()
     expect(await screen.findByText('등록된 GPU가 없습니다.')).toBeInTheDocument()
-    expect(screen.getByText(/온라인/)).toBeInTheDocument()
+    expect(screen.getAllByText(/온라인/).length).toBeGreaterThan(0)
   })
 
   it('shows null GPU snapshot message', async () => {
@@ -231,7 +234,7 @@ describe('NodeDetailPage', () => {
 
     renderDetail()
     expect(
-      await screen.findByText('아직 수집된 GPU 자원 정보가 없습니다.'),
+      await screen.findByText(/GPU 자원이 미수집입니다/),
     ).toBeInTheDocument()
   })
 
@@ -245,7 +248,7 @@ describe('NodeDetailPage', () => {
     expect(
       await screen.findByRole('heading', { level: 2, name: 'gpu-node-a' }),
     ).toBeInTheDocument()
-    expect(screen.getByText('resource down')).toBeInTheDocument()
+    expect(screen.getByText(/resource down/)).toBeInTheDocument()
   })
 
   it('keeps prior resources when metadata refresh fails', async () => {
@@ -275,9 +278,9 @@ describe('NodeDetailPage', () => {
 
     renderDetail()
     expect(
-      await screen.findByText('Node를 찾을 수 없습니다.'),
+      await screen.findByText('서버를 찾을 수 없습니다.'),
     ).toBeInTheDocument()
-    const back = screen.getByRole('link', { name: /Node 목록으로 돌아가기/ })
+    const back = screen.getByRole('link', { name: /서버 목록으로 돌아가기/ })
     expect(back).toHaveAttribute('href', '/nodes')
   })
 
@@ -362,10 +365,10 @@ describe('NodeDetailPage', () => {
 
     const btn = screen.getByRole('button', { name: '리소스 갱신' })
     await user.click(btn)
-    expect(await screen.findByRole('button', { name: '갱신 중…' })).toBeDisabled()
+    expect(await screen.findByRole('button', { name: '수집 중…' })).toBeDisabled()
     // AppShell DB refresh stays disabled during mutation.
     expect(screen.getByRole('button', { name: '새로고침' })).toBeDisabled()
-    await user.click(screen.getByRole('button', { name: '갱신 중…' }))
+    await user.click(screen.getByRole('button', { name: '수집 중…' }))
     expect(nodesApi.refreshNodeResources).toHaveBeenCalledTimes(1)
 
     resolveRefresh(makeResources())
@@ -456,7 +459,7 @@ describe('NodeDetailPage', () => {
     expect(
       await screen.findByRole('heading', { level: 2, name: 'gpu-node-a' }),
     ).toBeInTheDocument()
-    expect(await screen.findByText('resource down')).toBeInTheDocument()
+    expect(await screen.findByText(/resource down/)).toBeInTheDocument()
     await waitFor(() => {
       expect(
         screen.getByRole('button', { name: '리소스 갱신' }),
@@ -490,7 +493,7 @@ describe('NodeDetailPage', () => {
 
     renderDetail()
     expect(
-      await screen.findByText(/아직 수집된 Host 자원 정보가 없습니다/),
+      await screen.findByText(/Host 자원이 미수집입니다/),
     ).toBeInTheDocument()
   })
 
@@ -520,6 +523,6 @@ describe('NodeDetailPage', () => {
     await user.click(screen.getByRole('button', { name: '리소스 갱신' }))
     expect(await screen.findByText('77.0%')).toBeInTheDocument()
     expect(screen.getByText(/자원 수집은 성공했지만/)).toBeInTheDocument()
-    expect(screen.getByText(/저하/)).toBeInTheDocument()
+    expect(screen.getAllByText(/저하/).length).toBeGreaterThan(0)
   })
 })

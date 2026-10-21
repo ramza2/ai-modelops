@@ -24,6 +24,7 @@ import type {
 import { ActiveBadge } from '../components/ActiveBadge'
 import { AppShell } from '../components/AppShell'
 import { EndpointEnabledConfirmDialog } from '../components/EndpointEnabledConfirmDialog'
+import { EndpointTrafficDisplay } from '../components/EndpointTrafficDisplay'
 import { HelpHint, TermLabel } from '../components/HelpHint'
 import { LoadingBlock } from '../components/LoadingBlock'
 import { SectionError } from '../components/SectionError'
@@ -1040,6 +1041,9 @@ export function EndpointDetailPage() {
           <HelpHint showTopic label="사용 설정 vs 요청 처리">
             {ENDPOINT_FIELD_HELP.enabled} {ENDPOINT_FIELD_HELP.traffic}
           </HelpHint>
+          <HelpHint showTopic label="Traffic 표시 (사용 중지·미연결)">
+            {ENDPOINT_FIELD_HELP.trafficDisplay}
+          </HelpHint>
           <HelpHint showTopic label="현재 활성 연결">
             {ENDPOINT_FIELD_HELP.activeRoute}
           </HelpHint>
@@ -1134,7 +1138,11 @@ export function EndpointDetailPage() {
                   />
                 </dt>
                 <dd>
-                  <StatusBadge status={endpoint.traffic_state} />
+                  <EndpointTrafficDisplay
+                    isEnabled={endpoint.is_enabled}
+                    trafficState={endpoint.traffic_state}
+                    hasActiveRoute={Boolean(endpoint.active_route?.deployment_id)}
+                  />
                 </dd>
               </div>
               <div>

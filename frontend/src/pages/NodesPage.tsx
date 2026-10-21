@@ -4,6 +4,7 @@ import { ApiError } from '../api/client'
 import { listNodes } from '../api/nodes'
 import type { NodeSummary } from '../api/types'
 import { AppShell } from '../components/AppShell'
+import { HelpHint, TermLabel } from '../components/HelpHint'
 import { LoadingBlock } from '../components/LoadingBlock'
 import { Pagination } from '../components/Pagination'
 import { SectionError } from '../components/SectionError'
@@ -11,6 +12,7 @@ import { StatusBadge } from '../components/StatusBadge'
 import { formatApiDateTime } from '../utils/date'
 import { formatMemoryMb } from '../utils/number'
 import { parsePositivePage } from '../utils/query'
+import { NODE_FIELD_HELP } from '../utils/uiLabels'
 
 const PAGE_SIZE = 20
 const KNOWN_STATUSES = new Set([
@@ -124,7 +126,7 @@ export function NodesPage() {
             ? err.message
             : err instanceof Error
               ? err.message
-              : 'Node 목록을 불러오지 못했습니다.'
+              : '서버 목록을 불러오지 못했습니다.'
         setError(message)
         if (!hasLoadedRef.current) {
           setItems(null)
@@ -160,39 +162,61 @@ export function NodesPage() {
 
   return (
     <AppShell
-      title="Nodes / GPUs"
-      description="등록된 serving host의 지속 상태(Management API DB)를 조회합니다. GPU/VRAM 수치는 Node 상세에서 확인하며, GPU 간 free VRAM을 합산하지 않습니다."
+      title="서버 및 GPU"
+      description="등록된 GPU 서버(Node)의 연결 상태를 조회합니다. GPU/VRAM 수치는 서버 상세에서 확인하며, GPU 간 남은 VRAM을 합산하지 않습니다."
       onRefresh={() => void load('refresh')}
       refreshing={refreshing}
       lastUpdated={lastUpdated}
     >
+      <p className="panel-hint" role="note">
+        {NODE_FIELD_HELP.overview}
+      </p>
+      <details className="help-glossary">
+        <summary>용어 및 상태 안내</summary>
+        <div className="help-glossary__items">
+          <HelpHint showTopic label="서버 상태 (ONLINE 등)">
+            {NODE_FIELD_HELP.status}
+          </HelpHint>
+          <HelpHint showTopic label="마지막 연결 확인 vs 자원 측정">
+            {NODE_FIELD_HELP.heartbeat}
+          </HelpHint>
+          <HelpHint showTopic label="VRAM 합산 금지">
+            {NODE_FIELD_HELP.noPoolVram}
+          </HelpHint>
+        </div>
+      </details>
+
       <div className="toolbar">
-        <label className="toolbar__field" htmlFor="node-status-filter">
-          <span>상태</span>
+        <div className="toolbar__field">
+          <div className="toolbar__field-head">
+            <label htmlFor="node-status-filter">상태</label>
+            <HelpHint label="서버 상태">{NODE_FIELD_HELP.status}</HelpHint>
+          </div>
           <select
             id="node-status-filter"
             value={status ?? 'ALL'}
             onChange={(e) => onStatusChange(e.target.value)}
           >
-            <option value="ALL">ALL</option>
-            <option value="ONLINE">ONLINE</option>
-            <option value="DEGRADED">DEGRADED</option>
-            <option value="OFFLINE">OFFLINE</option>
-            <option value="UNKNOWN">UNKNOWN</option>
+            <option value="ALL">전체</option>
+            <option value="ONLINE">온라인 (ONLINE)</option>
+            <option value="DEGRADED">저하 (DEGRADED)</option>
+            <option value="OFFLINE">오프라인 (OFFLINE)</option>
+            <option value="UNKNOWN">알 수 없음 (UNKNOWN)</option>
           </select>
-        </label>
+        </div>
         <p className="toolbar__hint">
-          새로고침은 DB에 저장된 Node 목록을 다시 읽습니다. Node Agent를 호출하지
-          않습니다.
+          상단 새로고침은 DB에 저장된 서버 목록을 다시 읽습니다. Node Agent를
+          호출하지 않으며, GPU 실시간 수집은 서버 상세의 「리소스 갱신」에서
+          합니다.
         </p>
       </div>
 
       {error ? (
-        <SectionError title="Node 목록 오류" message={error} />
+        <SectionError title="서버 목록 오류" message={error} />
       ) : null}
 
       {loading && items === null ? (
-        <LoadingBlock label="Node 목록을 불러오는 중…" />
+        <LoadingBlock label="서버 목록을 불러오는 중…" />
       ) : null}
 
       {items !== null && items.length > 0 ? (
@@ -201,14 +225,42 @@ export function NodesPage() {
             <table className="data-table">
               <thead>
                 <tr>
-                  <th scope="col">Node</th>
-                  <th scope="col">Status</th>
-                  <th scope="col">Hostname</th>
-                  <th scope="col">Environment</th>
-                  <th scope="col">Region</th>
-                  <th scope="col">Last Heartbeat</th>
-                  <th scope="col">CPU</th>
-                  <th scope="col">RAM</th>
+                  <th scope="col">
+                    <TermLabel text="서버" apiTerm="Node" />
+                  </th>
+                  <th scope="col">
+                    <TermLabel
+                      text="상태"
+                      apiTerm="Status"
+                      help={NODE_FIELD_HELP.status}
+                    />
+                  </th>
+                  <th scope="col">
+                    <TermLabel text="서버 호스트명" apiTerm="Hostname" />
+                  </th>
+                  <th scope="col">
+                    <TermLabel text="운영 환경" apiTerm="Environment" />
+                  </th>
+                  <th scope="col">
+                    <TermLabel text="위치/리전" apiTerm="Region" />
+                  </th>
+                  <th scope="col">
+                    <TermLabel
+                      text="마지막 연결 확인"
+                      apiTerm="Last Heartbeat"
+                      help={NODE_FIELD_HELP.heartbeat}
+                    />
+                  </th>
+                  <th scope="col">
+                    <TermLabel text="CPU" apiTerm="CPU" />
+                  </th>
+                  <th scope="col">
+                    <TermLabel
+                      text="시스템 메모리"
+                      apiTerm="RAM"
+                      help={NODE_FIELD_HELP.ramVsVram}
+                    />
+                  </th>
                 </tr>
               </thead>
               <tbody>
@@ -220,13 +272,20 @@ export function NodesPage() {
                       </Link>
                     </td>
                     <td>
-                      <StatusBadge status={node.status} />
+                      <StatusBadge
+                        status={node.status}
+                        title={NODE_FIELD_HELP.status}
+                      />
                     </td>
-                    <td>{node.hostname || '—'}</td>
+                    <td className="table-cell-clip" title={node.hostname || undefined}>
+                      {node.hostname || '—'}
+                    </td>
                     <td>{node.environment || '—'}</td>
                     <td>{node.region || '—'}</td>
                     <td>{formatApiDateTime(node.last_heartbeat_at)}</td>
-                    <td>{node.cpu_model || '—'}</td>
+                    <td className="table-cell-clip" title={node.cpu_model || undefined}>
+                      {node.cpu_model || '—'}
+                    </td>
                     <td>{formatMemoryMb(node.ram_total_mb)}</td>
                   </tr>
                 ))}
@@ -245,13 +304,13 @@ export function NodesPage() {
 
       {emptyDatabase ? (
         <p className="empty-state" role="status">
-          등록된 Node가 없습니다.
+          등록된 서버가 없습니다.
         </p>
       ) : null}
 
       {emptyFiltered ? (
         <p className="empty-state" role="status">
-          선택한 상태에 해당하는 Node가 없습니다.
+          선택한 상태에 해당하는 서버가 없습니다.
         </p>
       ) : null}
     </AppShell>
