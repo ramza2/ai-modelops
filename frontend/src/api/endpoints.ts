@@ -1,4 +1,4 @@
-import { apiGet, apiPost } from './client'
+import { apiGet, apiPatch, apiPost } from './client'
 import type {
   Endpoint,
   EndpointRoute,
@@ -41,6 +41,22 @@ export async function getEndpoint(
   signal?: AbortSignal,
 ): Promise<Endpoint> {
   return apiGet<Endpoint>(`/api/v1/endpoints/${endpointId}`, { signal })
+}
+
+/**
+ * PATCH /endpoints/{id} — toggle is_enabled (Management API).
+ * Bumps routing_state.version when the value actually changes.
+ * Idempotency-Key is not part of the current Backend contract for this route.
+ */
+export async function updateEndpointEnabled(
+  endpointId: string,
+  isEnabled: boolean,
+  signal?: AbortSignal,
+): Promise<Endpoint> {
+  return apiPatch<Endpoint>(`/api/v1/endpoints/${endpointId}`, {
+    signal,
+    body: { is_enabled: isEnabled },
+  })
 }
 
 export async function listEndpointRoutes(

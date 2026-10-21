@@ -236,6 +236,11 @@ a:focus-visible {
   color: #fff;
 }
 
+.btn--small {
+  padding: 0.3rem 0.55rem;
+  font-size: 0.85rem;
+}
+
 .modal-backdrop {
   position: fixed;
   inset: 0;
@@ -780,6 +785,18 @@ th {
   margin: 0 0 0.85rem;
   color: var(--muted);
   font-size: 0.9rem;
+}
+
+.checkbox-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  line-height: 1.45;
+}
+
+.checkbox-row input[type='checkbox'] {
+  margin-top: 0.2rem;
+  flex-shrink: 0;
 }
 
 .panel-hint--warn {

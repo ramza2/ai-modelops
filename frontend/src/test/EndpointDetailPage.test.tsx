@@ -257,6 +257,7 @@ describe('EndpointDetailPage', () => {
     vi.spyOn(endpointsApi, 'listEndpointRoutes')
     vi.spyOn(endpointsApi, 'createPreflightPreview')
     vi.spyOn(endpointsApi, 'switchEndpoint')
+    vi.spyOn(endpointsApi, 'updateEndpointEnabled')
     vi.spyOn(endpointsApi, 'listEndpoints')
     vi.spyOn(deploymentsApi, 'listDeployments')
     vi.spyOn(deploymentsApi, 'getDeployment')
@@ -1926,6 +1927,107 @@ describe('EndpointDetailPage', () => {
     )
     expect(screen.getByTestId('switch-operation-result')).not.toHaveTextContent(
       /FINALIZE/,
+    )
+  })
+
+  it('disables an unused alias after consent and re-reads status', async () => {
+    const user = userEvent.setup()
+    const unused = makeEndpoint({
+      alias: 'minilm-test',
+      display_name: 'MiniLM Test',
+      active_route: null,
+    })
+    vi.mocked(endpointsApi.getEndpoint)
+      .mockResolvedValueOnce(unused)
+      .mockResolvedValueOnce(unused)
+      .mockResolvedValueOnce(unused)
+      .mockResolvedValue(
+        makeEndpoint({
+          ...unused,
+          is_enabled: false,
+          active_route: null,
+        }),
+      )
+    vi.mocked(endpointsApi.listEndpointRoutes).mockResolvedValue({
+      items: [
+        makeRoute({
+          id: 'r-old',
+          status: 'INACTIVE',
+          deactivated_at: '2026-09-01T00:00:00Z',
+        }),
+      ],
+      total: 1,
+    })
+    vi.mocked(endpointsApi.updateEndpointEnabled).mockResolvedValue(
+      makeEndpoint({
+        ...unused,
+        is_enabled: false,
+        active_route: null,
+      }),
+    )
+    renderDetail()
+    expect(
+      await screen.findByRole('button', { name: '사용 중지' }),
+    ).toBeInTheDocument()
+    expect(
+      screen.getByText(/ACTIVE Route가 없습니다/),
+    ).toBeInTheDocument()
+    expect(screen.getAllByText(/INACTIVE/).length).toBeGreaterThan(0)
+
+    await user.click(screen.getByTestId('endpoint-disable-open'))
+    expect(await screen.findByTestId('endpoint-enabled-dialog')).toBeInTheDocument()
+    await user.click(screen.getByTestId('endpoint-enabled-consent'))
+    const confirm = screen.getByTestId('endpoint-enabled-confirm')
+    expect(confirm).toBeEnabled()
+    await user.dblClick(confirm)
+    await waitFor(() => {
+      expect(endpointsApi.updateEndpointEnabled).toHaveBeenCalledTimes(1)
+    })
+    expect(await screen.findByTestId('endpoint-enabled-result')).toHaveTextContent(
+      /사용 중지/,
+    )
+    expect(
+      await screen.findByRole('button', { name: /다시 사용/ }),
+    ).toBeInTheDocument()
+  })
+
+  it('re-enables a disabled alias without inventing an ACTIVE route', async () => {
+    const user = userEvent.setup()
+    const disabled = makeEndpoint({
+      is_enabled: false,
+      active_route: null,
+    })
+    vi.mocked(endpointsApi.getEndpoint)
+      .mockResolvedValueOnce(disabled)
+      .mockResolvedValueOnce(disabled)
+      .mockResolvedValueOnce(disabled)
+      .mockResolvedValue(
+        makeEndpoint({ is_enabled: true, active_route: null }),
+      )
+    vi.mocked(endpointsApi.listEndpointRoutes).mockResolvedValue({
+      items: [],
+      total: 0,
+    })
+    vi.mocked(endpointsApi.updateEndpointEnabled).mockResolvedValue(
+      makeEndpoint({ is_enabled: true, active_route: null }),
+    )
+    renderDetail()
+    await user.click(
+      await screen.findByTestId('endpoint-enable-open'),
+    )
+    await user.click(
+      await screen.findByTestId('endpoint-enabled-consent'),
+    )
+    await user.click(screen.getByTestId('endpoint-enabled-confirm'))
+    await waitFor(() => {
+      expect(endpointsApi.updateEndpointEnabled).toHaveBeenCalledWith(
+        'e1',
+        true,
+        expect.anything(),
+      )
+    })
+    expect(await screen.findByTestId('endpoint-enabled-result')).toHaveTextContent(
+      /다시 사용/,
     )
   })
 })

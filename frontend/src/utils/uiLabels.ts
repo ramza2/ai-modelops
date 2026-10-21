@@ -297,6 +297,18 @@ export const ENDPOINT_FIELD_HELP = {
     'COLD Switch는 Source 중지·VRAM 해제·Target 기동 등이 포함될 수 있어 서비스 영향(중단·지연) 가능성이 있습니다. 운영 영향 범위를 확인한 뒤 진행하세요.',
   unpublish:
     '연결 해제(Unpublish)는 Gateway Alias의 ACTIVE Route만 제거합니다. 모델 컨테이너 중지·캐시 삭제·레지스트리 삭제와 다릅니다. Alias 재입력 확인이 필요합니다.',
+  disable:
+    '사용 중지(is_enabled=false)는 Alias를 Gateway 호출 대상에서 끕니다. ACTIVE Route·Deployment·캐시·레지스트리·Route/Operation 이력은 삭제하지 않습니다. Unpublish(연결 해제) · Deployment Stop · Cache Purge와 다릅니다.',
+  enable:
+    '다시 사용(재활성화, is_enabled=true)은 Alias 사용 설정만 켭니다. ACTIVE Route가 없으면 요청을 처리할 수 없으며, Route를 자동으로 만들거나 Deployment를 시작하지 않습니다.',
+  disableVsOthers:
+    '사용 중지 ≠ 연결 해제(Unpublish) ≠ 모델 중지(Deployment Stop) ≠ 캐시 삭제(Cache Purge). 사용 중지는 별칭 on/off이며 이력·모델 파일은 유지됩니다.',
+  gatewayAfterEnabledChange:
+    '사용 설정 변경 시 routing_state.version이 증가합니다. Gateway는 주기적으로 라우팅 스냅샷을 갱신하며, 반영 전까지 Last Known Good를 쓸 수 있습니다. 화면을 새로고침해 최신 is_enabled를 확인하세요.',
+  unusedAlias:
+    '활성 연결 없음: ACTIVE Route가 없습니다. Enabled여도 Gateway가 모델을 연결할 수 없는 미사용(또는 미연결) 별칭일 수 있습니다. 과거 INACTIVE Route 이력은 별도로 남습니다.',
+  connectedAlias:
+    '모델 연결됨: ACTIVE Route가 Deployment를 가리킵니다. 사용 중지 시 이 Alias를 호출하는 업무 시스템 요청이 실패할 수 있습니다.',
 } as const
 
 export const OPERATION_FIELD_HELP = {

@@ -156,6 +156,13 @@ export async function apiPost<T>(
   return apiRequest<T>('POST', path, options)
 }
 
+export async function apiPatch<T>(
+  path: string,
+  options: ApiFetchOptions = {},
+): Promise<T> {
+  return apiRequest<T>('PATCH', path, options)
+}
+
 export async function apiDelete<T>(
   path: string,
   options: ApiFetchOptions = {},
