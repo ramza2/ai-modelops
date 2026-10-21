@@ -33,6 +33,19 @@ import {
 
 const PAGE_SIZE = 20
 
+/** Registry optional numbers: null → 미등록; 0 and positives keep numeric format. */
+function formatRegistryOptionalMemoryMb(
+  value: number | null | undefined,
+): string {
+  if (value === null || value === undefined) return '미등록'
+  return formatMemoryMb(value)
+}
+
+function formatRegistryOptionalInt(value: number | null | undefined): string {
+  if (value === null || value === undefined) return '미등록'
+  return formatInt(value)
+}
+
 export function ModelVersionDetailPage() {
   const { versionId = '' } = useParams<{ versionId: string }>()
   const [searchParams, setSearchParams] = useSearchParams()
@@ -303,7 +316,11 @@ export function ModelVersionDetailPage() {
             {MODEL_VERSION_DETAIL_FIELD_HELP.runtimeConfig}
           </HelpHint>
           <HelpHint showTopic label="예상 자원">
-            {MODEL_VERSION_DETAIL_FIELD_HELP.expectedResources}
+            {MODEL_VERSION_DETAIL_FIELD_HELP.expectedResources}{' '}
+            {MODEL_VERSION_DETAIL_FIELD_HELP.expectedResourcesUnset}
+          </HelpHint>
+          <HelpHint showTopic label="빈 실행 설정">
+            {MODEL_VERSION_DETAIL_FIELD_HELP.runtimeConfigEmpty}
           </HelpHint>
           <HelpHint showTopic label="모델 파일 (Artifacts)">
             {MODEL_VERSION_DETAIL_FIELD_HELP.artifacts}
@@ -513,9 +530,8 @@ export function ModelVersionDetailPage() {
               예상 자원 (Expected Resources)
             </h2>
             <p className="panel-hint" role="note">
-              {MODEL_VERSION_DETAIL_FIELD_HELP.expectedResources} Version에
-              저장된 예상 자원 정의입니다. 현재 GPU 가용성이나 Deployment
-              Preflight 판정을 의미하지 않습니다.
+              {MODEL_VERSION_DETAIL_FIELD_HELP.expectedResources}{' '}
+              {MODEL_VERSION_DETAIL_FIELD_HELP.expectedResourcesUnset}
             </p>
             <dl className="meta-grid">
               <div>
@@ -523,27 +539,40 @@ export function ModelVersionDetailPage() {
                   <TermLabel
                     text="예상 Idle VRAM"
                     apiTerm="Expected Idle VRAM"
+                    help={MODEL_VERSION_DETAIL_FIELD_HELP.expectedResourcesUnset}
                   />
                 </dt>
-                <dd>{formatMemoryMb(version.expected_idle_vram_mb)}</dd>
+                <dd>
+                  {formatRegistryOptionalMemoryMb(
+                    version.expected_idle_vram_mb,
+                  )}
+                </dd>
               </div>
               <div>
                 <dt>
                   <TermLabel
                     text="예상 Peak VRAM"
                     apiTerm="Expected Peak VRAM"
+                    help={MODEL_VERSION_DETAIL_FIELD_HELP.expectedResourcesUnset}
                   />
                 </dt>
-                <dd>{formatMemoryMb(version.expected_peak_vram_mb)}</dd>
+                <dd>
+                  {formatRegistryOptionalMemoryMb(
+                    version.expected_peak_vram_mb,
+                  )}
+                </dd>
               </div>
               <div>
                 <dt>
                   <TermLabel
                     text="기본 최대 문맥 길이"
                     apiTerm="Default Max Model Len"
+                    help={MODEL_VERSION_DETAIL_FIELD_HELP.expectedResourcesUnset}
                   />
                 </dt>
-                <dd>{formatInt(version.default_max_model_len)}</dd>
+                <dd>
+                  {formatRegistryOptionalInt(version.default_max_model_len)}
+                </dd>
               </div>
             </dl>
           </section>
@@ -556,8 +585,10 @@ export function ModelVersionDetailPage() {
               버전 실행 설정 (Version Runtime Configuration)
             </h2>
             <p className="panel-hint" role="note">
-              {MODEL_VERSION_DETAIL_FIELD_HELP.runtimeConfig} 실행 적용 여부는
-              Deployment Capacity Profile에서 확인합니다.
+              {MODEL_VERSION_DETAIL_FIELD_HELP.runtimeConfig} 실제 실행·관측
+              설정은{' '}
+              <Link to="/deployments">모델 배포 목록에서 확인</Link>한 뒤 Capacity
+              Profile를 보세요. 버전 ID만으로 특정 Deployment를 추정하지 않습니다.
             </p>
             <dl className="meta-grid">
               {runtimeEntries.known.map(({ key, value }) => (
@@ -576,7 +607,7 @@ export function ModelVersionDetailPage() {
             </dl>
             {runtimeEntries.known.length === 0 ? (
               <p className="empty-state" role="status">
-                표시할 알려진 runtime_config 항목이 없습니다.
+                {MODEL_VERSION_DETAIL_FIELD_HELP.runtimeConfigEmpty}
               </p>
             ) : null}
             {runtimeEntries.otherCount > 0 ? (

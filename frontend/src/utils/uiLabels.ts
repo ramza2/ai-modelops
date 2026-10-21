@@ -356,8 +356,12 @@ export const MODEL_VERSION_DETAIL_FIELD_HELP = {
     '이 화면은 Model Version에 저장된 Registry 정의값입니다. Deployment override·실제 컨테이너 observed 값과 다를 수 있으며, 관측 설정은 Deployment Capacity Profile에서 확인합니다.',
   runtimeConfig:
     'Version runtime_config는 레지스트리 정의값입니다. Deployment의 deployment_config가 일부를 덮어쓸 수 있고, 실행 중 관측값과도 다를 수 있습니다.',
+  runtimeConfigEmpty:
+    '레지스트리에 별도 실행 설정이 등록되지 않았습니다. Hugging Face 자동 등록 시 runtime_config가 비어 있을 수 있으며, 이는 다운로드·배포 오류가 아닙니다. 실제 실행·관측 설정은 Deployment Capacity Profile에서 확인하세요.',
   expectedResources:
     '예상 Idle/Peak VRAM·기본 문맥 길이는 예상 정의값입니다. 실제 사용량이나 현재 GPU 가용량을 보장하지 않습니다.',
+  expectedResourcesUnset:
+    '미등록은 Registry에 예상 자원값이 저장되지 않았다는 뜻입니다(null). Hugging Face 자동 등록 시 예상 VRAM·문맥 길이가 비어 있을 수 있으며, 다운로드·배포 오류가 아닙니다. 0은 유효한 숫자로 표시합니다. 실행 중인 Deployment 값으로 Registry를 자동 보정하지 않습니다.',
   artifacts:
     'Artifact는 레지스트리에 등록된 모델 파일 메타데이터입니다. 서버 Node의 다운로드 캐시 READY 상태와는 별개입니다.',
   archived:
@@ -366,6 +370,24 @@ export const MODEL_VERSION_DETAIL_FIELD_HELP = {
     'SHA·Digest·Checksum·URI·Served Model Name 등 원본 식별값은 번역하거나 변형하지 않습니다.',
   parentModel:
     '부모 모델 링크는 Version이 속한 Model입니다. 부모 모델 조회 실패와 Version 자체 조회 실패는 별도로 안내합니다.',
+} as const
+
+/** P1-18 — Dashboard beginner help (display-only). */
+export const DASHBOARD_FIELD_HELP = {
+  overview:
+    '대시보드는 관리 시스템·배포·API 연결·작업·최근 24시간 호출 집계를 한눈에 보여 줍니다. 읽기 전용이며 실시간 scrape가 아닙니다.',
+  healthVsReady:
+    'Health는 Management API 프로세스 생존(응답 가능)이고, Ready는 의존성(DB 등)까지 준비되어 요청을 받을 수 있는 상태입니다. Health 정상 ≠ Ready 준비됨.',
+  deploymentStates:
+    '활성 모델 배포(Active)=퇴역하지 않은 Deployment 수, 실행 중(Running)=runtime_status=RUNNING, 정상(Healthy)=health_status=HEALTHY입니다. 모델 레지스트리 등록과 다릅니다.',
+  endpointTraffic:
+    '사용 설정(Enabled)은 Alias가 켜져 있는지이고, SERVING은 요청 처리 상태입니다. Enabled여도 Traffic이 DRAINING/MAINTENANCE이면 신규 요청이 차단될 수 있습니다.',
+  invocations:
+    '최근 24시간 요청·오류·성공률은 Gateway Invocation 집계입니다. 요청 성공률 ≠ Runtime HEALTHY입니다. Token coverage는 토큰이 기록된 요청 비율입니다.',
+  p95:
+    'P95 Latency·입력 토큰은 Deployment 단위 95백분위입니다(전역 P95가 아님). 상위 표는 요청 수 기준 상위 Deployment입니다.',
+  missingCounts:
+    '0=실제로 해당 건수가 없음, 미수집=값을 받지 못함(null), 확인 불가=해당 구역 API 오류입니다.',
 } as const
 
 export function userFacingLoadError(
