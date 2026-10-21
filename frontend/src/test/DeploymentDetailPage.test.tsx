@@ -191,13 +191,6 @@ describe('DeploymentDetailPage', () => {
       'href',
       '/nodes/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
     )
-    const monitoringLinks = screen.getAllByRole('link', {
-      name: '모델 실행·자원 모니터링 보기',
-    })
-    expect(monitoringLinks.length).toBeGreaterThanOrEqual(1)
-    for (const link of monitoringLinks) {
-      expect(link).toHaveAttribute('href', '/observability/deployments/d1')
-    }
     expect(screen.getByText('16.0 GiB')).toBeInTheDocument()
     expect(screen.getByText('deployment_config.max_num_seqs')).toBeInTheDocument()
     expect(screen.getByText('8')).toBeInTheDocument()
@@ -214,6 +207,16 @@ describe('DeploymentDetailPage', () => {
     expect(
       configSection?.querySelector('dt')?.textContent,
     ).toMatch(/^deployment_config\./)
+    const monitoringLinks = screen.getAllByRole('link', {
+      name: '모델 실행·자원 모니터링 보기',
+    })
+    expect(monitoringLinks).toHaveLength(1)
+    expect(monitoringLinks[0]).toHaveAttribute(
+      'href',
+      '/observability/deployments/d1',
+    )
+    expect(configSection?.contains(monitoringLinks[0])).toBe(true)
+    expect(screen.getByText(/조회 전용/)).toBeInTheDocument()
   })
 
   it('shows Start/Stop/Restart for MANAGED non-retired only', async () => {
@@ -290,6 +293,10 @@ describe('DeploymentDetailPage', () => {
     expect(
       await screen.findByText(/active lifecycle operation already exists/i),
     ).toBeInTheDocument()
+    expect(
+      screen.getByText(/작업 이력과 최신 배포 상태를 확인한 후/),
+    ).toBeInTheDocument()
+    expect(screen.queryByText(/버튼을 다시 시도/)).not.toBeInTheDocument()
     expect(
       screen.getByRole('heading', { level: 2, name: 'chat-prod' }),
     ).toBeInTheDocument()

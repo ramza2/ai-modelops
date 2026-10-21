@@ -466,18 +466,6 @@ export function DeploymentDetailPage() {
                 </span>
               </span>
             </div>
-            <p className="panel-hint">
-              <Link
-                className="table-link"
-                to={`/observability/deployments/${deployment.id}`}
-              >
-                모델 실행·자원 모니터링 보기
-              </Link>
-              <span className="secondary-text">
-                {' '}
-                — {DEPLOYMENT_FIELD_HELP.monitoringLink}
-              </span>
-            </p>
             <dl className="meta-grid">
               <div>
                 <dt>
@@ -736,7 +724,7 @@ export function DeploymentDetailPage() {
             {actionError ? (
               <SectionError
                 title="모델 실행 관리 작업 접수 실패"
-                message={`원인: ${actionError} — 버튼을 다시 시도하거나 네트워크·권한을 확인하세요.`}
+                message={`원인: ${actionError} — 작업 이력과 최신 배포 상태를 확인한 후, 필요한 경우 다시 시도하세요.`}
               />
             ) : null}
 

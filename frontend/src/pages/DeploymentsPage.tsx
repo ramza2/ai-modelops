@@ -11,7 +11,16 @@ import { SectionError } from '../components/SectionError'
 import { StatusBadge } from '../components/StatusBadge'
 import { formatApiDateTime, shortId } from '../utils/date'
 import { parsePositivePage } from '../utils/query'
-import { DEPLOYMENT_FIELD_HELP } from '../utils/uiLabels'
+import {
+  DEPLOYMENT_FIELD_HELP,
+  formatStatusDisplay,
+} from '../utils/uiLabels'
+
+function statusFilterOptionLabel(code: string): string {
+  const { label, code: normalized } = formatStatusDisplay(code)
+  if (label === normalized) return normalized
+  return `${label} (${normalized})`
+}
 
 const PAGE_SIZE = 20
 
@@ -395,7 +404,7 @@ export function DeploymentsPage() {
             <option value="ALL">전체</option>
             {[...KNOWN_RUNTIME].map((s) => (
               <option key={s} value={s}>
-                {s}
+                {statusFilterOptionLabel(s)}
               </option>
             ))}
           </select>
@@ -427,7 +436,7 @@ export function DeploymentsPage() {
             <option value="ALL">전체</option>
             {[...KNOWN_HEALTH].map((s) => (
               <option key={s} value={s}>
-                {s}
+                {statusFilterOptionLabel(s)}
               </option>
             ))}
           </select>

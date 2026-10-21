@@ -113,8 +113,22 @@ describe('DeploymentsPage', () => {
       expect(last?.deploymentType).toBe('MANAGED')
       expect(last?.page).toBe(1)
     })
-    await user.selectOptions(screen.getByLabelText('실행 상태'), 'RUNNING')
-    await user.selectOptions(screen.getByLabelText('정상 동작 상태'), 'HEALTHY')
+    const runtimeSelect = screen.getByLabelText('실행 상태')
+    expect(
+      within(runtimeSelect).getByRole('option', { name: '실행 중 (RUNNING)' }),
+    ).toHaveValue('RUNNING')
+    expect(
+      within(runtimeSelect).getByRole('option', { name: 'CREATED' }),
+    ).toHaveValue('CREATED')
+    const healthSelect = screen.getByLabelText('정상 동작 상태')
+    expect(
+      within(healthSelect).getByRole('option', { name: '정상 (HEALTHY)' }),
+    ).toHaveValue('HEALTHY')
+    expect(
+      within(healthSelect).getByRole('option', { name: '알 수 없음 (UNKNOWN)' }),
+    ).toHaveValue('UNKNOWN')
+    await user.selectOptions(runtimeSelect, 'RUNNING')
+    await user.selectOptions(healthSelect, 'HEALTHY')
     await user.selectOptions(screen.getByLabelText('퇴역 여부'), 'ACTIVE')
     await waitFor(() => {
       const last = vi.mocked(deploymentsApi.listDeployments).mock.calls.at(-1)?.[0]
