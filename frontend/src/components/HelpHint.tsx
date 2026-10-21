@@ -8,7 +8,10 @@ type HelpHintProps = {
 
 /**
  * Keyboard- and mobile-friendly help disclosure (no hover-only tooltip).
- * Keeps API/English codes inside the expanded body when callers include them.
+ *
+ * Uses a real ``details`` element (flow content). Callers must not nest this
+ * inside phrasing-only parents such as ``h1``–``h6`` or ``span``; prefer
+ * ``TermLabel`` (div wrapper) or place ``HelpHint`` beside a heading.
  */
 export function HelpHint({ label, children }: HelpHintProps) {
   return (
@@ -33,7 +36,14 @@ type TermLabelProps = {
   helpLabel?: string
 }
 
-/** Field / column label with optional API term + accessible help. */
+/**
+ * Field / column label with optional API term + accessible help.
+ *
+ * Outer element is a ``div`` so ``HelpHint`` (``details``) is valid HTML in
+ * table headers (``th``), definition terms (``dt``), and toolbar rows.
+ * Do not place ``TermLabel`` with ``help`` inside ``h1``–``h6`` — put the
+ * heading text in the heading and ``TermLabel``/``HelpHint`` beside it.
+ */
 export function TermLabel({
   text,
   apiTerm,
@@ -41,7 +51,7 @@ export function TermLabel({
   helpLabel,
 }: TermLabelProps) {
   return (
-    <span className="term-label">
+    <div className="term-label">
       {text ? <span className="term-label__text">{text}</span> : null}
       {apiTerm ? (
         <span className="term-label__api" title={apiTerm}>
@@ -53,6 +63,6 @@ export function TermLabel({
           {help}
         </HelpHint>
       ) : null}
-    </span>
+    </div>
   )
 }

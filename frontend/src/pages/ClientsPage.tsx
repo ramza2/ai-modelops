@@ -174,9 +174,8 @@ export function ClientsPage() {
       lastUpdated={lastUpdated}
     >
       <p className="panel-hint" role="note">
-        {CLIENT_FIELD_HELP.readOnly} 활성(ACTIVE)은 레지스트리 등록 상태일 뿐,
-        Endpoint·배포·Gateway 상태에 따라 실제 API 호출 가능 여부는 달라질 수
-        있습니다.
+        {CLIENT_FIELD_HELP.readOnly} 비활성(INACTIVE)은 Gateway 추론을 직접
+        막는 스위치가 아닙니다. 자세한 의미는 「등록 상태」 도움말을 보세요.
       </p>
 
       <form className="toolbar toolbar--wrap" onSubmit={onSearch}>

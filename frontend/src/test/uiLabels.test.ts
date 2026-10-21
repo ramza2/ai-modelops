@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  CLIENT_FIELD_HELP,
   NAV_ITEMS,
   formatNullableLimit,
   formatPriorityDisplay,
@@ -50,5 +51,15 @@ describe('uiLabels (P1-13)', () => {
     expect(kept.action).toMatch(/이전에 불러온/)
     const fresh = userFacingLoadError('목록', 'boom', { keptPrevious: false })
     expect(fresh.action).toMatch(/다시 시도/)
+  })
+
+  it('documents local datetime display and inactive client semantics', () => {
+    expect(CLIENT_FIELD_HELP.createdAt).toMatch(/브라우저 현지 시간/)
+    expect(CLIENT_FIELD_HELP.createdAt).toMatch(/UTC/)
+    expect(CLIENT_FIELD_HELP.updatedAt).toMatch(/브라우저 현지 시간/)
+    expect(CLIENT_FIELD_HELP.isActive).toMatch(/직접 차단하는 스위치가 아닙니다/)
+    expect(CLIENT_FIELD_HELP.isActive).toMatch(/정책 스냅샷/)
+    expect(CLIENT_FIELD_HELP.isActive).toMatch(/client_app_id/)
+    expect(CLIENT_FIELD_HELP.isActive).toMatch(/raw_client_key/)
   })
 })

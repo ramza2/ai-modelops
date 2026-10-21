@@ -5,7 +5,7 @@ import { getClient, getClientRuntimePolicy } from '../api/clients'
 import type { ClientApp, ClientRuntimePolicyResponse } from '../api/types'
 import { ActiveBadge } from '../components/ActiveBadge'
 import { AppShell } from '../components/AppShell'
-import { TermLabel } from '../components/HelpHint'
+import { HelpHint, TermLabel } from '../components/HelpHint'
 import { LoadingBlock } from '../components/LoadingBlock'
 import { SectionError } from '../components/SectionError'
 import { StatusBadge } from '../components/StatusBadge'
@@ -273,13 +273,13 @@ export function ClientDetailPage() {
         className="detail-panel"
         aria-labelledby="client-policy-heading"
       >
-        <h2 id="client-policy-heading">
-          <TermLabel
-            text="런타임 정책"
-            apiTerm="Runtime Policy"
-            help={CLIENT_FIELD_HELP.runtimePolicy}
-          />
-        </h2>
+        <div className="detail-panel__heading">
+          <h2 id="client-policy-heading">런타임 정책</h2>
+          <span className="term-label__api">(Runtime Policy)</span>
+          <HelpHint label="런타임 정책">
+            {CLIENT_FIELD_HELP.runtimePolicy}
+          </HelpHint>
+        </div>
         <p className="panel-hint">{CLIENT_FIELD_HELP.runtimePolicy}</p>
         {policyErr ? (
           <SectionError

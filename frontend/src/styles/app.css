@@ -403,6 +403,19 @@ th {
   flex-wrap: wrap;
   align-items: center;
   gap: 0.25rem;
+  /* div wrapper: valid host for HelpHint details in th/dt/toolbars */
+}
+
+.detail-panel__heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  margin-bottom: 0.35rem;
+}
+
+.detail-panel__heading h2 {
+  margin: 0;
 }
 
 .term-label__text {

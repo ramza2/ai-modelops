@@ -114,11 +114,13 @@ export const CLIENT_FIELD_HELP = {
   clientKey:
     'Gateway가 호출을 구분할 때 쓰는 식별자입니다(X-AI-Client). 직원 로그인 계정이 아니라, AI 모델을 호출하는 업무 서비스의 키입니다.',
   isActive:
-    '활성(ACTIVE)은 이 사용 시스템이 레지스트리에 사용 가능으로 등록된 상태입니다. 비활성(INACTIVE)이어도 과거 기록이 남을 수 있습니다. 실제 API 호출 가능 여부는 Endpoint Alias·배포 상태·Gateway 정책에 따라 달라지며, 이 값만으로 추론이 된다고 보지 마세요.',
+    '활성(ACTIVE)은 레지스트리에서 사용 가능으로 표시된 상태입니다. 비활성(INACTIVE)은 Gateway가 Chat/Embeddings 추론 요청을 직접 차단하는 스위치가 아닙니다. 비활성이면 (1) Gateway 정책 스냅샷에 이 키의 Runtime Policy가 올라가지 않아 클라이언트별 토큰·동시성·priority 제한이 적용되지 않고, (2) 호출 로그의 client_app_id 연결도 활성 키에만 이뤄지며 raw_client_key는 그대로 남을 수 있습니다. 실제 추론 가능 여부는 Endpoint Alias·배포·traffic 상태에 따릅니다.',
   displayName: '관리 화면에서 보이는 서비스 이름입니다.',
   description: '운영자가 적어 둔 설명입니다. 비어 있을 수 있습니다.',
-  createdAt: '이 사용 시스템이 처음 등록된 시각(UTC)입니다.',
-  updatedAt: '메타데이터가 마지막으로 바뀐 시각(UTC)입니다.',
+  createdAt:
+    '이 사용 시스템이 처음 등록된 시각입니다. API 원본은 UTC(ISO-8601)이고, 이 화면의 값은 브라우저 현지 시간으로 표시합니다.',
+  updatedAt:
+    '메타데이터가 마지막으로 바뀐 시각입니다. API 원본은 UTC(ISO-8601)이고, 이 화면의 값은 브라우저 현지 시간으로 표시합니다.',
   runtimePolicy:
     'Gateway가 적용할 수 있는 런타임 제한입니다. 정책 행이 없으면(policy = null) 별도 제한 행이 없는 것입니다. 제한 값이 null이면 해당 항목은 제한 없음(unrestricted)입니다.',
   policyNull:
