@@ -5,11 +5,13 @@ import { listClients } from '../api/clients'
 import type { ClientApp } from '../api/types'
 import { ActiveBadge } from '../components/ActiveBadge'
 import { AppShell } from '../components/AppShell'
+import { HelpHint, TermLabel } from '../components/HelpHint'
 import { LoadingBlock } from '../components/LoadingBlock'
 import { Pagination } from '../components/Pagination'
 import { SectionError } from '../components/SectionError'
 import { formatApiDateTime } from '../utils/date'
 import { parsePositivePage } from '../utils/query'
+import { CLIENT_FIELD_HELP, userFacingLoadError } from '../utils/uiLabels'
 
 const PAGE_SIZE = 20
 
@@ -129,7 +131,7 @@ export function ClientsPage() {
             ? err.message
             : err instanceof Error
               ? err.message
-              : 'Client 목록을 불러오지 못했습니다.'
+              : '목록을 불러오지 못했습니다.'
         setError(message)
         if (!hasLoadedRef.current) setItems(null)
       } finally {
@@ -157,15 +159,25 @@ export function ClientsPage() {
   const hasFilters = Boolean(q.trim()) || isActive !== null
   const emptyFiltered = items !== null && items.length === 0 && hasFilters
   const emptyDatabase = items !== null && items.length === 0 && !hasFilters
+  const listError = error
+    ? userFacingLoadError('AI 사용 시스템 목록', error, {
+        keptPrevious: items !== null,
+      })
+    : null
 
   return (
     <AppShell
-      title="Clients"
-      description="ClientApp registry와 Runtime Policy 조회 전용입니다. Client 생성/수정/Policy PUT는 현재 Backend가 Idempotency-Key를 소비하지 않아 C7 UI에서 제공하지 않습니다."
+      title="AI 사용 시스템"
+      description="여기의 ‘사용 시스템’은 직원 계정이 아니라, AI 모델을 호출하는 업무 서비스입니다. 조회 전용이며 추가·수정·정책 변경 UI는 제공하지 않습니다."
       onRefresh={() => void load('refresh')}
       refreshing={refreshing}
       lastUpdated={lastUpdated}
     >
+      <p className="panel-hint" role="note">
+        {CLIENT_FIELD_HELP.readOnly} 비활성(INACTIVE)은 Gateway 추론을 직접
+        막는 스위치가 아닙니다. 자세한 의미는 「등록 상태」 도움말을 보세요.
+      </p>
+
       <form className="toolbar toolbar--wrap" onSubmit={onSearch}>
         <label className="toolbar__field" htmlFor="client-q">
           <span>검색</span>
@@ -174,11 +186,17 @@ export function ClientsPage() {
             type="search"
             value={draftQ}
             onChange={(e) => setDraftQ(e.target.value)}
-            placeholder="client_key / display_name"
+            placeholder="서비스 키 / 표시 이름"
           />
         </label>
-        <label className="toolbar__field" htmlFor="client-active">
-          <span>Active</span>
+        <div className="toolbar__field">
+          <div className="toolbar__field-head">
+            <label htmlFor="client-active">
+              등록 상태{' '}
+              <span className="term-label__api">(is_active)</span>
+            </label>
+            <HelpHint label="등록 상태">{CLIENT_FIELD_HELP.isActive}</HelpHint>
+          </div>
           <select
             id="client-active"
             value={activeLabel(isActive)}
@@ -189,11 +207,11 @@ export function ClientsPage() {
               syncUrl({ q, isActive: next, page: 1 })
             }}
           >
-            <option value="ALL">ALL</option>
-            <option value="ACTIVE">ACTIVE</option>
-            <option value="INACTIVE">INACTIVE</option>
+            <option value="ALL">전체</option>
+            <option value="ACTIVE">활성 (ACTIVE)</option>
+            <option value="INACTIVE">비활성 (INACTIVE)</option>
           </select>
-        </label>
+        </div>
         <div className="toolbar__actions">
           <button type="submit" className="btn">
             검색
@@ -201,19 +219,16 @@ export function ClientsPage() {
         </div>
       </form>
 
-      {error ? (
+      {listError ? (
         <SectionError
-          title={items ? 'Client 목록 새로고침 실패' : 'Client 목록 오류'}
-          message={
-            items
-              ? `기존 Client 목록을 표시하고 있습니다. 새로고침 실패: ${error}`
-              : error
-          }
+          title={listError.title}
+          message={listError.message}
+          action={listError.action}
         />
       ) : null}
 
       {loading && items === null ? (
-        <LoadingBlock label="Client 목록을 불러오는 중…" />
+        <LoadingBlock label="AI 사용 시스템 목록을 불러오는 중…" />
       ) : null}
 
       {items !== null && items.length > 0 ? (
@@ -222,10 +237,30 @@ export function ClientsPage() {
             <table className="data-table">
               <thead>
                 <tr>
-                  <th scope="col">Client</th>
-                  <th scope="col">Key</th>
-                  <th scope="col">Active</th>
-                  <th scope="col">Updated</th>
+                  <th scope="col">
+                    <TermLabel text="표시 이름" apiTerm="display_name" />
+                  </th>
+                  <th scope="col">
+                    <TermLabel
+                      text="서비스 키"
+                      apiTerm="client_key"
+                      help={CLIENT_FIELD_HELP.clientKey}
+                    />
+                  </th>
+                  <th scope="col">
+                    <TermLabel
+                      text="등록 상태"
+                      apiTerm="is_active"
+                      help={CLIENT_FIELD_HELP.isActive}
+                    />
+                  </th>
+                  <th scope="col">
+                    <TermLabel
+                      text="수정 시각"
+                      apiTerm="updated_at"
+                      help={CLIENT_FIELD_HELP.updatedAt}
+                    />
+                  </th>
                 </tr>
               </thead>
               <tbody>
@@ -263,12 +298,12 @@ export function ClientsPage() {
 
       {emptyDatabase ? (
         <p className="empty-state" role="status">
-          등록된 Client가 없습니다.
+          등록된 AI 사용 시스템이 없습니다.
         </p>
       ) : null}
       {emptyFiltered ? (
         <p className="empty-state" role="status">
-          필터 조건에 해당하는 Client가 없습니다.
+          검색·필터 조건에 해당하는 사용 시스템이 없습니다.
         </p>
       ) : null}
     </AppShell>

@@ -93,13 +93,16 @@ describe('ClientDetailPage', () => {
     expect(
       await screen.findByRole('heading', { level: 2, name: 'ALZI' }),
     ).toBeInTheDocument()
-    expect(screen.getByText('unrestricted')).toBeInTheDocument()
+    expect(screen.getAllByText(/제한 없음/).length).toBeGreaterThan(0)
+    expect(screen.getAllByText(/null \(unrestricted\)/).length).toBeGreaterThan(
+      0,
+    )
     expect(
-      screen.getByText(/smaller = higher priority intent/),
-    ).toBeInTheDocument()
+      screen.getAllByText(/숫자가 작을수록 높은 우선순위/).length,
+    ).toBeGreaterThan(0)
     expect(
-      screen.getByText(/항상 Gateway에서 전달된다고 단정하지/),
-    ).toBeInTheDocument()
+      screen.getAllByText(/항상 모델 런타임으로 전달된다고 단정하지/).length,
+    ).toBeGreaterThan(0)
     expect(screen.queryByRole('button', { name: /create|save|update|put/i })).toBeNull()
     const methods = fetchSpy.mock.calls.map(
       (c) => (c[1] as RequestInit | undefined)?.method || 'GET',
@@ -115,7 +118,7 @@ describe('ClientDetailPage', () => {
     )
     renderDetail()
     expect(
-      await screen.findByText(/Runtime Policy 행이 없습니다/),
+      await screen.findByText(/Runtime Policy 행이 없습니다|정책 행이 없습니다/),
     ).toBeInTheDocument()
   })
 
@@ -159,7 +162,7 @@ describe('ClientDetailPage', () => {
     ).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: '새로고침' }))
     expect(
-      await screen.findByText('Client를 찾을 수 없습니다.'),
+      await screen.findByText(/사용 시스템을 찾을 수 없습니다/),
     ).toBeInTheDocument()
     expect(
       screen.queryByRole('heading', { level: 2, name: 'ALZI' }),

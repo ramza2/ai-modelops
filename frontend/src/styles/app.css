@@ -155,15 +155,30 @@ a:focus-visible {
 }
 
 .nav-link {
-  display: block;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
   padding: 0.55rem 0.75rem;
   border-radius: 6px;
   color: var(--text);
+  text-decoration: none;
 }
 
 .nav-link--active {
   background: var(--surface-2);
   font-weight: 600;
+}
+
+.nav-link__label {
+  font-size: 0.95rem;
+  line-height: 1.3;
+}
+
+.nav-link__desc {
+  font-size: 0.75rem;
+  font-weight: 400;
+  line-height: 1.35;
+  color: var(--muted);
 }
 
 .nav-section {
@@ -373,8 +388,109 @@ th {
 }
 
 .section-error__message {
-  margin: 0.35rem 0 0.6rem;
+  margin: 0.35rem 0 0;
   color: var(--muted);
+}
+
+.section-error__action {
+  margin: 0.35rem 0 0.6rem;
+  color: var(--text);
+  font-size: 0.9rem;
+}
+
+.term-label {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem;
+  /* div wrapper: valid host for HelpHint details in th/dt/toolbars */
+}
+
+.detail-panel__heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  margin-bottom: 0.35rem;
+}
+
+.detail-panel__heading h2 {
+  margin: 0;
+}
+
+.term-label__text {
+  font-weight: inherit;
+}
+
+.term-label__api {
+  color: var(--muted);
+  font-size: 0.85em;
+  font-weight: 400;
+}
+
+.help-hint {
+  display: inline;
+  position: relative;
+}
+
+.help-hint__summary {
+  list-style: none;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.15rem;
+  height: 1.15rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 0.7rem;
+  font-weight: 700;
+  line-height: 1;
+  vertical-align: middle;
+}
+
+.help-hint__summary::-webkit-details-marker {
+  display: none;
+}
+
+.help-hint__summary:focus-visible {
+  outline: 2px solid var(--accent, #2563eb);
+  outline-offset: 2px;
+}
+
+.help-hint__sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.help-hint__body {
+  margin-top: 0.35rem;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 0.85rem;
+  font-weight: 400;
+  line-height: 1.45;
+  max-width: 28rem;
+}
+
+.toolbar__field-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+  margin-bottom: 0.25rem;
 }
 
 .loading-block {
