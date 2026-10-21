@@ -23,6 +23,7 @@ import type {
 } from '../api/types'
 import { ActiveBadge } from '../components/ActiveBadge'
 import { AppShell } from '../components/AppShell'
+import { HelpHint, TermLabel } from '../components/HelpHint'
 import { LoadingBlock } from '../components/LoadingBlock'
 import { SectionError } from '../components/SectionError'
 import { StatusBadge } from '../components/StatusBadge'
@@ -36,6 +37,7 @@ import {
   OPERATION_POLL_MS,
   operationPollConfig,
 } from '../utils/operationLifecycle'
+import { ENDPOINT_FIELD_HELP } from '../utils/uiLabels'
 
 const SWITCH_OPERATION_QUERY = 'switch_operation_id'
 
@@ -890,18 +892,18 @@ export function EndpointDetailPage() {
   if (notFound) {
     return (
       <AppShell
-        title="Endpoints"
-        description="Endpoint 상세"
+        title="API 연결 관리"
+        description="API 연결 상세"
         onRefresh={() => void load('refresh')}
         refreshing={false}
         lastUpdated={lastUpdated}
       >
         <Link className="back-link" to="/endpoints">
-          ← Endpoints
+          ← API 연결 관리
         </Link>
         <SectionError
-          title="Endpoint를 찾을 수 없습니다."
-          message="요청한 Endpoint가 없거나 삭제되었습니다."
+          title="API 연결을 찾을 수 없습니다."
+          message="요청한 Endpoint Alias가 없거나 삭제되었습니다."
         />
       </AppShell>
     )
@@ -924,8 +926,8 @@ export function EndpointDetailPage() {
 
   return (
     <AppShell
-      title={endpoint?.display_name ?? endpoint?.alias ?? 'Endpoint 상세'}
-      description="Endpoint Alias, ACTIVE Route, Route 이력과 Preflight preview 기반 HOT/COLD Switch enqueue입니다. Preview는 분석 전용이며 Worker가 실행 직전 fresh Preflight를 다시 수행합니다."
+      title={endpoint?.display_name ?? endpoint?.alias ?? 'API 연결 상세'}
+      description="API 별칭·현재 활성 연결·Route 이력과 Preflight Preview 기반 HOT/COLD Switch enqueue입니다. Preview는 참고용이며 Worker가 실행 직전 자원 상태를 다시 검증합니다."
       onRefresh={() => {
         void (async () => {
           const epId = endpointId
@@ -1005,16 +1007,46 @@ export function EndpointDetailPage() {
       refreshDisabled={busy || previewing}
     >
       <Link className="back-link" to="/endpoints">
-        ← Endpoints
+        ← API 연결 관리
       </Link>
 
+      <p className="panel-hint" role="note">
+        {ENDPOINT_FIELD_HELP.overview}
+      </p>
+      <details className="help-glossary">
+        <summary>용어 및 상태 안내</summary>
+        <div className="help-glossary__items">
+          <HelpHint showTopic label="API 별칭 vs Served Model Name">
+            {ENDPOINT_FIELD_HELP.alias}
+          </HelpHint>
+          <HelpHint showTopic label="사용 설정 vs 요청 처리">
+            {ENDPOINT_FIELD_HELP.enabled} {ENDPOINT_FIELD_HELP.traffic}
+          </HelpHint>
+          <HelpHint showTopic label="현재 활성 연결">
+            {ENDPOINT_FIELD_HELP.activeRoute}
+          </HelpHint>
+          <HelpHint showTopic label="Preflight Preview">
+            {ENDPOINT_FIELD_HELP.preflight}
+          </HelpHint>
+          <HelpHint showTopic label="HOT Switch">
+            {ENDPOINT_FIELD_HELP.hotSwitch}
+          </HelpHint>
+          <HelpHint showTopic label="COLD Switch">
+            {ENDPOINT_FIELD_HELP.coldSwitch}
+          </HelpHint>
+          <HelpHint showTopic label="연결 해제 (Unpublish)">
+            {ENDPOINT_FIELD_HELP.unpublish}
+          </HelpHint>
+        </div>
+      </details>
+
       {loading && !endpoint ? (
-        <LoadingBlock label="Endpoint를 불러오는 중…" />
+        <LoadingBlock label="API 연결을 불러오는 중…" />
       ) : null}
 
       {error && !notFound ? (
         <SectionError
-          title={endpoint ? 'Endpoint 새로고침 실패' : 'Endpoint 오류'}
+          title={endpoint ? 'API 연결 새로고침 실패' : 'API 연결 오류'}
           message={
             endpoint
               ? `기존 Endpoint 정보를 표시하고 있습니다. 새로고침 실패: ${error}`
@@ -1035,30 +1067,48 @@ export function EndpointDetailPage() {
             </div>
             <dl className="meta-grid">
               <div>
-                <dt>Alias</dt>
+                <dt>
+                  <TermLabel
+                    text="API 별칭"
+                    apiTerm="Alias"
+                    help={ENDPOINT_FIELD_HELP.alias}
+                  />
+                </dt>
                 <dd className="mono">{endpoint.alias}</dd>
               </div>
               <div>
-                <dt>API Type</dt>
+                <dt>
+                  <TermLabel text="API 유형" apiTerm="API Type" />
+                </dt>
                 <dd>{endpoint.api_type || '—'}</dd>
               </div>
               <div>
-                <dt>Traffic State</dt>
+                <dt>
+                  <TermLabel
+                    text="요청 처리 상태"
+                    apiTerm="Traffic"
+                    help={ENDPOINT_FIELD_HELP.traffic}
+                  />
+                </dt>
                 <dd>
                   <StatusBadge status={endpoint.traffic_state} />
                 </dd>
               </div>
               <div>
-                <dt>Created</dt>
+                <dt>
+                  <TermLabel text="생성 시각" apiTerm="Created" />
+                </dt>
                 <dd>{formatApiDateTime(endpoint.created_at)}</dd>
               </div>
               <div>
-                <dt>Updated</dt>
+                <dt>
+                  <TermLabel text="수정 시각" apiTerm="Updated" />
+                </dt>
                 <dd>{formatApiDateTime(endpoint.updated_at)}</dd>
               </div>
             </dl>
             <div className="description-block">
-              <h3 className="section-subheading">Description</h3>
+              <h3 className="section-subheading">설명 (Description)</h3>
               <p className="description-text">
                 {endpoint.description?.trim() ? endpoint.description : '—'}
               </p>
@@ -1069,16 +1119,30 @@ export function EndpointDetailPage() {
             className="detail-panel"
             aria-labelledby="active-route-heading"
           >
-            <h2 id="active-route-heading">ACTIVE Route</h2>
+            <h2 id="active-route-heading">
+              현재 활성 연결 (ACTIVE Route)
+            </h2>
             {active ? (
               <>
                 <dl className="meta-grid">
                   <div>
-                    <dt>Alias</dt>
+                    <dt>
+                      <TermLabel
+                        text="API 별칭"
+                        apiTerm="Alias"
+                        help={ENDPOINT_FIELD_HELP.alias}
+                      />
+                    </dt>
                     <dd className="mono">{endpoint.alias}</dd>
                   </div>
                   <div>
-                    <dt>Deployment</dt>
+                    <dt>
+                      <TermLabel
+                        text="연결된 모델 배포"
+                        apiTerm="Deployment"
+                        help={ENDPOINT_FIELD_HELP.activeRoute}
+                      />
+                    </dt>
                     <dd>
                       <Link
                         className="table-link"
@@ -1090,7 +1154,9 @@ export function EndpointDetailPage() {
                     </dd>
                   </div>
                   <div>
-                    <dt>Runtime</dt>
+                    <dt>
+                      <TermLabel text="실행 상태" apiTerm="Runtime" />
+                    </dt>
                     <dd>
                       <StatusBadge
                         status={active.deployment?.runtime_status}
@@ -1098,19 +1164,29 @@ export function EndpointDetailPage() {
                     </dd>
                   </div>
                   <div>
-                    <dt>Health</dt>
+                    <dt>
+                      <TermLabel text="헬스" apiTerm="Health" />
+                    </dt>
                     <dd>
                       <StatusBadge status={active.deployment?.health_status} />
                     </dd>
                   </div>
                   <div>
-                    <dt>Rewrite Model Name</dt>
+                    <dt>
+                      <TermLabel
+                        text="Served Model Name"
+                        apiTerm="Rewrite"
+                        help={ENDPOINT_FIELD_HELP.alias}
+                      />
+                    </dt>
                     <dd className="mono">
                       {active.rewrite_model_name || '—'}
                     </dd>
                   </div>
                   <div>
-                    <dt>Activated</dt>
+                    <dt>
+                      <TermLabel text="활성화 시각" apiTerm="Activated" />
+                    </dt>
                     <dd>{formatApiDateTime(active.activated_at)}</dd>
                   </div>
                 </dl>
@@ -1130,20 +1206,19 @@ export function EndpointDetailPage() {
                       }
                       onClick={openUnpublishDialog}
                     >
-                      Unpublish
+                      연결 해제 (Unpublish)
                     </button>
                   </div>
                 </div>
-                <p className="panel-hint">
-                  Unpublish는 Gateway Alias 호출 경로(ACTIVE Route)만
-                  해제합니다. Deployment Stop / Remove / Cache Purge와는 다른
-                  작업입니다. Unpublished ≠ Stopped ≠ Removed ≠ Retired ≠
-                  Purged ≠ Archived.
+                <p className="panel-hint panel-hint--warn" role="note">
+                  {ENDPOINT_FIELD_HELP.unpublish} Unpublished ≠ Stopped ≠
+                  Removed ≠ Retired ≠ Purged ≠ Archived.
                 </p>
               </>
             ) : (
               <p className="empty-state" role="status">
-                ACTIVE Route가 없습니다. Switch workflow를 사용할 수 없습니다.
+                현재 활성 연결(ACTIVE Route)이 없습니다. Switch workflow를
+                사용할 수 없습니다.
               </p>
             )}
 
@@ -1221,12 +1296,17 @@ export function EndpointDetailPage() {
             className="detail-panel"
             aria-labelledby="switch-heading"
           >
-            <h2 id="switch-heading">Switch (HOT / COLD)</h2>
+            <h2 id="switch-heading">모델 전환 Switch (HOT / COLD)</h2>
+            <p className="panel-hint" role="note">
+              {ENDPOINT_FIELD_HELP.preflight}
+            </p>
+            <p className="panel-hint" role="note">
+              {ENDPOINT_FIELD_HELP.hotSwitch} {ENDPOINT_FIELD_HELP.coldSwitch}
+            </p>
             <p className="panel-hint">
-              Preflight preview는 분석 전용입니다 (`preview_only`). 합산 VRAM으로
-              가능 여부를 추론하지 말고 GPU별 결과를 확인하세요. Switch enqueue
-              후에도 Worker가 fresh Preflight를 다시 수행합니다
-              (`worker_must_revalidate`).
+              Preview 응답의 `preview_only` / `worker_must_revalidate` 값을
+              확인하세요. 합산 VRAM으로 가능 여부를 추론하지 말고 GPU별 결과를
+              보세요.
             </p>
 
             {switchTrackingUnresolved ? (
@@ -1292,7 +1372,7 @@ export function EndpointDetailPage() {
 
                 <div className="toolbar toolbar--wrap">
                   <label className="toolbar__field" htmlFor="switch-target">
-                    <span>Target Deployment</span>
+                    <span>변경 대상 Target Deployment</span>
                     <select
                       id="switch-target"
                       value={targetId}
@@ -1315,7 +1395,9 @@ export function EndpointDetailPage() {
                       aria-busy={previewing}
                       onClick={() => void runPreview()}
                     >
-                      {previewing ? 'Preview 중…' : 'Preflight Preview'}
+                      {previewing
+                        ? 'Preview 중…'
+                        : '사전 검사 (Preflight Preview)'}
                     </button>
                   </div>
                 </div>
@@ -1329,40 +1411,74 @@ export function EndpointDetailPage() {
 
                 {preview ? (
                   <div className="preflight-result">
-                    <h3 className="section-subheading">Preflight Preview</h3>
+                    <h3 className="section-subheading">
+                      사전 검사 결과 (Preflight Preview)
+                    </h3>
+                    <p className="panel-hint panel-hint--warn" role="note">
+                      {ENDPOINT_FIELD_HELP.preflight}
+                    </p>
                     <dl className="meta-grid">
                       <div>
-                        <dt>Result</dt>
+                        <dt>
+                          <TermLabel text="판정" apiTerm="Result" />
+                        </dt>
                         <dd>
                           <StatusBadge status={preview.result} />
                         </dd>
                       </div>
                       <div>
-                        <dt>Required Peak VRAM</dt>
+                        <dt>
+                          <TermLabel
+                            text="필요 Peak VRAM"
+                            apiTerm="Required Peak VRAM"
+                          />
+                        </dt>
                         <dd>{formatMemoryMb(preview.required_peak_vram_mb)}</dd>
                       </div>
                       <div>
-                        <dt>Available Hot VRAM</dt>
+                        <dt>
+                          <TermLabel
+                            text="Hot 가용 VRAM"
+                            apiTerm="Available Hot VRAM"
+                          />
+                        </dt>
                         <dd>
                           {formatMemoryMb(preview.available_hot_vram_mb)}
                         </dd>
                       </div>
                       <div>
-                        <dt>Reclaimable VRAM</dt>
+                        <dt>
+                          <TermLabel
+                            text="회수 가능 VRAM"
+                            apiTerm="Reclaimable VRAM"
+                          />
+                        </dt>
                         <dd>{formatMemoryMb(preview.reclaimable_vram_mb)}</dd>
                       </div>
                       <div>
-                        <dt>After Reclaim</dt>
+                        <dt>
+                          <TermLabel
+                            text="회수 후 가용"
+                            apiTerm="After Reclaim"
+                          />
+                        </dt>
                         <dd>
                           {formatMemoryMb(preview.available_after_reclaim_mb)}
                         </dd>
                       </div>
                       <div>
-                        <dt>Safety Margin</dt>
+                        <dt>
+                          <TermLabel
+                            text="안전 여유"
+                            apiTerm="Safety Margin"
+                          />
+                        </dt>
                         <dd>{formatMemoryMb(preview.safety_margin_mb)}</dd>
                       </div>
                       <div>
-                        <dt>Evaluated</dt>
+                        <dt>
+                          <TermLabel text="평가 시각" apiTerm="Evaluated" />
+                        </dt>
                         <dd>{formatApiDateTime(preview.evaluated_at)}</dd>
                       </div>
                       <div>
@@ -1377,7 +1493,7 @@ export function EndpointDetailPage() {
                       </div>
                     </dl>
 
-                    <h3 className="section-subheading">GPU Results</h3>
+                    <h3 className="section-subheading">GPU별 결과 (GPU Results)</h3>
                     <p className="panel-hint">
                       GPU별 판정입니다. 부모 aggregate 합계만으로 HOT/COLD 가능
                       여부를 결정하지 마세요.
@@ -1438,7 +1554,7 @@ export function EndpointDetailPage() {
                           className="toolbar__field"
                           htmlFor="switch-strategy"
                         >
-                          <span>Strategy</span>
+                          <span>전환 방식 Strategy</span>
                           <select
                             id="switch-strategy"
                             value={strategy}
@@ -1460,7 +1576,7 @@ export function EndpointDetailPage() {
                           className="toolbar__field"
                           htmlFor="switch-reason"
                         >
-                          <span>Reason (optional)</span>
+                          <span>사유 Reason (optional)</span>
                           <input
                             id="switch-reason"
                             type="text"
@@ -1478,7 +1594,9 @@ export function EndpointDetailPage() {
                             aria-busy={switching}
                             onClick={() => void runSwitch()}
                           >
-                            {switching ? 'Enqueue 중…' : 'Switch Enqueue'}
+                            {switching
+                              ? 'Enqueue 중…'
+                              : '전환 실행 (Switch Enqueue)'}
                           </button>
                         </div>
                       </div>
@@ -1501,7 +1619,9 @@ export function EndpointDetailPage() {
                 role="status"
                 data-testid="switch-operation-result"
               >
-                <h3 className="section-subheading">추적 중 Switch Operation</h3>
+                <h3 className="section-subheading">
+                  추적 중 Switch Operation
+                </h3>
                 {isActiveOperationStatus(lastOperation.status) ? (
                   <p className="panel-hint">
                     진행 중 — Operation을 {OPERATION_POLL_MS / 1000}초마다 자동
@@ -1512,12 +1632,14 @@ export function EndpointDetailPage() {
                 {isTerminalOperationStatus(lastOperation.status) ? (
                   <p className="panel-hint" data-testid="switch-op-terminal">
                     Operation이 {lastOperation.status} 상태입니다. Route 변경
-                    여부는 위 ACTIVE Route(GET Endpoint)를 확인하세요.
+                    여부는 위 현재 활성 연결(GET Endpoint)을 확인하세요.
                   </p>
                 ) : null}
                 <dl className="meta-grid">
                   <div>
-                    <dt>Operation ID</dt>
+                    <dt>
+                      <TermLabel text="작업 ID" apiTerm="Operation ID" />
+                    </dt>
                     <dd>
                       <Link
                         className="table-link mono"
@@ -1529,29 +1651,41 @@ export function EndpointDetailPage() {
                     </dd>
                   </div>
                   <div>
-                    <dt>Type</dt>
+                    <dt>
+                      <TermLabel text="작업 유형" apiTerm="Type" />
+                    </dt>
                     <dd>{lastOperation.operation_type}</dd>
                   </div>
                   <div>
-                    <dt>Strategy</dt>
+                    <dt>
+                      <TermLabel text="전환 방식" apiTerm="Strategy" />
+                    </dt>
                     <dd>{lastOperation.switch_strategy || '—'}</dd>
                   </div>
                   <div>
-                    <dt>Status</dt>
+                    <dt>
+                      <TermLabel text="진행 상태" apiTerm="Status" />
+                    </dt>
                     <dd>
                       <StatusBadge status={lastOperation.status} />
                     </dd>
                   </div>
                   <div>
-                    <dt>Current Step</dt>
+                    <dt>
+                      <TermLabel text="현재 작업 단계" apiTerm="Current Step" />
+                    </dt>
                     <dd>{lastOperation.current_step || '—'}</dd>
                   </div>
                   <div>
-                    <dt>Error</dt>
+                    <dt>
+                      <TermLabel text="오류 정보" apiTerm="Error" />
+                    </dt>
                     <dd>{formatOperationError(lastOperation.error)}</dd>
                   </div>
                   <div>
-                    <dt>Created</dt>
+                    <dt>
+                      <TermLabel text="생성 시각" apiTerm="Created" />
+                    </dt>
                     <dd>{formatApiDateTime(lastOperation.created_at)}</dd>
                   </div>
                 </dl>
@@ -1563,7 +1697,7 @@ export function EndpointDetailPage() {
             className="detail-panel"
             aria-labelledby="route-history-heading"
           >
-            <h2 id="route-history-heading">Route History</h2>
+            <h2 id="route-history-heading">연결 이력 (Route History)</h2>
             {routesError ? (
               <SectionError title="Route 이력 오류" message={routesError} />
             ) : null}
@@ -1629,34 +1763,32 @@ export function EndpointDetailPage() {
           data-testid="unpublish-dialog"
         >
           <div className="modal-card">
-            <h2 id="unpublish-dialog-title">Unpublish 확인</h2>
+            <h2 id="unpublish-dialog-title">연결 해제 (Unpublish) 확인</h2>
             <p>
               Alias <strong className="mono">{endpoint.alias}</strong> 의
-              ACTIVE Route를 해제합니다.
+              현재 활성 연결(ACTIVE Route)을 해제합니다.
             </p>
             <dl className="meta-grid">
               <div>
-                <dt>Alias</dt>
+                <dt>API 별칭 (Alias)</dt>
                 <dd className="mono">{endpoint.alias}</dd>
               </div>
               <div>
-                <dt>Deployment</dt>
+                <dt>모델 배포 (Deployment)</dt>
                 <dd className="mono">
                   {endpoint.active_route.deployment?.name ??
                     shortId(endpoint.active_route.deployment_id)}
                 </dd>
               </div>
               <div>
-                <dt>Rewrite Model Name</dt>
+                <dt>Served Model Name (Rewrite)</dt>
                 <dd className="mono">
                   {endpoint.active_route.rewrite_model_name || '—'}
                 </dd>
               </div>
             </dl>
             <p className="secondary-text">
-              경고: Unpublish는 Gateway에서 이 Alias로의 호출 경로를
-              해제합니다. Deployment를 Stop/Remove 하거나 Cache를 Purge하지
-              않습니다.
+              경고: {ENDPOINT_FIELD_HELP.unpublish}
             </p>
             <label className="toolbar__field" htmlFor="unpublish-alias-confirm">
               <span>확인을 위해 현재 Alias를 입력하세요</span>
@@ -1698,7 +1830,9 @@ export function EndpointDetailPage() {
                 aria-busy={unpublishing}
                 onClick={() => void confirmUnpublish()}
               >
-                {unpublishing ? 'Unpublish 중…' : 'Unpublish 실행'}
+                {unpublishing
+                  ? 'Unpublish 중…'
+                  : '연결 해제 실행 (Unpublish)'}
               </button>
             </div>
           </div>

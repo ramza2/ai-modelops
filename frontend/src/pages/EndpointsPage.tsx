@@ -5,12 +5,17 @@ import { listEndpoints } from '../api/endpoints'
 import type { Endpoint } from '../api/types'
 import { ActiveBadge } from '../components/ActiveBadge'
 import { AppShell } from '../components/AppShell'
+import { HelpHint, TermLabel } from '../components/HelpHint'
 import { LoadingBlock } from '../components/LoadingBlock'
 import { Pagination } from '../components/Pagination'
 import { SectionError } from '../components/SectionError'
 import { StatusBadge } from '../components/StatusBadge'
 import { formatApiDateTime, shortId } from '../utils/date'
 import { parsePositivePage } from '../utils/query'
+import {
+  ENDPOINT_FIELD_HELP,
+  userFacingLoadError,
+} from '../utils/uiLabels'
 
 const PAGE_SIZE = 20
 const KNOWN_API_TYPES = new Set(['CHAT', 'EMBEDDING'])
@@ -189,7 +194,7 @@ export function EndpointsPage() {
             ? err.message
             : err instanceof Error
               ? err.message
-              : 'Endpoint 목록을 불러오지 못했습니다.'
+              : 'API 연결 목록을 불러오지 못했습니다.'
         setError(message)
         if (!hasLoadedRef.current) setItems(null)
       } finally {
@@ -226,15 +231,41 @@ export function EndpointsPage() {
     q.trim() !== ''
   const emptyFiltered = items !== null && items.length === 0 && hasFilters
   const emptyDatabase = items !== null && items.length === 0 && !hasFilters
+  const listError = error
+    ? userFacingLoadError('API 연결 목록', error, {
+        keptPrevious: items !== null,
+      })
+    : null
 
   return (
     <AppShell
-      title="Endpoints"
-      description="Endpoint Alias와 ACTIVE Route를 조회합니다. HOT/COLD Switch는 상세 페이지에서 Preflight preview 후 enqueue합니다."
+      title="API 연결 관리"
+      description="업무 시스템이 Gateway로 호출하는 API 별칭과 현재 활성 연결을 조회합니다. HOT/COLD Switch는 상세에서 Preflight Preview 후 enqueue합니다."
       onRefresh={() => void load('refresh')}
       refreshing={refreshing}
       lastUpdated={lastUpdated}
     >
+      <p className="panel-hint" role="note">
+        {ENDPOINT_FIELD_HELP.overview}
+      </p>
+      <details className="help-glossary">
+        <summary>용어 및 상태 안내</summary>
+        <div className="help-glossary__items">
+          <HelpHint showTopic label="API 별칭">
+            {ENDPOINT_FIELD_HELP.alias}
+          </HelpHint>
+          <HelpHint showTopic label="사용 설정">
+            {ENDPOINT_FIELD_HELP.enabled}
+          </HelpHint>
+          <HelpHint showTopic label="요청 처리 상태">
+            {ENDPOINT_FIELD_HELP.traffic}
+          </HelpHint>
+          <HelpHint showTopic label="현재 활성 연결">
+            {ENDPOINT_FIELD_HELP.activeRoute}
+          </HelpHint>
+        </div>
+      </details>
+
       <form className="toolbar toolbar--wrap" onSubmit={onSubmitSearch}>
         <label className="toolbar__field" htmlFor="endpoint-search-q">
           <span>검색</span>
@@ -243,11 +274,11 @@ export function EndpointsPage() {
             type="search"
             value={draftQ}
             onChange={(e) => setDraftQ(e.target.value)}
-            placeholder="alias / display name"
+            placeholder="별칭 / 표시 이름"
           />
         </label>
         <label className="toolbar__field" htmlFor="endpoint-api-type">
-          <span>API Type</span>
+          <span>API 유형 (API Type)</span>
           <select
             id="endpoint-api-type"
             value={apiType ?? 'ALL'}
@@ -262,13 +293,16 @@ export function EndpointsPage() {
               })
             }}
           >
-            <option value="ALL">ALL</option>
+            <option value="ALL">전체</option>
             <option value="CHAT">CHAT</option>
             <option value="EMBEDDING">EMBEDDING</option>
           </select>
         </label>
-        <label className="toolbar__field" htmlFor="endpoint-enabled">
-          <span>Enabled</span>
+        <div className="toolbar__field">
+          <div className="toolbar__field-head">
+            <label htmlFor="endpoint-enabled">사용 설정 (Enabled)</label>
+            <HelpHint label="사용 설정">{ENDPOINT_FIELD_HELP.enabled}</HelpHint>
+          </div>
           <select
             id="endpoint-enabled"
             value={enabledLabel(isEnabled)}
@@ -285,13 +319,18 @@ export function EndpointsPage() {
               })
             }}
           >
-            <option value="ALL">ALL</option>
-            <option value="ENABLED">ENABLED</option>
-            <option value="DISABLED">DISABLED</option>
+            <option value="ALL">전체</option>
+            <option value="ENABLED">사용 (ENABLED)</option>
+            <option value="DISABLED">미사용 (DISABLED)</option>
           </select>
-        </label>
-        <label className="toolbar__field" htmlFor="endpoint-traffic">
-          <span>Traffic</span>
+        </div>
+        <div className="toolbar__field">
+          <div className="toolbar__field-head">
+            <label htmlFor="endpoint-traffic">요청 처리 상태 (Traffic)</label>
+            <HelpHint label="요청 처리 상태">
+              {ENDPOINT_FIELD_HELP.traffic}
+            </HelpHint>
+          </div>
           <select
             id="endpoint-traffic"
             value={trafficState ?? 'ALL'}
@@ -306,14 +345,14 @@ export function EndpointsPage() {
               })
             }}
           >
-            <option value="ALL">ALL</option>
+            <option value="ALL">전체</option>
             {[...KNOWN_TRAFFIC].map((s) => (
               <option key={s} value={s}>
                 {s}
               </option>
             ))}
           </select>
-        </label>
+        </div>
         <div className="toolbar__actions">
           <button type="submit" className="btn btn--primary">
             검색
@@ -324,12 +363,16 @@ export function EndpointsPage() {
         </div>
       </form>
 
-      {error ? (
-        <SectionError title="Endpoint 목록 오류" message={error} />
+      {listError ? (
+        <SectionError
+          title={listError.title}
+          message={listError.message}
+          action={listError.action}
+        />
       ) : null}
 
       {loading && items === null ? (
-        <LoadingBlock label="Endpoint 목록을 불러오는 중…" />
+        <LoadingBlock label="API 연결 목록을 불러오는 중…" />
       ) : null}
 
       {items !== null && items.length > 0 ? (
@@ -338,12 +381,40 @@ export function EndpointsPage() {
             <table className="data-table">
               <thead>
                 <tr>
-                  <th scope="col">Endpoint</th>
-                  <th scope="col">API Type</th>
-                  <th scope="col">Enabled</th>
-                  <th scope="col">Traffic</th>
-                  <th scope="col">ACTIVE Deployment</th>
-                  <th scope="col">Updated</th>
+                  <th scope="col">
+                    <TermLabel
+                      text="API 별칭"
+                      apiTerm="Endpoint Alias"
+                      help={ENDPOINT_FIELD_HELP.alias}
+                    />
+                  </th>
+                  <th scope="col">
+                    <TermLabel text="API 유형" apiTerm="API Type" />
+                  </th>
+                  <th scope="col">
+                    <TermLabel
+                      text="사용 설정"
+                      apiTerm="Enabled"
+                      help={ENDPOINT_FIELD_HELP.enabled}
+                    />
+                  </th>
+                  <th scope="col">
+                    <TermLabel
+                      text="요청 처리 상태"
+                      apiTerm="Traffic"
+                      help={ENDPOINT_FIELD_HELP.traffic}
+                    />
+                  </th>
+                  <th scope="col">
+                    <TermLabel
+                      text="현재 연결된 모델 배포"
+                      apiTerm="ACTIVE Deployment"
+                      help={ENDPOINT_FIELD_HELP.activeRoute}
+                    />
+                  </th>
+                  <th scope="col">
+                    <TermLabel text="수정 시각" apiTerm="Updated" />
+                  </th>
                 </tr>
               </thead>
               <tbody>
@@ -407,13 +478,13 @@ export function EndpointsPage() {
 
       {emptyDatabase ? (
         <p className="empty-state" role="status">
-          등록된 Endpoint가 없습니다.
+          등록된 API 연결이 없습니다.
         </p>
       ) : null}
 
       {emptyFiltered ? (
         <p className="empty-state" role="status">
-          검색/필터 조건에 해당하는 Endpoint가 없습니다.
+          검색/필터 조건에 해당하는 API 연결이 없습니다.
         </p>
       ) : null}
     </AppShell>

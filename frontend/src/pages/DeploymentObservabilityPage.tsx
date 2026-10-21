@@ -12,11 +12,13 @@ import type {
   RuntimeSnapshot,
 } from '../api/types'
 import { AppShell } from '../components/AppShell'
+import { HelpHint, TermLabel } from '../components/HelpHint'
 import { LoadingBlock } from '../components/LoadingBlock'
 import { SectionError } from '../components/SectionError'
 import { StatusBadge } from '../components/StatusBadge'
 import { formatApiDateTime, shortId } from '../utils/date'
 import { parseBoundedInt } from '../utils/query'
+import { OBSERVABILITY_FIELD_HELP } from '../utils/uiLabels'
 
 const CAPACITY_SETTINGS = [
   'max_model_len',
@@ -55,7 +57,7 @@ function formatCell(value: string | number | null | undefined): string {
 
 function settingHint(key: string): string | null {
   if (key === 'max_num_seqs') {
-    return 'scheduler/runner sequence capacity (not guaranteed simultaneous users)'
+    return 'scheduler/runner sequence capacity (not guaranteed simultaneous users) — 동시 사용자 수 보장이 아닙니다'
   }
   return null
 }
@@ -338,14 +340,14 @@ export function DeploymentObservabilityPage() {
   if (notFound) {
     return (
       <AppShell
-        title="Deployment Observability"
-        description="Runtime / Capacity Profile"
+        title="모델 배포 모니터링"
+        description="실행 상태 / 자원 사용 정보"
         onRefresh={() => void load('refresh')}
         refreshing={false}
         lastUpdated={lastUpdated}
       >
         <Link className="back-link" to="/observability">
-          ← Observability
+          ← 운영 모니터링
         </Link>
         <SectionError
           title="Deployment를 찾을 수 없습니다."
@@ -359,19 +361,43 @@ export function DeploymentObservabilityPage() {
     <AppShell
       title={
         displayProfile
-          ? `Runtime ${displayProfile.deployment.name}`
+          ? `실행 상태 ${displayProfile.deployment.name}`
           : displayLatest?.deployment_name
-            ? `Runtime ${displayLatest.deployment_name}`
-            : 'Deployment Observability'
+            ? `실행 상태 ${displayLatest.deployment_name}`
+            : '모델 배포 모니터링'
       }
-      description="Persisted DB snapshot 기반 Runtime latest/history와 Capacity Profile입니다. `/analytics`는 Capacity Profile의 embedded runtime_analytics로 재사용하며 별도 호출하지 않습니다."
+      description="DB에 저장된 Runtime latest/history와 Capacity Profile입니다. `/analytics`는 Capacity Profile의 embedded runtime_analytics로 재사용하며 별도 호출하지 않습니다."
       onRefresh={() => void load('refresh')}
       refreshing={refreshing}
       lastUpdated={lastUpdated}
     >
       <Link className="back-link" to="/observability">
-        ← Observability
+        ← 운영 모니터링
       </Link>
+      <p className="panel-hint" role="note">
+        {OBSERVABILITY_FIELD_HELP.overview}{' '}
+        {OBSERVABILITY_FIELD_HELP.missingVsZero}
+      </p>
+      <details className="help-glossary">
+        <summary>용어 및 상태 안내</summary>
+        <div className="help-glossary__items">
+          <HelpHint showTopic label="최근 모델 실행 상태">
+            {OBSERVABILITY_FIELD_HELP.runtimeLatest}
+          </HelpHint>
+          <HelpHint showTopic label="모델 자원 사용 정보">
+            {OBSERVABILITY_FIELD_HELP.capacity}
+          </HelpHint>
+          <HelpHint showTopic label="P50/P95">
+            {OBSERVABILITY_FIELD_HELP.latency}
+          </HelpHint>
+          <HelpHint showTopic label="GPU VRAM">
+            {OBSERVABILITY_FIELD_HELP.gpuVram}
+          </HelpHint>
+          <HelpHint showTopic label="처리 중 / 대기 중">
+            {OBSERVABILITY_FIELD_HELP.runningWaiting}
+          </HelpHint>
+        </div>
+      </details>
       <p className="panel-hint">
         Deployment:{' '}
         <Link className="table-link mono" to={`/deployments/${deploymentId}`}>
@@ -387,7 +413,7 @@ export function DeploymentObservabilityPage() {
         }}
       >
         <label className="toolbar__field" htmlFor="dep-obs-hours">
-          <span>Hours (1–168)</span>
+          <span>조회 기간 Hours (1–168)</span>
           <input
             id="dep-obs-hours"
             type="number"
@@ -401,7 +427,7 @@ export function DeploymentObservabilityPage() {
           />
         </label>
         <label className="toolbar__field" htmlFor="dep-obs-limit">
-          <span>History limit (1–1000)</span>
+          <span>이력 개수 History limit (1–1000)</span>
           <input
             id="dep-obs-limit"
             type="number"
@@ -421,14 +447,18 @@ export function DeploymentObservabilityPage() {
         </div>
         <p className="toolbar__hint">
           hours/limit는 Backend 계약 범위의 임의의 정수입니다. 잘못된 값은
-          기본값(hours=24, limit=500)으로 정규화됩니다.
+          기본값(hours=24, limit=500)으로 정규화됩니다. 화면 새로고침 시각과
+          샘플 시각을 구분하세요.
         </p>
       </form>
 
       <section className="detail-panel" aria-labelledby="latest-heading">
-        <h2 id="latest-heading">Latest runtime snapshot</h2>
+        <h2 id="latest-heading">
+          최근 모델 실행 상태 (Latest runtime snapshot)
+        </h2>
         <p className="panel-hint">
-          Persisted snapshot only — live scrape가 아닙니다.
+          {OBSERVABILITY_FIELD_HELP.runtimeLatest} Persisted snapshot only —
+          live scrape가 아닙니다.
         </p>
         {latestError ? (
           <SectionError
@@ -450,37 +480,72 @@ export function DeploymentObservabilityPage() {
         {displayLatest ? (
           <dl className="meta-grid">
             <div>
-              <dt>Sampled</dt>
+              <dt>
+                <TermLabel text="샘플 시각" apiTerm="Sampled" />
+              </dt>
               <dd>{formatApiDateTime(displayLatest.sampled_at)}</dd>
             </div>
             <div>
-              <dt>Availability</dt>
+              <dt>
+                <TermLabel text="가용성" apiTerm="Availability" />
+              </dt>
               <dd>
                 <StatusBadge status={displayLatest.availability} />
               </dd>
             </div>
             <div>
-              <dt>KV cache ratio</dt>
+              <dt>
+                <TermLabel
+                  text="KV 캐시 사용 비율"
+                  apiTerm="KV cache ratio"
+                />
+              </dt>
               <dd>{formatRatio(displayLatest.kv_cache_usage_ratio)}</dd>
             </div>
             <div>
-              <dt>Running</dt>
+              <dt>
+                <TermLabel
+                  text="처리 중"
+                  apiTerm="Running"
+                  help={OBSERVABILITY_FIELD_HELP.runningWaiting}
+                />
+              </dt>
               <dd>{formatNum(displayLatest.num_requests_running, 0)}</dd>
             </div>
             <div>
-              <dt>Waiting</dt>
+              <dt>
+                <TermLabel
+                  text="대기 중"
+                  apiTerm="Waiting"
+                  help={OBSERVABILITY_FIELD_HELP.runningWaiting}
+                />
+              </dt>
               <dd>{formatNum(displayLatest.num_requests_waiting, 0)}</dd>
             </div>
             <div>
-              <dt>Prompt tokens (cumulative)</dt>
+              <dt>
+                <TermLabel
+                  text="누적 입력 토큰"
+                  apiTerm="Prompt tokens (cumulative)"
+                  help={OBSERVABILITY_FIELD_HELP.tokens}
+                />
+              </dt>
               <dd>{formatNum(displayLatest.prompt_tokens_total, 0)}</dd>
             </div>
             <div>
-              <dt>Generation tokens (cumulative)</dt>
+              <dt>
+                <TermLabel
+                  text="누적 출력 토큰"
+                  apiTerm="Generation tokens (cumulative)"
+                  help={OBSERVABILITY_FIELD_HELP.tokens}
+                />
+              </dt>
               <dd>{formatNum(displayLatest.generation_tokens_total, 0)}</dd>
             </div>
             <div>
-              <dt>Runtime instance</dt>
+              <dt>
+                <TermLabel text="런타임 인스턴스" apiTerm="Runtime instance" />
+              </dt>
               <dd className="mono">
                 {displayLatest.runtime_instance
                   ? [
@@ -492,7 +557,13 @@ export function DeploymentObservabilityPage() {
               </dd>
             </div>
             <div>
-              <dt>Missing metrics</dt>
+              <dt>
+                <TermLabel
+                  text="누락 지표"
+                  apiTerm="Missing metrics"
+                  help={OBSERVABILITY_FIELD_HELP.missingVsZero}
+                />
+              </dt>
               <dd>
                 {displayLatest.missing_metrics?.length
                   ? displayLatest.missing_metrics.join(', ')
@@ -500,7 +571,9 @@ export function DeploymentObservabilityPage() {
               </dd>
             </div>
             <div>
-              <dt>Error</dt>
+              <dt>
+                <TermLabel text="오류" apiTerm="Error" />
+              </dt>
               <dd>
                 {displayLatest.error_code || displayLatest.error_message
                   ? [displayLatest.error_code, displayLatest.error_message]
@@ -519,7 +592,9 @@ export function DeploymentObservabilityPage() {
       </section>
 
       <section className="detail-panel" aria-labelledby="history-heading">
-        <h2 id="history-heading">History (oldest → newest)</h2>
+        <h2 id="history-heading">
+          이력 History (oldest → newest)
+        </h2>
         {historyError ? (
           <SectionError
             title={
@@ -542,15 +617,33 @@ export function DeploymentObservabilityPage() {
             <table className="data-table">
               <thead>
                 <tr>
-                  <th scope="col">Sampled</th>
-                  <th scope="col">Availability</th>
-                  <th scope="col">KV</th>
-                  <th scope="col">Running</th>
-                  <th scope="col">Waiting</th>
-                  <th scope="col">Prompt Σ</th>
-                  <th scope="col">Gen Σ</th>
-                  <th scope="col">Instance</th>
-                  <th scope="col">Error</th>
+                  <th scope="col">
+                    <TermLabel text="샘플 시각" apiTerm="Sampled" />
+                  </th>
+                  <th scope="col">
+                    <TermLabel text="가용성" apiTerm="Availability" />
+                  </th>
+                  <th scope="col">
+                    <TermLabel text="KV 캐시" apiTerm="KV" />
+                  </th>
+                  <th scope="col">
+                    <TermLabel text="처리 중" apiTerm="Running" />
+                  </th>
+                  <th scope="col">
+                    <TermLabel text="대기 중" apiTerm="Waiting" />
+                  </th>
+                  <th scope="col">
+                    <TermLabel text="누적 입력" apiTerm="Prompt Σ" />
+                  </th>
+                  <th scope="col">
+                    <TermLabel text="누적 출력" apiTerm="Gen Σ" />
+                  </th>
+                  <th scope="col">
+                    <TermLabel text="인스턴스" apiTerm="Instance" />
+                  </th>
+                  <th scope="col">
+                    <TermLabel text="오류" apiTerm="Error" />
+                  </th>
                 </tr>
               </thead>
               <tbody>
@@ -591,10 +684,12 @@ export function DeploymentObservabilityPage() {
       </section>
 
       <section className="detail-panel" aria-labelledby="capacity-heading">
-        <h2 id="capacity-heading">Capacity Profile</h2>
+        <h2 id="capacity-heading">
+          모델 자원 사용 정보 (Capacity Profile)
+        </h2>
         <p className="panel-hint">
-          requested ModelOps config vs observed_explicit Managed vLLM argv입니다.
-          런타임 기본값을 합성하지 않으며, GPU VRAM은 GPU별로만 표시합니다.
+          {OBSERVABILITY_FIELD_HELP.capacity} requested ModelOps config vs
+          observed_explicit Managed vLLM argv입니다.
         </p>
         {profileError ? (
           <SectionError
@@ -658,16 +753,29 @@ export function DeploymentObservabilityPage() {
               </div>
             </dl>
 
-            <h3 className="section-subheading">Capacity settings</h3>
+            <h3 className="section-subheading">용량 설정 (Capacity settings)</h3>
             <div className="table-wrap">
               <table className="data-table">
                 <thead>
                   <tr>
-                    <th scope="col">Setting</th>
-                    <th scope="col">Requested</th>
-                    <th scope="col">Source</th>
-                    <th scope="col">Observed explicit</th>
-                    <th scope="col">Status</th>
+                    <th scope="col">
+                      <TermLabel text="설정" apiTerm="Setting" />
+                    </th>
+                    <th scope="col">
+                      <TermLabel text="요청값" apiTerm="Requested" />
+                    </th>
+                    <th scope="col">
+                      <TermLabel text="출처" apiTerm="Source" />
+                    </th>
+                    <th scope="col">
+                      <TermLabel
+                        text="관측값"
+                        apiTerm="Observed explicit"
+                      />
+                    </th>
+                    <th scope="col">
+                      <TermLabel text="비교 상태" apiTerm="Status" />
+                    </th>
                   </tr>
                 </thead>
                 <tbody>
@@ -696,10 +804,12 @@ export function DeploymentObservabilityPage() {
               </table>
             </div>
 
-            <h3 className="section-subheading">GPU assignments (per GPU)</h3>
+            <h3 className="section-subheading">
+              GPU 할당 (per GPU)
+            </h3>
             <p className="panel-hint">
-              VRAM은 GPU별로만 표시합니다. 합산 pooled capacity로 해석하지
-              마세요.
+              {OBSERVABILITY_FIELD_HELP.gpuVram} VRAM은 GPU별로만 표시합니다.
+              합산 pooled capacity로 해석하지 마세요.
             </p>
             {displayProfile.gpu_assignments.length > 0 ? (
               <div className="table-wrap">
@@ -735,11 +845,16 @@ export function DeploymentObservabilityPage() {
             )}
 
             <h3 className="section-subheading">
-              Invocation demand (same window)
+              AI 요청 수요 (Invocation demand, same window)
             </h3>
             <dl className="meta-grid">
               <div>
-                <dt>Requests / Success / Error</dt>
+                <dt>
+                  <TermLabel
+                    text="요청 / 성공 / 오류"
+                    apiTerm="Requests / Success / Error"
+                  />
+                </dt>
                 <dd>
                   {displayProfile.invocations.request_count} /{' '}
                   {displayProfile.invocations.success_count} /{' '}
@@ -747,7 +862,13 @@ export function DeploymentObservabilityPage() {
                 </dd>
               </div>
               <div>
-                <dt>Token coverage</dt>
+                <dt>
+                  <TermLabel
+                    text="토큰 집계 포함률"
+                    apiTerm="Token coverage"
+                    help={OBSERVABILITY_FIELD_HELP.invocations}
+                  />
+                </dt>
                 <dd>
                   {displayProfile.invocations.request_count > 0
                     ? `${(
@@ -759,7 +880,13 @@ export function DeploymentObservabilityPage() {
                 </dd>
               </div>
               <div>
-                <dt>Input p50 / p95 / max</dt>
+                <dt>
+                  <TermLabel
+                    text="입력 토큰 p50 / p95 / max"
+                    apiTerm="Input"
+                    help={OBSERVABILITY_FIELD_HELP.tokens}
+                  />
+                </dt>
                 <dd>
                   {formatNum(displayProfile.invocations.input_tokens_p50, 0)} /{' '}
                   {formatNum(displayProfile.invocations.input_tokens_p95, 0)} /{' '}
@@ -767,7 +894,13 @@ export function DeploymentObservabilityPage() {
                 </dd>
               </div>
               <div>
-                <dt>Latency p50 / p95 / max (ms)</dt>
+                <dt>
+                  <TermLabel
+                    text="응답시간 p50 / p95 / max (ms)"
+                    apiTerm="Latency"
+                    help={OBSERVABILITY_FIELD_HELP.latency}
+                  />
+                </dt>
                 <dd>
                   {formatNum(displayProfile.invocations.latency_ms_p50, 1)} /{' '}
                   {formatNum(displayProfile.invocations.latency_ms_p95, 1)} /{' '}
@@ -780,9 +913,10 @@ export function DeploymentObservabilityPage() {
               Runtime analytics (embedded, classic histogram estimates)
             </h3>
             <p className="panel-hint">
-              P50/P95는 classic histogram bucket estimate이며 exact request
-              percentile가 아닙니다. reset/unknown-identity interval은 delta에서
-              제외됩니다.
+              {OBSERVABILITY_FIELD_HELP.latency} P50/P95는 classic histogram
+              bucket estimate이며 exact request percentile가 아닙니다.
+              reset/unknown-identity interval은 delta에서 제외됩니다. 요청
+              성공률과 Runtime HEALTHY는 의미가 다릅니다.
             </p>
             {analytics ? (
               <>
@@ -804,10 +938,14 @@ export function DeploymentObservabilityPage() {
                     </dd>
                   </div>
                 </dl>
-                <h4 className="section-subheading">Gauges (avg / max)</h4>
+                <h4 className="section-subheading">
+                  게이지 Gauges (avg / max)
+                </h4>
                 <dl className="meta-grid">
                   <div>
-                    <dt>KV cache</dt>
+                    <dt>
+                      <TermLabel text="KV 캐시" apiTerm="KV cache" />
+                    </dt>
                     <dd>
                       {analytics.gauges?.kv_cache_usage_ratio
                         ? `${formatRatio(analytics.gauges.kv_cache_usage_ratio.avg)} / ${formatRatio(analytics.gauges.kv_cache_usage_ratio.max)}`
@@ -815,7 +953,9 @@ export function DeploymentObservabilityPage() {
                     </dd>
                   </div>
                   <div>
-                    <dt>Running</dt>
+                    <dt>
+                      <TermLabel text="처리 중" apiTerm="Running" />
+                    </dt>
                     <dd>
                       {analytics.gauges?.num_requests_running
                         ? `${formatNum(analytics.gauges.num_requests_running.avg, 2)} / ${formatNum(analytics.gauges.num_requests_running.max, 0)}`
@@ -823,7 +963,9 @@ export function DeploymentObservabilityPage() {
                     </dd>
                   </div>
                   <div>
-                    <dt>Waiting</dt>
+                    <dt>
+                      <TermLabel text="대기 중" apiTerm="Waiting" />
+                    </dt>
                     <dd>
                       {analytics.gauges?.num_requests_waiting
                         ? `${formatNum(analytics.gauges.num_requests_waiting.avg, 2)} / ${formatNum(analytics.gauges.num_requests_waiting.max, 0)}`
@@ -831,7 +973,9 @@ export function DeploymentObservabilityPage() {
                     </dd>
                   </div>
                 </dl>
-                <h4 className="section-subheading">Token deltas / rates</h4>
+                <h4 className="section-subheading">
+                  토큰 증분 / 속도 (Token deltas / rates)
+                </h4>
                 <dl className="meta-grid">
                   {(['prompt_tokens', 'generation_tokens'] as const).map(
                     (key) => {

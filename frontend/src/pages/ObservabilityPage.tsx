@@ -11,11 +11,13 @@ import type {
   RuntimeSnapshot,
 } from '../api/types'
 import { AppShell } from '../components/AppShell'
+import { HelpHint, TermLabel } from '../components/HelpHint'
 import { LoadingBlock } from '../components/LoadingBlock'
 import { SectionError } from '../components/SectionError'
 import { StatusBadge } from '../components/StatusBadge'
 import { formatApiDateTime, shortId } from '../utils/date'
 import { parseBoundedInt } from '../utils/query'
+import { OBSERVABILITY_FIELD_HELP } from '../utils/uiLabels'
 
 const GROUP_BY = new Set(['client', 'alias', 'deployment'] as const)
 type GroupBy = 'client' | 'alias' | 'deployment'
@@ -239,8 +241,8 @@ export function ObservabilityPage() {
 
   return (
     <AppShell
-      title="Observability"
-      description="DB에 저장된 Invocation 집계와 Managed Runtime snapshot입니다. 실시간 scrape가 아니며, Capacity Profile/상세는 Deployment observability에서 확인합니다."
+      title="운영 모니터링"
+      description="DB에 저장된 AI 요청 집계와 모델 실행 스냅샷입니다. 실시간 측정 화면이 아니며, Capacity Profile/상세는 Deployment 모니터링에서 확인합니다."
       onRefresh={() => {
         void loadInvocations('refresh')
         void loadRuntime('refresh')
@@ -248,6 +250,30 @@ export function ObservabilityPage() {
       refreshing={refreshing}
       lastUpdated={lastUpdated}
     >
+      <p className="panel-hint" role="note">
+        {OBSERVABILITY_FIELD_HELP.overview}
+      </p>
+      <details className="help-glossary">
+        <summary>용어 및 상태 안내</summary>
+        <div className="help-glossary__items">
+          <HelpHint showTopic label="AI 요청 사용 현황">
+            {OBSERVABILITY_FIELD_HELP.invocations}
+          </HelpHint>
+          <HelpHint showTopic label="토큰·지연시간">
+            {OBSERVABILITY_FIELD_HELP.tokens} {OBSERVABILITY_FIELD_HELP.latency}
+          </HelpHint>
+          <HelpHint showTopic label="최근 모델 실행 상태">
+            {OBSERVABILITY_FIELD_HELP.runtimeLatest}
+          </HelpHint>
+          <HelpHint showTopic label="측정값 없음 vs 0">
+            {OBSERVABILITY_FIELD_HELP.missingVsZero}
+          </HelpHint>
+          <HelpHint showTopic label="GPU VRAM">
+            {OBSERVABILITY_FIELD_HELP.gpuVram}
+          </HelpHint>
+        </div>
+      </details>
+
       <form
         className="toolbar toolbar--wrap"
         onSubmit={(e) => {
@@ -256,7 +282,7 @@ export function ObservabilityPage() {
         }}
       >
         <label className="toolbar__field" htmlFor="obs-hours">
-          <span>Hours (1–720)</span>
+          <span>조회 기간 Hours (1–720)</span>
           <input
             id="obs-hours"
             type="number"
@@ -270,7 +296,7 @@ export function ObservabilityPage() {
           />
         </label>
         <label className="toolbar__field" htmlFor="obs-group-by">
-          <span>Group by</span>
+          <span>그룹 기준 (Group by)</span>
           <select
             id="obs-group-by"
             value={groupBy}
@@ -278,9 +304,9 @@ export function ObservabilityPage() {
               syncUrl({ hours, groupBy: e.target.value as GroupBy, includeInactive })
             }
           >
-            <option value="client">client</option>
-            <option value="alias">alias</option>
-            <option value="deployment">deployment</option>
+            <option value="client">client — 사용 시스템</option>
+            <option value="alias">alias — API 별칭</option>
+            <option value="deployment">deployment — 모델 배포</option>
           </select>
         </label>
         <div className="toolbar__actions">
@@ -291,49 +317,89 @@ export function ObservabilityPage() {
         <p className="toolbar__hint">
           hours는 1..720의 임의 정수, group_by는 client|alias|deployment입니다.
           Token percentile는 tokenized row만 사용하며 전체 요청 대비 토큰
-          커버리지를 함께 표시합니다.
+          커버리지를 함께 표시합니다. 「데이터 갱신 시각」은 화면 새로고침
+          시각이며 샘플 시각과 다릅니다.
         </p>
       </form>
 
       <section className="detail-panel" aria-labelledby="inv-summary-heading">
-        <h2 id="inv-summary-heading">Invocation Summary</h2>
+        <h2 id="inv-summary-heading">AI 요청 사용 현황 (Invocation Summary)</h2>
         <p className="panel-hint">
-          `GET /api/v1/observability/invocations/summary` 결과입니다. 전역
-          percentile를 재계산하지 않고 API가 반환한 그룹 지표를 표시합니다.
+          {OBSERVABILITY_FIELD_HELP.invocations} 전역 percentile를 재계산하지
+          않고 API가 반환한 그룹 지표를 표시합니다.
         </p>
         {invError ? (
           <SectionError
             title={
               invocations
-                ? 'Invocation summary 새로고침 실패'
-                : 'Invocation summary 오류'
+                ? 'AI 요청 사용 현황 새로고침 실패'
+                : 'AI 요청 사용 현황 오류'
             }
             message={
               invocations
-                ? `기존 summary를 표시하고 있습니다. 새로고침 실패: ${invError}`
-                : invError
+                ? `기존 집계를 표시하고 있습니다. 원인: ${invError}`
+                : `원인: ${invError}`
+            }
+            action={
+              invocations
+                ? '네트워크·권한을 확인한 뒤 새로고침을 다시 시도하세요.'
+                : '잠시 후 새로고침을 다시 시도하세요.'
             }
           />
         ) : null}
         {invLoading && !invocations ? (
-          <LoadingBlock label="Invocation summary를 불러오는 중…" />
+          <LoadingBlock label="AI 요청 사용 현황을 불러오는 중…" />
         ) : null}
         {invocations && items.length > 0 ? (
           <div className="table-wrap">
             <table className="data-table">
               <thead>
                 <tr>
-                  <th scope="col">Group</th>
+                  <th scope="col">
+                    <TermLabel text="그룹" apiTerm="Group" />
+                  </th>
                   {groupBy === 'deployment' ? (
-                    <th scope="col">Deployment</th>
+                    <th scope="col">
+                      <TermLabel text="모델 배포" apiTerm="Deployment" />
+                    </th>
                   ) : null}
-                  <th scope="col">Requests</th>
-                  <th scope="col">Success</th>
-                  <th scope="col">Error</th>
-                  <th scope="col">Token coverage</th>
-                  <th scope="col">Input p95</th>
-                  <th scope="col">Output avg</th>
-                  <th scope="col">Latency p95</th>
+                  <th scope="col">
+                    <TermLabel text="요청 건수" apiTerm="Requests" />
+                  </th>
+                  <th scope="col">
+                    <TermLabel text="성공" apiTerm="Success" />
+                  </th>
+                  <th scope="col">
+                    <TermLabel text="오류" apiTerm="Error" />
+                  </th>
+                  <th scope="col">
+                    <TermLabel
+                      text="토큰 집계 포함률"
+                      apiTerm="Token coverage"
+                      help={OBSERVABILITY_FIELD_HELP.invocations}
+                    />
+                  </th>
+                  <th scope="col">
+                    <TermLabel
+                      text="입력 토큰 95백분위"
+                      apiTerm="Input p95"
+                      help={OBSERVABILITY_FIELD_HELP.tokens}
+                    />
+                  </th>
+                  <th scope="col">
+                    <TermLabel
+                      text="평균 출력 토큰"
+                      apiTerm="Output avg"
+                      help={OBSERVABILITY_FIELD_HELP.tokens}
+                    />
+                  </th>
+                  <th scope="col">
+                    <TermLabel
+                      text="응답시간 95백분위"
+                      apiTerm="Latency p95"
+                      help={OBSERVABILITY_FIELD_HELP.latency}
+                    />
+                  </th>
                 </tr>
               </thead>
               <tbody>
@@ -375,12 +441,14 @@ export function ObservabilityPage() {
       </section>
 
       <section className="detail-panel" aria-labelledby="runtime-latest-heading">
-        <h2 id="runtime-latest-heading">Runtime Latest (persisted)</h2>
+        <h2 id="runtime-latest-heading">
+          최근 모델 실행 상태 (Runtime Latest)
+        </h2>
         <p className="panel-hint">
-          DB에 저장된 마지막 Runtime metric입니다(실시간 상태가 아닙니다).
-          기본 목록은 현재 RUNNING·미종료 Deployment만 표시합니다.
-          2분 넘게 갱신되지 않은 샘플은 STALE로 표시합니다.
-          과거 스냅샷과 상세/history는 삭제하지 않습니다.
+          {OBSERVABILITY_FIELD_HELP.runtimeLatest}{' '}
+          {OBSERVABILITY_FIELD_HELP.runningWaiting} 기본 목록은 현재
+          RUNNING·미종료 Deployment만 표시합니다. 과거 스냅샷과 상세/history는
+          삭제하지 않습니다.
         </p>
         <label className="checkbox-label" htmlFor="obs-include-inactive">
           <input
@@ -397,31 +465,65 @@ export function ObservabilityPage() {
           <SectionError
             title={
               runtimeItems
-                ? 'Runtime latest 새로고침 실패'
-                : 'Runtime latest 오류'
+                ? '최근 모델 실행 상태 새로고침 실패'
+                : '최근 모델 실행 상태 오류'
             }
             message={
               runtimeItems
-                ? `기존 runtime snapshot을 표시하고 있습니다. 새로고침 실패: ${rtError}`
-                : rtError
+                ? `기존 runtime snapshot을 표시하고 있습니다. 원인: ${rtError}`
+                : `원인: ${rtError}`
+            }
+            action={
+              runtimeItems
+                ? '네트워크·권한을 확인한 뒤 새로고침을 다시 시도하세요.'
+                : '잠시 후 새로고침을 다시 시도하세요.'
             }
           />
         ) : null}
         {rtLoading && runtimeItems === null ? (
-          <LoadingBlock label="Runtime latest를 불러오는 중…" />
+          <LoadingBlock label="최근 모델 실행 상태를 불러오는 중…" />
         ) : null}
         {runtimeItems && runtimeItems.length > 0 ? (
           <div className="table-wrap">
             <table className="data-table">
               <thead>
                 <tr>
-                  <th scope="col">Deployment</th>
-                  <th scope="col">Sampled</th>
-                  <th scope="col">Availability</th>
-                  <th scope="col">KV ratio</th>
-                  <th scope="col">Running</th>
-                  <th scope="col">Waiting</th>
-                  <th scope="col">Error</th>
+                  <th scope="col">
+                    <TermLabel text="모델 배포" apiTerm="Deployment" />
+                  </th>
+                  <th scope="col">
+                    <TermLabel text="샘플 시각" apiTerm="Sampled" />
+                  </th>
+                  <th scope="col">
+                    <TermLabel
+                      text="가용성"
+                      apiTerm="Availability"
+                      help={OBSERVABILITY_FIELD_HELP.runtimeLatest}
+                    />
+                  </th>
+                  <th scope="col">
+                    <TermLabel
+                      text="KV 캐시 사용 비율"
+                      apiTerm="KV ratio"
+                    />
+                  </th>
+                  <th scope="col">
+                    <TermLabel
+                      text="처리 중"
+                      apiTerm="Running"
+                      help={OBSERVABILITY_FIELD_HELP.runningWaiting}
+                    />
+                  </th>
+                  <th scope="col">
+                    <TermLabel
+                      text="대기 중"
+                      apiTerm="Waiting"
+                      help={OBSERVABILITY_FIELD_HELP.runningWaiting}
+                    />
+                  </th>
+                  <th scope="col">
+                    <TermLabel text="오류" apiTerm="Error" />
+                  </th>
                 </tr>
               </thead>
               <tbody>

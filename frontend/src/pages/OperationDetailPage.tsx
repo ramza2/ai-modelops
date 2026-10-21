@@ -11,6 +11,7 @@ import type {
   RetryOperationResponse,
 } from '../api/types'
 import { AppShell } from '../components/AppShell'
+import { HelpHint, TermLabel } from '../components/HelpHint'
 import { LoadingBlock } from '../components/LoadingBlock'
 import { SectionError } from '../components/SectionError'
 import { StatusBadge } from '../components/StatusBadge'
@@ -22,6 +23,7 @@ import {
   OPERATION_POLL_MS,
   operationPollConfig,
 } from '../utils/operationLifecycle'
+import { OPERATION_FIELD_HELP } from '../utils/uiLabels'
 
 const CANCEL_STATUSES = new Set(['QUEUED', 'RUNNING', 'ROLLING_BACK'])
 const RETRY_STATUSES = new Set(['FAILED', 'ROLLED_BACK'])
@@ -293,17 +295,17 @@ export function OperationDetailPage() {
   if (notFound) {
     return (
       <AppShell
-        title="Operations"
-        description="Operation 상세"
+        title="작업 이력"
+        description="작업 상세"
         onRefresh={() => void load('refresh')}
         refreshing={false}
         lastUpdated={lastUpdated}
       >
         <Link className="back-link" to="/operations">
-          ← Operations
+          ← 작업 이력
         </Link>
         <SectionError
-          title="Operation을 찾을 수 없습니다."
+          title="작업을 찾을 수 없습니다."
           message="요청한 Operation이 없거나 삭제되었습니다."
         />
       </AppShell>
@@ -324,28 +326,47 @@ export function OperationDetailPage() {
     <AppShell
       title={
         displayOperation
-          ? `Operation ${shortId(displayOperation.id, 12)}`
-          : 'Operation 상세'
+          ? `작업 ${shortId(displayOperation.id, 12)}`
+          : '작업 상세'
       }
-      description="Operation 진행 상태와 Step 이력입니다. Switch Safe Cancel / Explicit Retry만 제공하며, metadata·step detail JSON은 표시하지 않습니다."
+      description="작업 진행 상태와 Step 이력입니다. Switch Safe Cancel / Explicit Retry만 제공하며, metadata·step detail JSON은 표시하지 않습니다."
       onRefresh={() => void load('refresh')}
       refreshing={refreshing}
       lastUpdated={lastUpdated}
       refreshDisabled={mutating !== null}
     >
       <Link className="back-link" to="/operations">
-        ← Operations
+        ← 작업 이력
       </Link>
 
+      <p className="panel-hint" role="note">
+        {OPERATION_FIELD_HELP.overview}
+      </p>
+      <details className="help-glossary">
+        <summary>용어 및 상태 안내</summary>
+        <div className="help-glossary__items">
+          <HelpHint showTopic label="진행 상태">
+            {OPERATION_FIELD_HELP.status}
+          </HelpHint>
+          <HelpHint showTopic label="안전 취소 (Safe Cancel)">
+            {OPERATION_FIELD_HELP.safeCancel}
+          </HelpHint>
+          <HelpHint showTopic label="명시적 재시도 (Explicit Retry)">
+            {OPERATION_FIELD_HELP.explicitRetry}
+          </HelpHint>
+          <HelpHint showTopic label="기존/변경 대상">
+            {OPERATION_FIELD_HELP.sourceTarget}
+          </HelpHint>
+        </div>
+      </details>
+
       {loading && !displayOperation ? (
-        <LoadingBlock label="Operation을 불러오는 중…" />
+        <LoadingBlock label="작업을 불러오는 중…" />
       ) : null}
 
       {error && !notFound ? (
         <SectionError
-          title={
-            displayOperation ? 'Operation 새로고침 실패' : 'Operation 오류'
-          }
+          title={displayOperation ? '작업 새로고침 실패' : '작업 오류'}
           message={
             displayOperation
               ? `기존 Operation 정보를 표시하고 있습니다. 새로고침 실패: ${error}`
@@ -374,55 +395,90 @@ export function OperationDetailPage() {
             ) : null}
             <dl className="meta-grid">
               <div>
-                <dt>Type</dt>
+                <dt>
+                  <TermLabel
+                    text="작업 유형"
+                    apiTerm="Type"
+                    help={OPERATION_FIELD_HELP.type}
+                  />
+                </dt>
                 <dd>{displayOperation.operation_type || '—'}</dd>
               </div>
               <div>
-                <dt>Strategy</dt>
+                <dt>
+                  <TermLabel
+                    text="전환 방식"
+                    apiTerm="Strategy"
+                    help={OPERATION_FIELD_HELP.strategy}
+                  />
+                </dt>
                 <dd>{displayOperation.switch_strategy || '—'}</dd>
               </div>
               <div>
-                <dt>Current Step</dt>
+                <dt>
+                  <TermLabel text="현재 작업 단계" apiTerm="Current Step" />
+                </dt>
                 <dd className="mono">
                   {displayOperation.current_step || '—'}
                 </dd>
               </div>
               <div>
-                <dt>Elapsed</dt>
+                <dt>
+                  <TermLabel text="경과 시간" apiTerm="Elapsed" />
+                </dt>
                 <dd>{operationElapsed(displayOperation)}</dd>
               </div>
               <div>
-                <dt>Requested By</dt>
+                <dt>
+                  <TermLabel text="요청자" apiTerm="Requested By" />
+                </dt>
                 <dd>{displayOperation.requested_by || '—'}</dd>
               </div>
               <div>
-                <dt>Request Reason</dt>
+                <dt>
+                  <TermLabel text="요청 사유" apiTerm="Request Reason" />
+                </dt>
                 <dd>{displayOperation.request_reason || '—'}</dd>
               </div>
               <div>
-                <dt>Cancel Requested</dt>
+                <dt>
+                  <TermLabel
+                    text="취소 요청 시각"
+                    apiTerm="Cancel Requested"
+                  />
+                </dt>
                 <dd>
                   {formatApiDateTime(displayOperation.cancel_requested_at)}
                 </dd>
               </div>
               <div>
-                <dt>Error</dt>
+                <dt>
+                  <TermLabel text="오류 정보" apiTerm="Error" />
+                </dt>
                 <dd>{formatOperationError(displayOperation.error)}</dd>
               </div>
               <div>
-                <dt>Created</dt>
+                <dt>
+                  <TermLabel text="생성 시각" apiTerm="Created" />
+                </dt>
                 <dd>{formatApiDateTime(displayOperation.created_at)}</dd>
               </div>
               <div>
-                <dt>Started</dt>
+                <dt>
+                  <TermLabel text="시작 시각" apiTerm="Started" />
+                </dt>
                 <dd>{formatApiDateTime(displayOperation.started_at)}</dd>
               </div>
               <div>
-                <dt>Finished</dt>
+                <dt>
+                  <TermLabel text="종료 시각" apiTerm="Finished" />
+                </dt>
                 <dd>{formatApiDateTime(displayOperation.finished_at)}</dd>
               </div>
               <div>
-                <dt>Endpoint</dt>
+                <dt>
+                  <TermLabel text="API 별칭" apiTerm="Endpoint" />
+                </dt>
                 <dd>
                   {displayOperation.endpoint_alias_id ? (
                     <Link
@@ -437,7 +493,13 @@ export function OperationDetailPage() {
                 </dd>
               </div>
               <div>
-                <dt>Source Deployment</dt>
+                <dt>
+                  <TermLabel
+                    text="기존 대상"
+                    apiTerm="Source"
+                    help={OPERATION_FIELD_HELP.sourceTarget}
+                  />
+                </dt>
                 <dd>
                   {displayOperation.source_deployment_id ? (
                     <Link
@@ -452,7 +514,13 @@ export function OperationDetailPage() {
                 </dd>
               </div>
               <div>
-                <dt>Target Deployment</dt>
+                <dt>
+                  <TermLabel
+                    text="변경 대상"
+                    apiTerm="Target"
+                    help={OPERATION_FIELD_HELP.sourceTarget}
+                  />
+                </dt>
                 <dd>
                   {displayOperation.target_deployment_id ? (
                     <Link
@@ -467,7 +535,9 @@ export function OperationDetailPage() {
                 </dd>
               </div>
               <div>
-                <dt>Retry Of</dt>
+                <dt>
+                  <TermLabel text="재시도 원본" apiTerm="Retry Of" />
+                </dt>
                 <dd>
                   {displayOperation.retry_of_operation_id ? (
                     <Link
@@ -488,7 +558,13 @@ export function OperationDetailPage() {
             className="detail-panel"
             aria-labelledby="operation-actions-heading"
           >
-            <h2 id="operation-actions-heading">Actions</h2>
+            <h2 id="operation-actions-heading">작업 조작 (Actions)</h2>
+            <p className="panel-hint" role="note">
+              {OPERATION_FIELD_HELP.safeCancel}
+            </p>
+            <p className="panel-hint" role="note">
+              {OPERATION_FIELD_HELP.explicitRetry}
+            </p>
             <p className="panel-hint">
               Safe Cancel은 HOT/COLD SWITCH의 QUEUED/RUNNING/ROLLING_BACK에서만
               표시됩니다. Explicit Retry는 FAILED/ROLLED_BACK SWITCH의 거친 UI
@@ -505,7 +581,7 @@ export function OperationDetailPage() {
             {showCancel ? (
               <div className="toolbar toolbar--wrap">
                 <label className="toolbar__field" htmlFor="cancel-reason">
-                  <span>Cancel Reason (optional)</span>
+                  <span>취소 사유 Cancel Reason (optional)</span>
                   <input
                     id="cancel-reason"
                     type="text"
@@ -524,7 +600,9 @@ export function OperationDetailPage() {
                     aria-busy={mutating === 'cancel'}
                     onClick={() => void runCancel()}
                   >
-                    {mutating === 'cancel' ? 'Cancel 중…' : 'Safe Cancel'}
+                    {mutating === 'cancel'
+                      ? 'Cancel 중…'
+                      : '안전 취소 (Safe Cancel)'}
                   </button>
                 </div>
               </div>
@@ -539,7 +617,9 @@ export function OperationDetailPage() {
                   aria-busy={mutating === 'retry'}
                   onClick={() => void runRetry()}
                 >
-                  {mutating === 'retry' ? 'Retry 중…' : 'Explicit Retry'}
+                  {mutating === 'retry'
+                    ? 'Retry 중…'
+                    : '명시적 재시도 (Explicit Retry)'}
                 </button>
               </div>
             ) : null}
@@ -550,10 +630,14 @@ export function OperationDetailPage() {
 
             {retryChild ? (
               <div className="operation-result" role="status">
-                <h3 className="section-subheading">생성된 Retry Operation</h3>
+                <h3 className="section-subheading">
+                  생성된 재시도 작업 (Retry Operation)
+                </h3>
                 <dl className="meta-grid">
                   <div>
-                    <dt>New Operation</dt>
+                    <dt>
+                      <TermLabel text="새 작업" apiTerm="New Operation" />
+                    </dt>
                     <dd>
                       <Link
                         className="table-link mono"
@@ -564,17 +648,23 @@ export function OperationDetailPage() {
                     </dd>
                   </div>
                   <div>
-                    <dt>Status</dt>
+                    <dt>
+                      <TermLabel text="진행 상태" apiTerm="Status" />
+                    </dt>
                     <dd>
                       <StatusBadge status={retryChild.status} />
                     </dd>
                   </div>
                   <div>
-                    <dt>Strategy</dt>
+                    <dt>
+                      <TermLabel text="전환 방식" apiTerm="Strategy" />
+                    </dt>
                     <dd>{retryChild.switch_strategy || '—'}</dd>
                   </div>
                   <div>
-                    <dt>Retry Of</dt>
+                    <dt>
+                      <TermLabel text="재시도 원본" apiTerm="Retry Of" />
+                    </dt>
                     <dd className="mono">
                       {retryChild.retry_of_operation_id || displayOperation.id}
                     </dd>
@@ -588,23 +678,37 @@ export function OperationDetailPage() {
             className="detail-panel"
             aria-labelledby="operation-steps-heading"
           >
-            <h2 id="operation-steps-heading">Steps</h2>
+            <h2 id="operation-steps-heading">작업 단계 (Steps)</h2>
             <p className="panel-hint">
               상세 응답에 포함된 순서대로의 Step입니다. Step detail JSON은
-              렌더링하지 않습니다.
+              렌더링하지 않습니다. step_code 원본은 그대로 표시합니다.
             </p>
             {steps.length > 0 ? (
               <div className="table-wrap">
                 <table className="data-table">
                   <thead>
                     <tr>
-                      <th scope="col">Seq</th>
-                      <th scope="col">Step</th>
-                      <th scope="col">Attempt</th>
-                      <th scope="col">Status</th>
-                      <th scope="col">Started</th>
-                      <th scope="col">Finished</th>
-                      <th scope="col">Error</th>
+                      <th scope="col">
+                        <TermLabel text="순서" apiTerm="Seq" />
+                      </th>
+                      <th scope="col">
+                        <TermLabel text="단계" apiTerm="Step" />
+                      </th>
+                      <th scope="col">
+                        <TermLabel text="시도" apiTerm="Attempt" />
+                      </th>
+                      <th scope="col">
+                        <TermLabel text="진행 상태" apiTerm="Status" />
+                      </th>
+                      <th scope="col">
+                        <TermLabel text="시작 시각" apiTerm="Started" />
+                      </th>
+                      <th scope="col">
+                        <TermLabel text="종료 시각" apiTerm="Finished" />
+                      </th>
+                      <th scope="col">
+                        <TermLabel text="오류 정보" apiTerm="Error" />
+                      </th>
                     </tr>
                   </thead>
                   <tbody>
