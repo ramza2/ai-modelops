@@ -216,14 +216,14 @@ describe('CacheDeployWizardPage Runtime layout (P1-5A / P1-8C)', () => {
     renderWizard()
 
     expect(
-      await screen.findByRole('heading', { level: 2, name: '2. Runtime' }),
+      await screen.findByRole('heading', { level: 2, name: '2. 모델 실행 설정' }),
     ).toBeInTheDocument()
     expect(screen.getByTestId('runtime-section-basic')).toBeInTheDocument()
     expect(screen.getByTestId('runtime-section-resource')).toBeInTheDocument()
     expect(screen.getByTestId('runtime-section-advanced')).toBeInTheDocument()
-    expect(screen.getByText('기본 정보')).toBeInTheDocument()
+    expect(screen.getByText('기본 설정')).toBeInTheDocument()
     expect(screen.getByText('리소스 설정')).toBeInTheDocument()
-    expect(screen.getByText('고급 옵션')).toBeInTheDocument()
+    expect(screen.getByText(/고급 옵션/)).toBeInTheDocument()
 
     const grids = document.querySelectorAll('.form-grid')
     expect(grids.length).toBe(3)
@@ -234,12 +234,14 @@ describe('CacheDeployWizardPage Runtime layout (P1-5A / P1-8C)', () => {
     expect(labelCount).toBeGreaterThanOrEqual(10)
     expect(document.querySelectorAll('.form-grid__wide').length).toBe(3)
 
-    expect(screen.getByText('max_model_len')).toBeInTheDocument()
-    expect(screen.getByText('max_num_seqs')).toBeInTheDocument()
-    expect(screen.getByText('gpu_memory_utilization')).toBeInTheDocument()
-    expect(screen.getByText('Served model name')).toBeInTheDocument()
+    expect(screen.getAllByText(/max_model_len/).length).toBeGreaterThan(0)
+    expect(screen.getAllByText(/max_num_seqs/).length).toBeGreaterThan(0)
     expect(
-      screen.getByText(/runner\(generate\/pooling\)와 다릅니다/),
+      screen.getAllByText(/gpu_memory_utilization/).length,
+    ).toBeGreaterThan(0)
+    expect(screen.getAllByText(/Served model name/).length).toBeGreaterThan(0)
+    expect(
+      screen.getByText(/vLLM Model Runner\(Auto\/V1\)와는 다른 설정/),
     ).toBeInTheDocument()
 
     const parser = screen.getByLabelText('Reasoning Parser')
@@ -279,9 +281,9 @@ describe('CacheDeployWizardPage Runtime layout (P1-5A / P1-8C)', () => {
 
   it('blocks Next: GPU on invalid numeric Runtime inputs', async () => {
     renderWizard()
-    await screen.findByRole('heading', { level: 2, name: '2. Runtime' })
+    await screen.findByRole('heading', { level: 2, name: '2. 모델 실행 설정' })
 
-    const next = screen.getByRole('button', { name: 'Next: GPU' })
+    const next = screen.getByRole('button', { name: '다음: GPU 선택 및 자원 검사' })
     expect(next).toBeEnabled()
 
     const port = screen.getByLabelText(/Runtime port/)
@@ -322,7 +324,7 @@ describe('CacheDeployWizardPage Runtime layout (P1-5A / P1-8C)', () => {
   it('does not overwrite last-good Draft while Runtime numerics are invalid; resumes after fix', async () => {
     const cache = makeCache()
     renderWizard()
-    await screen.findByRole('heading', { level: 2, name: '2. Runtime' })
+    await screen.findByRole('heading', { level: 2, name: '2. 모델 실행 설정' })
 
     const nameInput = screen.getByDisplayValue(/-managed$/)
     await userEvent.clear(nameInput)
@@ -339,27 +341,27 @@ describe('CacheDeployWizardPage Runtime layout (P1-5A / P1-8C)', () => {
     expect(lastGoodRaw).toBeTruthy()
 
     await userEvent.clear(screen.getByLabelText(/Runtime port/))
-    expect(screen.getByRole('button', { name: 'Next: GPU' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: '다음: GPU 선택 및 자원 검사' })).toBeDisabled()
     // Empty/NaN port must not JSON-null the draft (would fail read after F5).
     expect(sessionStorage.getItem(wizardDraftKey('cache-1'))).toBe(lastGoodRaw)
     expect(readWizardDraft(sessionStorage, cache)?.runtimePort).toBe(8123)
 
     await userEvent.type(screen.getByLabelText(/Runtime port/), '0')
-    expect(screen.getByRole('button', { name: 'Next: GPU' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: '다음: GPU 선택 및 자원 검사' })).toBeDisabled()
     expect(sessionStorage.getItem(wizardDraftKey('cache-1'))).toBe(lastGoodRaw)
     expect(readWizardDraft(sessionStorage, cache)?.runtimePort).toBe(8123)
 
     const len = screen.getByLabelText(/max_model_len/)
     await userEvent.clear(len)
     await userEvent.type(len, '-1')
-    expect(screen.getByRole('button', { name: 'Next: GPU' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: '다음: GPU 선택 및 자원 검사' })).toBeDisabled()
     expect(sessionStorage.getItem(wizardDraftKey('cache-1'))).toBe(lastGoodRaw)
 
     await userEvent.clear(len)
     await userEvent.clear(screen.getByLabelText(/Runtime port/))
     await userEvent.type(screen.getByLabelText(/Runtime port/), '9002')
     await userEvent.type(screen.getByLabelText(/max_model_len/), '4096')
-    expect(screen.getByRole('button', { name: 'Next: GPU' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: '다음: GPU 선택 및 자원 검사' })).toBeEnabled()
 
     await waitFor(() => {
       const saved = readWizardDraft(sessionStorage, cache)
@@ -370,7 +372,7 @@ describe('CacheDeployWizardPage Runtime layout (P1-5A / P1-8C)', () => {
 
     cleanup()
     renderWizard('/models/cache/cache-1/deploy?step=runtime')
-    await screen.findByRole('heading', { level: 2, name: '2. Runtime' })
+    await screen.findByRole('heading', { level: 2, name: '2. 모델 실행 설정' })
     expect(screen.getByDisplayValue('draft-keep-valid')).toBeInTheDocument()
     expect(screen.getByDisplayValue('9002')).toBeInTheDocument()
     expect(screen.getByDisplayValue('4096')).toBeInTheDocument()
@@ -381,7 +383,7 @@ describe('CacheDeployWizardPage Runtime layout (P1-5A / P1-8C)', () => {
       makeVersion({ dtype: 'float16', quantization: 'awq' }),
     )
     renderWizard()
-    await screen.findByRole('heading', { level: 2, name: '2. Runtime' })
+    await screen.findByRole('heading', { level: 2, name: '2. 모델 실행 설정' })
 
     const dtype = screen.getByPlaceholderText('float16')
     const quant = screen.getByPlaceholderText('awq')
@@ -402,7 +404,7 @@ describe('CacheDeployWizardPage Runtime layout (P1-5A / P1-8C)', () => {
       }),
     )
     renderWizard()
-    await screen.findByRole('heading', { level: 2, name: '2. Runtime' })
+    await screen.findByRole('heading', { level: 2, name: '2. 모델 실행 설정' })
     await userEvent.selectOptions(
       screen.getByLabelText('Reasoning Parser'),
       'qwen3',
@@ -421,22 +423,22 @@ describe('CacheDeployWizardPage Runtime layout (P1-5A / P1-8C)', () => {
     )
 
     renderWizard('/models/cache/cache-1/deploy?step=gpu')
-    await screen.findByRole('heading', { level: 2, name: /3\. GPU/ })
+    await screen.findByRole('heading', { level: 2, name: /3\. GPU 선택/ })
     // First GPU is pre-selected on load.
-    await userEvent.click(screen.getByRole('button', { name: 'Run fresh fit' }))
-    expect(await screen.findByTitle('FIT')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Fresh Fit 실행' }))
+    expect(await screen.findByTitle(/자원 적합\(FIT\)/)).toBeInTheDocument()
     expect(cacheDeployApi.previewCacheDeployFit).toHaveBeenCalledTimes(1)
 
-    await userEvent.click(screen.getByRole('button', { name: 'Back' }))
-    await screen.findByRole('heading', { level: 2, name: '2. Runtime' })
+    await userEvent.click(screen.getByRole('button', { name: '이전' }))
+    await screen.findByRole('heading', { level: 2, name: '2. 모델 실행 설정' })
     await userEvent.selectOptions(
       screen.getByLabelText('Reasoning Parser'),
       'qwen3',
     )
-    await userEvent.click(screen.getByRole('button', { name: 'Next: GPU' }))
-    await screen.findByRole('heading', { level: 2, name: /3\. GPU/ })
+    await userEvent.click(screen.getByRole('button', { name: '다음: GPU 선택 및 자원 검사' }))
+    await screen.findByRole('heading', { level: 2, name: /3\. GPU 선택/ })
     expect(
-      screen.getByText(/Fresh Fit을 다시 실행해야 Review/),
+      screen.getByText(/Fresh Fit을 다시 실행해야/),
     ).toBeInTheDocument()
     expect(screen.queryByTitle('FIT')).not.toBeInTheDocument()
   })
@@ -475,7 +477,7 @@ describe('CacheDeployWizardPage Runtime layout (P1-5A / P1-8C)', () => {
     )
 
     renderWizard('/models/cache/cache-1/deploy?step=runtime')
-    await screen.findByRole('heading', { level: 2, name: '2. Runtime' })
+    await screen.findByRole('heading', { level: 2, name: '2. 모델 실행 설정' })
     expect(screen.getByDisplayValue('restored-dep')).toBeInTheDocument()
     expect(screen.getByDisplayValue('9001')).toBeInTheDocument()
     expect(screen.getByDisplayValue('2048')).toBeInTheDocument()
@@ -484,11 +486,11 @@ describe('CacheDeployWizardPage Runtime layout (P1-5A / P1-8C)', () => {
     expect(screen.getByLabelText('Auto Tool Choice')).toHaveValue('true')
     expect(screen.getByLabelText('Tool Call Parser')).toHaveValue('hermes')
 
-    await userEvent.click(screen.getByRole('button', { name: 'Next: GPU' }))
-    await screen.findByRole('heading', { level: 2, name: /3\. GPU/ })
-    await userEvent.click(screen.getByRole('button', { name: 'Run fresh fit' }))
-    expect(await screen.findByTitle('FIT')).toBeInTheDocument()
-    await userEvent.click(screen.getByRole('button', { name: 'Next: Review' }))
+    await userEvent.click(screen.getByRole('button', { name: '다음: GPU 선택 및 자원 검사' }))
+    await screen.findByRole('heading', { level: 2, name: /3\. GPU 선택/ })
+    await userEvent.click(screen.getByRole('button', { name: 'Fresh Fit 실행' }))
+    expect(await screen.findByTitle(/자원 적합\(FIT\)/)).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: '다음: 설정 검토' }))
 
     const summary = await screen.findByTestId('runtime-review-summary')
     expect(within(summary).getByText('Runtime 설정 요약')).toBeInTheDocument()

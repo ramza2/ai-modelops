@@ -102,14 +102,14 @@ describe('ModelsPage', () => {
     const user = userEvent.setup()
     vi.mocked(modelsApi.listModels).mockResolvedValue(pageResult([]))
     renderAt('/models?page=2')
-    await screen.findByLabelText('Type')
-    await user.selectOptions(screen.getByLabelText('Type'), 'LLM')
+    await screen.findByLabelText(/모델 유형/)
+    await user.selectOptions(screen.getByLabelText(/모델 유형/), 'LLM')
     await waitFor(() => {
       const last = vi.mocked(modelsApi.listModels).mock.calls.at(-1)?.[0]
       expect(last?.modelType).toBe('LLM')
       expect(last?.page).toBe(1)
     })
-    await user.selectOptions(screen.getByLabelText('Active'), 'INACTIVE')
+    await user.selectOptions(screen.getByLabelText(/등록 상태/), 'INACTIVE')
     await waitFor(() => {
       const last = vi.mocked(modelsApi.listModels).mock.calls.at(-1)?.[0]
       expect(last?.isActive).toBe(false)
@@ -122,15 +122,15 @@ describe('ModelsPage', () => {
     vi.mocked(modelsApi.listModels).mockResolvedValue(pageResult([]))
     renderAt('/models?q=qwen&provider=Qwen&model_type=LLM&active=false')
     expect(await screen.findByRole('button', { name: '필터 초기화' })).toBeInTheDocument()
-    expect(screen.getByLabelText('Type')).toHaveValue('LLM')
-    expect(screen.getByLabelText('Active')).toHaveValue('INACTIVE')
+    expect(screen.getByLabelText(/모델 유형/)).toHaveValue('LLM')
+    expect(screen.getByLabelText(/등록 상태/)).toHaveValue('INACTIVE')
     await user.click(screen.getByRole('button', { name: '필터 초기화' }))
     await waitFor(() => {
       expect(screen.getByTestId('location-search')).toHaveTextContent(/^$/)
-      expect(screen.getByLabelText('Type')).toHaveValue('ALL')
-      expect(screen.getByLabelText('Active')).toHaveValue('ALL')
+      expect(screen.getByLabelText(/모델 유형/)).toHaveValue('ALL')
+      expect(screen.getByLabelText(/등록 상태/)).toHaveValue('ALL')
       expect(screen.getByLabelText('검색')).toHaveValue('')
-      expect(screen.getByLabelText('Provider')).toHaveValue('')
+      expect(screen.getByLabelText(/제공자/)).toHaveValue('')
       expect(modelsApi.listModels).toHaveBeenLastCalledWith(
         expect.objectContaining({
           q: null,
@@ -150,7 +150,7 @@ describe('ModelsPage', () => {
     await screen.findByLabelText('검색')
     const callsBefore = vi.mocked(modelsApi.listModels).mock.calls.length
     await user.type(screen.getByLabelText('검색'), 'qwen chat')
-    await user.type(screen.getByLabelText('Provider'), 'acme')
+    await user.type(screen.getByLabelText(/제공자/), 'acme')
     expect(vi.mocked(modelsApi.listModels).mock.calls.length).toBe(callsBefore)
     await user.click(screen.getByRole('button', { name: '검색' }))
     await waitFor(() => {
@@ -227,7 +227,7 @@ describe('ModelsPage', () => {
     const user = userEvent.setup()
     vi.mocked(modelsApi.listModels).mockResolvedValueOnce(pageResult([]))
     renderAt('/models')
-    expect(await screen.findByText('등록된 Model이 없습니다.')).toBeInTheDocument()
+    expect(await screen.findByText('등록된 모델이 없습니다.')).toBeInTheDocument()
     cleanup()
 
     vi.mocked(modelsApi.listModels).mockRejectedValueOnce(

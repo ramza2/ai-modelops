@@ -44,10 +44,19 @@ import type {
   OperationDetail,
 } from '../api/types'
 import { AppShell } from '../components/AppShell'
+import { HelpHint } from '../components/HelpHint'
 import { LoadingBlock } from '../components/LoadingBlock'
 import { SectionError } from '../components/SectionError'
 import { StatusBadge } from '../components/StatusBadge'
 import { formatApiDateTime, operationElapsed } from '../utils/date'
+import {
+  FIT_RESULT_HELP,
+  RUNTIME_FIELD_HELP,
+  WIZARD_FIELD_HELP,
+  WIZARD_STEP_HINTS,
+  WIZARD_STEP_LABELS,
+  type WizardStepKey,
+} from '../utils/uiLabels'
 import {
   createDetailFetchGate,
   formatOperationError,
@@ -77,6 +86,48 @@ const STEPS: Step[] = [
   'publish',
   'done',
 ]
+
+function fitResultTitle(result: string | null | undefined): string | undefined {
+  const code = (result || '').toUpperCase()
+  if (code === 'FIT') return FIT_RESULT_HELP.FIT
+  if (code === 'TIGHT') return FIT_RESULT_HELP.TIGHT
+  if (code === 'INSUFFICIENT') return FIT_RESULT_HELP.INSUFFICIENT
+  if (code === 'UNKNOWN') return FIT_RESULT_HELP.UNKNOWN
+  return undefined
+}
+
+function WizardStepStrip({ current }: { current: Step }) {
+  const currentIdx = STEPS.indexOf(current)
+  return (
+    <>
+      <ol className="wizard-steps" aria-label="배포 설정 단계">
+        {STEPS.map((key, idx) => {
+          const label = WIZARD_STEP_LABELS[key as WizardStepKey]
+          const state =
+            idx < currentIdx ? 'done' : idx === currentIdx ? 'current' : 'todo'
+          return (
+            <li
+              key={key}
+              className={
+                state === 'current'
+                  ? 'wizard-steps__item wizard-steps__item--current'
+                  : state === 'done'
+                    ? 'wizard-steps__item wizard-steps__item--done'
+                    : 'wizard-steps__item'
+              }
+              aria-current={state === 'current' ? 'step' : undefined}
+            >
+              {label}
+            </li>
+          )
+        })}
+      </ol>
+      <p className="panel-hint wizard-step-hint" role="note">
+        {WIZARD_STEP_HINTS[current as WizardStepKey]}
+      </p>
+    </>
+  )
+}
 
 /** Known-profile values for an existing BGE-M3 cache — not generic EMBEDDING defaults. */
 const BGE_M3_KNOWN_PROFILE: CacheDeployRuntimeConfig = {
@@ -695,8 +746,8 @@ export function CacheDeployWizardPage() {
   if (loading) {
     return (
       <AppShell
-        title="Deploy from Cache"
-        description="M7-C wizard"
+        title="모델 배포 설정"
+        description="다운로드한 모델 캐시로 배포·실행·API 연결을 구성합니다."
         onRefresh={onRefresh}
         refreshing={refreshing}
         lastUpdated={lastUpdated}
@@ -708,20 +759,25 @@ export function CacheDeployWizardPage() {
 
   return (
     <AppShell
-      title="Deploy from Cache"
-      description="Downloaded ≠ Deployed ≠ Published. Wizard composes existing Deployment / Operation / Endpoint APIs."
+      title="모델 배포 설정"
+      description="캐시 READY ≠ 모델 실행 중 ≠ API 게시 완료. 배포 정보 생성·모델 실행·API 별칭 연결은 서로 다른 단계입니다."
       onRefresh={onRefresh}
       refreshing={refreshing}
       lastUpdated={lastUpdated}
     >
       <div className="toolbar toolbar--wrap" style={{ marginBottom: '0.75rem' }}>
         <Link className="btn btn--ghost" to="/models/cache">
-          ← Model Cache
+          ← 다운로드한 모델 관리
         </Link>
         <span className="secondary-text">
-          Step: <strong>{step}</strong>
+          내부 단계 키: <strong>{step}</strong>
         </span>
       </div>
+
+      <p className="panel-hint" role="note">
+        {WIZARD_FIELD_HELP.overview}
+      </p>
+      <WizardStepStrip current={step} />
 
       {error ? <SectionError title="로드 오류" message={error} /> : null}
       {actionError ? (
@@ -733,38 +789,42 @@ export function CacheDeployWizardPage() {
         </p>
       ) : null}
       {reviewNeedsFit && step === 'gpu' ? (
-        <p role="alert">Review 이전 설정을 복원했습니다. GPU/Runtime을 확인한 후 Fresh Fit을 다시 실행해 주세요.</p>
+        <p role="alert">
+          검토 단계 이전 설정을 복원했습니다. GPU/Runtime을 확인한 후 Fresh Fit(현재
+          설정 자원 검사)을 다시 실행해 주세요.
+        </p>
       ) : null}
 
       {step === 'cache' && cache ? (
         <section className="panel">
-          <h2>1. Cache</h2>
+          <h2>{WIZARD_STEP_LABELS.cache}</h2>
+          <p className="secondary-text">{WIZARD_STEP_HINTS.cache}</p>
           <dl className="detail-list">
             <div>
-              <dt>Repository</dt>
+              <dt>모델 저장소 (Repository)</dt>
               <dd className="mono">{cache.repository_id || '—'}</dd>
             </div>
             <div>
-              <dt>Immutable SHA</dt>
+              <dt>고정 버전 SHA (Immutable SHA)</dt>
               <dd className="mono">{cache.resolved_revision || '—'}</dd>
             </div>
             <div>
-              <dt>Size</dt>
+              <dt>크기 (Size)</dt>
               <dd>{formatBytes(cache.size_bytes)}</dd>
             </div>
             <div>
-              <dt>Node</dt>
+              <dt>대상 서버 (Node)</dt>
               <dd>
                 {cache.node_name || cache.node_id}{' '}
                 <StatusBadge status={cache.status} />
               </dd>
             </div>
             <div>
-              <dt>Path</dt>
+              <dt>로컬 경로 (Path)</dt>
               <dd className="mono">{cache.local_path || '—'}</dd>
             </div>
             <div>
-              <dt>Model type</dt>
+              <dt>모델 유형 (Model type)</dt>
               <dd>{model?.model_type || '—'}</dd>
             </div>
           </dl>
@@ -774,38 +834,40 @@ export function CacheDeployWizardPage() {
             disabled={cache.status !== 'READY'}
             onClick={() => syncStep('runtime')}
           >
-            Next: Runtime
+            다음: 모델 실행 설정
           </button>
         </section>
       ) : null}
 
       {step === 'runtime' ? (
         <section className="panel">
-          <h2>2. Runtime</h2>
+          <h2>{WIZARD_STEP_LABELS.runtime}</h2>
           {knownProfileLabel ? (
             <p className="muted" data-testid="known-profile-label">
-              Prefill: {knownProfileLabel}
+              알려진 프로파일 사전 입력: {knownProfileLabel}
             </p>
           ) : null}
-          <p className="secondary-text">
-            미설정 필드는 기존 기본 동작을 유지합니다. 확인되지 않은 dtype /
-            quantization을 자동으로 채우지 않습니다.
-          </p>
+          <p className="secondary-text">{RUNTIME_FIELD_HELP.unsetKeepsDefault}</p>
 
-          <div className="form-section" data-testid="runtime-section-basic">
-            <h3 className="form-section__title">기본 정보</h3>
+          <div
+            className="form-section form-section--basic"
+            data-testid="runtime-section-basic"
+          >
+            <h3 className="form-section__title">기본 설정</h3>
             <div className="form-grid">
               <label className="form-grid__wide">
-                Deployment name
+                배포 이름{' '}
+                <span className="term-label__api">(Deployment name)</span>
                 <span className="form-field-hint">
-                  Management API에 등록되는 Deployment 표시 이름입니다.
+                  {RUNTIME_FIELD_HELP.deploymentName}
                 </span>
                 <input value={name} onChange={(e) => setName(e.target.value)} />
               </label>
               <label className="form-grid__wide">
-                Container name
+                컨테이너 이름{' '}
+                <span className="term-label__api">(Container name)</span>
                 <span className="form-field-hint">
-                  Managed 컨테이너 이름입니다. Node 내에서 고유해야 합니다.
+                  {RUNTIME_FIELD_HELP.containerName}
                 </span>
                 <input
                   value={containerName}
@@ -813,10 +875,10 @@ export function CacheDeployWizardPage() {
                 />
               </label>
               <label className="form-grid__wide">
-                Served model name
+                모델 실행 이름{' '}
+                <span className="term-label__api">(Served model name)</span>
                 <span className="form-field-hint">
-                  런타임이 노출하는 model id이며 Publish rewrite 기본값으로도
-                  사용됩니다.
+                  {RUNTIME_FIELD_HELP.servedModelName}
                 </span>
                 <input
                   value={servedModelName}
@@ -827,9 +889,10 @@ export function CacheDeployWizardPage() {
                 />
               </label>
               <label>
-                Runtime port
+                모델 실행 포트{' '}
+                <span className="term-label__api">(Runtime port)</span>
                 <span className="form-field-hint">
-                  컨테이너 listen 포트 (1–65535 정수).
+                  {RUNTIME_FIELD_HELP.runtimePort}
                 </span>
                 <input
                   type="number"
@@ -852,13 +915,17 @@ export function CacheDeployWizardPage() {
             </div>
           </div>
 
-          <div className="form-section" data-testid="runtime-section-resource">
+          <div
+            className="form-section form-section--basic"
+            data-testid="runtime-section-resource"
+          >
             <h3 className="form-section__title">리소스 설정</h3>
             <div className="form-grid">
               <label>
-                max_model_len
+                최대 문맥 길이{' '}
+                <span className="term-label__api">(max_model_len)</span>
                 <span className="form-field-hint">
-                  컨텍스트 길이 상한. 비우면 런타임 기본값을 사용합니다.
+                  {RUNTIME_FIELD_HELP.maxModelLen}
                 </span>
                 <input
                   type="number"
@@ -882,10 +949,10 @@ export function CacheDeployWizardPage() {
                 ) : null}
               </label>
               <label>
-                max_num_seqs
+                동시 처리 시퀀스 상한{' '}
+                <span className="term-label__api">(max_num_seqs)</span>
                 <span className="form-field-hint">
-                  스케줄러 동시 시퀀스 상한(사용자 수 보장 아님). 비우면 기본
-                  동작입니다.
+                  {RUNTIME_FIELD_HELP.maxNumSeqs}
                 </span>
                 <input
                   type="number"
@@ -909,9 +976,10 @@ export function CacheDeployWizardPage() {
                 ) : null}
               </label>
               <label>
-                gpu_memory_utilization
+                GPU 메모리 사용 비율{' '}
+                <span className="term-label__api">(gpu_memory_utilization)</span>
                 <span className="form-field-hint">
-                  GPU당 VRAM 사용 비율 (0 초과–1 이하). GPU 간 합산하지 않습니다.
+                  {RUNTIME_FIELD_HELP.gpuMemoryUtilization}
                 </span>
                 <input
                   type="number"
@@ -936,9 +1004,10 @@ export function CacheDeployWizardPage() {
                 ) : null}
               </label>
               <label>
-                dtype (optional)
+                연산 데이터 형식{' '}
+                <span className="term-label__api">(dtype, optional)</span>
                 <span className="form-field-hint">
-                  자유 입력. ModelVersion 값은 참고용이며 자동 선택하지 않습니다.
+                  {RUNTIME_FIELD_HELP.dtype}
                   {version?.dtype
                     ? ` (ModelVersion 참고: ${version.dtype})`
                     : ''}
@@ -951,13 +1020,14 @@ export function CacheDeployWizardPage() {
                       dtype: e.target.value || null,
                     }))
                   }
-                  placeholder={version?.dtype || 'do not guess'}
+                  placeholder={version?.dtype || '추측하지 않음'}
                 />
               </label>
               <label>
-                quantization (optional)
+                모델 양자화 방식{' '}
+                <span className="term-label__api">(quantization, optional)</span>
                 <span className="form-field-hint">
-                  자유 입력. 확인되지 않은 양자화 설정을 추측하지 마세요.
+                  {RUNTIME_FIELD_HELP.quantization}
                   {version?.quantization
                     ? ` (ModelVersion 참고: ${version.quantization})`
                     : ''}
@@ -970,20 +1040,27 @@ export function CacheDeployWizardPage() {
                       quantization: e.target.value || null,
                     }))
                   }
-                  placeholder={version?.quantization || 'do not guess'}
+                  placeholder={version?.quantization || '추측하지 않음'}
                 />
               </label>
             </div>
           </div>
 
-          <div className="form-section" data-testid="runtime-section-advanced">
-            <h3 className="form-section__title">고급 옵션</h3>
+          <details
+            className="form-section form-section--advanced"
+            data-testid="runtime-section-advanced"
+          >
+            <summary>고급 옵션 (필요 시 펼치기)</summary>
+            <p className="secondary-text">
+              접거나 펼쳐도 입력값과 유효성 검사는 유지됩니다. 미설정은 런타임
+              기본 동작을 따릅니다.
+            </p>
             <div className="form-grid">
               <label>
-                runner
+                생성/임베딩 실행 모드{' '}
+                <span className="term-label__api">(runner)</span>
                 <span className="form-field-hint">
-                  vLLM 작업 모드: generate(생성) / pooling(임베딩). 아래 vLLM
-                  Model Runner(Auto/V1)와는 다른 설정입니다.
+                  {RUNTIME_FIELD_HELP.runner}
                 </span>
                 <select
                   value={runtime.runner ?? ''}
@@ -1000,10 +1077,11 @@ export function CacheDeployWizardPage() {
                 </select>
               </label>
               <label>
-                Reasoning Parser (optional)
+                추론 내용 분리 설정{' '}
+                <span className="term-label__api">(Reasoning Parser)</span>
                 <span className="form-field-hint">
-                  Qwen3용 Runtime 시작 옵션(<code>--reasoning-parser</code>).
-                  요청별 enable_thinking과는 별개입니다.
+                  {RUNTIME_FIELD_HELP.reasoningParser} (
+                  <code>--reasoning-parser</code>)
                 </span>
                 <select
                   aria-label="Reasoning Parser"
@@ -1020,10 +1098,10 @@ export function CacheDeployWizardPage() {
                 </select>
               </label>
               <label>
-                vLLM Model Runner (optional)
+                엔진 실행 방식{' '}
+                <span className="term-label__api">(vLLM Model Runner)</span>
                 <span className="form-field-hint">
-                  엔진 Model Runner 선택(Auto/V1). runner(generate/pooling)와
-                  다릅니다. V1은 thinking_token_budget 호환용입니다.
+                  {RUNTIME_FIELD_HELP.vllmModelRunner}
                 </span>
                 <select
                   aria-label="vLLM Model Runner"
@@ -1040,11 +1118,11 @@ export function CacheDeployWizardPage() {
                 </select>
               </label>
               <label>
-                Auto Tool Choice (optional)
+                자동 도구 선택{' '}
+                <span className="term-label__api">(Auto Tool Choice)</span>
                 <span className="form-field-hint">
-                  vLLM OpenAI-compatible Auto Tool Calling. ON일 때만{' '}
+                  {RUNTIME_FIELD_HELP.autoToolChoice} ON일 때만{' '}
                   <code>--enable-auto-tool-choice</code>와 parser를 추가합니다.
-                  요청별 <code>tools</code>/<code>tool_choice</code>와 별개입니다.
                 </span>
                 <select
                   aria-label="Auto Tool Choice"
@@ -1086,9 +1164,10 @@ export function CacheDeployWizardPage() {
                 </select>
               </label>
               <label>
-                Tool Call Parser
+                도구 호출 분석 방식{' '}
+                <span className="term-label__api">(Tool Call Parser)</span>
                 <span className="form-field-hint">
-                  Auto Tool Choice ON일 때 필수. 현재 allowlist:{' '}
+                  {RUNTIME_FIELD_HELP.toolCallParser} 현재 allowlist:{' '}
                   <code>hermes</code> (Qwen3).
                 </span>
                 <select
@@ -1111,11 +1190,11 @@ export function CacheDeployWizardPage() {
                 </select>
               </label>
             </div>
-          </div>
+          </details>
 
           <p className="secondary-text">
-            Catalog dtype/quant hints are suggestions only. Official vLLM image
-            ENTRYPOINT contract remains <code>vllm serve …</code>.
+            카탈로그 dtype/quant 힌트는 참고용입니다. 공식 vLLM 이미지 ENTRYPOINT
+            계약은 <code>vllm serve …</code>를 유지합니다.
           </p>
           {qwen3ParserSelected ? (
             <p className="panel-hint" role="note">
@@ -1161,7 +1240,7 @@ export function CacheDeployWizardPage() {
           ) : null}
           <div className="toolbar__actions">
             <button type="button" className="btn btn--ghost" onClick={() => syncStep('cache')}>
-              Back
+              이전
             </button>
             <button
               type="button"
@@ -1169,7 +1248,7 @@ export function CacheDeployWizardPage() {
               disabled={!runtimeFormValid}
               onClick={() => syncStep('gpu')}
             >
-              Next: GPU
+              다음: GPU 선택 및 자원 검사
             </button>
           </div>
         </section>
@@ -1177,27 +1256,37 @@ export function CacheDeployWizardPage() {
 
       {step === 'gpu' ? (
         <section className="panel">
-          <h2>3. GPU (fresh fit)</h2>
+          <h2>{WIZARD_STEP_LABELS.gpu}</h2>
+          <p className="secondary-text">{WIZARD_FIELD_HELP.freshFit}</p>
+          <p className="secondary-text">{WIZARD_FIELD_HELP.tensorParallel}</p>
+          <div className="toolbar toolbar--wrap" style={{ marginBottom: '0.5rem' }}>
+            <HelpHint showTopic label="Fit 판정 기준">
+              {FIT_RESULT_HELP.FIT} {FIT_RESULT_HELP.TIGHT}{' '}
+              {FIT_RESULT_HELP.INSUFFICIENT} {FIT_RESULT_HELP.UNKNOWN}
+            </HelpHint>
+          </div>
           <p className="secondary-text">
-            GPU 단계 진입 시 Node Agent에서 최신 스냅샷을 수집합니다.
-            저장된 측정값은 실시간 스트리밍이 아닙니다.
+            GPU 단계 진입 시 Node Agent에서 최신 스냅샷을 수집합니다. 저장된
+            측정값은 실시간 스트리밍이 아닙니다
             {typeof resources?.age_ms === 'number'
-              ? ` · age ${Math.round(resources.age_ms / 1000)}s`
+              ? ` · 경과 ${Math.round(resources.age_ms / 1000)}초`
               : ''}
-            . Fresh Fit은 선택한 GPU를 UUID 기준으로 다시 측정합니다.
-            VRAM은 GPU 간 합산되지 않습니다.
+            .
           </p>
           {gpuResourceLoading ? <p className="secondary-text">GPU 메모리 측정 중…</p> : null}
           {gpuResourceError ? (
-            <p role="alert">GPU 리소스 갱신 실패: {gpuResourceError}. Fresh Fit으로 별도 확인해 주세요.</p>
+            <p role="alert">
+              GPU 리소스 갱신 실패: {gpuResourceError}. Fresh Fit으로 별도 확인해
+              주세요.
+            </p>
           ) : null}
           <div className="table-wrap">
             <table className="data-table">
               <thead>
                 <tr>
-                  <th>Select</th>
+                  <th>선택</th>
                   <th>GPU</th>
-                  <th>Free / Total</th>
+                  <th>여유 / 전체 VRAM</th>
                 </tr>
               </thead>
               <tbody>
@@ -1235,8 +1324,10 @@ export function CacheDeployWizardPage() {
                         {freeMb ?? '—'} / {live?.vram_total_mb ?? g.vram_total_mb} MiB
                         <div className="secondary-text">
                           {measuredAt
-                            ? `${live ? 'Fresh Fit' : 'Node Agent refresh'} · ${measuredAt}`
-                            : gpuResourceLoading ? '측정 중…' : '최신 측정값 없음'}
+                            ? `${live ? 'Fresh Fit' : 'Node Agent 갱신'} · ${measuredAt}`
+                            : gpuResourceLoading
+                              ? '측정 중…'
+                              : '최신 측정값 없음'}
                         </div>
                       </td>
                     </tr>
@@ -1246,11 +1337,12 @@ export function CacheDeployWizardPage() {
             </table>
           </div>
           <label>
-            expected_vram_mb (optional override)
+            예상 VRAM 수동 지정{' '}
+            <span className="term-label__api">(expected_vram_mb, optional)</span>
             <input
               value={expectedVramMb}
               onChange={(e) => setExpectedVramMb(e.target.value)}
-              placeholder="leave empty to estimate from cache size"
+              placeholder="비우면 캐시 크기 기반 추정"
             />
           </label>
           <div className="toolbar__actions" style={{ marginTop: '0.75rem' }}>
@@ -1260,15 +1352,20 @@ export function CacheDeployWizardPage() {
               disabled={fitLoading || selectedGpuIds.length === 0}
               onClick={() => void refreshFit()}
             >
-              {fitLoading ? 'Fitting…' : 'Run fresh fit'}
+              {fitLoading ? 'Fit 검사 중…' : 'Fresh Fit 실행'}
             </button>
           </div>
           {activeFit ? (
             <div style={{ marginTop: '0.75rem' }}>
-              <StatusBadge status={activeFit.result} />{' '}
+              <StatusBadge
+                status={activeFit.result}
+                title={fitResultTitle(activeFit.result) ?? activeFit.result}
+              />{' '}
               <span className="secondary-text">
-                Node Agent sample:{' '}
-                {activeFit.resource_sampled_at || activeFit.evaluated_at || 'time unknown'}
+                Node Agent 샘플:{' '}
+                {activeFit.resource_sampled_at ||
+                  activeFit.evaluated_at ||
+                  '시각 미상'}
               </span>
               <ul>
                 {activeFit.reasons.map((r) => (
@@ -1277,16 +1374,17 @@ export function CacheDeployWizardPage() {
               </ul>
               {activeFit.gpu_results.map((g) => (
                 <p key={g.gpu_device_id} className="secondary-text">
-                  GPU #{g.gpu_index ?? '?'} {g.gpu_uuid ? `(${g.gpu_uuid})` : ''}:{' '}
-                  {g.vram_free_mb ?? '—'} free / {g.vram_used_mb ?? '—'} used /{' '}
-                  {g.vram_total_mb} total MiB; estimated {g.estimated_required_vram_mb ?? '—'} MiB,
-                  safety margin {g.safety_margin_mb} MiB — {g.result}
+                  GPU #{g.gpu_index ?? '?'} {g.gpu_uuid ? `(${g.gpu_uuid})` : ''}
+                  : 여유 {g.vram_free_mb ?? '—'} / 사용 {g.vram_used_mb ?? '—'} /
+                  전체 {g.vram_total_mb} MiB · 예상 필요{' '}
+                  {g.estimated_required_vram_mb ?? '—'} MiB · 안전 여유{' '}
+                  {g.safety_margin_mb} MiB — {g.result}
                   {g.reasons.length ? ` (${g.reasons.join('; ')})` : ''}
                 </p>
               ))}
               {activeFit.assumptions.length > 0 ? (
                 <p className="secondary-text">
-                  Assumptions: {activeFit.assumptions.join(' / ')}
+                  전제(Assumptions): {activeFit.assumptions.join(' / ')}
                 </p>
               ) : null}
               {activeFit.result === 'UNKNOWN' ? (
@@ -1296,23 +1394,24 @@ export function CacheDeployWizardPage() {
                     checked={ackUnknown}
                     onChange={(e) => setAckUnknown(e.target.checked)}
                   />{' '}
-                  Acknowledge UNKNOWN fit and proceed
+                  {WIZARD_FIELD_HELP.unknownAck} UNKNOWN 판정을 이해하고 계속합니다
                 </label>
               ) : null}
               {activeFit.result === 'INSUFFICIENT' ? (
                 <p className="secondary-text">
-                  INSUFFICIENT blocks Deployment creation.
+                  자원 부족(INSUFFICIENT)이면 배포 정보 생성이 차단됩니다.
                 </p>
               ) : null}
             </div>
           ) : (
             <p className="secondary-text">
-              현재 GPU/Runtime 설정으로 Fresh Fit을 다시 실행해야 Review를 진행할 수 있습니다.
+              현재 GPU/Runtime 설정으로 Fresh Fit을 다시 실행해야 설정 검토
+              단계로 진행할 수 있습니다.
             </p>
           )}
           <div className="toolbar__actions">
             <button type="button" className="btn btn--ghost" onClick={() => syncStep('runtime')}>
-              Back
+              이전
             </button>
             <button
               type="button"
@@ -1325,7 +1424,7 @@ export function CacheDeployWizardPage() {
               }
               onClick={() => syncStep('review')}
             >
-              Next: Review
+              다음: 설정 검토
             </button>
           </div>
         </section>
@@ -1333,29 +1432,30 @@ export function CacheDeployWizardPage() {
 
       {step === 'review' ? (
         <section className="panel">
-          <h2>4–5. Review & Create Deployment</h2>
+          <h2>{WIZARD_STEP_LABELS.review}</h2>
+          <p className="action-impact">{WIZARD_FIELD_HELP.create}</p>
           <div
             className="runtime-review"
             data-testid="runtime-review-summary"
           >
             <h3 className="form-section__title">Runtime 설정 요약</h3>
             <p className="secondary-text">
-              Create는 metadata only입니다. 아래는 요청에 전달될 runtime_config와
-              미설정(기존 기본 동작) 항목입니다.
+              배포 정보 생성은 메타데이터만 등록합니다. 아래는 요청에 전달될
+              runtime_config와 미설정(기존 기본 동작) 항목입니다.
             </p>
             <dl className="runtime-review__meta">
               <div>
-                <dt>Runtime port</dt>
+                <dt>모델 실행 포트 (Runtime port)</dt>
                 <dd className="mono">{String(runtimePort)}</dd>
               </div>
               <div>
-                <dt>Served model name</dt>
+                <dt>모델 실행 이름 (Served model name)</dt>
                 <dd className="mono">{servedModelName || '—'}</dd>
               </div>
               <div>
-                <dt>Selected GPUs (TP)</dt>
+                <dt>선택한 GPU / Tensor Parallel</dt>
                 <dd className="mono">
-                  {uniqueGpuIds.length} → tensor_parallel_size=
+                  {uniqueGpuIds.length}장 → tensor_parallel_size=
                   {uniqueGpuIds.length}
                 </dd>
               </div>
@@ -1441,17 +1541,21 @@ export function CacheDeployWizardPage() {
             )}
           </pre>
           <p className="secondary-text">
-            Create is metadata only — Start is a separate step.
-            {!activeFit ? ' Run fresh Fit again after a reload or input change.' : ''}
+            배포 정보 생성 ≠ 모델 실행. 실행(Start)은 다음 단계에서 별도로
+            요청합니다.
+            {!activeFit
+              ? ' 새로고침·설정 변경 후에는 Fresh Fit을 다시 실행하세요.'
+              : ''}
           </p>
           {!runtimeFormValid ? (
             <p className="form-field-error" role="alert">
-              Runtime 입력값이 유효하지 않습니다. Runtime 단계로 돌아가 수정하세요.
+              Runtime 입력값이 유효하지 않습니다. 모델 실행 설정 단계로 돌아가
+              수정하세요.
             </p>
           ) : null}
           <div className="toolbar__actions">
             <button type="button" className="btn btn--ghost" onClick={() => syncStep('gpu')}>
-              Back
+              이전
             </button>
             <button
               type="button"
@@ -1461,7 +1565,7 @@ export function CacheDeployWizardPage() {
                 (activeFit.result === 'UNKNOWN' && !ackUnknown)}
               onClick={() => void onCreate()}
             >
-              {busy ? 'Creating…' : 'Create Deployment'}
+              {busy ? '생성 중…' : '배포 정보 생성'}
             </button>
           </div>
         </section>
@@ -1469,9 +1573,10 @@ export function CacheDeployWizardPage() {
 
       {step === 'start' && deployment ? (
         <section className="panel">
-          <h2>6. Start / Operation</h2>
+          <h2>{WIZARD_STEP_LABELS.start}</h2>
+          <p className="action-impact">{WIZARD_FIELD_HELP.start}</p>
           <p>
-            Deployment{' '}
+            배포{' '}
             <Link to={`/deployments/${deployment.id}`}>{deployment.name}</Link>{' '}
             <StatusBadge status={deployment.desired_state} />{' '}
             <StatusBadge status={deployment.runtime_status} />{' '}
@@ -1511,8 +1616,8 @@ export function CacheDeployWizardPage() {
               ) : null}
               {lifecyclePhase === 'ready' ? (
                 <p className="panel-hint" role="status">
-                  Deployment가 RUNNING + HEALTHY입니다. Publish로 진행할 수
-                  있습니다.
+                  배포가 실행 중(RUNNING)이고 Health가 정상(HEALTHY)입니다. API
+                  연결 설정으로 진행할 수 있습니다.
                 </p>
               ) : null}
               {pollWarning ? (
@@ -1522,7 +1627,7 @@ export function CacheDeployWizardPage() {
               ) : null}
               <dl className="meta-grid">
                 <div>
-                  <dt>Operation ID</dt>
+                  <dt>작업 ID (Operation)</dt>
                   <dd>
                     <Link
                       className="table-link mono"
@@ -1533,25 +1638,25 @@ export function CacheDeployWizardPage() {
                   </dd>
                 </div>
                 <div>
-                  <dt>Status</dt>
+                  <dt>작업 상태</dt>
                   <dd>
                     <StatusBadge status={operation.status} />
                   </dd>
                 </div>
                 <div>
-                  <dt>Current Step</dt>
+                  <dt>현재 단계</dt>
                   <dd className="mono">{operation.current_step || '—'}</dd>
                 </div>
                 <div>
-                  <dt>Elapsed</dt>
+                  <dt>경과 시간</dt>
                   <dd>{operationElapsed(operation)}</dd>
                 </div>
                 <div>
-                  <dt>Error</dt>
+                  <dt>오류</dt>
                   <dd>{formatOperationError(operation.error)}</dd>
                 </div>
                 <div>
-                  <dt>Last updated</dt>
+                  <dt>마지막 갱신</dt>
                   <dd>
                     {lastUpdated
                       ? formatApiDateTime(lastUpdated.toISOString())
@@ -1571,14 +1676,17 @@ export function CacheDeployWizardPage() {
               ) : null}
             </div>
           ) : (
-            <button
-              type="button"
-              className="btn"
-              disabled={busy}
-              onClick={() => void onStart()}
-            >
-              {busy ? 'Starting…' : 'Start Deployment'}
-            </button>
+            <>
+              <p className="action-impact">{WIZARD_FIELD_HELP.start}</p>
+              <button
+                type="button"
+                className="btn"
+                disabled={busy}
+                onClick={() => void onStart()}
+              >
+                {busy ? '실행 요청 중…' : '모델 실행 요청'}
+              </button>
+            </>
           )}
           <div className="toolbar__actions" style={{ marginTop: '0.75rem' }}>
             <button
@@ -1588,14 +1696,14 @@ export function CacheDeployWizardPage() {
               title={
                 healthy
                   ? undefined
-                  : 'Publish disabled until RUNNING + HEALTHY'
+                  : 'RUNNING + HEALTHY가 될 때까지 API 연결을 진행할 수 없습니다'
               }
               onClick={() => {
                 void loadEndpoints()
                 syncStep('publish', { deploymentId: deployment.id })
               }}
             >
-              Next: Publish
+              다음: API 연결 설정
             </button>
           </div>
         </section>
@@ -1603,16 +1711,19 @@ export function CacheDeployWizardPage() {
 
       {step === 'publish' && deployment ? (
         <section className="panel">
-          <h2>7. Publish (initial route)</h2>
+          <h2>{WIZARD_STEP_LABELS.publish}</h2>
+          <p className="action-impact">{WIZARD_FIELD_HELP.publish}</p>
+          <p className="secondary-text">{WIZARD_FIELD_HELP.alias}</p>
+          <p className="secondary-text">{WIZARD_FIELD_HELP.aliasModes}</p>
           {publishStatusLoading ? (
-            <LoadingBlock label="Checking published state…" />
+            <LoadingBlock label="게시 상태를 확인하는 중…" />
           ) : null}
           {publishResult ? (
             <>
               <p>
-                Already published to alias{' '}
-                <strong>{publishResult.endpoint.alias}</strong>. Refresh-safe
-                state restored from ACTIVE route.
+                이미 API 별칭{' '}
+                <strong>{publishResult.endpoint.alias}</strong>에 게시되어
+                있습니다. ACTIVE Route에서 새로고침해도 안전한 상태로 복원했습니다.
               </p>
               <button
                 type="button"
@@ -1621,15 +1732,15 @@ export function CacheDeployWizardPage() {
                   syncStep('done', { deploymentId: deployment.id })
                 }
               >
-                Continue to Done
+                다음: API 연결 결과 확인
               </button>
             </>
           ) : (
             <>
               {!healthy ? (
                 <SectionError
-                  title="Not healthy"
-                  message="Publish requires desired RUNNING + runtime RUNNING + HEALTHY."
+                  title="배포가 아직 준비되지 않음"
+                  message="API 연결은 desired RUNNING + runtime RUNNING + HEALTHY가 필요합니다."
                 />
               ) : null}
               <label>
@@ -1638,7 +1749,7 @@ export function CacheDeployWizardPage() {
                   checked={publishMode === 'new'}
                   onChange={() => setPublishMode('new')}
                 />{' '}
-                Create new Endpoint Alias
+                새 API 별칭 만들기 (Create new Endpoint Alias)
               </label>
               <label>
                 <input
@@ -1649,11 +1760,11 @@ export function CacheDeployWizardPage() {
                     void loadEndpoints()
                   }}
                 />{' '}
-                Select existing Alias (no active route)
+                기존 별칭 선택 — ACTIVE Route 없는 항목만 (Select existing Alias)
               </label>
               {publishMode === 'new' ? (
                 <label>
-                  Alias
+                  API 별칭 (Alias)
                   <input
                     value={alias}
                     onChange={(e) => setAlias(e.target.value)}
@@ -1666,7 +1777,7 @@ export function CacheDeployWizardPage() {
                     value={endpointId}
                     onChange={(e) => setEndpointId(e.target.value)}
                   >
-                    <option value="">Select…</option>
+                    <option value="">선택…</option>
                     {endpoints.map((ep) => (
                       <option
                         key={ep.id}
@@ -1675,7 +1786,7 @@ export function CacheDeployWizardPage() {
                       >
                         {ep.alias}
                         {ep.active_route
-                          ? ' (has ACTIVE route → use Switch)'
+                          ? ' (ACTIVE Route 있음 → Switch 사용)'
                           : ''}
                       </option>
                     ))}
@@ -1683,15 +1794,19 @@ export function CacheDeployWizardPage() {
                 </label>
               )}
               <label>
-                rewrite_model_name
+                upstream 모델 이름 재작성{' '}
+                <span className="term-label__api">(rewrite_model_name)</span>
                 <input
                   value={rewriteModelName}
                   onChange={(e) => setRewriteModelName(e.target.value)}
                 />
               </label>
               <p className="secondary-text">
-                Gateway clients use the Alias; upstream receives the served model
-                name.
+                Gateway 클라이언트는 API 별칭을 쓰고, upstream에는 모델 실행
+                이름(Served model name)이 전달됩니다.
+              </p>
+              <p className="action-impact">
+                게시 요청은 실제 서비스 API 연결(라우팅)에 영향을 줄 수 있습니다.
               </p>
               <button
                 type="button"
@@ -1699,7 +1814,7 @@ export function CacheDeployWizardPage() {
                 disabled={busy || !healthy || publishStatusLoading}
                 onClick={() => void onPublish()}
               >
-                {busy ? 'Publishing…' : 'Publish + verify Gateway'}
+                {busy ? '게시 중…' : 'API 연결 및 Gateway 검증'}
               </button>
             </>
           )}
@@ -1708,9 +1823,10 @@ export function CacheDeployWizardPage() {
 
       {step === 'done' ? (
         <section className="panel">
-          <h2>8. Gateway verification</h2>
+          <h2>{WIZARD_STEP_LABELS.done}</h2>
+          <p className="action-impact">{WIZARD_FIELD_HELP.verify}</p>
           {publishStatusLoading ? (
-            <LoadingBlock label="Restoring published state…" />
+            <LoadingBlock label="게시 상태를 복원하는 중…" />
           ) : publishResult ? (
             <>
               <p>{publishResult.note}</p>
@@ -1722,7 +1838,7 @@ export function CacheDeployWizardPage() {
                 ({publishResult.endpoint.api_type})
               </p>
               <p>
-                Verification:{' '}
+                Gateway 검증:{' '}
                 <StatusBadge
                   status={
                     publishResult.gateway_verification?.status || 'SKIPPED'
@@ -1731,7 +1847,7 @@ export function CacheDeployWizardPage() {
               </p>
               {deployment ? (
                 <p>
-                  Deployment{' '}
+                  배포{' '}
                   <Link to={`/deployments/${deployment.id}`}>
                     {deployment.name}
                   </Link>
@@ -1742,14 +1858,14 @@ export function CacheDeployWizardPage() {
                 className="btn"
                 onClick={() => navigate('/models/cache')}
               >
-                Back to Model Cache
+                다운로드한 모델 관리로 돌아가기
               </button>
             </>
           ) : (
             <>
               <SectionError
-                title="Not published"
-                message="No ACTIVE route targets this Deployment yet. Return to Publish."
+                title="아직 게시되지 않음"
+                message="이 Deployment를 가리키는 ACTIVE Route가 없습니다. API 연결 설정으로 돌아가세요."
               />
               <button
                 type="button"
@@ -1760,7 +1876,7 @@ export function CacheDeployWizardPage() {
                   })
                 }
               >
-                Back to Publish
+                API 연결 설정으로 돌아가기
               </button>
             </>
           )}

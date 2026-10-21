@@ -192,6 +192,91 @@ export const CACHE_FIELD_HELP = {
     '로컬 캐시 삭제(Purge)는 해당 서버 Node Agent의 모델 파일만 지웁니다. 모델 레지스트리(Model/Version) 삭제나 실행 중 컨테이너 중지가 아닙니다. 사용 중인 Deployment가 있으면 삭제가 거부될 수 있습니다.',
 } as const
 
+/** P1-15 — Deploy Wizard / Models registry beginner help (display-only). */
+export type WizardStepKey =
+  | 'cache'
+  | 'runtime'
+  | 'gpu'
+  | 'review'
+  | 'start'
+  | 'publish'
+  | 'done'
+
+export const WIZARD_STEP_LABELS: Record<WizardStepKey, string> = {
+  cache: '1. 다운로드 모델 확인',
+  runtime: '2. 모델 실행 설정',
+  gpu: '3. GPU 선택 및 자원 검사',
+  review: '4. 설정 검토 및 배포 정보 생성',
+  start: '5. 모델 실행 및 상태 확인',
+  publish: '6. API 연결 설정',
+  done: '7. API 연결 결과 확인',
+}
+
+export const WIZARD_STEP_HINTS: Record<WizardStepKey, string> = {
+  cache: '다운로드가 끝난 모델 파일을 확인한 뒤, 실행 설정으로 갑니다.',
+  runtime: '배포·컨테이너·런타임 옵션을 입력합니다. 미설정은 런타임 기본 동작을 따릅니다.',
+  gpu: '사용할 GPU를 고르고 Fresh Fit(현재 설정으로의 자원 검사)을 실행합니다. Fit은 모델을 실행하지 않습니다.',
+  review: '설정을 검토한 뒤 배포 정보만 생성합니다. 아직 모델은 실행되지 않습니다.',
+  start: '실제 모델 컨테이너 실행을 요청하고 Operation·Health 상태를 확인합니다.',
+  publish: '업무 시스템이 호출할 API 별칭(Alias)을 연결합니다. 서비스 라우팅에 영향을 줄 수 있습니다.',
+  done: 'API 연결·Gateway 검증 결과를 확인합니다.',
+}
+
+export const WIZARD_FIELD_HELP = {
+  overview:
+    '캐시 READY → Runtime 설정 → GPU·Fit → 배포 정보 생성 → 모델 실행 → API 별칭 연결 → 결과 확인 순서로 진행합니다. Create ≠ Start ≠ Publish입니다.',
+  create:
+    '배포 정보 생성(Create Deployment)은 Management API에 Deployment 메타데이터를 등록할 뿐이며, 모델 컨테이너를 시작하지 않습니다.',
+  start:
+    '모델 실행(Start Deployment)은 선택한 GPU에서 Managed 컨테이너를 기동하는 비동기 Operation을 요청합니다.',
+  publish:
+    'API 연결(Publish)은 Endpoint Alias를 ACTIVE Route로 이 Deployment에 연결합니다. 업무 시스템의 Gateway 호출 경로에 영향을 줄 수 있습니다.',
+  verify:
+    'API 연결 결과 확인은 Alias·Route·Gateway 검증 상태를 보여 줍니다. 모델 파일 다운로드나 Fit과는 별개입니다.',
+  freshFit:
+    'Fresh Fit은 지금 선택한 GPU와 Runtime 설정으로 Node Agent가 새로 측정한 자원 적합성 검사입니다. 모델을 실행하거나 GPU를 점유하지 않으며, VRAM을 GPU끼리 합산하지 않습니다.',
+  tensorParallel:
+    'GPU를 여러 장 고르면 Tensor Parallel(TP) 크기가 선택 수와 같아집니다. 이는 모델 샤딩이며, 여러 GPU의 여유 VRAM을 하나의 큰 메모리로 합치는 것과 다릅니다.',
+  unknownAck:
+    'UNKNOWN은 정보 부족으로 적합성을 단정하지 못한 상태입니다. 계속하려면 아래 동의 체크가 필요합니다.',
+  alias:
+    'API 별칭(Endpoint Alias)은 업무 시스템이 Gateway에 보내는 model 이름입니다. Served model name은 실제 런타임이 인식하는 모델 id이며, Publish 시 rewrite로 연결될 수 있습니다.',
+  aliasModes:
+    '신규 Alias는 새 별칭을 만들고 이 Deployment에 연결합니다. 기존 Alias는 ACTIVE Route가 없는 항목만 선택 가능합니다. ACTIVE Route가 있으면 이 단계에서 임의 전환할 수 없으며 Switch를 사용하세요.',
+  registryList:
+    '이 목록은 레지스트리에 등록된 모델 정의·버전을 조회합니다. 지금 서버에서 실행 중인 Deployment 목록과 다릅니다.',
+} as const
+
+export const RUNTIME_FIELD_HELP = {
+  deploymentName: '관리 화면에 보이는 배포 이름입니다(Deployment name).',
+  containerName:
+    'Node에서 Managed 컨테이너에 붙는 이름입니다(Container name). 같은 Node 안에서 고유해야 합니다.',
+  servedModelName:
+    '런타임이 노출하는 모델 실행 이름입니다(Served model name). Publish 시 upstream rewrite 기본값으로도 쓰입니다.',
+  runtimePort: '컨테이너가 listen하는 모델 실행 포트입니다(Runtime port, 1–65535).',
+  maxModelLen:
+    '최대 문맥 길이입니다(max_model_len). 비우면 런타임 기본값을 사용하며, 임의 기본값을 만들지 않습니다.',
+  maxNumSeqs:
+    '동시 처리 시퀀스 상한입니다(max_num_seqs). 스케줄러 용량이며 동시 사용자 수 보장이 아닙니다. 비우면 기본 동작입니다.',
+  gpuMemoryUtilization:
+    'GPU 메모리 사용 비율입니다(gpu_memory_utilization, 0 초과–1 이하). GPU별로 적용되며 합산하지 않습니다.',
+  dtype: '연산 데이터 형식입니다(dtype). 선택 사항이며 추측으로 채우지 않습니다.',
+  quantization:
+    '모델 양자화 방식입니다(quantization). 선택 사항이며 확인되지 않은 값을 자동 선택하지 않습니다.',
+  runner:
+    '생성/임베딩 실행 모드입니다(runner: generate / pooling). 아래 vLLM Model Runner(Auto/V1)와는 다른 설정입니다.',
+  reasoningParser:
+    '추론 내용 분리 설정입니다(Reasoning Parser, --reasoning-parser). 요청별 enable_thinking과 별개입니다.',
+  autoToolChoice:
+    '자동 도구 선택입니다(Auto Tool Choice). ON일 때만 --enable-auto-tool-choice와 parser를 추가합니다.',
+  toolCallParser:
+    '도구 호출 분석 방식입니다(Tool Call Parser). Auto Tool Choice ON일 때 필요합니다.',
+  vllmModelRunner:
+    '엔진 실행 방식입니다(vLLM Model Runner: Auto/V1). runner(generate/pooling)와 다릅니다.',
+  unsetKeepsDefault:
+    '미설정 필드는 실제 Runtime 기본 동작을 따릅니다. 임의의 기본값이나 모델별 설정을 자동 생성하지 않습니다.',
+} as const
+
 export function userFacingLoadError(
   area: string,
   raw: string,
