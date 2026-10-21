@@ -5,11 +5,13 @@ import { listEndpoints } from '../api/endpoints'
 import type { Endpoint } from '../api/types'
 import { ActiveBadge } from '../components/ActiveBadge'
 import { AppShell } from '../components/AppShell'
+import { EndpointEnabledConfirmDialog } from '../components/EndpointEnabledConfirmDialog'
 import { HelpHint, TermLabel } from '../components/HelpHint'
 import { LoadingBlock } from '../components/LoadingBlock'
 import { Pagination } from '../components/Pagination'
 import { SectionError } from '../components/SectionError'
 import { StatusBadge } from '../components/StatusBadge'
+import { useEndpointEnabledAction } from '../hooks/useEndpointEnabledAction'
 import { formatApiDateTime, shortId } from '../utils/date'
 import { parsePositivePage } from '../utils/query'
 import {
@@ -70,6 +72,15 @@ export function EndpointsPage() {
   const abortRef = useRef<AbortController | null>(null)
   const hasLoadedRef = useRef(false)
   const readGenRef = useRef(0)
+  const loadRef = useRef<(mode: 'initial' | 'refresh') => Promise<void>>(
+    async () => {},
+  )
+
+  const enabledAction = useEndpointEnabledAction({
+    onSuccess: async () => {
+      await loadRef.current('refresh')
+    },
+  })
 
   useEffect(() => {
     setDraftQ(q)
@@ -206,6 +217,7 @@ export function EndpointsPage() {
     },
     [q, apiType, isEnabled, trafficState, page, syncUrl],
   )
+  loadRef.current = load
 
   useEffect(() => {
     void load(hasLoadedRef.current ? 'refresh' : 'initial')
@@ -257,14 +269,35 @@ export function EndpointsPage() {
           <HelpHint showTopic label="사용 설정">
             {ENDPOINT_FIELD_HELP.enabled}
           </HelpHint>
+          <HelpHint showTopic label="사용 중지 vs 다른 정리 작업">
+            {ENDPOINT_FIELD_HELP.disableVsOthers}
+          </HelpHint>
           <HelpHint showTopic label="요청 처리 상태">
             {ENDPOINT_FIELD_HELP.traffic}
           </HelpHint>
           <HelpHint showTopic label="현재 활성 연결">
             {ENDPOINT_FIELD_HELP.activeRoute}
           </HelpHint>
+          <HelpHint showTopic label="미연결 별칭">
+            {ENDPOINT_FIELD_HELP.unusedAlias}
+          </HelpHint>
         </div>
       </details>
+
+      {enabledAction.resultMessage ? (
+        <div className="operation-result" role="status" data-testid="endpoint-enabled-result">
+          <p>{enabledAction.resultMessage}</p>
+          <p className="secondary-text">
+            {ENDPOINT_FIELD_HELP.gatewayAfterEnabledChange}
+          </p>
+        </div>
+      ) : null}
+      {enabledAction.openError ? (
+        <SectionError
+          title="사용 설정 변경"
+          message={enabledAction.openError}
+        />
+      ) : null}
 
       <form className="toolbar toolbar--wrap" onSubmit={onSubmitSearch}>
         <label className="toolbar__field" htmlFor="endpoint-search-q">
@@ -320,10 +353,37 @@ export function EndpointsPage() {
             }}
           >
             <option value="ALL">전체</option>
-            <option value="ENABLED">사용 (ENABLED)</option>
-            <option value="DISABLED">미사용 (DISABLED)</option>
+            <option value="ENABLED">사용 중 (ENABLED)</option>
+            <option value="DISABLED">사용 중지됨 (DISABLED)</option>
           </select>
         </div>
+        <label
+          className="toolbar__field toolbar__field--checkbox"
+          htmlFor="endpoint-enabled-only"
+        >
+          <span className="checkbox-row">
+            <input
+              id="endpoint-enabled-only"
+              type="checkbox"
+              checked={isEnabled === true}
+              data-testid="endpoint-enabled-only"
+              onChange={(e) => {
+                syncUrl({
+                  q,
+                  apiType,
+                  isEnabled: e.target.checked ? true : null,
+                  trafficState,
+                  page: 1,
+                })
+              }}
+            />
+            <span>사용 설정된 API만 보기</span>
+          </span>
+          <span className="secondary-text">
+            사용 설정(is_enabled=true)된 API만 조회합니다. 실제 모델 연결
+            여부와는 다릅니다.
+          </span>
+        </label>
         <div className="toolbar__field">
           <div className="toolbar__field-head">
             <label htmlFor="endpoint-traffic">요청 처리 상태 (Traffic)</label>
@@ -415,12 +475,15 @@ export function EndpointsPage() {
                   <th scope="col">
                     <TermLabel text="수정 시각" apiTerm="Updated" />
                   </th>
+                  <th scope="col">정리</th>
                 </tr>
               </thead>
               <tbody>
                 {items.map((ep) => {
                   const active = ep.active_route
                   const dep = active?.deployment
+                  const actionBusy =
+                    enabledAction.isDialogOpen || enabledAction.submitting
                   return (
                     <tr key={ep.id}>
                       <td>
@@ -441,17 +504,52 @@ export function EndpointsPage() {
                       </td>
                       <td>
                         {active ? (
-                          <Link
-                            className="table-link"
-                            to={`/deployments/${active.deployment_id}`}
-                          >
-                            {dep?.name ?? shortId(active.deployment_id)}
-                          </Link>
+                          <>
+                            <div className="secondary-text">모델 연결됨</div>
+                            <Link
+                              className="table-link"
+                              to={`/deployments/${active.deployment_id}`}
+                            >
+                              {dep?.name ?? shortId(active.deployment_id)}
+                            </Link>
+                          </>
                         ) : (
-                          '—'
+                          <span
+                            className="secondary-text"
+                            title={ENDPOINT_FIELD_HELP.unusedAlias}
+                          >
+                            활성 연결 없음
+                          </span>
                         )}
                       </td>
                       <td>{formatApiDateTime(ep.updated_at)}</td>
+                      <td>
+                        {ep.is_enabled ? (
+                          <button
+                            type="button"
+                            className="btn btn--danger btn--small"
+                            data-testid={`endpoint-disable-${ep.id}`}
+                            disabled={actionBusy || refreshing}
+                            onClick={() =>
+                              void enabledAction.open(ep.id, 'disable')
+                            }
+                          >
+                            사용 중지
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            className="btn btn--primary btn--small"
+                            data-testid={`endpoint-enable-${ep.id}`}
+                            disabled={actionBusy || refreshing}
+                            onClick={() =>
+                              void enabledAction.open(ep.id, 'enable')
+                            }
+                          >
+                            다시 사용
+                          </button>
+                        )}
+                      </td>
                     </tr>
                   )
                 })}
@@ -486,6 +584,22 @@ export function EndpointsPage() {
         <p className="empty-state" role="status">
           검색/필터 조건에 해당하는 API 연결이 없습니다.
         </p>
+      ) : null}
+
+      {enabledAction.isDialogOpen && enabledAction.mode ? (
+        <EndpointEnabledConfirmDialog
+          mode={enabledAction.mode}
+          endpoint={enabledAction.draft}
+          refreshing={enabledAction.refreshing}
+          submitting={enabledAction.submitting}
+          error={enabledAction.error}
+          consent={enabledAction.consent}
+          onConsentChange={enabledAction.setConsent}
+          aliasInput={enabledAction.aliasInput}
+          onAliasInputChange={enabledAction.setAliasInput}
+          onCancel={enabledAction.close}
+          onConfirm={() => void enabledAction.confirm()}
+        />
       ) : null}
     </AppShell>
   )

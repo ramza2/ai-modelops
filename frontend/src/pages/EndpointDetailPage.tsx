@@ -23,10 +23,12 @@ import type {
 } from '../api/types'
 import { ActiveBadge } from '../components/ActiveBadge'
 import { AppShell } from '../components/AppShell'
+import { EndpointEnabledConfirmDialog } from '../components/EndpointEnabledConfirmDialog'
 import { HelpHint, TermLabel } from '../components/HelpHint'
 import { LoadingBlock } from '../components/LoadingBlock'
 import { SectionError } from '../components/SectionError'
 import { StatusBadge } from '../components/StatusBadge'
+import { useEndpointEnabledAction } from '../hooks/useEndpointEnabledAction'
 import { formatApiDateTime, shortId } from '../utils/date'
 import { formatMemoryMb } from '../utils/number'
 import {
@@ -415,6 +417,16 @@ export function EndpointDetailPage() {
   const loadRef = useRef(load)
   loadRef.current = load
 
+  const enabledAction = useEndpointEnabledAction({
+    onSuccess: async () => {
+      await loadRef.current('refresh')
+    },
+    isExternallyBusy: () =>
+      switchingRef.current || unpublishingRef.current || refreshingRef.current,
+  })
+  const enabledActionCloseRef = useRef(enabledAction.close)
+  enabledActionCloseRef.current = enabledAction.close
+
   /**
    * First time a Switch Operation is observed as terminal for this id,
    * re-read Endpoint + Route History once. SUCCEEDED ≠ invent ACTIVE Route;
@@ -443,6 +455,7 @@ export function EndpointDetailPage() {
     setUnpublishError(null)
     // Drop prior Endpoint's Unpublish busy; do not leave buttons stuck.
     setUnpublishing(false)
+    enabledActionCloseRef.current()
     // Drop prior Endpoint Switch tracking UI (URL restore runs separately).
     setLastOperation(null)
     setSwitchOpRestoreError(null)
@@ -456,6 +469,7 @@ export function EndpointDetailPage() {
       targetsAbortRef.current?.abort()
       unpublishAbortRef.current?.abort()
       switchOpAbortRef.current?.abort()
+      enabledActionCloseRef.current()
     }
   }, [load, closeUnpublishDialog])
 
@@ -909,9 +923,13 @@ export function EndpointDetailPage() {
     )
   }
 
-  // Enqueue/Unpublish mutations block refresh; in-flight Switch poll does not
-  // (operators must be able to recover after a poll failure).
-  const busy = switching || unpublishing
+  // Enqueue/Unpublish/사용중지 mutations block refresh; in-flight Switch poll
+  // does not (operators must be able to recover after a poll failure).
+  const busy =
+    switching ||
+    unpublishing ||
+    enabledAction.submitting ||
+    enabledAction.isDialogOpen
   const hotAllowed = preview?.result === 'HOT_SWITCH_AVAILABLE'
   const coldAllowed =
     preview?.result === 'HOT_SWITCH_AVAILABLE' ||
@@ -1037,8 +1055,33 @@ export function EndpointDetailPage() {
           <HelpHint showTopic label="연결 해제 (Unpublish)">
             {ENDPOINT_FIELD_HELP.unpublish}
           </HelpHint>
+          <HelpHint showTopic label="사용 중지 / 다시 사용">
+            {ENDPOINT_FIELD_HELP.disable} {ENDPOINT_FIELD_HELP.enable}
+          </HelpHint>
+          <HelpHint showTopic label="사용 중지 vs 다른 정리 작업">
+            {ENDPOINT_FIELD_HELP.disableVsOthers}
+          </HelpHint>
         </div>
       </details>
+
+      {enabledAction.resultMessage ? (
+        <div
+          className="operation-result"
+          role="status"
+          data-testid="endpoint-enabled-result"
+        >
+          <p>{enabledAction.resultMessage}</p>
+          <p className="secondary-text">
+            {ENDPOINT_FIELD_HELP.gatewayAfterEnabledChange}
+          </p>
+        </div>
+      ) : null}
+      {enabledAction.openError ? (
+        <SectionError
+          title="사용 설정 변경"
+          message={enabledAction.openError}
+        />
+      ) : null}
 
       {loading && !endpoint ? (
         <LoadingBlock label="API 연결을 불러오는 중…" />
@@ -1113,6 +1156,52 @@ export function EndpointDetailPage() {
                 {endpoint.description?.trim() ? endpoint.description : '—'}
               </p>
             </div>
+
+            <div className="toolbar toolbar--wrap">
+              <div className="toolbar__actions">
+                {endpoint.is_enabled ? (
+                  <button
+                    type="button"
+                    className="btn btn--danger"
+                    data-testid="endpoint-disable-open"
+                    disabled={
+                      busy ||
+                      previewing ||
+                      refreshing ||
+                      trackedSwitchActive ||
+                      switchTrackingUnresolved
+                    }
+                    onClick={() =>
+                      void enabledAction.open(endpoint.id, 'disable')
+                    }
+                  >
+                    사용 중지
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    className="btn btn--primary"
+                    data-testid="endpoint-enable-open"
+                    disabled={
+                      busy ||
+                      previewing ||
+                      refreshing ||
+                      trackedSwitchActive ||
+                      switchTrackingUnresolved
+                    }
+                    onClick={() =>
+                      void enabledAction.open(endpoint.id, 'enable')
+                    }
+                  >
+                    다시 사용 (재활성화)
+                  </button>
+                )}
+              </div>
+            </div>
+            <p className="panel-hint" role="note">
+              {ENDPOINT_FIELD_HELP.disableVsOthers} Route History·Operation
+              이력은 유지됩니다. 영구 삭제는 제공하지 않습니다.
+            </p>
           </section>
 
           <section
@@ -1216,10 +1305,15 @@ export function EndpointDetailPage() {
                 </p>
               </>
             ) : (
-              <p className="empty-state" role="status">
-                현재 활성 연결(ACTIVE Route)이 없습니다. Switch workflow를
-                사용할 수 없습니다.
-              </p>
+              <>
+                <p className="empty-state" role="status">
+                  현재 활성 연결(ACTIVE Route)이 없습니다. Switch workflow를
+                  사용할 수 없습니다.
+                </p>
+                <p className="panel-hint" role="note">
+                  {ENDPOINT_FIELD_HELP.unusedAlias}
+                </p>
+              </>
             )}
 
             {unpublishError && !unpublishOpen ? (
@@ -1752,6 +1846,22 @@ export function EndpointDetailPage() {
             ) : null}
           </section>
         </>
+      ) : null}
+
+      {enabledAction.isDialogOpen && enabledAction.mode ? (
+        <EndpointEnabledConfirmDialog
+          mode={enabledAction.mode}
+          endpoint={enabledAction.draft}
+          refreshing={enabledAction.refreshing}
+          submitting={enabledAction.submitting}
+          error={enabledAction.error}
+          consent={enabledAction.consent}
+          onConsentChange={enabledAction.setConsent}
+          aliasInput={enabledAction.aliasInput}
+          onAliasInputChange={enabledAction.setAliasInput}
+          onCancel={enabledAction.close}
+          onConfirm={() => void enabledAction.confirm()}
+        />
       ) : null}
 
       {unpublishOpen && endpoint?.active_route ? (

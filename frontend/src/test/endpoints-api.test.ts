@@ -5,6 +5,7 @@ import {
   listEndpointRoutes,
   listEndpoints,
   switchEndpoint,
+  updateEndpointEnabled,
 } from '../api/endpoints'
 
 describe('endpoints API client', () => {
@@ -57,6 +58,29 @@ describe('endpoints API client', () => {
     const urls = fetchSpy.mock.calls.map((c) => String(c[0]))
     expect(urls[0]).toContain('/api/v1/endpoints/e1')
     expect(urls[1]).toContain('/api/v1/endpoints/e1/routes')
+  })
+
+  it('patches is_enabled via updateEndpointEnabled', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          id: 'e1',
+          alias: 'minilm-test',
+          is_enabled: false,
+          traffic_state: 'SERVING',
+          active_route: null,
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+    )
+    const result = await updateEndpointEnabled('e1', false)
+    expect(result.is_enabled).toBe(false)
+    expect(String(fetchSpy.mock.calls[0]?.[0])).toContain('/api/v1/endpoints/e1')
+    expect((fetchSpy.mock.calls[0]?.[1] as RequestInit).method).toBe('PATCH')
+    const body = JSON.parse(
+      String((fetchSpy.mock.calls[0]?.[1] as RequestInit).body),
+    )
+    expect(body).toEqual({ is_enabled: false })
   })
 
   it('posts preflight and switch with unique Idempotency-Key', async () => {

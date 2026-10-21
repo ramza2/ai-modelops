@@ -190,4 +190,107 @@ describe('EndpointsPage', () => {
     expect(urls.some((u) => u.includes('/preflights'))).toBe(false)
     expect(urls.some((u) => u.includes('/switch'))).toBe(false)
   })
+
+  it('defaults to full list and filters with 사용 설정된 API만 보기', async () => {
+    const user = userEvent.setup()
+    vi.mocked(endpointsApi.listEndpoints).mockResolvedValue(pageResult([]))
+    renderAt('/endpoints')
+    await waitFor(() => {
+      expect(endpointsApi.listEndpoints).toHaveBeenCalled()
+    })
+    const lastAll = vi.mocked(endpointsApi.listEndpoints).mock.calls.at(-1)?.[0]
+    expect(lastAll?.isEnabled).toBeNull()
+    expect(screen.getByText('사용 설정된 API만 보기')).toBeInTheDocument()
+    expect(
+      screen.getByText(/실제 모델 연결 여부와는 다릅니다/),
+    ).toBeInTheDocument()
+    await user.click(screen.getByTestId('endpoint-enabled-only'))
+    await waitFor(() => {
+      expect(screen.getByTestId('location-search')).toHaveTextContent(
+        'is_enabled=true',
+      )
+    })
+    const lastEnabled = vi.mocked(endpointsApi.listEndpoints).mock.calls.at(
+      -1,
+    )?.[0]
+    expect(lastEnabled?.isEnabled).toBe(true)
+  })
+
+  it('distinguishes unused vs connected aliases and disables unused safely', async () => {
+    const user = userEvent.setup()
+    vi.spyOn(endpointsApi, 'updateEndpointEnabled')
+    vi.mocked(endpointsApi.listEndpoints).mockResolvedValue(
+      pageResult([
+        makeEndpoint({
+          id: 'e-unused',
+          alias: 'minilm-test',
+          display_name: 'MiniLM Test',
+          active_route: null,
+        }),
+        makeEndpoint({
+          id: 'e-live',
+          alias: 'chat-main',
+          display_name: 'Chat Main',
+        }),
+      ]),
+    )
+    vi.mocked(endpointsApi.getEndpoint).mockImplementation(async (id) => {
+      if (id === 'e-unused') {
+        return makeEndpoint({
+          id: 'e-unused',
+          alias: 'minilm-test',
+          display_name: 'MiniLM Test',
+          active_route: null,
+        })
+      }
+      return makeEndpoint({ id: 'e-live', alias: 'chat-main' })
+    })
+    vi.mocked(endpointsApi.updateEndpointEnabled).mockResolvedValue(
+      makeEndpoint({
+        id: 'e-unused',
+        alias: 'minilm-test',
+        display_name: 'MiniLM Test',
+        is_enabled: false,
+        active_route: null,
+      }),
+    )
+    renderAt('/endpoints')
+    expect(await screen.findByText('활성 연결 없음')).toBeInTheDocument()
+    expect(screen.getByText('모델 연결됨')).toBeInTheDocument()
+
+    await user.click(screen.getByTestId('endpoint-disable-e-unused'))
+    expect(await screen.findByTestId('endpoint-enabled-dialog')).toBeInTheDocument()
+    expect(screen.getByText(/ACTIVE Route가 없는 미사용 별칭/)).toBeInTheDocument()
+    expect(
+      screen.queryByTestId('endpoint-enabled-alias-confirm'),
+    ).not.toBeInTheDocument()
+    await user.click(screen.getByTestId('endpoint-enabled-consent'))
+    await user.click(screen.getByTestId('endpoint-enabled-confirm'))
+    await waitFor(() => {
+      expect(endpointsApi.updateEndpointEnabled).toHaveBeenCalledWith(
+        'e-unused',
+        false,
+        expect.anything(),
+      )
+    })
+    expect(await screen.findByTestId('endpoint-enabled-result')).toHaveTextContent(
+      /사용 중지/,
+    )
+  })
+
+  it('requires alias confirm when disabling a connected alias', async () => {
+    const user = userEvent.setup()
+    vi.spyOn(endpointsApi, 'updateEndpointEnabled')
+    const live = makeEndpoint({ id: 'e-live', alias: 'chat-main' })
+    vi.mocked(endpointsApi.listEndpoints).mockResolvedValue(pageResult([live]))
+    vi.mocked(endpointsApi.getEndpoint).mockResolvedValue(live)
+    renderAt('/endpoints')
+    await user.click(await screen.findByTestId('endpoint-disable-e-live'))
+    expect(await screen.findByTestId('endpoint-enabled-alias-confirm')).toBeInTheDocument()
+    await user.click(screen.getByTestId('endpoint-enabled-consent'))
+    expect(screen.getByTestId('endpoint-enabled-confirm')).toBeDisabled()
+    await user.type(screen.getByTestId('endpoint-enabled-alias-confirm'), 'chat-main')
+    expect(screen.getByTestId('endpoint-enabled-confirm')).toBeEnabled()
+    expect(endpointsApi.updateEndpointEnabled).not.toHaveBeenCalled()
+  })
 })
