@@ -335,6 +335,39 @@ export const OBSERVABILITY_FIELD_HELP = {
     'GPU별 VRAM을 여러 장의 합산 자원처럼 해석하지 마세요. 카드마다 독립적으로 봅니다.',
 } as const
 
+/** P1-17 — Model / Model Version detail beginner help (display-only). */
+export const MODEL_DETAIL_FIELD_HELP = {
+  overview:
+    '이 화면은 레지스트리에 등록된 모델 정의와 버전 이력입니다. 모델 등록 상태(Active) ≠ 실제 배포·실행 중(Deployment) ≠ API 연결(Endpoint)입니다.',
+  modelVsVersion:
+    '모델(Model)은 논리 단위이고, 모델 버전(Model Version)은 실행·다운로드에 쓰이는 구체 스냅샷입니다. 버전마다 Runtime·예상 자원·Artifact가 다를 수 있습니다.',
+  registration:
+    '등록 상태(Active)는 레지스트리에서 이 모델이 관리 대상으로 켜져 있는지를 나타냅니다. 서버에서 컨테이너가 떠 있거나 Gateway로 요청이 가는 상태가 아닙니다.',
+  archived:
+    '버전 보관(Archived)은 이력에서 기본 목록에 덜 보이게 하는 표시입니다. 모델 삭제·Runtime 중지·캐시 삭제를 의미하지 않으며, 이미 실행 중인 Deployment와도 별개입니다.',
+  expectedResources:
+    '예상 Peak VRAM·문맥 길이 등은 Version에 저장된 예상 정의값입니다. 실제 GPU 측정값·현재 가용량·Preflight 판정이 아닙니다.',
+  versions:
+    '모델 버전 이력입니다. 「보관된 버전 포함」을 켜면 보관된 버전도 함께 볼 수 있습니다. 필터·페이지는 URL에 유지됩니다.',
+} as const
+
+export const MODEL_VERSION_DETAIL_FIELD_HELP = {
+  overview:
+    '이 화면은 Model Version에 저장된 Registry 정의값입니다. Deployment override·실제 컨테이너 observed 값과 다를 수 있으며, 관측 설정은 Deployment Capacity Profile에서 확인합니다.',
+  runtimeConfig:
+    'Version runtime_config는 레지스트리 정의값입니다. Deployment의 deployment_config가 일부를 덮어쓸 수 있고, 실행 중 관측값과도 다를 수 있습니다.',
+  expectedResources:
+    '예상 Idle/Peak VRAM·기본 문맥 길이는 예상 정의값입니다. 실제 사용량이나 현재 GPU 가용량을 보장하지 않습니다.',
+  artifacts:
+    'Artifact는 레지스트리에 등록된 모델 파일 메타데이터입니다. 서버 Node의 다운로드 캐시 READY 상태와는 별개입니다.',
+  archived:
+    '버전이 Archived여도 이미 연결된 Deployment가 실행 중일 수 있습니다. 보관 표시 ≠ 실행 중지입니다.',
+  identifiers:
+    'SHA·Digest·Checksum·URI·Served Model Name 등 원본 식별값은 번역하거나 변형하지 않습니다.',
+  parentModel:
+    '부모 모델 링크는 Version이 속한 Model입니다. 부모 모델 조회 실패와 Version 자체 조회 실패는 별도로 안내합니다.',
+} as const
+
 export function userFacingLoadError(
   area: string,
   raw: string,
