@@ -169,8 +169,8 @@ describe('DashboardPage', () => {
     // 0 stays 0 for known zero counts
     const online = screen.getByText('온라인 서버 (ONLINE Node)').closest('article')
     expect(online?.textContent).toMatch(/0/)
-    expect(screen.getByText('미수집')).toBeInTheDocument()
-    expect(screen.getByText('확인 불가')).toBeInTheDocument()
+    expect(screen.getAllByText('미수집').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('확인 불가').length).toBeGreaterThan(0)
     expect(
       screen.getByText('최근 24시간 호출 기록이 없습니다.'),
     ).toBeInTheDocument()

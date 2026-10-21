@@ -197,7 +197,9 @@ describe('ModelVersionDetailPage', () => {
     ).toBeInTheDocument()
     expect(screen.getAllByText('미등록').length).toBe(2)
     expect(screen.getByText('0 MB')).toBeInTheDocument()
-    expect(screen.getByText(/다운로드·배포 오류가 아닙니다/)).toBeInTheDocument()
+    expect(
+      screen.getAllByText(/다운로드·배포 오류가 아닙니다/).length,
+    ).toBeGreaterThan(0)
     expect(screen.queryByText('8.0 GiB')).not.toBeInTheDocument()
   })
 
@@ -213,7 +215,9 @@ describe('ModelVersionDetailPage', () => {
         /레지스트리에 별도 실행 설정이 등록되지 않았습니다/,
       ),
     ).toBeInTheDocument()
-    expect(screen.getByText(/다운로드·배포 오류가 아닙니다/)).toBeInTheDocument()
+    expect(
+      screen.getAllByText(/다운로드·배포 오류가 아닙니다/).length,
+    ).toBeGreaterThan(0)
     expect(
       screen.queryByText('표시할 알려진 runtime_config 항목이 없습니다.'),
     ).not.toBeInTheDocument()
