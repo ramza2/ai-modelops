@@ -123,8 +123,8 @@ describe('ModelDetailPage', () => {
     vi.mocked(modelsApi.getModel).mockResolvedValue(makeModel())
     vi.mocked(modelsApi.listModelVersions).mockResolvedValue(pageResult([]))
     renderDetail('/models/m1?page=2')
-    await screen.findByLabelText('Archived 포함')
-    await user.click(screen.getByLabelText('Archived 포함'))
+    await screen.findByLabelText('보관된 버전 포함')
+    await user.click(screen.getByLabelText('보관된 버전 포함'))
     await waitFor(() => {
       const last = vi.mocked(modelsApi.listModelVersions).mock.calls.at(-1)
       expect(last?.[1]?.includeArchived).toBe(true)
@@ -140,7 +140,7 @@ describe('ModelDetailPage', () => {
     vi.mocked(modelsApi.listModelVersions).mockResolvedValue(pageResult([]))
     renderDetail()
     expect(
-      await screen.findByText(/표시할 활성 Model Version이 없습니다/),
+      await screen.findByText(/표시할 활성 모델 버전이 없습니다/),
     ).toBeInTheDocument()
   })
 
@@ -181,10 +181,10 @@ describe('ModelDetailPage', () => {
     )
     renderDetail()
     expect(
-      await screen.findByText('Model을 찾을 수 없습니다.'),
+      await screen.findByText('모델을 찾을 수 없습니다.'),
     ).toBeInTheDocument()
     expect(
-      screen.getByRole('link', { name: '← Models / Versions' }),
+      screen.getByRole('link', { name: '← 등록된 모델 관리' }),
     ).toHaveAttribute('href', '/models')
   })
 
@@ -206,14 +206,14 @@ describe('ModelDetailPage', () => {
 
     await user.click(screen.getByRole('button', { name: '새로고침' }))
     expect(
-      await screen.findByText('Model을 찾을 수 없습니다.'),
+      await screen.findByText('모델을 찾을 수 없습니다.'),
     ).toBeInTheDocument()
     expect(
       screen.queryByRole('heading', { level: 2, name: 'Chat A' }),
     ).not.toBeInTheDocument()
     expect(screen.queryByRole('link', { name: 'keep-v' })).not.toBeInTheDocument()
     expect(
-      screen.getByRole('link', { name: '← Models / Versions' }),
+      screen.getByRole('link', { name: '← 등록된 모델 관리' }),
     ).toHaveAttribute('href', '/models')
   })
 

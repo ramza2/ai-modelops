@@ -111,7 +111,7 @@ export function ModelVersionDetailPage() {
         setVersionNotFound(true)
         setVersionLoading(false)
         setArtifactsLoading(false)
-        setVersionError('Model Version을 찾을 수 없습니다.')
+        setVersionError('모델 버전을 찾을 수 없습니다.')
         return
       }
 
@@ -149,7 +149,7 @@ export function ModelVersionDetailPage() {
             setArtifacts(null)
             setArtifactTotal(0)
             setVersionNotFound(true)
-            setVersionError('Model Version을 찾을 수 없습니다.')
+            setVersionError('모델 버전을 찾을 수 없습니다.')
             return
           }
           const message =
@@ -231,11 +231,11 @@ export function ModelVersionDetailPage() {
         lastUpdated={lastUpdated}
       >
         <Link className="back-link" to="/models">
-          ← Models / Versions
+          ← 등록된 모델 관리
         </Link>
         <SectionError
-          title="Model Version을 찾을 수 없습니다."
-          message="요청한 Version이 없거나 삭제되었습니다."
+          title="모델 버전을 찾을 수 없습니다."
+          message="요청한 모델 버전이 없거나 삭제되었습니다."
         />
       </AppShell>
     )
@@ -267,7 +267,7 @@ export function ModelVersionDetailPage() {
       lastUpdated={lastUpdated}
     >
       <nav className="breadcrumb" aria-label="경로">
-        <Link to="/models">Models / Versions</Link>
+        <Link to="/models">등록된 모델 관리</Link>
         <span aria-hidden="true"> → </span>
         {parentModel ? (
           <Link to={`/models/${parentModel.id}`}>{parentModel.name}</Link>
@@ -289,7 +289,7 @@ export function ModelVersionDetailPage() {
           </Link>
         ) : null}
         <Link className="back-link" to="/models">
-          ← Models / Versions
+          ← 등록된 모델 관리
         </Link>
       </div>
 
@@ -684,7 +684,7 @@ export function ModelVersionDetailPage() {
 
         {artifacts !== null && artifacts.length === 0 ? (
           <p className="empty-state" role="status">
-            등록된 Artifact가 없습니다.
+            등록된 모델 파일이 없습니다.
           </p>
         ) : null}
       </section>

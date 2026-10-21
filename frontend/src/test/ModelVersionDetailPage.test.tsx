@@ -211,7 +211,7 @@ describe('ModelVersionDetailPage', () => {
     vi.mocked(modelsApi.listModelArtifacts).mockResolvedValue(pageResult([]))
     renderDetail()
     expect(
-      await screen.findByText('등록된 Artifact가 없습니다.'),
+      await screen.findByText('등록된 모델 파일이 없습니다.'),
     ).toBeInTheDocument()
     cleanup()
 
@@ -252,10 +252,10 @@ describe('ModelVersionDetailPage', () => {
     )
     renderDetail()
     expect(
-      await screen.findByText('Model Version을 찾을 수 없습니다.'),
+      await screen.findByText('모델 버전을 찾을 수 없습니다.'),
     ).toBeInTheDocument()
     expect(
-      screen.getByRole('link', { name: '← Models / Versions' }),
+      screen.getByRole('link', { name: '← 등록된 모델 관리' }),
     ).toHaveAttribute('href', '/models')
   })
 
@@ -286,7 +286,7 @@ describe('ModelVersionDetailPage', () => {
     expect(screen.getByRole('link', { name: 'Chat A' })).toBeInTheDocument()
     expect(screen.getByText('WEIGHTS')).toBeInTheDocument()
     expect(
-      screen.queryByText('Model Version을 찾을 수 없습니다.'),
+      screen.queryByText('모델 버전을 찾을 수 없습니다.'),
     ).not.toBeInTheDocument()
   })
 
@@ -306,14 +306,14 @@ describe('ModelVersionDetailPage', () => {
 
     await user.click(screen.getByRole('button', { name: '새로고침' }))
     expect(
-      await screen.findByText('Model Version을 찾을 수 없습니다.'),
+      await screen.findByText('모델 버전을 찾을 수 없습니다.'),
     ).toBeInTheDocument()
     expect(
       screen.queryByRole('heading', { level: 2, name: '1.0.0' }),
     ).not.toBeInTheDocument()
     expect(screen.queryByText('WEIGHTS')).not.toBeInTheDocument()
     expect(
-      screen.getByRole('link', { name: '← Models / Versions' }),
+      screen.getByRole('link', { name: '← 등록된 모델 관리' }),
     ).toHaveAttribute('href', '/models')
   })
 

@@ -84,7 +84,7 @@ export function ModelDetailPage() {
         setModelNotFound(true)
         setModelLoading(false)
         setVersionsLoading(false)
-        setModelError('Model을 찾을 수 없습니다.')
+        setModelError('모델을 찾을 수 없습니다.')
         return
       }
 
@@ -119,7 +119,7 @@ export function ModelDetailPage() {
             setVersions(null)
             setVersionTotal(0)
             setModelNotFound(true)
-            setModelError('Model을 찾을 수 없습니다.')
+            setModelError('모델을 찾을 수 없습니다.')
             return
           }
           const message =
@@ -201,11 +201,11 @@ export function ModelDetailPage() {
         lastUpdated={lastUpdated}
       >
         <Link className="back-link" to="/models">
-          ← Models / Versions
+          ← 등록된 모델 관리
         </Link>
         <SectionError
-          title="Model을 찾을 수 없습니다."
-          message="요청한 Model이 없거나 삭제되었습니다."
+          title="모델을 찾을 수 없습니다."
+          message="요청한 모델이 없거나 삭제되었습니다."
         />
       </AppShell>
     )
@@ -231,7 +231,7 @@ export function ModelDetailPage() {
       lastUpdated={lastUpdated}
     >
       <Link className="back-link" to="/models">
-        ← Models / Versions
+        ← 등록된 모델 관리
       </Link>
 
       <p className="panel-hint" role="note">
@@ -346,7 +346,7 @@ export function ModelDetailPage() {
                 syncUrl({ includeArchived: e.target.checked, page: 1 })
               }
             />
-            Archived 포함
+            보관된 버전 포함
           </label>
         </div>
         <p className="panel-hint" role="note">
@@ -450,14 +450,14 @@ export function ModelDetailPage() {
 
         {versions !== null && versions.length === 0 && !includeArchived ? (
           <p className="empty-state" role="status">
-            표시할 활성 Model Version이 없습니다. Archived 포함을 켜면 보관된
-            Version도 확인할 수 있습니다.
+            표시할 활성 모델 버전이 없습니다. 「보관된 버전 포함」을 켜면
+            보관된 버전도 확인할 수 있습니다.
           </p>
         ) : null}
 
         {versions !== null && versions.length === 0 && includeArchived ? (
           <p className="empty-state" role="status">
-            등록된 Model Version이 없습니다.
+            등록된 모델 버전이 없습니다.
           </p>
         ) : null}
       </section>

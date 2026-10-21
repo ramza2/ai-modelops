@@ -348,7 +348,7 @@ export const MODEL_DETAIL_FIELD_HELP = {
   expectedResources:
     '예상 Peak VRAM·문맥 길이 등은 Version에 저장된 예상 정의값입니다. 실제 GPU 측정값·현재 가용량·Preflight 판정이 아닙니다.',
   versions:
-    '모델 버전 이력입니다. Archived 포함을 켜면 보관된 버전도 함께 볼 수 있습니다. 필터·페이지는 URL에 유지됩니다.',
+    '모델 버전 이력입니다. 「보관된 버전 포함」을 켜면 보관된 버전도 함께 볼 수 있습니다. 필터·페이지는 URL에 유지됩니다.',
 } as const
 
 export const MODEL_VERSION_DETAIL_FIELD_HELP = {
