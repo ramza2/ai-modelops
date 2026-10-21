@@ -414,6 +414,43 @@ export const MODEL_VERSION_DETAIL_FIELD_HELP = {
     '부모 모델 링크는 Version이 속한 Model입니다. 부모 모델 조회 실패와 Version 자체 조회 실패는 별도로 안내합니다.',
 } as const
 
+/** P1-20 — Deployments list/detail beginner help (display-only). */
+export const DEPLOYMENT_FIELD_HELP = {
+  overview:
+    '이 화면은 서버에 올린 모델 배포(Deployment) 메타데이터와 목표·실행·정상 동작 상태를 조회합니다. 모델 레지스트리 등록 ≠ 모델 배포이며, 활성 배포 ≠ 실제 실행 중입니다.',
+  managedVsImported:
+    'MANAGED=ModelOps가 컨테이너 lifecycle(시작·중지·재시작)을 관리합니다. IMPORTED=이미 떠 있는 런타임을 등록·조회만 하며, 이 화면에서 Start/Stop/Restart를 노출하지 않습니다.',
+  registryVsDeploy:
+    '모델 레지스트리 등록은 카탈로그/버전 정의이고, 모델 배포는 특정 서버·GPU에 올린 실행 단위입니다. 등록만으로 컨테이너가 기동되지 않습니다.',
+  activeVsRunning:
+    '활성 배포(퇴역하지 않음)는 관리 대상이라는 뜻이며, runtime_status=RUNNING(실제 실행 중)과 다릅니다.',
+  desiredVsRuntime:
+    '목표 상태(Desired)는 시스템이 맞추려는 상태이고, 실행 상태(Runtime)는 관측된 실제 컨테이너 상태입니다. 둘이 잠시 어긋날 수 있습니다.',
+  runtimeVsHealth:
+    'Runtime RUNNING은 컨테이너가 떠 있다는 뜻이고, Health HEALTHY는 정상 동작 확인이 된 상태입니다. RUNNING ≠ HEALTHY입니다.',
+  retired:
+    '퇴역(Retired)은 배포를 관리 대상에서 빼는 표시입니다. 모델 파일 삭제·캐시 삭제·레지스트리 삭제와 다릅니다. Retired여도 Health HEALTHY 잔여 표시가 남을 수 있으니 활성·실행과 혼동하지 마세요.',
+  lifecycle:
+    '모델 실행 관리(Lifecycle)는 Management API에 Operation을 enqueue합니다(202 Accepted=작업 접수). Frontend는 Node Agent/Gateway를 직접 호출하지 않으며, Worker가 비동기로 수행합니다. 최종 결과는 Operation·Deployment 상태에서 확인하세요.',
+  lifecycleStart: '모델 시작: 모델 컨테이너 실행 작업을 요청합니다. 접수 ≠ 즉시 RUNNING/HEALTHY입니다.',
+  lifecycleStop:
+    '모델 중지: 해당 모델 컨테이너 중지를 요청합니다. 현재 API를 이용하는 서비스에 영향을 줄 수 있습니다.',
+  lifecycleRestart:
+    '모델 재시작: 컨테이너를 재시작하므로 요청 지연·실패 또는 일시 중단이 가능합니다.',
+  operationTracking:
+    '최근 Operation은 enqueue된 비동기 작업입니다. Operation SUCCEEDED가 곧 Runtime HEALTHY 또는 STOPPED를 의미하지는 않습니다.',
+  stopSync:
+    'STOP Operation SUCCEEDED와 Deployment runtime_status=STOPPED는 다를 수 있습니다. STOP 완료 후에도 상태 동기화를 기다리며, 시간 초과 시 수동 새로고침으로 확인하세요.',
+  gpuAssignments:
+    '할당된 GPU는 배포 정보에 저장된 할당입니다. 현재 실제 GPU 사용량·여유 VRAM이 아니며, 예상 VRAM도 관측 사용량이 아닙니다. GPU별 자원을 합산하지 마세요. 최신 GPU 상태는 서버 및 GPU 화면에서 확인하세요.',
+  deploymentConfig:
+    '모델 배포 실행 설정(Deployment Config)은 배포 시 저장된 값입니다. Model Version runtime_config·실제 컨테이너 관측값과 다를 수 있습니다. 없는 항목에 임의 기본값을 만들지 않습니다.',
+  monitoringLink:
+    '모델 실행·자원 모니터링 보기는 조회 전용입니다. 모델을 시작·중지·재시작하지 않습니다.',
+  decommission:
+    '모델 종료·정리 절차(Decommission)는 일반 중지(Stop)와 다른 단계적 정리입니다. API 연결 해제·모델 중지·Registry 보관·캐시 삭제는 서로 다른 작업입니다. 해당 화면의 한국어화·안전 검토는 P1-21에서 진행 예정입니다.',
+} as const
+
 /** P1-18 — Dashboard beginner help (display-only). */
 export const DASHBOARD_FIELD_HELP = {
   overview:

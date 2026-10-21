@@ -199,7 +199,7 @@ describe('DeploymentDetailPage', () => {
     expect(screen.getByText(/기타 설정 1개/)).toBeInTheDocument()
     const configHeading = screen.getByRole('heading', {
       level: 2,
-      name: 'Deployment Config',
+      name: '모델 배포 실행 설정',
     })
     const configSection = configHeading.closest('section')
     expect(configSection?.querySelector('.config-kv-grid')).not.toBeNull()
@@ -207,6 +207,16 @@ describe('DeploymentDetailPage', () => {
     expect(
       configSection?.querySelector('dt')?.textContent,
     ).toMatch(/^deployment_config\./)
+    const monitoringLinks = screen.getAllByRole('link', {
+      name: '모델 실행·자원 모니터링 보기',
+    })
+    expect(monitoringLinks).toHaveLength(1)
+    expect(monitoringLinks[0]).toHaveAttribute(
+      'href',
+      '/observability/deployments/d1',
+    )
+    expect(configSection?.contains(monitoringLinks[0])).toBe(true)
+    expect(screen.getByText(/조회 전용/)).toBeInTheDocument()
   })
 
   it('shows Start/Stop/Restart for MANAGED non-retired only', async () => {
@@ -214,10 +224,10 @@ describe('DeploymentDetailPage', () => {
     vi.mocked(modelsApi.getModelVersion).mockResolvedValue(makeVersion())
     vi.mocked(nodesApi.getNode).mockResolvedValue(makeNode())
     renderDetail()
-    expect(await screen.findByRole('button', { name: 'Start' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Stop' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Restart' })).toBeInTheDocument()
-    expect(screen.getByRole('link', { name: 'Decommission' })).toHaveAttribute(
+    expect(await screen.findByRole('button', { name: '모델 시작' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '모델 중지' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '모델 재시작' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: '모델 종료·정리 절차' })).toHaveAttribute(
       'href',
       '/deployments/d1/decommission',
     )
@@ -228,9 +238,9 @@ describe('DeploymentDetailPage', () => {
     )
     renderDetail()
     expect(
-      await screen.findByText(/IMPORTED Deployment에는 lifecycle/),
+      await screen.findByText(/IMPORTED 모델 배포에는 시작·중지·재시작/),
     ).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'Start' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '모델 시작' })).not.toBeInTheDocument()
     cleanup()
 
     vi.mocked(deploymentsApi.getDeployment).mockResolvedValue(
@@ -238,9 +248,9 @@ describe('DeploymentDetailPage', () => {
     )
     renderDetail()
     expect(
-      await screen.findByText(/Retired Deployment에는 lifecycle/),
+      await screen.findByText(/퇴역\(Retired\)된 모델 배포에는 시작·중지·재시작/),
     ).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'Start' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '모델 시작' })).not.toBeInTheDocument()
   })
 
   it('enqueues Start, shows Operation, and re-reads Deployment', async () => {
@@ -254,8 +264,8 @@ describe('DeploymentDetailPage', () => {
     vi.mocked(nodesApi.getNode).mockResolvedValue(makeNode())
     vi.mocked(deploymentsApi.startDeployment).mockResolvedValue(makeOp())
     renderDetail()
-    await screen.findByRole('button', { name: 'Start' })
-    await user.click(screen.getByRole('button', { name: 'Start' }))
+    await screen.findByRole('button', { name: '모델 시작' })
+    await user.click(screen.getByRole('button', { name: '모델 시작' }))
     await waitFor(() => {
       expect(deploymentsApi.startDeployment).toHaveBeenCalledWith('d1')
     })
@@ -264,7 +274,7 @@ describe('DeploymentDetailPage', () => {
     await waitFor(() => {
       expect(deploymentsApi.getDeployment).toHaveBeenCalledTimes(2)
     })
-    expect(screen.getByText(/RUNNING/)).toBeInTheDocument()
+    expect(screen.getByText(/\(RUNNING\)/)).toBeInTheDocument()
   })
 
   it('keeps Deployment snapshot on lifecycle 409 and shows error', async () => {
@@ -279,10 +289,14 @@ describe('DeploymentDetailPage', () => {
     )
     renderDetail()
     await screen.findByRole('heading', { level: 2, name: 'chat-prod' })
-    await user.click(screen.getByRole('button', { name: 'Start' }))
+    await user.click(screen.getByRole('button', { name: '모델 시작' }))
     expect(
       await screen.findByText(/active lifecycle operation already exists/i),
     ).toBeInTheDocument()
+    expect(
+      screen.getByText(/작업 이력과 최신 배포 상태를 확인한 후/),
+    ).toBeInTheDocument()
+    expect(screen.queryByText(/버튼을 다시 시도/)).not.toBeInTheDocument()
     expect(
       screen.getByRole('heading', { level: 2, name: 'chat-prod' }),
     ).toBeInTheDocument()
@@ -302,17 +316,17 @@ describe('DeploymentDetailPage', () => {
         }),
     )
     renderDetail()
-    await screen.findByRole('button', { name: 'Start' })
-    await user.click(screen.getByRole('button', { name: 'Start' }))
+    await screen.findByRole('button', { name: '모델 시작' })
+    await user.click(screen.getByRole('button', { name: '모델 시작' }))
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: 'Enqueue 중…' })).toBeDisabled()
+      expect(screen.getByRole('button', { name: '작업 접수 중…' })).toBeDisabled()
     })
-    expect(screen.getByRole('button', { name: 'Stop' })).toBeDisabled()
-    expect(screen.getByRole('button', { name: 'Restart' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: '모델 중지' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: '모델 재시작' })).toBeDisabled()
     expect(screen.getByRole('button', { name: '새로고침' })).toBeDisabled()
     resolveStart(makeOp())
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: 'Start' })).not.toBeDisabled()
+      expect(screen.getByRole('button', { name: '모델 시작' })).not.toBeDisabled()
     })
   })
 
@@ -329,7 +343,7 @@ describe('DeploymentDetailPage', () => {
     ).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: '새로고침' }))
     expect(
-      await screen.findByText('Deployment를 찾을 수 없습니다.'),
+      await screen.findByText('모델 배포를 찾을 수 없습니다.'),
     ).toBeInTheDocument()
     expect(
       screen.queryByRole('heading', { level: 2, name: 'chat-prod' }),
@@ -347,13 +361,13 @@ describe('DeploymentDetailPage', () => {
     await screen.findByRole('heading', { level: 2, name: 'chat-prod' })
     await user.click(screen.getByRole('button', { name: '새로고침' }))
     await waitFor(() => {
-      expect(screen.getByText(/기존 Deployment 정보를 표시/)).toBeInTheDocument()
+      expect(screen.getByText(/이전에 불러온 모델 배포 정보를 그대로 표시/)).toBeInTheDocument()
     })
     expect(
       screen.getByRole('heading', { level: 2, name: 'chat-prod' }),
     ).toBeInTheDocument()
     expect(
-      screen.queryByText('Deployment를 찾을 수 없습니다.'),
+      screen.queryByText('모델 배포를 찾을 수 없습니다.'),
     ).not.toBeInTheDocument()
   })
 
@@ -405,8 +419,8 @@ describe('DeploymentDetailPage', () => {
     )
 
     renderDetail()
-    await screen.findByRole('button', { name: 'Start' })
-    await user.click(screen.getByRole('button', { name: 'Start' }))
+    await screen.findByRole('button', { name: '모델 시작' })
+    await user.click(screen.getByRole('button', { name: '모델 시작' }))
     expect(await screen.findByRole('link', { name: 'op-1' })).toHaveAttribute(
       'href',
       '/operations/op-1',
@@ -414,7 +428,7 @@ describe('DeploymentDetailPage', () => {
     expect(screen.getByText(/자동 갱신/)).toBeInTheDocument()
 
     expect(await screen.findByText('FINALIZE')).toBeInTheDocument()
-    expect(screen.getByText(/HEALTHY/)).toBeInTheDocument()
+    expect(screen.getByText(/\(HEALTHY\)/)).toBeInTheDocument()
     expect(screen.queryByText(/자동 갱신/)).not.toBeInTheDocument()
 
     const callsAfterTerminal = vi.mocked(operationsApi.getOperation).mock.calls
@@ -471,8 +485,8 @@ describe('DeploymentDetailPage', () => {
     })
 
     renderDetail()
-    await screen.findByRole('button', { name: 'Start' })
-    await user.click(screen.getByRole('button', { name: 'Start' }))
+    await screen.findByRole('button', { name: '모델 시작' })
+    await user.click(screen.getByRole('button', { name: '모델 시작' }))
     expect(await screen.findByRole('link', { name: 'op-1' })).toBeInTheDocument()
 
     await waitFor(() => {
@@ -480,7 +494,7 @@ describe('DeploymentDetailPage', () => {
     })
     await user.click(screen.getByRole('button', { name: '새로고침' }))
     expect(await screen.findByText('from-refresh')).toBeInTheDocument()
-    expect(screen.getByText(/HEALTHY/)).toBeInTheDocument()
+    expect(screen.getByText(/\(HEALTHY\)/)).toBeInTheDocument()
 
     resolveSlowPollOp(
       makeOpDetail({
@@ -533,14 +547,14 @@ describe('DeploymentDetailPage', () => {
     })
 
     renderDetail()
-    await screen.findByRole('button', { name: 'Start' })
-    await user.click(screen.getByRole('button', { name: 'Start' }))
+    await screen.findByRole('button', { name: '모델 시작' })
+    await user.click(screen.getByRole('button', { name: '모델 시작' }))
     expect(await screen.findByRole('link', { name: 'op-a' })).toBeInTheDocument()
 
     await waitFor(() => {
       expect(opAPolls).toBeGreaterThan(0)
     })
-    await user.click(screen.getByRole('button', { name: 'Stop' }))
+    await user.click(screen.getByRole('button', { name: '모델 중지' }))
     expect(await screen.findByRole('link', { name: 'op-b' })).toBeInTheDocument()
 
     resolveLate(
@@ -601,8 +615,8 @@ describe('DeploymentDetailPage', () => {
     })
 
     renderDetail()
-    await screen.findByRole('button', { name: 'Stop' })
-    await user.click(screen.getByRole('button', { name: 'Stop' }))
+    await screen.findByRole('button', { name: '모델 중지' })
+    await user.click(screen.getByRole('button', { name: '모델 중지' }))
     expect(
       await screen.findByRole('link', { name: 'op-stop' }),
     ).toBeInTheDocument()
@@ -657,7 +671,7 @@ describe('DeploymentDetailPage', () => {
     )
 
     renderDetail()
-    await user.click(await screen.findByRole('button', { name: 'Stop' }))
+    await user.click(await screen.findByRole('button', { name: '모델 중지' }))
     expect(
       await screen.findByRole('link', { name: 'op-stop-fail' }),
     ).toBeInTheDocument()
@@ -709,7 +723,7 @@ describe('DeploymentDetailPage', () => {
     )
 
     renderDetail()
-    await user.click(await screen.findByRole('button', { name: 'Stop' }))
+    await user.click(await screen.findByRole('button', { name: '모델 중지' }))
     expect(
       await screen.findByRole('link', { name: 'op-stop-lag' }),
     ).toBeInTheDocument()
@@ -760,7 +774,7 @@ describe('DeploymentDetailPage', () => {
     )
 
     renderDetail()
-    await user.click(await screen.findByRole('button', { name: 'Stop' }))
+    await user.click(await screen.findByRole('button', { name: '모델 중지' }))
     expect(
       await screen.findByRole('link', { name: 'op-stop-null-finished' }),
     ).toBeInTheDocument()
@@ -811,7 +825,7 @@ describe('DeploymentDetailPage', () => {
     )
 
     renderDetail()
-    await user.click(await screen.findByRole('button', { name: 'Stop' }))
+    await user.click(await screen.findByRole('button', { name: '모델 중지' }))
     expect(
       await screen.findByRole('link', { name: 'op-stop-future' }),
     ).toBeInTheDocument()
