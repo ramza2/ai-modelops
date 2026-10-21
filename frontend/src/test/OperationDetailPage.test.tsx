@@ -170,10 +170,10 @@ describe('OperationDetailPage', () => {
     vi.mocked(operationsApi.getOperation).mockResolvedValue(makeOp())
     renderDetail()
     expect(
-      await screen.findByRole('button', { name: 'Safe Cancel' }),
+      await screen.findByRole('button', { name: /Safe Cancel/ }),
     ).toBeInTheDocument()
     expect(
-      screen.queryByRole('button', { name: 'Explicit Retry' }),
+      screen.queryByRole('button', { name: /Explicit Retry/ }),
     ).not.toBeInTheDocument()
     cleanup()
 
@@ -211,10 +211,10 @@ describe('OperationDetailPage', () => {
     )
     renderDetail()
     expect(
-      await screen.findByRole('button', { name: 'Explicit Retry' }),
+      await screen.findByRole('button', { name: /Explicit Retry/ }),
     ).toBeInTheDocument()
     expect(
-      screen.queryByRole('button', { name: 'Safe Cancel' }),
+      screen.queryByRole('button', { name: /Safe Cancel/ }),
     ).not.toBeInTheDocument()
     expect(screen.getByText(/TARGET_START_FAILED/)).toBeInTheDocument()
   })
@@ -235,9 +235,9 @@ describe('OperationDetailPage', () => {
       makeOp({ status: 'CANCELLED' }),
     )
     renderDetail()
-    await screen.findByRole('button', { name: 'Safe Cancel' })
+    await screen.findByRole('button', { name: /Safe Cancel/ })
     await user.type(screen.getByLabelText(/Cancel Reason/), 'abort now')
-    await user.click(screen.getByRole('button', { name: 'Safe Cancel' }))
+    await user.click(screen.getByRole('button', { name: /Safe Cancel/ }))
     await waitFor(() => {
       expect(operationsApi.cancelOperation).toHaveBeenCalledWith(
         'op-1',
@@ -247,7 +247,7 @@ describe('OperationDetailPage', () => {
     await waitFor(() => {
       expect(operationsApi.getOperation).toHaveBeenCalledTimes(2)
     })
-    expect(await screen.findByText(/CANCELLED/)).toBeInTheDocument()
+    expect(await screen.findByTitle('CANCELLED')).toBeInTheDocument()
   })
 
   it('keeps stale Operation/Steps on cancel 409', async () => {
@@ -258,7 +258,7 @@ describe('OperationDetailPage', () => {
     )
     renderDetail()
     await screen.findByRole('heading', { level: 2, name: 'op-1' })
-    await user.click(screen.getByRole('button', { name: 'Safe Cancel' }))
+    await user.click(screen.getByRole('button', { name: /Safe Cancel/ }))
     expect(await screen.findByText(/not cancelable/)).toBeInTheDocument()
     expect(
       screen.getByRole('heading', { level: 2, name: 'op-1' }),
@@ -283,8 +283,8 @@ describe('OperationDetailPage', () => {
       )
     vi.mocked(operationsApi.retryOperation).mockResolvedValue(makeRetry())
     renderDetail()
-    await screen.findByRole('button', { name: 'Explicit Retry' })
-    await user.click(screen.getByRole('button', { name: 'Explicit Retry' }))
+    await screen.findByRole('button', { name: /Explicit Retry/ })
+    await user.click(screen.getByRole('button', { name: /Explicit Retry/ }))
     await waitFor(() => {
       expect(operationsApi.retryOperation).toHaveBeenCalledWith('op-1')
     })
@@ -307,7 +307,7 @@ describe('OperationDetailPage', () => {
     )
     renderDetail()
     await screen.findByRole('heading', { level: 2, name: 'op-1' })
-    await user.click(screen.getByRole('button', { name: 'Explicit Retry' }))
+    await user.click(screen.getByRole('button', { name: /Explicit Retry/ }))
     expect(await screen.findByText(/not eligible/)).toBeInTheDocument()
     expect(
       screen.getByRole('heading', { level: 2, name: 'op-1' }),
@@ -328,17 +328,17 @@ describe('OperationDetailPage', () => {
         }),
     )
     renderDetail()
-    await screen.findByRole('button', { name: 'Safe Cancel' })
-    await user.click(screen.getByRole('button', { name: 'Safe Cancel' }))
+    await screen.findByRole('button', { name: /Safe Cancel/ })
+    await user.click(screen.getByRole('button', { name: /Safe Cancel/ }))
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: 'Cancel 중…' })).toBeDisabled()
+      expect(screen.getByRole('button', { name: /Cancel 중/ })).toBeDisabled()
     })
     expect(screen.getByRole('button', { name: '새로고침' })).toBeDisabled()
     expect(screen.getByLabelText(/Cancel Reason/)).toBeDisabled()
     resolveCancel(makeOp({ status: 'CANCELLED' }))
     await waitFor(() => {
       expect(
-        screen.queryByRole('button', { name: 'Cancel 중…' }),
+        screen.queryByRole('button', { name: /Cancel 중/ }),
       ).not.toBeInTheDocument()
     })
   })
@@ -355,19 +355,19 @@ describe('OperationDetailPage', () => {
           }),
       )
     renderDetail()
-    await screen.findByRole('button', { name: 'Safe Cancel' })
+    await screen.findByRole('button', { name: /Safe Cancel/ })
     await user.type(screen.getByLabelText(/Cancel Reason/), 'hold')
     await user.click(screen.getByRole('button', { name: '새로고침' }))
     await waitFor(() => {
       expect(screen.getByRole('button', { name: '갱신 중…' })).toBeDisabled()
     })
-    expect(screen.getByRole('button', { name: 'Safe Cancel' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: /Safe Cancel/ })).toBeDisabled()
     expect(screen.getByLabelText(/Cancel Reason/)).toBeDisabled()
-    await user.click(screen.getByRole('button', { name: 'Safe Cancel' }))
+    await user.click(screen.getByRole('button', { name: /Safe Cancel/ }))
     expect(operationsApi.cancelOperation).not.toHaveBeenCalled()
     resolveRefresh(makeOp())
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: 'Safe Cancel' })).not.toBeDisabled()
+      expect(screen.getByRole('button', { name: /Safe Cancel/ })).not.toBeDisabled()
     })
   })
 
@@ -388,13 +388,13 @@ describe('OperationDetailPage', () => {
           }),
       )
     renderDetail()
-    await screen.findByRole('button', { name: 'Explicit Retry' })
+    await screen.findByRole('button', { name: /Explicit Retry/ })
     await user.click(screen.getByRole('button', { name: '새로고침' }))
     await waitFor(() => {
       expect(screen.getByRole('button', { name: '갱신 중…' })).toBeDisabled()
     })
-    expect(screen.getByRole('button', { name: 'Explicit Retry' })).toBeDisabled()
-    await user.click(screen.getByRole('button', { name: 'Explicit Retry' }))
+    expect(screen.getByRole('button', { name: /Explicit Retry/ })).toBeDisabled()
+    await user.click(screen.getByRole('button', { name: /Explicit Retry/ }))
     expect(operationsApi.retryOperation).not.toHaveBeenCalled()
     resolveRefresh(
       makeOp({
@@ -404,7 +404,7 @@ describe('OperationDetailPage', () => {
     )
     await waitFor(() => {
       expect(
-        screen.getByRole('button', { name: 'Explicit Retry' }),
+        screen.getByRole('button', { name: /Explicit Retry/ }),
       ).not.toBeDisabled()
     })
   })
@@ -442,7 +442,7 @@ describe('OperationDetailPage', () => {
     ).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'go-op-b' }))
     expect(
-      await screen.findByText('Operation을 찾을 수 없습니다.'),
+      await screen.findByText(/작업을 찾을 수 없습니다|Operation을 찾을 수 없습니다/),
     ).toBeInTheDocument()
     expect(
       screen.queryByRole('heading', { level: 2, name: 'op-a' }),
@@ -469,7 +469,7 @@ describe('OperationDetailPage', () => {
       )
     })
     renderNavigable('/operations/op-a')
-    await screen.findByText('Operation을 불러오는 중…')
+    await screen.findByText(/불러오는 중/)
     await user.click(screen.getByRole('button', { name: 'go-op-b' }))
     expect(
       await screen.findByRole('heading', { level: 2, name: 'op-b' }),
@@ -496,7 +496,7 @@ describe('OperationDetailPage', () => {
     ).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: '새로고침' }))
     expect(
-      await screen.findByText('Operation을 찾을 수 없습니다.'),
+      await screen.findByText(/작업을 찾을 수 없습니다|Operation을 찾을 수 없습니다/),
     ).toBeInTheDocument()
     expect(
       screen.queryByRole('heading', { level: 2, name: 'op-1' }),
@@ -569,7 +569,7 @@ describe('OperationDetailPage', () => {
     renderDetail()
     expect(await screen.findByText('DRAIN_TRAFFIC')).toBeInTheDocument()
     expect(screen.getByText(/자동 갱신/)).toBeInTheDocument()
-    expect(screen.getByText('Elapsed')).toBeInTheDocument()
+    expect(screen.getByText(/Elapsed/)).toBeInTheDocument()
 
     expect(await screen.findByText('ACTIVATE_TARGET_ROUTE')).toBeInTheDocument()
     expect(await screen.findByText('FINALIZE')).toBeInTheDocument()

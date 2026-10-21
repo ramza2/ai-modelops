@@ -113,7 +113,7 @@ describe('EndpointsPage', () => {
     const user = userEvent.setup()
     vi.mocked(endpointsApi.listEndpoints).mockResolvedValue(pageResult([]))
     renderAt('/endpoints')
-    await screen.findByLabelText('API Type')
+    await screen.findByLabelText(/API Type/)
     await waitFor(() => {
       expect(endpointsApi.listEndpoints).toHaveBeenCalled()
     })
@@ -126,9 +126,9 @@ describe('EndpointsPage', () => {
       expect(last?.q).toBe('demo')
       expect(last?.page).toBe(1)
     })
-    await user.selectOptions(screen.getByLabelText('API Type'), 'CHAT')
-    await user.selectOptions(screen.getByLabelText('Enabled'), 'ENABLED')
-    await user.selectOptions(screen.getByLabelText('Traffic'), 'DRAINING')
+    await user.selectOptions(screen.getByLabelText(/API Type/), 'CHAT')
+    await user.selectOptions(screen.getByLabelText(/Enabled/), 'ENABLED')
+    await user.selectOptions(screen.getByLabelText(/Traffic/), 'DRAINING')
     await waitFor(() => {
       const last = vi.mocked(endpointsApi.listEndpoints).mock.calls.at(-1)?.[0]
       expect(last).toEqual(
@@ -169,7 +169,7 @@ describe('EndpointsPage', () => {
     renderAt('/endpoints')
     expect(await screen.findByRole('link', { name: 'Keep' })).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: '새로고침' }))
-    expect(await screen.findByText('refresh fail')).toBeInTheDocument()
+    expect(await screen.findByText(/refresh fail/)).toBeInTheDocument()
     expect(screen.getByRole('link', { name: 'Keep' })).toBeInTheDocument()
   })
 

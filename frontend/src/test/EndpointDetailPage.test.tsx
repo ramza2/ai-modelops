@@ -304,8 +304,8 @@ describe('EndpointDetailPage', () => {
       'href',
       '/deployments/source-dep',
     )
-    expect(await screen.findByLabelText('Target Deployment')).toBeInTheDocument()
-    const select = screen.getByLabelText('Target Deployment')
+    expect(await screen.findByLabelText(/Target Deployment/)).toBeInTheDocument()
+    const select = screen.getByLabelText(/Target Deployment/)
     expect(within(select).queryByText(/source-prod/)).not.toBeInTheDocument()
     expect(within(select).getByText(/target-candidate/)).toBeInTheDocument()
     expect(modelsApi.getModel).not.toHaveBeenCalled()
@@ -335,7 +335,7 @@ describe('EndpointDetailPage', () => {
       await screen.findByText(/ACTIVE Source Route가 있어야/),
     ).toBeInTheDocument()
     expect(
-      screen.queryByRole('button', { name: 'Unpublish' }),
+      screen.queryByRole('button', { name: /Unpublish/ }),
     ).not.toBeInTheDocument()
     cleanup()
 
@@ -401,7 +401,7 @@ describe('EndpointDetailPage', () => {
       },
     )
     renderDetail()
-    const select = await screen.findByLabelText('Target Deployment')
+    const select = await screen.findByLabelText(/Target Deployment/)
     await waitFor(() => {
       expect(deploymentsApi.listDeployments).toHaveBeenCalledTimes(2)
     })
@@ -430,10 +430,10 @@ describe('EndpointDetailPage', () => {
     )
     renderDetail()
     await user.selectOptions(
-      await screen.findByLabelText('Target Deployment'),
+      await screen.findByLabelText(/Target Deployment/),
       'target-dep',
     )
-    await user.click(screen.getByRole('button', { name: 'Preflight Preview' }))
+    await user.click(screen.getByRole('button', { name: /Preflight Preview/ }))
     expect(await screen.findByText('preview_only')).toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: '새로고침' }))
@@ -441,14 +441,14 @@ describe('EndpointDetailPage', () => {
       expect(screen.queryByText('preview_only')).not.toBeInTheDocument()
     })
     expect(
-      screen.queryByRole('button', { name: 'Switch Enqueue' }),
+      screen.queryByRole('button', { name: /Switch Enqueue/ }),
     ).not.toBeInTheDocument()
 
     await user.selectOptions(
-      screen.getByLabelText('Target Deployment'),
+      screen.getByLabelText(/Target Deployment/),
       'target-dep',
     )
-    await user.click(screen.getByRole('button', { name: 'Preflight Preview' }))
+    await user.click(screen.getByRole('button', { name: /Preflight Preview/ }))
     expect(await screen.findByText('preview_only')).toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: '새로고침' }))
@@ -457,7 +457,7 @@ describe('EndpointDetailPage', () => {
     })
     expect(screen.getByText('preview_only')).toBeInTheDocument()
     expect(
-      screen.getByRole('button', { name: 'Switch Enqueue' }),
+      screen.getByRole('button', { name: /Switch Enqueue/ }),
     ).toBeInTheDocument()
   })
 
@@ -475,17 +475,17 @@ describe('EndpointDetailPage', () => {
       makePreview(),
     )
     renderDetail()
-    await screen.findByLabelText('Target Deployment')
+    await screen.findByLabelText(/Target Deployment/)
     await user.selectOptions(
-      screen.getByLabelText('Target Deployment'),
+      screen.getByLabelText(/Target Deployment/),
       'target-dep',
     )
-    await user.click(screen.getByRole('button', { name: 'Preflight Preview' }))
+    await user.click(screen.getByRole('button', { name: /Preflight Preview/ }))
     expect(await screen.findByText('preview_only')).toBeInTheDocument()
     expect(screen.getByText('worker_must_revalidate')).toBeInTheDocument()
     expect(screen.getByText('gpu-0').closest('tr')).toBeTruthy()
     expect(screen.getByText('gpu-1').closest('tr')).toBeTruthy()
-    const strategy = screen.getByLabelText('Strategy')
+    const strategy = screen.getByLabelText(/Strategy/)
     expect(within(strategy).getByRole('option', { name: 'HOT' })).toBeEnabled()
     expect(within(strategy).getByRole('option', { name: 'COLD' })).toBeEnabled()
     cleanup()
@@ -503,18 +503,18 @@ describe('EndpointDetailPage', () => {
     )
     renderDetail()
     await user.selectOptions(
-      await screen.findByLabelText('Target Deployment'),
+      await screen.findByLabelText(/Target Deployment/),
       'target-dep',
     )
-    await user.click(screen.getByRole('button', { name: 'Preflight Preview' }))
-    await screen.findByLabelText('Strategy')
+    await user.click(screen.getByRole('button', { name: /Preflight Preview/ }))
+    await screen.findByLabelText(/Strategy/)
     expect(
-      within(screen.getByLabelText('Strategy')).getByRole('option', {
+      within(screen.getByLabelText(/Strategy/)).getByRole('option', {
         name: 'HOT',
       }),
     ).toBeDisabled()
     expect(
-      within(screen.getByLabelText('Strategy')).getByRole('option', {
+      within(screen.getByLabelText(/Strategy/)).getByRole('option', {
         name: 'COLD',
       }),
     ).toBeEnabled()
@@ -533,15 +533,15 @@ describe('EndpointDetailPage', () => {
     )
     renderDetail()
     await user.selectOptions(
-      await screen.findByLabelText('Target Deployment'),
+      await screen.findByLabelText(/Target Deployment/),
       'target-dep',
     )
-    await user.click(screen.getByRole('button', { name: 'Preflight Preview' }))
+    await user.click(screen.getByRole('button', { name: /Preflight Preview/ }))
     expect(
       await screen.findByText(/RESOURCE_INSUFFICIENT preview에서는 Switch/),
     ).toBeInTheDocument()
     expect(
-      screen.queryByRole('button', { name: 'Switch Enqueue' }),
+      screen.queryByRole('button', { name: /Switch Enqueue/ }),
     ).not.toBeInTheDocument()
   })
 
@@ -563,15 +563,15 @@ describe('EndpointDetailPage', () => {
     )
     renderDetail()
     await user.selectOptions(
-      await screen.findByLabelText('Target Deployment'),
+      await screen.findByLabelText(/Target Deployment/),
       'target-dep',
     )
-    await user.click(screen.getByRole('button', { name: 'Preflight Preview' }))
+    await user.click(screen.getByRole('button', { name: /Preflight Preview/ }))
     expect(await screen.findByText('preview_only')).toBeInTheDocument()
-    await user.selectOptions(screen.getByLabelText('Target Deployment'), 'target-b')
+    await user.selectOptions(screen.getByLabelText(/Target Deployment/), 'target-b')
     expect(screen.queryByText('preview_only')).not.toBeInTheDocument()
     expect(
-      screen.queryByRole('button', { name: 'Switch Enqueue' }),
+      screen.queryByRole('button', { name: /Switch Enqueue/ }),
     ).not.toBeInTheDocument()
   })
 
@@ -593,12 +593,12 @@ describe('EndpointDetailPage', () => {
     vi.mocked(endpointsApi.switchEndpoint).mockResolvedValue(makeOp())
     renderDetail()
     await user.selectOptions(
-      await screen.findByLabelText('Target Deployment'),
+      await screen.findByLabelText(/Target Deployment/),
       'target-dep',
     )
-    await user.click(screen.getByRole('button', { name: 'Preflight Preview' }))
-    await screen.findByRole('button', { name: 'Switch Enqueue' })
-    await user.click(screen.getByRole('button', { name: 'Switch Enqueue' }))
+    await user.click(screen.getByRole('button', { name: /Preflight Preview/ }))
+    await screen.findByRole('button', { name: /Switch Enqueue/ })
+    await user.click(screen.getByRole('button', { name: /Switch Enqueue/ }))
     await waitFor(() => {
       expect(endpointsApi.switchEndpoint).toHaveBeenCalledWith(
         'e1',
@@ -620,7 +620,7 @@ describe('EndpointDetailPage', () => {
     // Successful re-read invalidates preview; in-flight Switch blocks enqueue UI.
     expect(screen.queryByText('preview_only')).not.toBeInTheDocument()
     expect(
-      screen.queryByRole('button', { name: 'Switch Enqueue' }),
+      screen.queryByRole('button', { name: /Switch Enqueue/ }),
     ).not.toBeInTheDocument()
     expect(screen.getByTestId('switch-op-active')).toBeInTheDocument()
   })
@@ -647,18 +647,18 @@ describe('EndpointDetailPage', () => {
     )
     renderDetail()
     await user.selectOptions(
-      await screen.findByLabelText('Target Deployment'),
+      await screen.findByLabelText(/Target Deployment/),
       'target-dep',
     )
-    await user.click(screen.getByRole('button', { name: 'Preflight Preview' }))
-    await screen.findByRole('button', { name: 'Switch Enqueue' })
-    await user.click(screen.getByRole('button', { name: 'Switch Enqueue' }))
+    await user.click(screen.getByRole('button', { name: /Preflight Preview/ }))
+    await screen.findByRole('button', { name: /Switch Enqueue/ })
+    await user.click(screen.getByRole('button', { name: /Switch Enqueue/ }))
     await waitFor(() => {
       expect(screen.getByRole('button', { name: 'Enqueue 중…' })).toBeDisabled()
     })
     expect(screen.getByRole('button', { name: '새로고침' })).toBeDisabled()
     expect(
-      screen.getByRole('button', { name: 'Preflight Preview' }),
+      screen.getByRole('button', { name: /Preflight Preview/ }),
     ).toBeDisabled()
     resolveSwitch(makeOp())
     await waitFor(() => {
@@ -671,10 +671,10 @@ describe('EndpointDetailPage', () => {
     expect(screen.getByRole('button', { name: '새로고침' })).not.toBeDisabled()
     expect(await screen.findByTestId('switch-op-active')).toBeInTheDocument()
     expect(
-      screen.queryByRole('button', { name: 'Switch Enqueue' }),
+      screen.queryByRole('button', { name: /Switch Enqueue/ }),
     ).not.toBeInTheDocument()
     expect(
-      screen.queryByRole('button', { name: 'Preflight Preview' }),
+      screen.queryByRole('button', { name: /Preflight Preview/ }),
     ).not.toBeInTheDocument()
   })
 
@@ -696,11 +696,11 @@ describe('EndpointDetailPage', () => {
     )
     renderDetail()
     await user.selectOptions(
-      await screen.findByLabelText('Target Deployment'),
+      await screen.findByLabelText(/Target Deployment/),
       'target-dep',
     )
-    await user.click(screen.getByRole('button', { name: 'Preflight Preview' }))
-    await user.click(await screen.findByRole('button', { name: 'Switch Enqueue' }))
+    await user.click(screen.getByRole('button', { name: /Preflight Preview/ }))
+    await user.click(await screen.findByRole('button', { name: /Switch Enqueue/ }))
     expect(await screen.findByText(/active switch exists/i)).toBeInTheDocument()
     expect(
       screen.getByRole('heading', { level: 2, name: 'Chat Main' }),
@@ -723,7 +723,7 @@ describe('EndpointDetailPage', () => {
     ).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: '새로고침' }))
     expect(
-      await screen.findByText('Endpoint를 찾을 수 없습니다.'),
+      await screen.findByText(/API 연결을 찾을 수 없습니다/),
     ).toBeInTheDocument()
     expect(
       screen.queryByRole('heading', { level: 2, name: 'Chat Main' }),
@@ -798,9 +798,9 @@ describe('EndpointDetailPage', () => {
       total: 0,
     })
     renderDetail()
-    await screen.findByText(/ACTIVE Route가 없습니다/)
+    await screen.findByText(/ACTIVE Route\)이 없습니다/)
     expect(
-      screen.queryByRole('button', { name: 'Unpublish' }),
+      screen.queryByRole('button', { name: /Unpublish/ }),
     ).not.toBeInTheDocument()
     expect(decommissionApi.unpublishEndpoint).not.toHaveBeenCalled()
   })
@@ -905,7 +905,7 @@ describe('EndpointDetailPage', () => {
     )
     await waitFor(() => {
       expect(
-        screen.queryByRole('button', { name: 'Unpublish' }),
+        screen.queryByRole('button', { name: /Unpublish/ }),
       ).not.toBeInTheDocument()
     })
     expect(screen.getByText(/비활성/)).toBeInTheDocument()
@@ -944,7 +944,7 @@ describe('EndpointDetailPage', () => {
       expect(screen.getByRole('button', { name: '새로고침' })).not.toBeDisabled()
     })
     expect(screen.getByTestId('unpublish-open')).not.toBeDisabled()
-    expect(screen.getByLabelText('Target Deployment')).not.toBeDisabled()
+    expect(screen.getByLabelText(/Target Deployment/)).not.toBeDisabled()
   })
 
   it('shows changed=false and non-PASSED Gateway verification accurately', async () => {
@@ -1131,9 +1131,9 @@ describe('EndpointDetailPage', () => {
       total: 1,
     })
     renderDetail()
-    await screen.findByText(/ACTIVE Route가 없습니다/)
+    await screen.findByText(/ACTIVE Route\)이 없습니다/)
     expect(
-      screen.queryByRole('button', { name: 'Unpublish' }),
+      screen.queryByRole('button', { name: /Unpublish/ }),
     ).not.toBeInTheDocument()
   })
 
@@ -1251,11 +1251,11 @@ describe('EndpointDetailPage', () => {
 
     renderDetail()
     await user.selectOptions(
-      await screen.findByLabelText('Target Deployment'),
+      await screen.findByLabelText(/Target Deployment/),
       'target-dep',
     )
-    await user.click(screen.getByRole('button', { name: 'Preflight Preview' }))
-    await user.click(await screen.findByRole('button', { name: 'Switch Enqueue' }))
+    await user.click(screen.getByRole('button', { name: /Preflight Preview/ }))
+    await user.click(await screen.findByRole('button', { name: /Switch Enqueue/ }))
     expect(await screen.findByTestId('switch-op-active')).toBeInTheDocument()
     expect(screen.getByTestId('search-probe')).toHaveTextContent(
       /switch_operation_id=op-sw/,
@@ -1340,7 +1340,7 @@ describe('EndpointDetailPage', () => {
     renderDetail('/endpoints/e1?switch_operation_id=op-sw')
     expect(await screen.findByTestId('switch-op-active')).toBeInTheDocument()
     expect(
-      screen.queryByRole('button', { name: 'Switch Enqueue' }),
+      screen.queryByRole('button', { name: /Switch Enqueue/ }),
     ).not.toBeInTheDocument()
     expect(endpointsApi.switchEndpoint).not.toHaveBeenCalled()
     // Unpublish also blocked while Switch is active.
@@ -1504,10 +1504,10 @@ describe('EndpointDetailPage', () => {
     expect(await screen.findByTestId('switch-op-unresolved')).toBeInTheDocument()
     expect(screen.getByTestId('unpublish-open')).toBeDisabled()
     expect(
-      screen.queryByRole('button', { name: 'Switch Enqueue' }),
+      screen.queryByRole('button', { name: /Switch Enqueue/ }),
     ).not.toBeInTheDocument()
     expect(
-      screen.queryByRole('button', { name: 'Preflight Preview' }),
+      screen.queryByRole('button', { name: /Preflight Preview/ }),
     ).not.toBeInTheDocument()
 
     resolveOp(
@@ -1543,11 +1543,11 @@ describe('EndpointDetailPage', () => {
 
     renderDetail()
     await user.selectOptions(
-      await screen.findByLabelText('Target Deployment'),
+      await screen.findByLabelText(/Target Deployment/),
       'target-dep',
     )
-    await user.click(screen.getByRole('button', { name: 'Preflight Preview' }))
-    await user.click(await screen.findByRole('button', { name: 'Switch Enqueue' }))
+    await user.click(screen.getByRole('button', { name: /Preflight Preview/ }))
+    await user.click(await screen.findByRole('button', { name: /Switch Enqueue/ }))
     expect(await screen.findByTestId('switch-operation-result')).toBeInTheDocument()
     await waitFor(() => {
       expect(screen.getByTestId('search-probe')).toHaveTextContent(
@@ -1640,7 +1640,9 @@ describe('EndpointDetailPage', () => {
       await screen.findByTestId('switch-op-poll-warning'),
     ).toHaveTextContent(/소속이 일치하지 않아/)
     expect(screen.queryByTestId('switch-operation-result')).not.toBeInTheDocument()
-    expect(screen.getByTestId('search-probe')).toHaveTextContent('(empty)')
+    await waitFor(() => {
+      expect(screen.getByTestId('search-probe')).toHaveTextContent('(empty)')
+    })
     // Warning must remain after tracking cleared.
     await new Promise((r) => setTimeout(r, 80))
     expect(screen.getByTestId('switch-op-poll-warning')).toBeInTheDocument()
@@ -1759,11 +1761,11 @@ describe('EndpointDetailPage', () => {
 
     renderDetail()
     await user.selectOptions(
-      await screen.findByLabelText('Target Deployment'),
+      await screen.findByLabelText(/Target Deployment/),
       'target-dep',
     )
-    await user.click(screen.getByRole('button', { name: 'Preflight Preview' }))
-    await user.click(await screen.findByRole('button', { name: 'Switch Enqueue' }))
+    await user.click(screen.getByRole('button', { name: /Preflight Preview/ }))
+    await user.click(await screen.findByRole('button', { name: /Switch Enqueue/ }))
     expect(await screen.findByTestId('switch-op-terminal')).toBeInTheDocument()
     await waitFor(() => {
       expect(screen.getByTestId('search-probe')).toHaveTextContent(

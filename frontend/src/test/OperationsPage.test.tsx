@@ -118,12 +118,12 @@ describe('OperationsPage', () => {
     const user = userEvent.setup()
     vi.mocked(operationsApi.listOperations).mockResolvedValue(pageResult([]))
     renderAt('/operations')
-    await screen.findByLabelText('Status')
+    await screen.findByLabelText(/Status/)
     await waitFor(() => {
       expect(operationsApi.listOperations).toHaveBeenCalled()
     })
 
-    await user.selectOptions(screen.getByLabelText('Status'), 'FAILED')
+    await user.selectOptions(screen.getByLabelText(/Status/), 'FAILED')
     await waitFor(() => {
       const last = vi.mocked(operationsApi.listOperations).mock.calls.at(-1)?.[0]
       expect(last).toEqual(
@@ -141,7 +141,7 @@ describe('OperationsPage', () => {
       'active=',
     )
 
-    await user.selectOptions(screen.getByLabelText('Active'), 'ACTIVE')
+    await user.selectOptions(screen.getByLabelText(/Active/), 'ACTIVE')
     await waitFor(() => {
       const last = vi.mocked(operationsApi.listOperations).mock.calls.at(-1)?.[0]
       expect(last).toEqual(
@@ -159,7 +159,7 @@ describe('OperationsPage', () => {
       'status=',
     )
 
-    await user.selectOptions(screen.getByLabelText('Type'), 'SWITCH')
+    await user.selectOptions(screen.getByLabelText(/Type/), 'SWITCH')
     await waitFor(() => {
       const last = vi.mocked(operationsApi.listOperations).mock.calls.at(-1)?.[0]
       expect(last).toEqual(
@@ -210,7 +210,7 @@ describe('OperationsPage', () => {
       await screen.findByRole('link', { name: /op-keep/ }),
     ).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: '새로고침' }))
-    expect(await screen.findByText('refresh fail')).toBeInTheDocument()
+    expect(await screen.findByText(/refresh fail/)).toBeInTheDocument()
     expect(
       screen.getByRole('link', { name: /op-keep/ }),
     ).toBeInTheDocument()
