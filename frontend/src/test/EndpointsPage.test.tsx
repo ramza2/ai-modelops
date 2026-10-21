@@ -191,7 +191,7 @@ describe('EndpointsPage', () => {
     expect(urls.some((u) => u.includes('/switch'))).toBe(false)
   })
 
-  it('defaults to full list and filters with 사용 중인 연결만 보기', async () => {
+  it('defaults to full list and filters with 사용 설정된 API만 보기', async () => {
     const user = userEvent.setup()
     vi.mocked(endpointsApi.listEndpoints).mockResolvedValue(pageResult([]))
     renderAt('/endpoints')
@@ -200,7 +200,11 @@ describe('EndpointsPage', () => {
     })
     const lastAll = vi.mocked(endpointsApi.listEndpoints).mock.calls.at(-1)?.[0]
     expect(lastAll?.isEnabled).toBeNull()
-    await user.click(screen.getByTestId('endpoint-in-use-only'))
+    expect(screen.getByText('사용 설정된 API만 보기')).toBeInTheDocument()
+    expect(
+      screen.getByText(/실제 모델 연결 여부와는 다릅니다/),
+    ).toBeInTheDocument()
+    await user.click(screen.getByTestId('endpoint-enabled-only'))
     await waitFor(() => {
       expect(screen.getByTestId('location-search')).toHaveTextContent(
         'is_enabled=true',

@@ -359,14 +359,14 @@ export function EndpointsPage() {
         </div>
         <label
           className="toolbar__field toolbar__field--checkbox"
-          htmlFor="endpoint-in-use-only"
+          htmlFor="endpoint-enabled-only"
         >
           <span className="checkbox-row">
             <input
-              id="endpoint-in-use-only"
+              id="endpoint-enabled-only"
               type="checkbox"
               checked={isEnabled === true}
-              data-testid="endpoint-in-use-only"
+              data-testid="endpoint-enabled-only"
               onChange={(e) => {
                 syncUrl({
                   q,
@@ -377,10 +377,11 @@ export function EndpointsPage() {
                 })
               }}
             />
-            <span>사용 중인 연결만 보기</span>
+            <span>사용 설정된 API만 보기</span>
           </span>
           <span className="secondary-text">
-            기본은 전체 목록입니다. 켜면 is_enabled=true만 조회합니다.
+            사용 설정(is_enabled=true)된 API만 조회합니다. 실제 모델 연결
+            여부와는 다릅니다.
           </span>
         </label>
         <div className="toolbar__field">

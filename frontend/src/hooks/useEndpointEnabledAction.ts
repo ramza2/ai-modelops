@@ -11,9 +11,36 @@ type UseEndpointEnabledActionOptions = {
   isExternallyBusy?: () => boolean
 }
 
+/** Observed ACTIVE Route identity for confirm-dialog drift checks. */
+export type ActiveRouteSnapshot = {
+  routeId: string | null
+  deploymentId: string | null
+}
+
+export function activeRouteSnapshot(
+  endpoint: Endpoint | null | undefined,
+): ActiveRouteSnapshot {
+  const route = endpoint?.active_route
+  return {
+    routeId: route?.route_id ?? null,
+    deploymentId: route?.deployment_id ?? null,
+  }
+}
+
+export function activeRouteSnapshotsEqual(
+  a: ActiveRouteSnapshot,
+  b: ActiveRouteSnapshot,
+): boolean {
+  return a.routeId === b.routeId && a.deploymentId === b.deploymentId
+}
+
 /**
  * Shared 사용 중지 / 재활성화 flow:
  * open → re-fetch Endpoint → confirm → PATCH is_enabled → callback.
+ *
+ * Note: GET-then-PATCH is not atomic under the current Management API contract.
+ * Pre-PATCH re-read catches many ACTIVE Route drifts, but cannot fully prevent
+ * a concurrent change between the last GET and PATCH commit (follow-up if needed).
  */
 export function useEndpointEnabledAction(
   options: UseEndpointEnabledActionOptions,
@@ -36,12 +63,20 @@ export function useEndpointEnabledAction(
   const abortRef = useRef<AbortController | null>(null)
   const submittingRef = useRef(false)
   submittingRef.current = submitting
+  /** ACTIVE Route identity shown in the dialog when the user last accepted it. */
+  const observedRouteRef = useRef<ActiveRouteSnapshot | null>(null)
+
+  const adoptDraft = useCallback((endpoint: Endpoint) => {
+    setDraft(endpoint)
+    observedRouteRef.current = activeRouteSnapshot(endpoint)
+  }, [])
 
   const close = useCallback(() => {
     abortRef.current?.abort()
     abortRef.current = null
     setMode(null)
     setDraft(null)
+    observedRouteRef.current = null
     setRefreshing(false)
     setSubmitting(false)
     setError(null)
@@ -60,6 +95,7 @@ export function useEndpointEnabledAction(
 
       setMode(nextMode)
       setDraft(null)
+      observedRouteRef.current = null
       setError(null)
       setConsent(false)
       setAliasInput('')
@@ -72,15 +108,15 @@ export function useEndpointEnabledAction(
         if (controller.signal.aborted) return
         if (nextMode === 'disable' && !fresh.is_enabled) {
           setError('이미 사용 중지된 별칭입니다. 최신 상태를 확인하세요.')
-          setDraft(fresh)
+          adoptDraft(fresh)
           return
         }
         if (nextMode === 'enable' && fresh.is_enabled) {
           setError('이미 사용 중인 별칭입니다. 최신 상태를 확인하세요.')
-          setDraft(fresh)
+          adoptDraft(fresh)
           return
         }
-        setDraft(fresh)
+        adoptDraft(fresh)
       } catch (err) {
         if (controller.signal.aborted) return
         if (err instanceof DOMException && err.name === 'AbortError') return
@@ -93,11 +129,12 @@ export function useEndpointEnabledAction(
         setOpenError(message)
         setMode(null)
         setDraft(null)
+        observedRouteRef.current = null
       } finally {
         if (!controller.signal.aborted) setRefreshing(false)
       }
     },
-    [],
+    [adoptDraft],
   )
 
   const confirm = useCallback(async () => {
@@ -127,28 +164,29 @@ export function useEndpointEnabledAction(
         setError(
           '상태가 변경되어 이미 사용 중지되었습니다. 화면을 새로고침하세요.',
         )
-        setDraft(latest)
+        adoptDraft(latest)
         return
       }
       if (mode === 'enable' && latest.is_enabled) {
         setError('상태가 변경되어 이미 사용 중입니다. 화면을 새로고침하세요.')
-        setDraft(latest)
+        adoptDraft(latest)
         return
       }
-      if (
-        mode === 'disable' &&
-        Boolean(draft.active_route?.deployment_id) !==
-          Boolean(latest.active_route?.deployment_id)
-      ) {
+
+      const observed = observedRouteRef.current ?? activeRouteSnapshot(draft)
+      const latestRoute = activeRouteSnapshot(latest)
+      if (!activeRouteSnapshotsEqual(observed, latestRoute)) {
+        // Presence, route_id, or deployment_id drifted since the dialog snapshot.
         setError(
-          'ACTIVE Route 상태가 변경되었습니다. 내용을 다시 확인한 뒤 진행하세요.',
+          '확인 내용이 변경되었습니다. ACTIVE Route(route_id/deployment_id)가 달라졌습니다. 최신 상태를 다시 확인한 뒤 동의하세요.',
         )
-        setDraft(latest)
+        adoptDraft(latest)
         setConsent(false)
         setAliasInput('')
         return
       }
 
+      // Non-atomic vs concurrent writers: see file-level note above.
       const updated = await updateEndpointEnabled(
         latest.id,
         mode === 'enable',
@@ -181,7 +219,7 @@ export function useEndpointEnabledAction(
     } finally {
       if (!controller.signal.aborted) setSubmitting(false)
     }
-  }, [mode, draft, consent, aliasInput, close])
+  }, [mode, draft, consent, aliasInput, close, adoptDraft])
 
   return {
     open,
