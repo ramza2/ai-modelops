@@ -277,6 +277,64 @@ export const RUNTIME_FIELD_HELP = {
     '미설정 필드는 실제 Runtime 기본 동작을 따릅니다. 임의의 기본값이나 모델별 설정을 자동 생성하지 않습니다.',
 } as const
 
+/** P1-16 — Endpoints / Operations / Observability beginner help (display-only). */
+export const ENDPOINT_FIELD_HELP = {
+  overview:
+    '이 화면은 업무 시스템이 Gateway로 호출하는 API 별칭(Endpoint Alias)과 현재 활성 연결(ACTIVE Route)을 관리합니다. Alias 등록 ≠ 요청 처리 가능 ≠ 모델 실행 중입니다.',
+  alias:
+    'API 별칭(Endpoint Alias)은 Gateway 요청의 model로 쓰는 이름입니다. Served Model Name은 실제 런타임이 인식하는 모델 id이며, rewrite로 연결될 수 있습니다.',
+  enabled:
+    '사용 설정(Enabled)은 Alias가 관리 대상으로 켜져 있는지를 나타냅니다. 실제 요청 처리는 Traffic 상태·ACTIVE Route·Deployment 실행/Health에 따릅니다.',
+  traffic:
+    '요청 처리 상태(Traffic): SERVING=정상 전달, DRAINING=신규 요청 차단·진행 중 요청 대기, MAINTENANCE=신규 요청 차단·upstream 전달 금지.',
+  activeRoute:
+    '현재 활성 연결(ACTIVE Route)은 지금 Gateway가 이 Alias로 보내는 Deployment입니다. Deployment가 STOPPED/UNHEALTHY여도 Route 행 자체는 남을 수 있습니다.',
+  preflight:
+    'Preflight Preview는 참고용 사전 검사입니다(실제 Switch 실행 아님). 실행을 enqueue하면 Worker가 자원 상태를 다시 검증합니다. GPU VRAM은 GPU별로만 판단하며 합산하지 않습니다.',
+  hotSwitch:
+    'HOT Switch는 가능한 경우 짧은 전환을 시도하지만, 무중단·무영향 전환을 무조건 보장하지 않습니다. Preview 결과와 실제 Worker 판정이 다를 수 있습니다.',
+  coldSwitch:
+    'COLD Switch는 Source 중지·VRAM 해제·Target 기동 등이 포함될 수 있어 서비스 영향(중단·지연) 가능성이 있습니다. 운영 영향 범위를 확인한 뒤 진행하세요.',
+  unpublish:
+    '연결 해제(Unpublish)는 Gateway Alias의 ACTIVE Route만 제거합니다. 모델 컨테이너 중지·캐시 삭제·레지스트리 삭제와 다릅니다. Alias 재입력 확인이 필요합니다.',
+} as const
+
+export const OPERATION_FIELD_HELP = {
+  overview:
+    '작업 이력(Operation)은 배포·전환 등 비동기 작업의 진행과 결과를 추적합니다. 목록의 상태는 API 원본 코드를 유지하며, 상세에서 Safe Cancel / Explicit Retry를 제공합니다.',
+  status:
+    '진행 상태 예: QUEUED=대기, RUNNING=실행 중, SUCCEEDED=성공, FAILED=실패, CANCELLED/CANCELED=취소됨, ROLLING_BACK=롤백 중, ROLLED_BACK=롤백 완료, MANUAL_INTERVENTION_REQUIRED=수동 개입 필요.',
+  type: '작업 유형(Type)은 SWITCH·DEPLOYMENT_START 등 Operation이 수행하는 작업 종류입니다.',
+  strategy: '전환 방식(Strategy)은 HOT/COLD 등 Switch 전략입니다. 목록·상세의 원본 코드를 확인하세요.',
+  sourceTarget:
+    '기존 대상(Source)은 전환 전 Deployment, 변경 대상(Target)은 전환 후 Deployment입니다.',
+  safeCancel:
+    'Safe Cancel은 지원되는 Switch 상태에서 취소 의도를 보냅니다. 즉시 작업 중단을 보장하지 않으며, Source 중지 이후에는 단순 취소가 아니라 rollback intent로 처리될 수 있습니다.',
+  explicitRetry:
+    'Explicit Retry는 새 Operation을 생성합니다(기존 Operation을 덮어쓰지 않음). Backend가 상태·중복을 다시 검증하며, UI gate만으로 재시도 가능을 단정하지 마세요.',
+} as const
+
+export const OBSERVABILITY_FIELD_HELP = {
+  overview:
+    '운영 모니터링은 DB에 저장된 집계·스냅샷을 보여 줍니다. 실시간 scrape/측정 화면이 아니며, 최근 샘플 시각과 화면 새로고침 시각을 구분하세요.',
+  invocations:
+    'AI 요청 사용 현황(Invocation Summary)은 선택한 구간의 Gateway 호출 집계입니다. Token coverage는 토큰이 기록된 행의 비율이며 전체 요청이 모두 토큰화되었다고 보지 마세요.',
+  tokens:
+    '입력/출력 토큰 percentile·평균은 토큰이 있는 행만 사용합니다. 누적 카운터와 구간별 사용량을 혼동하지 마세요.',
+  latency:
+    'Latency p95 등은 응답시간 분포 요약입니다. Runtime analytics의 P50/P95는 classic histogram bucket 추정값이며 exact request percentile이 아닙니다.',
+  runtimeLatest:
+    '최근 모델 실행 상태(Runtime Latest)는 저장된 마지막 metric snapshot입니다. 샘플 시각이 2분을 넘으면 STALE로 표시합니다(실시간 Health와 다름).',
+  capacity:
+    '모델 자원 사용 정보(Capacity Profile)는 요청 설정과 관측값·analytics를 비교합니다. 런타임 기본값을 합성하지 않으며 GPU VRAM은 GPU별로만 봅니다.',
+  runningWaiting:
+    '처리 중(Running)·대기 중(Waiting)은 런타임 스케줄러 게이지입니다. 요청 성공률이나 Deployment HEALTHY와 같은 의미가 아닙니다.',
+  missingVsZero:
+    '측정값 없음(—/null)과 실제 0은 다릅니다. 없는 값을 0으로 채우지 않습니다.',
+  gpuVram:
+    'GPU별 VRAM을 여러 장의 합산 자원처럼 해석하지 마세요. 카드마다 독립적으로 봅니다.',
+} as const
+
 export function userFacingLoadError(
   area: string,
   raw: string,

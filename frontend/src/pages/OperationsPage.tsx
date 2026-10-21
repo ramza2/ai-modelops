@@ -4,12 +4,17 @@ import { ApiError } from '../api/client'
 import { listOperations } from '../api/operations'
 import type { OperationSummary } from '../api/types'
 import { AppShell } from '../components/AppShell'
+import { HelpHint, TermLabel } from '../components/HelpHint'
 import { LoadingBlock } from '../components/LoadingBlock'
 import { Pagination } from '../components/Pagination'
 import { SectionError } from '../components/SectionError'
 import { StatusBadge } from '../components/StatusBadge'
 import { formatApiDateTime, shortId } from '../utils/date'
 import { parsePositivePage } from '../utils/query'
+import {
+  OPERATION_FIELD_HELP,
+  userFacingLoadError,
+} from '../utils/uiLabels'
 
 const PAGE_SIZE = 20
 
@@ -206,7 +211,7 @@ export function OperationsPage() {
             ? err.message
             : err instanceof Error
               ? err.message
-              : 'Operation 목록을 불러오지 못했습니다.'
+              : '작업 목록을 불러오지 못했습니다.'
         setError(message)
         if (!hasLoadedRef.current) setItems(null)
       } finally {
@@ -230,18 +235,53 @@ export function OperationsPage() {
     status !== null || operationType !== null || active !== null
   const emptyFiltered = items !== null && items.length === 0 && hasFilters
   const emptyDatabase = items !== null && items.length === 0 && !hasFilters
+  const listError = error
+    ? userFacingLoadError('작업 목록', error, {
+        keptPrevious: items !== null,
+      })
+    : null
 
   return (
     <AppShell
-      title="Operations"
-      description="Operation 목록과 진행 상태입니다. Switch Safe Cancel / Explicit Retry는 상세 페이지에서만 제공됩니다."
+      title="작업 이력"
+      description="배포·전환 등 비동기 작업의 진행과 결과를 추적합니다. Safe Cancel / Explicit Retry는 상세 페이지에서만 제공합니다."
       onRefresh={() => void load('refresh')}
       refreshing={refreshing}
       lastUpdated={lastUpdated}
     >
+      <p className="panel-hint" role="note">
+        {OPERATION_FIELD_HELP.overview}
+      </p>
+      <details className="help-glossary">
+        <summary>용어 및 상태 안내</summary>
+        <div className="help-glossary__items">
+          <HelpHint showTopic label="진행 상태">
+            {OPERATION_FIELD_HELP.status}
+          </HelpHint>
+          <HelpHint showTopic label="작업 유형">
+            {OPERATION_FIELD_HELP.type}
+          </HelpHint>
+          <HelpHint showTopic label="전환 방식">
+            {OPERATION_FIELD_HELP.strategy}
+          </HelpHint>
+          <HelpHint showTopic label="기존/변경 대상">
+            {OPERATION_FIELD_HELP.sourceTarget}
+          </HelpHint>
+          <HelpHint showTopic label="안전 취소">
+            {OPERATION_FIELD_HELP.safeCancel}
+          </HelpHint>
+          <HelpHint showTopic label="명시적 재시도">
+            {OPERATION_FIELD_HELP.explicitRetry}
+          </HelpHint>
+        </div>
+      </details>
+
       <div className="toolbar toolbar--wrap">
-        <label className="toolbar__field" htmlFor="op-status-filter">
-          <span>Status</span>
+        <div className="toolbar__field">
+          <div className="toolbar__field-head">
+            <label htmlFor="op-status-filter">진행 상태 (Status)</label>
+            <HelpHint label="진행 상태">{OPERATION_FIELD_HELP.status}</HelpHint>
+          </div>
           <select
             id="op-status-filter"
             value={status ?? 'ALL'}
@@ -255,16 +295,16 @@ export function OperationsPage() {
               })
             }}
           >
-            <option value="ALL">ALL</option>
+            <option value="ALL">전체</option>
             {[...KNOWN_STATUSES].map((s) => (
               <option key={s} value={s}>
                 {s}
               </option>
             ))}
           </select>
-        </label>
+        </div>
         <label className="toolbar__field" htmlFor="op-type-filter">
-          <span>Type</span>
+          <span>작업 유형 (Type)</span>
           <select
             id="op-type-filter"
             value={operationType ?? 'ALL'}
@@ -278,7 +318,7 @@ export function OperationsPage() {
               })
             }}
           >
-            <option value="ALL">ALL</option>
+            <option value="ALL">전체</option>
             {[...KNOWN_TYPES].map((t) => (
               <option key={t} value={t}>
                 {t}
@@ -287,7 +327,7 @@ export function OperationsPage() {
           </select>
         </label>
         <label className="toolbar__field" htmlFor="op-active-filter">
-          <span>Active</span>
+          <span>진행 여부 (Active)</span>
           <select
             id="op-active-filter"
             value={activeLabel(active)}
@@ -303,22 +343,27 @@ export function OperationsPage() {
               })
             }}
           >
-            <option value="ALL">ALL</option>
-            <option value="ACTIVE">ACTIVE</option>
-            <option value="TERMINAL">TERMINAL</option>
+            <option value="ALL">전체</option>
+            <option value="ACTIVE">진행 중 (ACTIVE)</option>
+            <option value="TERMINAL">종료됨 (TERMINAL)</option>
           </select>
         </label>
         <p className="toolbar__hint">
-          Status와 Active는 동시에 사용할 수 없습니다.
+          Status와 Active는 동시에 사용할 수 없습니다. 필터 값(QUEUED, SWITCH
+          등)은 API 원본 코드를 유지합니다.
         </p>
       </div>
 
-      {error ? (
-        <SectionError title="Operation 목록 오류" message={error} />
+      {listError ? (
+        <SectionError
+          title={listError.title}
+          message={listError.message}
+          action={listError.action}
+        />
       ) : null}
 
       {loading && items === null ? (
-        <LoadingBlock label="Operation 목록을 불러오는 중…" />
+        <LoadingBlock label="작업 목록을 불러오는 중…" />
       ) : null}
 
       {items !== null && items.length > 0 ? (
@@ -327,14 +372,50 @@ export function OperationsPage() {
             <table className="data-table">
               <thead>
                 <tr>
-                  <th scope="col">Operation</th>
-                  <th scope="col">Type</th>
-                  <th scope="col">Status</th>
-                  <th scope="col">Strategy</th>
-                  <th scope="col">Endpoint</th>
-                  <th scope="col">Source</th>
-                  <th scope="col">Target</th>
-                  <th scope="col">Created</th>
+                  <th scope="col">
+                    <TermLabel text="작업" apiTerm="Operation" />
+                  </th>
+                  <th scope="col">
+                    <TermLabel
+                      text="작업 유형"
+                      apiTerm="Type"
+                      help={OPERATION_FIELD_HELP.type}
+                    />
+                  </th>
+                  <th scope="col">
+                    <TermLabel
+                      text="진행 상태"
+                      apiTerm="Status"
+                      help={OPERATION_FIELD_HELP.status}
+                    />
+                  </th>
+                  <th scope="col">
+                    <TermLabel
+                      text="전환 방식"
+                      apiTerm="Strategy"
+                      help={OPERATION_FIELD_HELP.strategy}
+                    />
+                  </th>
+                  <th scope="col">
+                    <TermLabel text="API 별칭" apiTerm="Endpoint" />
+                  </th>
+                  <th scope="col">
+                    <TermLabel
+                      text="기존 대상"
+                      apiTerm="Source"
+                      help={OPERATION_FIELD_HELP.sourceTarget}
+                    />
+                  </th>
+                  <th scope="col">
+                    <TermLabel
+                      text="변경 대상"
+                      apiTerm="Target"
+                      help={OPERATION_FIELD_HELP.sourceTarget}
+                    />
+                  </th>
+                  <th scope="col">
+                    <TermLabel text="생성 시각" apiTerm="Created" />
+                  </th>
                 </tr>
               </thead>
               <tbody>
