@@ -448,7 +448,45 @@ export const DEPLOYMENT_FIELD_HELP = {
   monitoringLink:
     '모델 실행·자원 모니터링 보기는 조회 전용입니다. 모델을 시작·중지·재시작하지 않습니다.',
   decommission:
-    '모델 종료·정리 절차(Decommission)는 일반 중지(Stop)와 다른 단계적 정리입니다. API 연결 해제·모델 중지·Registry 보관·캐시 삭제는 서로 다른 작업입니다. 해당 화면의 한국어화·안전 검토는 P1-21에서 진행 예정입니다.',
+    '모델 종료·정리 절차(Decommission)는 일반 중지(Stop)와 다른 단계적 정리입니다. API 연결 해제·모델 중지·컨테이너 제거·배포 퇴역·캐시 삭제·레지스트리 보관은 서로 다른 작업입니다.',
+} as const
+
+/** P1-21 — Decommission wizard beginner help (display-only). */
+export const DECOMMISSION_FIELD_HELP = {
+  overview:
+    '모델 종료·정리 절차는 API 연결 해제 → 모델 중지 → 컨테이너 제거 → 배포 퇴역 → (선택) 캐시 삭제 → (선택) 레지스트리 보관 순서로 진행합니다. 각 단계는 서로 다른 작업이며, 일반 중지만으로는 정리가 끝나지 않습니다.',
+  inspect:
+    '현재 상태 확인: ACTIVE Route, Runtime/Health, 컨테이너 존재, 캐시, 진행 중 Operation, Backend can_* / blockers를 조회합니다. 조회만 하며 상태를 변경하지 않습니다.',
+  unpublish:
+    'API 연결 해제(Unpublish): Gateway Alias의 ACTIVE Route만 제거합니다. 모델 컨테이너 중지·캐시 삭제·레지스트리 삭제와 다릅니다. 해당 Alias를 쓰는 업무 요청이 실패할 수 있습니다.',
+  gatewayVerify:
+    'DB Route 해제와 Gateway 실제 반영은 다릅니다. gateway_verification.status=PASSED 만 적용 확인으로 봅니다. ROUTING_PENDING·ROUTE_STILL_ACTIVE·GATEWAY_UNAVAILABLE·SKIPPED·null·알 수 없는 값은 확인 미완료이며, 이 세션에서는 Stop을 진행하지 마세요. F5/다른 브라우저에서는 Frontend 기억이 사라지므로 완전한 안전은 Backend 조건부 검증이 필요합니다.',
+  stop:
+    '모델 실행 중지(Stop): 컨테이너 중지 Operation을 접수합니다(202 Accepted ≠ 완료). Operation SUCCEEDED와 runtime_status=STOPPED는 다를 수 있습니다. ACTIVE Route가 있으면 중지를 진행하지 마세요.',
+  remove:
+    '모델 컨테이너 제거(Remove): Managed 컨테이너 삭제 Operation을 접수합니다. Registry/Cache 삭제와 다르며 배포 메타데이터는 Retire 전까지 유지됩니다. container_present=null(UNKNOWN)을 제거 완료로 보지 마세요.',
+  retire:
+    '모델 배포 퇴역(Retire): retired_at을 설정해 관리 대상에서 제외합니다. Operation·GPU 할당·Version 참조 이력은 유지되며 캐시 파일이 삭제되지 않습니다.',
+  purge:
+    '로컬 모델 캐시 삭제(Purge, 선택): Node의 실제 모델 파일을 삭제할 수 있습니다. Retire ≠ Purge이며 Registry Model/Version 삭제와 다릅니다. 확인 입력은 정확히 PURGE여야 합니다.',
+  archive:
+    '모델·버전 보관(Archive, 선택): Version Archive는 해당 Version의 Archived 표시이고, Model Archive는 Model 전체 is_active=false로 다른 버전에도 영향할 수 있습니다. Runtime 중지·파일 삭제와 다릅니다.',
+  done:
+    '정리 결과 확인: Backend가 증명하는 항목만 표시합니다. 선택 단계 미실행·조회 실패·UNKNOWN이 있으면 모든 정리가 완료된 것으로 보지 마세요.',
+  stepNav:
+    '단계 이동은 화면 전환일 뿐 위험 API를 실행하지 않습니다. URL로 단계를 열어도 실행 버튼은 최신 can_*·blocker·상태를 다시 검사합니다. 상태 확인(Inspect)은 언제든 열 수 있습니다.',
+  revalidate:
+    '실행 직전 최신 decommission-status를 다시 조회합니다. 확인 이후 ACTIVE Route·Runtime·컨테이너·Operation 등이 바뀌면 실행을 중단하고 동의를 초기화합니다. Frontend 확인만으로 GET→POST 사이 동시 변경을 원자적으로 막지는 못합니다.',
+  unknownSafe:
+    '상태가 UNKNOWN이거나 조회에 실패하면 안전하다고 추정하지 않습니다. 확인될 때까지 위험 작업을 진행하지 마세요.',
+  operationEnqueue:
+    '202 Accepted는 작업 접수입니다. enqueue 후 상세 조회가 실패해도 이미 접수되었을 수 있으니 즉시 재실행하지 말고 작업 이력에서 확인하세요. Poll 실패 ≠ Operation 실패입니다.',
+  stopVsRuntime:
+    'STOP Operation SUCCEEDED만으로 다음 단계가 안전하지 않습니다. runtime_status=STOPPED와 Backend 판정을 함께 확인하세요. 이미 중지된 경우 중복 STOP을 보내지 마세요.',
+  containerUnknown:
+    'container_present: true=컨테이너 있음, false=없음, null=확인 불가(UNKNOWN). UNKNOWN을 제거 완료로 취급하지 않으며, 확인 전에는 퇴역 단계로 진행하지 마세요.',
+  missingCache:
+    '캐시 상태가 MISSING이면 이미 로컬 캐시가 없는 상태입니다. 목록에 남은 파일 크기 값이 실제 파일 존재를 의미하지 않습니다. 디스크 잔여 점검은 별도 운영 절차로 하세요.',
 } as const
 
 /** P1-18 — Dashboard beginner help (display-only). */

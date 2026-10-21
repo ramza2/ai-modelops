@@ -733,19 +733,28 @@ export function ModelCachePage() {
                           <button
                             type="button"
                             className="btn btn--danger"
-                            disabled={purging || !listMatchesContext}
+                            disabled={
+                              purging ||
+                              !listMatchesContext ||
+                              row.status === 'MISSING'
+                            }
                             title={
                               !listMatchesContext
                                 ? '목록 갱신 중 — 로컬 캐시 삭제 불가'
-                                : '로컬 캐시 파일만 삭제합니다(레지스트리·실행 중 모델과 별개)'
+                                : row.status === 'MISSING'
+                                  ? '이미 캐시 없음(MISSING). 목록의 크기 값이 실제 파일 존재를 의미하지 않습니다.'
+                                  : '로컬 캐시 파일만 삭제합니다(레지스트리·실행 중 모델과 별개)'
                             }
                             onClick={() => {
                               if (!listMatchesContext) return
+                              if (row.status === 'MISSING') return
                               setPurgeError(null)
                               setPurgeTarget(row)
                             }}
                           >
-                            로컬 캐시 삭제
+                            {row.status === 'MISSING'
+                              ? '이미 캐시 없음'
+                              : '로컬 캐시 삭제'}
                           </button>
                         </div>
                       </td>
