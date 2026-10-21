@@ -207,6 +207,21 @@ describe('ModelCatalogPage', () => {
     expect(screen.getAllByText(/적합/).length).toBeGreaterThan(0)
     expect(screen.getAllByText(/여유 부족/).length).toBeGreaterThan(0)
 
+    const glossary = screen.getByText('용어 및 상태 안내').closest(
+      'details',
+    ) as HTMLDetailsElement
+    expect(glossary).toBeTruthy()
+    await userEvent.click(screen.getByText('용어 및 상태 안내'))
+    expect(within(glossary).getByText('Fit 판정 기준')).toBeVisible()
+    expect(within(glossary).getByText('GPU 적합성')).toBeVisible()
+    expect(within(glossary).getByText('다운로드 상태')).toBeVisible()
+
+    const fitBadge = screen.getByTitle(/자원 적합\(FIT\)/)
+    expect(fitBadge).toHaveTextContent(/\(FIT\)/)
+    expect(fitBadge.getAttribute('title')).toMatch(/배포 성공을 보장하지 않습니다/)
+    // Inner status code must not replace the beginner title.
+    expect(fitBadge.querySelector('[title="FIT"]')).toBeNull()
+
     const downloadButtons = screen.getAllByRole('button', { name: '다운로드' })
     expect(downloadButtons.every((b) => !(b as HTMLButtonElement).disabled)).toBe(
       true,
@@ -1830,7 +1845,13 @@ describe('ModelCatalogPage', () => {
     expect(
       screen.queryByRole('link', { name: '캐시 목록 확인' }),
     ).not.toBeInTheDocument()
-    expect(screen.getByText(/READY는 대상 서버에 파일 캐시가 준비된 상태/)).toBeInTheDocument()
+    expect(
+      screen.getAllByText(/READY는 대상 서버에 파일 캐시가 준비된 상태/)
+        .length,
+    ).toBeGreaterThan(0)
+    expect(
+      within(row).getByText(/READY는 대상 서버에 파일 캐시가 준비된 상태/),
+    ).toBeInTheDocument()
 
     expect(
       within(row).getByRole('button', { name: '다운로드됨' }),

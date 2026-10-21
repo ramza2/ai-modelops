@@ -1296,16 +1296,26 @@ export function ModelCatalogPage() {
         {CATALOG_FIELD_HELP.overview}{' '}
         {CATALOG_FIELD_HELP.diskVsVram}
       </p>
-      <div className="toolbar toolbar--wrap" style={{ marginBottom: '0.75rem' }}>
-        <HelpHint label="GPU 적합성(Fit)">{CATALOG_FIELD_HELP.fit}</HelpHint>
-        <HelpHint label="LLM">{MODEL_TYPE_HELP.LLM}</HelpHint>
-        <HelpHint label="VLM">{MODEL_TYPE_HELP.VLM}</HelpHint>
-        <HelpHint label="Embedding">{MODEL_TYPE_HELP.EMBEDDING}</HelpHint>
-        <HelpHint label="FIT">{FIT_RESULT_HELP.FIT}</HelpHint>
-        <HelpHint label="TIGHT">{FIT_RESULT_HELP.TIGHT}</HelpHint>
-        <HelpHint label="INSUFFICIENT">{FIT_RESULT_HELP.INSUFFICIENT}</HelpHint>
-        <HelpHint label="UNKNOWN">{FIT_RESULT_HELP.UNKNOWN}</HelpHint>
-      </div>
+      <details className="help-glossary">
+        <summary>용어 및 상태 안내</summary>
+        <div className="help-glossary__items">
+          <HelpHint showTopic label="모델 유형">
+            {CATALOG_FIELD_HELP.modelType} {MODEL_TYPE_HELP.LLM}{' '}
+            {MODEL_TYPE_HELP.VLM} {MODEL_TYPE_HELP.EMBEDDING}
+          </HelpHint>
+          <HelpHint showTopic label="GPU 적합성">
+            {CATALOG_FIELD_HELP.fit}
+          </HelpHint>
+          <HelpHint showTopic label="Fit 판정 기준">
+            {FIT_RESULT_HELP.FIT} {FIT_RESULT_HELP.TIGHT}{' '}
+            {FIT_RESULT_HELP.INSUFFICIENT} {FIT_RESULT_HELP.UNKNOWN}
+          </HelpHint>
+          <HelpHint showTopic label="다운로드 상태">
+            {CATALOG_FIELD_HELP.downloadPolling}{' '}
+            {CATALOG_FIELD_HELP.downloadReady}
+          </HelpHint>
+        </div>
+      </details>
 
       <form className="toolbar toolbar--wrap" onSubmit={onSubmitSearch}>
         <label className="toolbar__field" htmlFor="catalog-q">
@@ -1662,9 +1672,12 @@ export function ModelCatalogPage() {
                           <div className="catalog-fit-summary">
                             <span className="secondary-text">목록 요약</span>
                             {catalogFit ? (
-                              <span title={fitResultHelp(catalogFit)}>
-                                <StatusBadge status={catalogFit} />
-                              </span>
+                              <StatusBadge
+                                status={catalogFit}
+                                title={
+                                  fitResultHelp(catalogFit) ?? catalogFit
+                                }
+                              />
                             ) : (
                               <span className="secondary-text">
                                 {listMatchesContext ? '—' : '갱신 중'}
@@ -1686,9 +1699,13 @@ export function ModelCatalogPage() {
                                 data-testid={`fit-row-status-${repoId}`}
                               >
                                 <span className="secondary-text">분석 완료</span>
-                                <span title={fitResultHelp(analysis.result)}>
-                                  <StatusBadge status={analysis.result} />
-                                </span>
+                                <StatusBadge
+                                  status={analysis.result}
+                                  title={
+                                    fitResultHelp(analysis.result) ??
+                                    analysis.result
+                                  }
+                                />
                               </div>
                             ) : fitError ? (
                               <div
@@ -1810,7 +1827,13 @@ export function ModelCatalogPage() {
                                 <div>
                                   <dt>종합 결과</dt>
                                   <dd>
-                                    <StatusBadge status={analysis.result} />
+                                    <StatusBadge
+                                      status={analysis.result}
+                                      title={
+                                        fitResultHelp(analysis.result) ??
+                                        analysis.result
+                                      }
+                                    />
                                     <div className="secondary-text">
                                       TP={analysis.tensor_parallel}
                                     </div>
@@ -1914,7 +1937,13 @@ export function ModelCatalogPage() {
                                               {gpu.name || '—'}
                                             </div>
                                           </div>
-                                          <StatusBadge status={gpu.result} />
+                                          <StatusBadge
+                                            status={gpu.result}
+                                            title={
+                                              fitResultHelp(gpu.result) ??
+                                              gpu.result
+                                            }
+                                          />
                                         </header>
                                         {suggested ? (
                                           <p className="catalog-fit-gpu-card__badge">

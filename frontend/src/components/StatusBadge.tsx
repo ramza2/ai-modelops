@@ -115,14 +115,23 @@ const TONE: Record<string, string> = {
 type StatusBadgeProps = {
   status: string | null | undefined
   label?: string
+  /**
+   * Native tooltip / advisory title. Defaults to the status code so operators
+   * still see the API enum. Callers may pass a longer beginner explanation
+   * (e.g. Fit result help) without changing badge rendering.
+   */
+  title?: string
 }
 
-export function StatusBadge({ status, label }: StatusBadgeProps) {
+export function StatusBadge({ status, label, title }: StatusBadgeProps) {
   const code = (status || 'UNKNOWN').toUpperCase()
   const tone = TONE[code] || 'muted'
   const text = label || LABELS[code] || code
   return (
-    <span className={`status-badge status-badge--${tone}`} title={code}>
+    <span
+      className={`status-badge status-badge--${tone}`}
+      title={title ?? code}
+    >
       <span className="status-badge__dot" aria-hidden="true" />
       <span className="status-badge__text">
         {text}

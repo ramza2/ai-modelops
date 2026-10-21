@@ -4,6 +4,11 @@ type HelpHintProps = {
   /** Short name used in the accessible summary label. */
   label: string
   children: ReactNode
+  /**
+   * When true, show ``label`` visibly next to ``?`` so glossary/toolbar rows
+   * are identifiable. Compact ``?``-only mode stays the default for TermLabel.
+   */
+  showTopic?: boolean
 }
 
 /**
@@ -13,14 +18,23 @@ type HelpHintProps = {
  * inside phrasing-only parents such as ``h1``–``h6`` or ``span``; prefer
  * ``TermLabel`` (div wrapper) or place ``HelpHint`` beside a heading.
  */
-export function HelpHint({ label, children }: HelpHintProps) {
+export function HelpHint({
+  label,
+  children,
+  showTopic = false,
+}: HelpHintProps) {
   return (
-    <details className="help-hint">
+    <details
+      className={showTopic ? 'help-hint help-hint--topic' : 'help-hint'}
+    >
       <summary className="help-hint__summary">
+        {showTopic ? <span className="help-hint__topic">{label}</span> : null}
         <span className="help-hint__mark" aria-hidden="true">
           ?
         </span>
-        <span className="help-hint__sr">{label} 도움말</span>
+        {showTopic ? null : (
+          <span className="help-hint__sr">{label} 도움말</span>
+        )}
       </summary>
       <div className="help-hint__body">{children}</div>
     </details>

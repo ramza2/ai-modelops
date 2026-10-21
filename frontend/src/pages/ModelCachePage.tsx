@@ -482,12 +482,23 @@ export function ModelCachePage() {
       <p className="panel-hint" role="note">
         {CACHE_FIELD_HELP.overview} {CACHE_FIELD_HELP.deploy}
       </p>
-      <div className="toolbar toolbar--wrap" style={{ marginBottom: '0.75rem' }}>
-        <HelpHint label="캐시 상태">{CACHE_FIELD_HELP.status}</HelpHint>
-        <HelpHint label="진행률·상태 조회">{CACHE_FIELD_HELP.progress}</HelpHint>
-        <HelpHint label="로컬 캐시 삭제">{CACHE_FIELD_HELP.purge}</HelpHint>
-        <HelpHint label="다운로드 READY">{CATALOG_FIELD_HELP.downloadReady}</HelpHint>
-      </div>
+      <details className="help-glossary">
+        <summary>용어 및 상태 안내</summary>
+        <div className="help-glossary__items">
+          <HelpHint showTopic label="캐시 상태">
+            {CACHE_FIELD_HELP.status}
+          </HelpHint>
+          <HelpHint showTopic label="다운로드 상태">
+            {CACHE_FIELD_HELP.progress} {CATALOG_FIELD_HELP.downloadReady}
+          </HelpHint>
+          <HelpHint showTopic label="캐시 삭제 안내">
+            {CACHE_FIELD_HELP.purge}
+          </HelpHint>
+          <HelpHint showTopic label="배포 가능 여부">
+            {CACHE_FIELD_HELP.deploy}
+          </HelpHint>
+        </div>
+      </details>
 
       <div className="toolbar toolbar--wrap" style={{ marginBottom: '0.75rem' }}>
         <div className="toolbar__field">

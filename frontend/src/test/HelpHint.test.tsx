@@ -47,4 +47,19 @@ describe('HelpHint / TermLabel markup', () => {
     expect(container.querySelector('h2')?.textContent).toBe('런타임 정책')
     expect(container.querySelector('.detail-panel__heading details')).toBeTruthy()
   })
+
+  it('shows a visible topic label when showTopic is set', async () => {
+    const user = userEvent.setup()
+    render(
+      <HelpHint showTopic label="Fit 판정 기준">
+        FIT는 참고용입니다
+      </HelpHint>,
+    )
+    expect(screen.getByText('Fit 판정 기준')).toBeVisible()
+    expect(screen.queryByText('Fit 판정 기준 도움말')).toBeNull()
+    const summary = screen.getByText('Fit 판정 기준').closest('summary')
+    expect(summary).toBeTruthy()
+    await user.click(summary!)
+    expect(screen.getByText('FIT는 참고용입니다')).toBeVisible()
+  })
 })

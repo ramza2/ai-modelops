@@ -163,6 +163,9 @@ describe('ModelCachePage', () => {
     expect(
       screen.getAllByText(/캐시 READY ≠ 모델 실행 중 ≠ API 게시 완료/).length,
     ).toBeGreaterThan(0)
+    await userEvent.click(screen.getByText('용어 및 상태 안내'))
+    expect(screen.getByText('캐시 삭제 안내')).toBeVisible()
+    expect(screen.getByText('다운로드 상태')).toBeVisible()
     const deploy = screen.getByRole('link', { name: '배포 설정' })
     expect(deploy).toHaveAttribute('href', '/models/cache/cache-1/deploy')
 
