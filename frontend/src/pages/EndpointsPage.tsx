@@ -6,11 +6,11 @@ import type { Endpoint } from '../api/types'
 import { ActiveBadge } from '../components/ActiveBadge'
 import { AppShell } from '../components/AppShell'
 import { EndpointEnabledConfirmDialog } from '../components/EndpointEnabledConfirmDialog'
+import { EndpointTrafficDisplay } from '../components/EndpointTrafficDisplay'
 import { HelpHint, TermLabel } from '../components/HelpHint'
 import { LoadingBlock } from '../components/LoadingBlock'
 import { Pagination } from '../components/Pagination'
 import { SectionError } from '../components/SectionError'
-import { StatusBadge } from '../components/StatusBadge'
 import { useEndpointEnabledAction } from '../hooks/useEndpointEnabledAction'
 import { formatApiDateTime, shortId } from '../utils/date'
 import { parsePositivePage } from '../utils/query'
@@ -275,6 +275,9 @@ export function EndpointsPage() {
           <HelpHint showTopic label="요청 처리 상태">
             {ENDPOINT_FIELD_HELP.traffic}
           </HelpHint>
+          <HelpHint showTopic label="Traffic 표시 (사용 중지·미연결)">
+            {ENDPOINT_FIELD_HELP.trafficDisplay}
+          </HelpHint>
           <HelpHint showTopic label="현재 활성 연결">
             {ENDPOINT_FIELD_HELP.activeRoute}
           </HelpHint>
@@ -500,7 +503,11 @@ export function EndpointsPage() {
                         <ActiveBadge active={ep.is_enabled} />
                       </td>
                       <td>
-                        <StatusBadge status={ep.traffic_state} />
+                        <EndpointTrafficDisplay
+                          isEnabled={ep.is_enabled}
+                          trafficState={ep.traffic_state}
+                          hasActiveRoute={Boolean(active?.deployment_id)}
+                        />
                       </td>
                       <td>
                         {active ? (

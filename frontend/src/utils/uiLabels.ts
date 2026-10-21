@@ -277,6 +277,32 @@ export const RUNTIME_FIELD_HELP = {
     '미설정 필드는 실제 Runtime 기본 동작을 따릅니다. 임의의 기본값이나 모델별 설정을 자동 생성하지 않습니다.',
 } as const
 
+/** P1-19 — Nodes / GPUs beginner help (display-only). */
+export const NODE_FIELD_HELP = {
+  overview:
+    '서버(Node)는 Node Agent가 설치된 GPU 호스트입니다. 목록의 상태는 Management API DB에 저장된 값이며, 새로고침은 DB 재조회만 수행합니다(Node Agent 호출 아님).',
+  status:
+    'ONLINE=Node Agent 연결 정상, DEGRADED=연결은 있으나 일부 저하, OFFLINE=연결 끊김, UNKNOWN=상태를 알 수 없음. ONLINE ≠ GPU 모델이 정상 실행 중.',
+  heartbeat:
+    '마지막 연결 확인(Last Heartbeat)은 Node Agent 생존 신호 시각입니다. Host/GPU 자원 측정 시각(Snapshot Sampled At)과 다르며, 오래된 스냅샷을 실시간 상태로 보지 마세요.',
+  refreshVsCollect:
+    '상단 새로고침=DB에 저장된 메타/스냅샷 재조회. 리소스 갱신=Node Agent로 새 Host/GPU 스냅샷 수집 요청. 수집 중에는 중복 요청이 차단됩니다.',
+  ramVsVram:
+    '시스템 메모리(RAM)는 서버 일반 메모리이고, GPU 메모리(VRAM)는 그래픽카드 전용 메모리입니다. 서로 다른 자원입니다.',
+  gpuUtilVsVram:
+    'GPU 연산 사용률(GPU Utilization)과 VRAM 사용량/여유는 다른 지표입니다. Memory Utilization은 GPU 메모리 컨트롤러 사용률이며 VRAM Used/Free와 동일 개념이 아닙니다.',
+  vramFree:
+    '남은 GPU 메모리(VRAM Free)가 모두 새 모델에 할당 가능하다는 뜻이 아닙니다. Safety Margin(GPU 안전 여유)과 다른 프로세스 점유를 고려해야 합니다.',
+  safetyMargin:
+    'GPU 안전 여유(Safety Margin)는 안정 실행을 위해 남겨 두는 VRAM 여유입니다. Fit/배포 판정에 반영됩니다.',
+  noPoolVram:
+    'GPU가 여러 장이어도 각 GPU의 VRAM을 하나의 큰 메모리로 합산하지 않습니다. 적합성은 GPU별로 판단합니다.',
+  fitReminder:
+    '현재 사용률이 낮다고 새 모델 배포 성공이 보장되지 않습니다. 최종 자원 적합성은 배포 Wizard의 Fresh Fit으로 확인하세요.',
+  uncollected:
+    '스냅샷이 없으면 미수집입니다. 0으로 대체하지 않으며, 리소스 갱신 후 값이 채워질 수 있습니다.',
+} as const
+
 /** P1-16 — Endpoints / Operations / Observability beginner help (display-only). */
 export const ENDPOINT_FIELD_HELP = {
   overview:
@@ -287,6 +313,10 @@ export const ENDPOINT_FIELD_HELP = {
     '사용 설정(Enabled)은 Alias가 관리 대상으로 켜져 있는지를 나타냅니다. 실제 요청 처리는 Traffic 상태·ACTIVE Route·Deployment 실행/Health에 따릅니다.',
   traffic:
     '요청 처리 상태(Traffic): SERVING=정상 전달, DRAINING=신규 요청 차단·진행 중 요청 대기, MAINTENANCE=신규 요청 차단·upstream 전달 금지.',
+  trafficDisplay:
+    '사용 설정·ACTIVE Route·Traffic 설정값은 서로 다릅니다. 사용 중지(is_enabled=false)이거나 모델 미연결이면 Traffic 원본이 SERVING이어도 녹색 서빙 중으로 보이지 않습니다. 원본 traffic_state는 유지됩니다.',
+  trafficServingOk:
+    '사용 설정 ON + ACTIVE Route가 있을 때 Traffic SERVING은 Gateway가 요청을 넘기려는 설정입니다. 실제 처리 가능 여부는 Deployment Runtime/Health에 따릅니다.',
   activeRoute:
     '현재 활성 연결(ACTIVE Route)은 지금 Gateway가 이 Alias로 보내는 Deployment입니다. Deployment가 STOPPED/UNHEALTHY여도 Route 행 자체는 남을 수 있습니다.',
   preflight:
