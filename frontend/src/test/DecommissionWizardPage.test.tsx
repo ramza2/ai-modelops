@@ -489,14 +489,19 @@ describe('DecommissionWizardPage', () => {
       await screen.findByRole('button', { name: '모델 중지 확인…' }),
     )
     await confirmAndRun(user)
-    expect(await screen.findByText(/접수되었을 수 있습니다/)).toBeInTheDocument()
+    expect(await screen.findByText(/중지 작업은 접수되었습니다/)).toBeInTheDocument()
     expect(deploymentsApi.stopDeployment).toHaveBeenCalledTimes(1)
     await waitFor(() => {
       expect(operationsApi.getOperation).toHaveBeenCalledWith(
         'op-new-stop',
       )
     })
-    // Do not urge an immediate second stop after uncertain detail fetch.
+    // Confirm dialog closed; no immediate second Stop POST.
+    expect(screen.queryByTestId('danger-confirm-dialog')).not.toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: '모델 중지 확인…' }),
+    ).toBeDisabled()
+    expect(screen.getByText(/중복 실행 금지/)).toBeInTheDocument()
     expect(screen.queryByText(/버튼을 다시 시도/)).not.toBeInTheDocument()
   })
 
@@ -837,5 +842,259 @@ describe('DecommissionWizardPage', () => {
     expect(
       screen.getByText(/진행 중인 Deployment Operation이 있습니다/),
     ).toBeInTheDocument()
+  })
+
+  it('blocks Purge before retire even when Backend can_purge_cache=true', async () => {
+    mockHappyLoad(
+      makeStatus({
+        active_routes: [],
+        can_unpublish: false,
+        can_stop: false,
+        can_remove_container: false,
+        can_retire: true,
+        can_purge_cache: true,
+        runtime_status: 'STOPPED',
+        container_present: false,
+        retired_at: null,
+        blockers: [],
+      }),
+    )
+    renderWizard('/deployments/d1/decommission?step=purge')
+    expect(
+      await screen.findByRole('heading', { name: /6\. 로컬 모델 캐시 삭제/ }),
+    ).toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: '로컬 캐시 삭제 확인…' }),
+    ).toBeDisabled()
+    expect(
+      screen.getByText(/배포 퇴역\(retired_at\) 완료 전/),
+    ).toBeInTheDocument()
+    expect(decommissionApi.purgeModelCache).not.toHaveBeenCalled()
+  })
+
+  it('blocks Purge on direct URL step=purge before retire', async () => {
+    mockHappyLoad(
+      makeStatus({
+        active_routes: [],
+        can_unpublish: false,
+        can_purge_cache: true,
+        runtime_status: 'STOPPED',
+        container_present: false,
+        retired_at: null,
+        blockers: [],
+      }),
+    )
+    renderWizard('/deployments/d1/decommission?step=purge')
+    expect(
+      await screen.findByRole('button', { name: '로컬 캐시 삭제 확인…' }),
+    ).toBeDisabled()
+    expect(
+      screen.getByText(/Backend can_purge_cache만으로 허용하지 않습니다/),
+    ).toBeInTheDocument()
+  })
+
+  it.each(['CREATED', 'FAILED', 'UNKNOWN'] as const)(
+    'blocks MANAGED Remove execute when runtime_status=%s even if Backend allows',
+    async (runtime) => {
+      mockHappyLoad(
+        makeStatus({
+          active_routes: [],
+          can_unpublish: false,
+          can_stop: false,
+          can_remove_container: true,
+          runtime_status: runtime,
+          container_present: true,
+          blockers: [],
+        }),
+      )
+      renderWizard('/deployments/d1/decommission?step=remove')
+      expect(
+        await screen.findByRole('heading', { name: /4\. 모델 컨테이너 제거/ }),
+      ).toBeInTheDocument()
+      expect(
+        screen.getByRole('button', { name: '컨테이너 제거 확인…' }),
+      ).toBeDisabled()
+      expect(
+        screen.getByText(/MANAGED Remove는 runtime_status=STOPPED/),
+      ).toBeInTheDocument()
+      expect(decommissionApi.removeDeployment).not.toHaveBeenCalled()
+    },
+  )
+
+  it('blocks Remove when container_present is UNKNOWN (null)', async () => {
+    mockHappyLoad(
+      makeStatus({
+        active_routes: [],
+        can_unpublish: false,
+        can_remove_container: true,
+        runtime_status: 'STOPPED',
+        container_present: null,
+        blockers: [],
+      }),
+    )
+    renderWizard('/deployments/d1/decommission?step=remove')
+    expect(
+      await screen.findByRole('button', { name: '컨테이너 제거 확인…' }),
+    ).toBeDisabled()
+    expect(
+      screen.getByText(/컨테이너 존재 여부를 확인할 수 없습니다/),
+    ).toBeInTheDocument()
+  })
+
+  it('allows MANAGED Remove when STOPPED and Backend can_remove_container', async () => {
+    const user = userEvent.setup()
+    mockHappyLoad(
+      makeStatus({
+        active_routes: [],
+        can_unpublish: false,
+        can_stop: false,
+        can_remove_container: true,
+        runtime_status: 'STOPPED',
+        container_present: true,
+        blockers: [],
+      }),
+    )
+    vi.mocked(decommissionApi.removeDeployment).mockResolvedValue({
+      id: 'op-rm-ok',
+      operation_type: 'REMOVE',
+      status: 'QUEUED',
+      target_deployment_id: 'd1',
+      current_step: null,
+      created_at: '2026-10-08T00:00:00Z',
+      started_at: null,
+      finished_at: null,
+      error: null,
+    })
+    vi.mocked(operationsApi.getOperation).mockResolvedValue(
+      makeOp({
+        id: 'op-rm-ok',
+        operation_type: 'REMOVE',
+        status: 'QUEUED',
+      }),
+    )
+
+    renderWizard('/deployments/d1/decommission?step=remove')
+    await user.click(
+      await screen.findByRole('button', { name: '컨테이너 제거 확인…' }),
+    )
+    await confirmAndRun(user)
+    await waitFor(() => {
+      expect(decommissionApi.removeDeployment).toHaveBeenCalledTimes(1)
+    })
+    expect(screen.queryByTestId('danger-confirm-dialog')).not.toBeInTheDocument()
+  })
+
+  it('does not re-POST Stop when 202 succeeds but refreshStatus fails', async () => {
+    const user = userEvent.setup()
+    const stopStatus = makeStatus({
+      active_routes: [],
+      can_unpublish: false,
+      can_stop: true,
+      blockers: [],
+    })
+    let statusCalls = 0
+    vi.mocked(decommissionApi.getDecommissionStatus).mockImplementation(
+      async () => {
+        statusCalls += 1
+        // load + revalidate before POST
+        if (statusCalls <= 2) return stopStatus
+        throw new Error('refresh boom')
+      },
+    )
+    vi.mocked(deploymentsApi.getDeployment).mockResolvedValue(
+      makeDeployment({ runtime_status: 'RUNNING' }),
+    )
+    vi.mocked(modelsApi.getModelVersion).mockResolvedValue(makeVersion())
+    vi.mocked(modelsApi.getModel).mockResolvedValue(makeModel())
+    vi.mocked(deploymentsApi.stopDeployment).mockResolvedValue({
+      id: 'op-stop-refresh-fail',
+      operation_type: 'STOP',
+      status: 'QUEUED',
+      target_deployment_id: 'd1',
+      current_step: null,
+      created_at: '2026-10-08T00:00:00Z',
+      started_at: null,
+      finished_at: null,
+      error: null,
+    })
+    vi.mocked(operationsApi.getOperation).mockResolvedValue(
+      makeOp({ id: 'op-stop-refresh-fail', status: 'QUEUED' }),
+    )
+
+    renderWizard('/deployments/d1/decommission?step=stop')
+    await user.click(
+      await screen.findByRole('button', { name: '모델 중지 확인…' }),
+    )
+    await confirmAndRun(user)
+    expect(await screen.findByText(/상태 재조회 실패/)).toBeInTheDocument()
+    expect(deploymentsApi.stopDeployment).toHaveBeenCalledTimes(1)
+    expect(screen.queryByTestId('danger-confirm-dialog')).not.toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: '모델 중지 확인…' }),
+    ).toBeDisabled()
+    expect(screen.getByText(/중복 실행 금지/)).toBeInTheDocument()
+    // Second openConfirm must not fire another POST.
+    await user.click(screen.getByRole('button', { name: '모델 중지 확인…' }))
+    expect(deploymentsApi.stopDeployment).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not re-POST Remove when 202 succeeds but refreshStatus fails', async () => {
+    const user = userEvent.setup()
+    const removeStatus = makeStatus({
+      active_routes: [],
+      can_unpublish: false,
+      can_stop: false,
+      can_remove_container: true,
+      runtime_status: 'STOPPED',
+      container_present: true,
+      blockers: [],
+    })
+    let statusCalls = 0
+    vi.mocked(decommissionApi.getDecommissionStatus).mockImplementation(
+      async () => {
+        statusCalls += 1
+        if (statusCalls <= 2) return removeStatus
+        throw new Error('remove refresh boom')
+      },
+    )
+    vi.mocked(deploymentsApi.getDeployment).mockResolvedValue(
+      makeDeployment({ runtime_status: 'STOPPED' }),
+    )
+    vi.mocked(modelsApi.getModelVersion).mockResolvedValue(makeVersion())
+    vi.mocked(modelsApi.getModel).mockResolvedValue(makeModel())
+    vi.mocked(decommissionApi.removeDeployment).mockResolvedValue({
+      id: 'op-rm-refresh-fail',
+      operation_type: 'REMOVE',
+      status: 'QUEUED',
+      target_deployment_id: 'd1',
+      current_step: null,
+      created_at: '2026-10-08T00:00:00Z',
+      started_at: null,
+      finished_at: null,
+      error: null,
+    })
+    vi.mocked(operationsApi.getOperation).mockResolvedValue(
+      makeOp({
+        id: 'op-rm-refresh-fail',
+        operation_type: 'REMOVE',
+        status: 'QUEUED',
+      }),
+    )
+
+    renderWizard('/deployments/d1/decommission?step=remove')
+    await user.click(
+      await screen.findByRole('button', { name: '컨테이너 제거 확인…' }),
+    )
+    await confirmAndRun(user)
+    expect(await screen.findByText(/상태 재조회 실패/)).toBeInTheDocument()
+    expect(decommissionApi.removeDeployment).toHaveBeenCalledTimes(1)
+    expect(screen.queryByTestId('danger-confirm-dialog')).not.toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: '컨테이너 제거 확인…' }),
+    ).toBeDisabled()
+    await user.click(
+      screen.getByRole('button', { name: '컨테이너 제거 확인…' }),
+    )
+    expect(decommissionApi.removeDeployment).toHaveBeenCalledTimes(1)
   })
 })
