@@ -1118,8 +1118,9 @@ Idempotency-Key: <client-generated-unique-key>
 - Same key + same normalized payload → replay original `201` body (no second row).
 - Same key + different method/resource/payload → `409 IDEMPOTENCY_KEY_CONFLICT`.
 - Duplicate `client_key` (different Idempotency-Key) → `409 CLIENT_KEY_CONFLICT`.
-- Header omitted → legacy non-idempotent create (still subject to UNIQUE `client_key`).
-- Key format: `1..255` of `[A-Za-z0-9._:-]`; leading/trailing whitespace rejected (`422`).
+- Header omitted → Idempotency unused; legacy non-idempotent create (still subject to UNIQUE `client_key`).
+- Header present but invalid (empty, whitespace-only, leading/trailing spaces, illegal chars, length > 255) → `422 VALIDATION_ERROR`; **mutation must not run**.
+- Valid key format: `1..255` of `[A-Za-z0-9._:-]` (kept as-is; not stripped).
 - Durable store: `client_mutation_idempotency` (not `operation.idempotency_key`).
 - Concurrent same-key requests serialize on the idempotency row lock; the waiter replays the completed response.
 

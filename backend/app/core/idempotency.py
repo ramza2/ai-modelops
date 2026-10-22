@@ -18,22 +18,27 @@ _IDEMPOTENCY_KEY_RE = re.compile(r"^[A-Za-z0-9._:\-]{1,255}$")
 
 
 def validate_idempotency_key(raw: str | None) -> str | None:
-    """Return normalized key or None when header absent.
+    """Return the key unchanged, or None when the header is omitted.
 
-    Absent/blank header ⇒ caller proceeds without idempotency (backward compatible).
-    Present but invalid ⇒ 422 VALIDATION_ERROR.
+    - ``None`` (header absent) → no idempotency (backward compatible)
+    - ``""``, whitespace-only, leading/trailing spaces, illegal chars,
+      or length > 255 → ``422 VALIDATION_ERROR`` (do not run the mutation)
+    - Valid key → original string (no strip/normalize)
     """
     if raw is None:
         return None
-    key = raw.strip()
-    if not key:
-        return None
-    if key != raw:
+    stripped = raw.strip()
+    if not stripped:
+        raise ValidationError(
+            "Idempotency-Key must not be empty.",
+            details={"field": "Idempotency-Key"},
+        )
+    if stripped != raw:
         raise ValidationError(
             "Idempotency-Key must not include leading or trailing whitespace.",
             details={"field": "Idempotency-Key"},
         )
-    if not _IDEMPOTENCY_KEY_RE.fullmatch(key):
+    if not _IDEMPOTENCY_KEY_RE.fullmatch(raw):
         raise ValidationError(
             "Idempotency-Key must be 1..255 characters of "
             "[A-Za-z0-9._:-] only.",
@@ -43,7 +48,7 @@ def validate_idempotency_key(raw: str | None) -> str | None:
                 "pattern": "[A-Za-z0-9._:-]+",
             },
         )
-    return key
+    return raw
 
 
 def canonical_request_hash(payload: dict[str, Any]) -> str:

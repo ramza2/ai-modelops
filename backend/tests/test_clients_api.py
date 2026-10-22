@@ -571,6 +571,135 @@ async def test_patch_idempotency_conflict_and_invalid_key(client) -> None:
 
 
 @pytest.mark.anyio
+async def test_idempotency_key_empty_and_whitespace_rejected(client) -> None:
+    """Present-but-invalid Idempotency-Key must 422 without mutating."""
+    c = client["client"]
+    suffix = uuid.uuid4().hex[:8]
+    client_key = f"empty-idem-{suffix}"
+
+    empty_post = await c.post(
+        "/api/v1/clients",
+        json={"client_key": client_key, "display_name": "ShouldNotCreate"},
+        headers={"Idempotency-Key": ""},
+    )
+    assert empty_post.status_code == 422, empty_post.text
+    assert empty_post.json()["error"]["code"] == "VALIDATION_ERROR"
+
+    async with client["session_factory"]() as session:
+        count = int(
+            (
+                await session.execute(
+                    text(
+                        "SELECT COUNT(*) FROM client_app "
+                        "WHERE client_key = :k"
+                    ),
+                    {"k": client_key},
+                )
+            ).scalar_one()
+        )
+    assert count == 0
+
+    created = await c.post(
+        "/api/v1/clients",
+        json={
+            "client_key": f"ws-{suffix}",
+            "display_name": "Original",
+            "description": "keep",
+        },
+    )
+    assert created.status_code == 201, created.text
+    client_id = created.json()["id"]
+    before = created.json()
+
+    ws_patch = await c.patch(
+        f"/api/v1/clients/{client_id}",
+        json={"display_name": "Mutated"},
+        headers={"Idempotency-Key": "   "},
+    )
+    assert ws_patch.status_code == 422
+    assert ws_patch.json()["error"]["code"] == "VALIDATION_ERROR"
+
+    padded = await c.patch(
+        f"/api/v1/clients/{client_id}",
+        json={"display_name": "Mutated"},
+        headers={"Idempotency-Key": f"  pad-{suffix}  "},
+    )
+    assert padded.status_code == 422
+    assert padded.json()["error"]["code"] == "VALIDATION_ERROR"
+
+    too_long = await c.post(
+        "/api/v1/clients",
+        json={"client_key": f"long-{suffix}", "display_name": "L"},
+        headers={"Idempotency-Key": "a" * 256},
+    )
+    assert too_long.status_code == 422
+    assert too_long.json()["error"]["code"] == "VALIDATION_ERROR"
+
+    got = await c.get(f"/api/v1/clients/{client_id}")
+    assert got.status_code == 200
+    assert got.json()["display_name"] == before["display_name"]
+    assert got.json()["description"] == before["description"]
+    assert got.json()["updated_at"] == before["updated_at"]
+
+
+@pytest.mark.anyio
+async def test_idempotency_key_cross_method_and_client_conflict(client) -> None:
+    c = client["client"]
+    suffix = uuid.uuid4().hex[:8]
+    shared_key = f"cross-{suffix}"
+
+    created_a = await c.post(
+        "/api/v1/clients",
+        json={"client_key": f"a-{suffix}", "display_name": "A"},
+        headers={"Idempotency-Key": shared_key},
+    )
+    assert created_a.status_code == 201, created_a.text
+    id_a = created_a.json()["id"]
+
+    # Same key reused for PATCH (different method/resource) → conflict.
+    cross_method = await c.patch(
+        f"/api/v1/clients/{id_a}",
+        json={"display_name": "A2"},
+        headers={"Idempotency-Key": shared_key},
+    )
+    assert cross_method.status_code == 409
+    assert cross_method.json()["error"]["code"] == "IDEMPOTENCY_KEY_CONFLICT"
+
+    created_b = await c.post(
+        "/api/v1/clients",
+        json={"client_key": f"b-{suffix}", "display_name": "B"},
+    )
+    assert created_b.status_code == 201
+    id_b = created_b.json()["id"]
+
+    patch_key = f"patch-res-{suffix}"
+    patch_a = await c.patch(
+        f"/api/v1/clients/{id_a}",
+        json={"display_name": "A-patched"},
+        headers={"Idempotency-Key": patch_key},
+    )
+    assert patch_a.status_code == 200
+
+    # Same key on a different client_id → conflict.
+    patch_b = await c.patch(
+        f"/api/v1/clients/{id_b}",
+        json={"display_name": "B-patched"},
+        headers={"Idempotency-Key": patch_key},
+    )
+    assert patch_b.status_code == 409
+    assert patch_b.json()["error"]["code"] == "IDEMPOTENCY_KEY_CONFLICT"
+
+    # Replay same normalized PATCH payload still works.
+    patch_a_replay = await c.patch(
+        f"/api/v1/clients/{id_a}",
+        json={"display_name": "A-patched"},
+        headers={"Idempotency-Key": patch_key},
+    )
+    assert patch_a_replay.status_code == 200
+    assert patch_a_replay.json() == patch_a.json()
+
+
+@pytest.mark.anyio
 async def test_create_without_idempotency_key_still_works(client) -> None:
     c = client["client"]
     suffix = uuid.uuid4().hex[:8]
@@ -588,6 +717,14 @@ async def test_create_without_idempotency_key_still_works(client) -> None:
     pol = await c.get(f"/api/v1/clients/{resp.json()['id']}/runtime-policy")
     assert pol.status_code == 200
     assert pol.json()["policy"] is None
+
+    # PATCH without Idempotency-Key remains valid.
+    patched = await c.patch(
+        f"/api/v1/clients/{resp.json()['id']}",
+        json={"display_name": f"Legacy {suffix} renamed"},
+    )
+    assert patched.status_code == 200
+    assert patched.json()["display_name"] == f"Legacy {suffix} renamed"
 
 
 @pytest.mark.anyio

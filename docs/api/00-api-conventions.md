@@ -330,7 +330,15 @@ Idempotency-Key: <client-generated-unique-key>
 
 을 반환한다. `client_key` UNIQUE 충돌은 별도 코드 `CLIENT_KEY_CONFLICT`이다.
 
-헤더 생략 시 기존 non-idempotent 동작과 호환된다.
+헤더 의미:
+
+| 헤더 | 동작 |
+|---|---|
+| 미전달 (`None`) | Idempotency 미사용 — 기존 non-idempotent mutation (하위 호환) |
+| 전달 + 잘못된 키 | `422 VALIDATION_ERROR` — mutation 실행 금지 (빈 문자열, 공백만, 앞뒤 공백, 미허용 문자, 255자 초과) |
+| 전달 + 유효한 키 | DB(`client_mutation_idempotency`) 기반 중복 요청 보호 |
+
+유효 키 형식: `1..255` of `[A-Za-z0-9._:-]` (원본 유지, strip하지 않음).
 
 Node Agent mutation에는 Worker가 생성한 `X-Operation-ID`와 `X-Step-ID`를 전달하고 Agent는 동일 side effect의 재실행을 안전하게 처리해야 한다.
 
