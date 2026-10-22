@@ -10,6 +10,7 @@ import type { ClientApp, ClientRuntimePolicyResponse } from '../api/types'
 import { ActiveBadge } from '../components/ActiveBadge'
 import { AppShell } from '../components/AppShell'
 import { ClientEditDialog } from '../components/ClientEditDialog'
+import { ClientKeyCopyActions } from '../components/ClientKeyCopyActions'
 import { DangerConfirmDialog } from '../components/DangerConfirmDialog'
 import { HelpHint, TermLabel } from '../components/HelpHint'
 import { LoadingBlock } from '../components/LoadingBlock'
@@ -371,7 +372,13 @@ export function ClientDetailPage() {
                   help={CLIENT_FIELD_HELP.clientKey}
                 />
               </dt>
-              <dd className="mono">{displayClient.client_key}</dd>
+              <dd>
+                <span className="mono">{displayClient.client_key}</span>
+                <ClientKeyCopyActions clientKey={displayClient.client_key} />
+                <p className="form-field-hint">
+                  {CLIENT_FIELD_HELP.clientKeyIntegration}
+                </p>
+              </dd>
             </div>
             <div>
               <dt>

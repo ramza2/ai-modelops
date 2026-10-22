@@ -112,7 +112,9 @@ export function formatPriorityDisplay(
 
 export const CLIENT_FIELD_HELP = {
   clientKey:
-    'Gateway가 호출을 구분할 때 쓰는 식별자입니다(X-AI-Client). 직원 로그인 계정이 아니라, AI 모델을 호출하는 업무 서비스의 키입니다.',
+    'Gateway가 호출을 구분할 때 쓰는 식별자입니다(X-AI-Client). 직원 로그인 계정이 아니라, AI 모델을 호출하는 업무 서비스의 키입니다. API 인증키·비밀번호가 아닙니다.',
+  clientKeyIntegration:
+    '등록만으로 다른 프로젝트에 X-AI-Client 헤더가 자동으로 붙지 않습니다. 각 업무 프로젝트의 Gateway 공통 클라이언트(또는 HTTP 클라이언트)에 헤더를 설정해야 하며, 환경변수 MODELOPS_CLIENT_KEY 사용을 권장합니다.',
   isActive:
     '활성(ACTIVE)은 레지스트리에서 사용 가능으로 표시된 상태입니다. 비활성(INACTIVE)은 Gateway가 Chat/Embeddings 추론 요청을 직접 차단하는 스위치가 아닙니다. 비활성이면 (1) Gateway 정책 스냅샷에 이 키의 Runtime Policy가 올라가지 않아 클라이언트별 토큰·동시성·priority 제한이 적용되지 않고, (2) 호출 로그의 client_app_id 연결도 활성 키에만 이뤄지며 raw_client_key는 그대로 남을 수 있습니다. 실제 추론 가능 여부는 Endpoint Alias·배포·traffic 상태에 따릅니다.',
   displayName: '관리 화면에서 보이는 서비스 이름입니다.',

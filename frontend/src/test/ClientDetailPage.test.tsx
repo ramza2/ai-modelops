@@ -83,6 +83,7 @@ describe('ClientDetailPage', () => {
 
   afterEach(() => {
     cleanup()
+    vi.unstubAllGlobals()
     vi.restoreAllMocks()
   })
 
@@ -108,6 +109,36 @@ describe('ClientDetailPage', () => {
     ).toBeGreaterThan(0)
     expect(clientsApi.listClients).not.toHaveBeenCalled()
     expect(clientsApi.updateClient).not.toHaveBeenCalled()
+  })
+
+  it('shows registered client_key read-only with copy actions', async () => {
+    const user = userEvent.setup()
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    vi.stubGlobal('navigator', {
+      ...navigator,
+      clipboard: { writeText },
+    })
+    vi.mocked(clientsApi.getClient).mockResolvedValue(
+      makeClient({ client_key: 'svc-aabbccddeeff00112233445566778899' }),
+    )
+    vi.mocked(clientsApi.getClientRuntimePolicy).mockResolvedValue(makePolicy())
+    renderDetail()
+    expect(
+      await screen.findByText('svc-aabbccddeeff00112233445566778899'),
+    ).toBeInTheDocument()
+    expect(screen.getByText(/MODELOPS_CLIENT_KEY/)).toBeInTheDocument()
+    // Read-only: no editable key input on detail.
+    expect(screen.queryByLabelText(/서비스 키/)).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: '서비스 키 복사' }))
+    expect(writeText).toHaveBeenCalledWith(
+      'svc-aabbccddeeff00112233445566778899',
+    )
+    await user.click(
+      screen.getByRole('button', { name: 'X-AI-Client 헤더 복사' }),
+    )
+    expect(writeText).toHaveBeenCalledWith(
+      'X-AI-Client: svc-aabbccddeeff00112233445566778899',
+    )
   })
 
   it('shows null policy as no policy row', async () => {
