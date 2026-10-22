@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  createClient,
   getClient,
   getClientRuntimePolicy,
   listClients,
+  updateClient,
 } from '../api/clients'
 
 describe('clients API client', () => {
@@ -26,7 +28,7 @@ describe('clients API client', () => {
     expect((fetchSpy.mock.calls[0]?.[1] as RequestInit).method).toBe('GET')
   })
 
-  it('loads client detail and runtime-policy via GET only', async () => {
+  it('loads client detail and runtime-policy via GET', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(
       async (input) => {
         const url = String(input)
@@ -60,12 +62,73 @@ describe('clients API client', () => {
       (c) => (c[1] as RequestInit).method || 'GET',
     )
     expect(methods.every((m) => m === 'GET')).toBe(true)
-    expect(
-      fetchSpy.mock.calls.every(
-        (c) => !['POST', 'PATCH', 'PUT', 'DELETE'].includes(
-          String((c[1] as RequestInit).method || 'GET'),
-        ),
+  })
+
+  it('POSTs create with caller Idempotency-Key and preserves case', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          id: 'c-new',
+          client_key: 'AlZi',
+          display_name: '사내 지식 AI 검색',
+          description: 'RAG',
+          is_active: true,
+          created_at: '2026-10-01T00:00:00Z',
+          updated_at: '2026-10-01T00:00:00Z',
+        }),
+        { status: 201, headers: { 'Content-Type': 'application/json' } },
       ),
-    ).toBe(true)
+    )
+    const result = await createClient(
+      {
+        client_key: 'AlZi',
+        display_name: '사내 지식 AI 검색',
+        description: 'RAG',
+      },
+      { idempotencyKey: 'idem-create-1' },
+    )
+    expect(result.client_key).toBe('AlZi')
+    const init = fetchSpy.mock.calls[0]?.[1] as RequestInit
+    expect(init.method).toBe('POST')
+    expect((init.headers as Record<string, string>)['Idempotency-Key']).toBe(
+      'idem-create-1',
+    )
+    expect(JSON.parse(String(init.body))).toEqual({
+      client_key: 'AlZi',
+      display_name: '사내 지식 AI 검색',
+      description: 'RAG',
+    })
+  })
+
+  it('PATCHes only provided fields and sends null description', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          id: 'c1',
+          client_key: 'alzi',
+          display_name: 'Renamed',
+          description: null,
+          is_active: false,
+          created_at: '2026-10-01T00:00:00Z',
+          updated_at: '2026-10-08T00:00:00Z',
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+    )
+    await updateClient(
+      'c1',
+      { display_name: 'Renamed', description: null, is_active: false },
+      { idempotencyKey: 'idem-patch-1' },
+    )
+    const init = fetchSpy.mock.calls[0]?.[1] as RequestInit
+    expect(init.method).toBe('PATCH')
+    expect((init.headers as Record<string, string>)['Idempotency-Key']).toBe(
+      'idem-patch-1',
+    )
+    expect(JSON.parse(String(init.body))).toEqual({
+      display_name: 'Renamed',
+      description: null,
+      is_active: false,
+    })
   })
 })

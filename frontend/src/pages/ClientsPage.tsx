@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
-import { Link, useSearchParams } from 'react-router-dom'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { ApiError } from '../api/client'
 import { listClients } from '../api/clients'
 import type { ClientApp } from '../api/types'
 import { ActiveBadge } from '../components/ActiveBadge'
 import { AppShell } from '../components/AppShell'
+import { ClientCreateDialog } from '../components/ClientCreateDialog'
 import { HelpHint, TermLabel } from '../components/HelpHint'
 import { LoadingBlock } from '../components/LoadingBlock'
 import { Pagination } from '../components/Pagination'
@@ -31,6 +32,7 @@ function activeLabel(value: boolean | null): string {
 }
 
 export function ClientsPage() {
+  const navigate = useNavigate()
   const [searchParams, setSearchParams] = useSearchParams()
   const q = searchParams.get('q') ?? ''
   const isActive = parseClientActiveQuery(searchParams.get('is_active'))
@@ -43,6 +45,7 @@ export function ClientsPage() {
   const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
+  const [createOpen, setCreateOpen] = useState(false)
   const abortRef = useRef<AbortController | null>(null)
   const hasLoadedRef = useRef(false)
   const readGenRef = useRef(0)
@@ -168,15 +171,28 @@ export function ClientsPage() {
   return (
     <AppShell
       title="AI 사용 시스템"
-      description="여기의 ‘사용 시스템’은 직원 계정이 아니라, AI 모델을 호출하는 업무 서비스입니다. 조회 전용이며 추가·수정·정책 변경 UI는 제공하지 않습니다."
+      description="여기의 ‘사용 시스템’은 직원 계정이 아니라, AI 모델을 호출하는 업무 서비스입니다. 등록·수정·등록 상태 변경이 가능합니다."
       onRefresh={() => void load('refresh')}
       refreshing={refreshing}
       lastUpdated={lastUpdated}
     >
       <p className="panel-hint" role="note">
-        {CLIENT_FIELD_HELP.readOnly} 비활성(INACTIVE)은 Gateway 추론을 직접
-        막는 스위치가 아닙니다. 자세한 의미는 「등록 상태」 도움말을 보세요.
+        {CLIENT_FIELD_HELP.registryEditable} {CLIENT_FIELD_HELP.policyReadOnly}{' '}
+        비활성(INACTIVE)은 Gateway 추론을 직접 막는 스위치가 아닙니다. 자세한
+        의미는 「등록 상태」 도움말을 보세요.
       </p>
+
+      <div className="toolbar toolbar--wrap">
+        <div className="toolbar__actions">
+          <button
+            type="button"
+            className="btn"
+            onClick={() => setCreateOpen(true)}
+          >
+            신규 시스템 등록
+          </button>
+        </div>
+      </div>
 
       <form className="toolbar toolbar--wrap" onSubmit={onSearch}>
         <label className="toolbar__field" htmlFor="client-q">
@@ -306,6 +322,15 @@ export function ClientsPage() {
           검색·필터 조건에 해당하는 사용 시스템이 없습니다.
         </p>
       ) : null}
+
+      <ClientCreateDialog
+        open={createOpen}
+        onClose={() => setCreateOpen(false)}
+        onCreated={(created) => {
+          setCreateOpen(false)
+          navigate(`/clients/${created.id}`)
+        }}
+      />
     </AppShell>
   )
 }

@@ -68,6 +68,10 @@ describe('uiLabels (P1-13)', () => {
     expect(CLIENT_FIELD_HELP.isActive).toMatch(/정책 스냅샷/)
     expect(CLIENT_FIELD_HELP.isActive).toMatch(/client_app_id/)
     expect(CLIENT_FIELD_HELP.isActive).toMatch(/raw_client_key/)
+    expect(CLIENT_FIELD_HELP.registryEditable).toMatch(/등록·표시 이름/)
+    expect(CLIENT_FIELD_HELP.policyReadOnly).toMatch(/편집 UI는 아직/)
+    expect(CLIENT_FIELD_HELP.deactivateImpact).toMatch(/직접 차단하지 않습니다/)
+    expect(CLIENT_FIELD_HELP.deactivateImpact).toMatch(/토큰·동시 요청 제한/)
   })
 })
 
