@@ -11,6 +11,7 @@ import { ActiveBadge } from '../components/ActiveBadge'
 import { AppShell } from '../components/AppShell'
 import { ClientEditDialog } from '../components/ClientEditDialog'
 import { ClientKeyCopyActions } from '../components/ClientKeyCopyActions'
+import { ClientRuntimePolicyDialog } from '../components/ClientRuntimePolicyDialog'
 import { DangerConfirmDialog } from '../components/DangerConfirmDialog'
 import { HelpHint, TermLabel } from '../components/HelpHint'
 import { LoadingBlock } from '../components/LoadingBlock'
@@ -42,6 +43,7 @@ export function ClientDetailPage() {
   const [refreshing, setRefreshing] = useState(false)
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
   const [editOpen, setEditOpen] = useState(false)
+  const [policyEditOpen, setPolicyEditOpen] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
   const [activeConfirm, setActiveConfirm] = useState<'deactivate' | 'reactivate' | null>(
     null,
@@ -66,6 +68,7 @@ export function ClientDetailPage() {
     setNotFound(false)
     setLastUpdated(null)
     setEditOpen(false)
+    setPolicyEditOpen(false)
     setActiveConfirm(null)
     setConsent(false)
     setActionError(null)
@@ -332,7 +335,7 @@ export function ClientDetailPage() {
       </Link>
 
       <p className="panel-hint" role="note">
-        {CLIENT_FIELD_HELP.registryEditable} {CLIENT_FIELD_HELP.policyReadOnly}
+        {CLIENT_FIELD_HELP.registryEditable} {CLIENT_FIELD_HELP.policyEditable}
       </p>
 
       {clientErr ? (
@@ -467,7 +470,7 @@ export function ClientDetailPage() {
         </div>
         <p className="panel-hint">{CLIENT_FIELD_HELP.runtimePolicy}</p>
         <p className="panel-hint secondary-text">
-          {CLIENT_FIELD_HELP.policyReadOnly}
+          {CLIENT_FIELD_HELP.policyEditable} {CLIENT_FIELD_HELP.policySaveImpact}
         </p>
         {policyErr ? (
           <SectionError
@@ -483,6 +486,21 @@ export function ClientDetailPage() {
           <p className="empty-state" role="status">
             {CLIENT_FIELD_HELP.policyNull}
           </p>
+        ) : null}
+        {displayClient && displayPolicy && !policyLoading ? (
+          <div className="toolbar__actions" style={{ marginBottom: '0.75rem' }}>
+            <button
+              type="button"
+              className="btn"
+              disabled={actionBusy || policyEditOpen}
+              onClick={() => {
+                setActionError(null)
+                setPolicyEditOpen(true)
+              }}
+            >
+              {policy === null ? '새 정책 만들기' : '정책 수정'}
+            </button>
+          </div>
         ) : null}
         {policy ? (
           <dl className="meta-grid">
@@ -597,6 +615,21 @@ export function ClientDetailPage() {
             setLastUpdated(new Date())
             setEditOpen(false)
             setActionError(null)
+          }}
+        />
+      ) : null}
+
+      {displayClient && policyEditOpen ? (
+        <ClientRuntimePolicyDialog
+          open={policyEditOpen}
+          client={displayClient}
+          policy={policy}
+          onClose={() => setPolicyEditOpen(false)}
+          onSaved={() => {
+            if (activeIdRef.current !== clientId) return
+            setPolicyEditOpen(false)
+            setActionError(null)
+            void load('refresh')
           }}
         />
       ) : null}

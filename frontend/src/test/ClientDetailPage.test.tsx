@@ -79,6 +79,7 @@ describe('ClientDetailPage', () => {
     vi.spyOn(clientsApi, 'getClientRuntimePolicy')
     vi.spyOn(clientsApi, 'listClients')
     vi.spyOn(clientsApi, 'updateClient')
+    vi.spyOn(clientsApi, 'putClientRuntimePolicy')
   })
 
   afterEach(() => {
@@ -87,7 +88,7 @@ describe('ClientDetailPage', () => {
     vi.restoreAllMocks()
   })
 
-  it('renders client + policy and keeps Runtime Policy read-only', async () => {
+  it('renders client + policy and exposes policy edit entry', async () => {
     vi.mocked(clientsApi.getClient).mockResolvedValue(makeClient())
     vi.mocked(clientsApi.getClientRuntimePolicy).mockResolvedValue(makePolicy())
     renderDetail()
@@ -105,10 +106,11 @@ describe('ClientDetailPage', () => {
       screen.getByRole('button', { name: '등록 비활성화' }),
     ).toBeInTheDocument()
     expect(
-      screen.getAllByText(/런타임 정책\(Runtime Policy\) 편집 UI는 아직/).length,
-    ).toBeGreaterThan(0)
+      screen.getByRole('button', { name: '정책 수정' }),
+    ).toBeInTheDocument()
     expect(clientsApi.listClients).not.toHaveBeenCalled()
     expect(clientsApi.updateClient).not.toHaveBeenCalled()
+    expect(clientsApi.putClientRuntimePolicy).not.toHaveBeenCalled()
   })
 
   it('shows registered client_key read-only with copy actions', async () => {
@@ -515,5 +517,167 @@ describe('ClientDetailPage', () => {
       ).toBeInTheDocument()
     })
     expect(clientsApi.updateClient).not.toHaveBeenCalled()
+  })
+
+  it('creates a runtime policy with defaults, consent, preflight, and GET refresh', async () => {
+    const user = userEvent.setup()
+    const baseline = makeClient()
+    vi.mocked(clientsApi.getClient).mockResolvedValue(baseline)
+    vi.mocked(clientsApi.getClientRuntimePolicy)
+      .mockResolvedValueOnce(makePolicy({ policy: null }))
+      .mockResolvedValueOnce(makePolicy({ policy: null })) // preflight
+      .mockResolvedValueOnce(
+        makePolicy({
+          policy: {
+            id: 'p-new',
+            client_app_id: 'c-a',
+            client_key: 'alzi',
+            is_enabled: false,
+            max_input_tokens: null,
+            max_output_tokens: null,
+            max_concurrent_requests: 2,
+            priority: null,
+            created_at: '2026-10-09T00:00:00Z',
+            updated_at: '2026-10-09T00:00:00Z',
+          },
+        }),
+      )
+    vi.mocked(clientsApi.putClientRuntimePolicy).mockResolvedValue({
+      id: 'p-new',
+      client_app_id: 'c-a',
+      client_key: 'alzi',
+      is_enabled: false,
+      max_input_tokens: null,
+      max_output_tokens: null,
+      max_concurrent_requests: 2,
+      priority: null,
+      created_at: '2026-10-09T00:00:00Z',
+      updated_at: '2026-10-09T00:00:00Z',
+    })
+    renderDetail()
+    await user.click(
+      await screen.findByRole('button', { name: '새 정책 만들기' }),
+    )
+    const dialog = await screen.findByTestId('client-runtime-policy-dialog')
+    expect(within(dialog).getByLabelText(/정책 사용 여부/)).toHaveValue('false')
+    await user.type(within(dialog).getByLabelText(/동시 요청 상한/), '2')
+    await user.click(within(dialog).getByRole('button', { name: '저장 검토…' }))
+    const confirm = await within(dialog).findByTestId('policy-confirm-step')
+    expect(confirm).toHaveTextContent(/Gateway 호출 차단이 아닙니다/)
+    await user.click(within(dialog).getByRole('checkbox'))
+    await user.click(
+      within(dialog).getByRole('button', { name: '동의하고 저장' }),
+    )
+    await waitFor(() => {
+      expect(clientsApi.putClientRuntimePolicy).toHaveBeenCalledTimes(1)
+    })
+    expect(vi.mocked(clientsApi.putClientRuntimePolicy).mock.calls[0]![1]).toEqual(
+      {
+        is_enabled: false,
+        max_input_tokens: null,
+        max_output_tokens: null,
+        max_concurrent_requests: 2,
+        priority: null,
+      },
+    )
+    expect(
+      await screen.findByRole('button', { name: '정책 수정' }),
+    ).toBeInTheDocument()
+  })
+
+  it('blocks invalid inputs and preserves draft on policy updated_at conflict', async () => {
+    const user = userEvent.setup()
+    const baseline = makeClient()
+    const existing = makePolicy().policy!
+    vi.mocked(clientsApi.getClient).mockResolvedValue(baseline)
+    vi.mocked(clientsApi.getClientRuntimePolicy)
+      .mockResolvedValueOnce(makePolicy())
+      .mockResolvedValueOnce(
+        makePolicy({
+          policy: { ...existing, updated_at: '2026-10-10T00:00:00Z' },
+        }),
+      )
+    renderDetail()
+    await user.click(await screen.findByRole('button', { name: '정책 수정' }))
+    const dialog = await screen.findByTestId('client-runtime-policy-dialog')
+    const inputField = within(dialog).getByLabelText(/입력 토큰 상한/)
+    await user.clear(inputField)
+    await user.type(inputField, '0')
+    await user.click(within(dialog).getByRole('button', { name: '저장 검토…' }))
+    expect(await within(dialog).findByText(/1 이상/)).toBeInTheDocument()
+    expect(clientsApi.putClientRuntimePolicy).not.toHaveBeenCalled()
+    await user.clear(inputField)
+    await user.type(inputField, '4096')
+    await user.click(within(dialog).getByRole('button', { name: '저장 검토…' }))
+    await user.click(within(dialog).getByRole('checkbox'))
+    await user.click(
+      within(dialog).getByRole('button', { name: '동의하고 저장' }),
+    )
+    expect(
+      await within(dialog).findByText(/정책이 다른 변경으로 갱신/),
+    ).toBeInTheDocument()
+    expect(clientsApi.putClientRuntimePolicy).not.toHaveBeenCalled()
+    expect(within(dialog).getByTestId('policy-confirm-step')).toHaveTextContent(
+      '4096',
+    )
+    await user.click(within(dialog).getByRole('button', { name: '뒤로' }))
+    expect(within(dialog).getByLabelText(/입력 토큰 상한/)).toHaveValue('4096')
+  })
+
+  it('preserves priority=0 and rejects duplicate submit while saving', async () => {
+    const user = userEvent.setup()
+    const existing = makePolicy().policy!
+    let resolvePut!: (value: ReturnType<typeof makePolicy>['policy']) => void
+    vi.mocked(clientsApi.getClient).mockResolvedValue(makeClient())
+    vi.mocked(clientsApi.getClientRuntimePolicy).mockResolvedValue(
+      makePolicy({
+        policy: { ...existing, priority: null, max_output_tokens: null },
+      }),
+    )
+    vi.mocked(clientsApi.putClientRuntimePolicy).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolvePut = resolve
+        }),
+    )
+    renderDetail()
+    await user.click(await screen.findByRole('button', { name: '정책 수정' }))
+    const dialog = await screen.findByTestId('client-runtime-policy-dialog')
+    await user.type(within(dialog).getByLabelText(/요청 우선순위/), '0')
+    await user.click(within(dialog).getByRole('button', { name: '저장 검토…' }))
+    expect(
+      await within(dialog).findByText(/0 \(중립값/),
+    ).toBeInTheDocument()
+    await user.click(within(dialog).getByRole('checkbox'))
+    await user.click(
+      within(dialog).getByRole('button', { name: '동의하고 저장' }),
+    )
+    expect(
+      await within(dialog).findByRole('button', { name: '저장 중…' }),
+    ).toBeDisabled()
+    await user.click(
+      within(dialog).getByRole('button', { name: '저장 중…' }),
+    )
+    expect(clientsApi.putClientRuntimePolicy).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(clientsApi.putClientRuntimePolicy).mock.calls[0]![1]).toEqual(
+      {
+        is_enabled: true,
+        max_input_tokens: 8192,
+        max_output_tokens: null,
+        max_concurrent_requests: 4,
+        priority: 0,
+      },
+    )
+    resolvePut!({
+      ...existing,
+      priority: 0,
+      max_output_tokens: null,
+      updated_at: '2026-10-11T00:00:00Z',
+    })
+    await waitFor(() => {
+      expect(
+        screen.queryByTestId('client-runtime-policy-dialog'),
+      ).not.toBeInTheDocument()
+    })
   })
 })

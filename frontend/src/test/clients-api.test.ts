@@ -4,6 +4,7 @@ import {
   getClient,
   getClientRuntimePolicy,
   listClients,
+  putClientRuntimePolicy,
   updateClient,
 } from '../api/clients'
 
@@ -97,6 +98,50 @@ describe('clients API client', () => {
       client_key: 'AlZi',
       display_name: '사내 지식 AI 검색',
       description: 'RAG',
+    })
+  })
+
+  it('PUTs full runtime-policy replacement without Idempotency-Key', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          id: 'p1',
+          client_app_id: 'c1',
+          client_key: 'alzi',
+          is_enabled: false,
+          max_input_tokens: null,
+          max_output_tokens: 100,
+          max_concurrent_requests: null,
+          priority: 0,
+          created_at: '2026-10-01T00:00:00Z',
+          updated_at: '2026-10-09T00:00:00Z',
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+    )
+    const result = await putClientRuntimePolicy('c1', {
+      is_enabled: false,
+      max_input_tokens: null,
+      max_output_tokens: 100,
+      max_concurrent_requests: null,
+      priority: 0,
+    })
+    expect(result.priority).toBe(0)
+    expect(result.max_input_tokens).toBeNull()
+    const init = fetchSpy.mock.calls[0]?.[1] as RequestInit
+    expect(init.method).toBe('PUT')
+    expect(String(fetchSpy.mock.calls[0]?.[0])).toContain(
+      '/api/v1/clients/c1/runtime-policy',
+    )
+    expect(
+      (init.headers as Record<string, string>)['Idempotency-Key'],
+    ).toBeUndefined()
+    expect(JSON.parse(String(init.body))).toEqual({
+      is_enabled: false,
+      max_input_tokens: null,
+      max_output_tokens: 100,
+      max_concurrent_requests: null,
+      priority: 0,
     })
   })
 

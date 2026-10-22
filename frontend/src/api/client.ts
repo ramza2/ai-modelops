@@ -163,6 +163,13 @@ export async function apiPatch<T>(
   return apiRequest<T>('PATCH', path, options)
 }
 
+export async function apiPut<T>(
+  path: string,
+  options: ApiFetchOptions = {},
+): Promise<T> {
+  return apiRequest<T>('PUT', path, options)
+}
+
 export async function apiDelete<T>(
   path: string,
   options: ApiFetchOptions = {},
