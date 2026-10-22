@@ -154,8 +154,21 @@ export function ClientCreateDialog({
     return key
   }
 
+  const fieldsLocked = submitting || responseUncertain
+
   const handleClose = () => {
     if (submitting) return
+    if (responseUncertain) {
+      if (
+        !window.confirm(
+          '등록 응답이 불확실합니다. 지금 닫으면 목록에서 동일 서비스 키 등록 여부를 확인하기 어렵고, 이후 다른 내용으로 다시 등록하면 중복 등록될 수 있습니다. 닫으시겠습니까?',
+        )
+      ) {
+        return
+      }
+      onClose()
+      return
+    }
     if (dirty && !window.confirm('작성 중인 내용이 있습니다. 닫으시겠습니까?')) {
       return
     }
@@ -163,19 +176,14 @@ export function ClientCreateDialog({
   }
 
   const handleRegenerate = () => {
-    if (submitting || submitLockRef.current) return
-    if (responseUncertain) {
-      setSubmitError(
-        '응답이 불확실한 상태에서는 키를 재생성하지 마세요. 목록에서 등록 여부를 확인한 뒤 「확인했고 새 키로 다시 작성」을 사용하세요.',
-      )
-      return
-    }
+    if (submitting || submitLockRef.current || responseUncertain) return
     applyGeneratedKey()
     setSubmitError(null)
   }
 
   const handleAcknowledgeUncertainAndRegen = () => {
     if (submitting || submitLockRef.current) return
+    // Explicit recovery only: unlock fields, clear prior Idempotency-Key, new service key.
     setResponseUncertain(false)
     idempotencyKeyRef.current = null
     payloadFpRef.current = null
@@ -279,7 +287,9 @@ export function ClientCreateDialog({
           >
             <p>
               응답이 불확실합니다. 목록에서 동일 서비스 키 등록 여부를 먼저
-              확인하세요. 확인 전에 키를 바꾸면 중복 등록될 수 있습니다.
+              확인하세요. 입력·키 재생성은 잠겨 있으며, 같은 내용으로 다시
+              등록하면 이전 Idempotency-Key가 재사용됩니다. 확인 후 새 키로
+              다시 작성하려면 아래 버튼을 사용하세요.
             </p>
             <button
               type="button"
@@ -311,13 +321,15 @@ export function ClientCreateDialog({
               name="client_key"
               value={clientKey}
               onChange={(e) => {
+                if (responseUncertain) return
                 setClientKey(e.target.value)
                 setKeyGenError(null)
               }}
               maxLength={KEY_MAX + 8}
               autoComplete="off"
               spellCheck={false}
-              disabled={submitting}
+              disabled={fieldsLocked}
+              readOnly={responseUncertain}
               aria-invalid={Boolean(fieldErrors.client_key || keyGenError)}
               placeholder="svc-…"
               className="mono"
@@ -326,7 +338,7 @@ export function ClientCreateDialog({
               <button
                 type="button"
                 className="btn btn--ghost btn--small"
-                disabled={submitting || responseUncertain}
+                disabled={fieldsLocked}
                 onClick={handleRegenerate}
                 data-testid="client-key-regenerate"
               >
@@ -357,9 +369,13 @@ export function ClientCreateDialog({
               id="create-display-name"
               name="display_name"
               value={displayName}
-              onChange={(e) => setDisplayName(e.target.value)}
+              onChange={(e) => {
+                if (responseUncertain) return
+                setDisplayName(e.target.value)
+              }}
               maxLength={NAME_MAX + 8}
-              disabled={submitting}
+              disabled={fieldsLocked}
+              readOnly={responseUncertain}
               aria-invalid={Boolean(fieldErrors.display_name)}
               placeholder="예: 사내 지식 AI 검색"
             />
@@ -381,9 +397,13 @@ export function ClientCreateDialog({
               id="create-description"
               name="description"
               value={description}
-              onChange={(e) => setDescription(e.target.value)}
+              onChange={(e) => {
+                if (responseUncertain) return
+                setDescription(e.target.value)
+              }}
               rows={3}
-              disabled={submitting}
+              disabled={fieldsLocked}
+              readOnly={responseUncertain}
               placeholder="예: 사내 문서 검색 및 RAG 서비스를 운영하는 업무 시스템"
             />
           </label>

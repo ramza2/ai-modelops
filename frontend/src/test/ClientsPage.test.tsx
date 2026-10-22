@@ -210,7 +210,7 @@ describe('ClientsPage', () => {
     expect(within(dialog).getByLabelText(/서비스 키/)).toHaveValue('dup-key')
   })
 
-  it('reuses Idempotency-Key on uncertain retry; blocks casual regenerate', async () => {
+  it('locks all fields on uncertain response and reuses Idempotency-Key on same payload retry', async () => {
     const user = userEvent.setup()
     vi.mocked(clientsApi.listClients).mockResolvedValue(pageResult([]))
     vi.mocked(clientsApi.createClient)
@@ -231,11 +231,15 @@ describe('ClientsPage', () => {
     await user.clear(keyInput)
     await user.type(keyInput, 'retry-key')
     await user.type(within(dialog).getByLabelText(/표시 이름/), 'Retry')
+    await user.type(within(dialog).getByLabelText(/설명/), 'desc')
     await user.click(within(dialog).getByRole('button', { name: '등록' }))
     expect(await within(dialog).findByText(/network down/)).toBeInTheDocument()
     expect(
       within(dialog).getByTestId('create-uncertain-banner'),
     ).toBeInTheDocument()
+    expect(within(dialog).getByLabelText(/서비스 키/)).toBeDisabled()
+    expect(within(dialog).getByLabelText(/표시 이름/)).toBeDisabled()
+    expect(within(dialog).getByLabelText(/설명/)).toBeDisabled()
     expect(
       within(dialog).getByTestId('client-key-regenerate'),
     ).toBeDisabled()
@@ -243,17 +247,84 @@ describe('ClientsPage', () => {
     await waitFor(() => {
       expect(clientsApi.createClient).toHaveBeenCalledTimes(2)
     })
-    const key1 = vi.mocked(clientsApi.createClient).mock.calls[0]![1]
-      .idempotencyKey
-    const key2 = vi.mocked(clientsApi.createClient).mock.calls[1]![1]
-      .idempotencyKey
-    expect(key1).toBe(key2)
-    expect(vi.mocked(clientsApi.createClient).mock.calls[0]![0].client_key).toBe(
-      'retry-key',
+    const call1 = vi.mocked(clientsApi.createClient).mock.calls[0]!
+    const call2 = vi.mocked(clientsApi.createClient).mock.calls[1]!
+    expect(call1[1].idempotencyKey).toBe(call2[1].idempotencyKey)
+    expect(call1[0]).toEqual(call2[0])
+    expect(call1[0].client_key).toBe('retry-key')
+  })
+
+  it('unlocks only via explicit acknowledge and mints new service + Idempotency keys', async () => {
+    const user = userEvent.setup()
+    vi.mocked(clientsApi.listClients).mockResolvedValue(pageResult([]))
+    vi.mocked(clientsApi.createClient)
+      .mockRejectedValueOnce(new TypeError('network down'))
+      .mockResolvedValueOnce(
+        makeClient({
+          id: 'c-new',
+          client_key: 'svc-placeholder',
+          display_name: 'Retry',
+        }),
+      )
+    renderAt('/clients')
+    await user.click(
+      await screen.findByRole('button', { name: '신규 시스템 등록' }),
     )
-    expect(vi.mocked(clientsApi.createClient).mock.calls[1]![0].client_key).toBe(
-      'retry-key',
+    const dialog = await screen.findByTestId('client-create-dialog')
+    const keyInput = within(dialog).getByLabelText(/서비스 키/)
+    await user.clear(keyInput)
+    await user.type(keyInput, 'retry-key')
+    await user.type(within(dialog).getByLabelText(/표시 이름/), 'Retry')
+    await user.click(within(dialog).getByRole('button', { name: '등록' }))
+    expect(
+      await within(dialog).findByTestId('create-uncertain-banner'),
+    ).toBeInTheDocument()
+    const idem1 = vi.mocked(clientsApi.createClient).mock.calls[0]![1]
+      .idempotencyKey
+    await user.click(
+      within(dialog).getByRole('button', { name: '확인했고 새 키로 다시 작성' }),
     )
+    expect(
+      within(dialog).queryByTestId('create-uncertain-banner'),
+    ).not.toBeInTheDocument()
+    expect(within(dialog).getByLabelText(/서비스 키/)).not.toBeDisabled()
+    expect(within(dialog).getByLabelText(/표시 이름/)).not.toBeDisabled()
+    expect(within(dialog).getByTestId('client-key-regenerate')).not.toBeDisabled()
+    const keyAfter = (
+      within(dialog).getByLabelText(/서비스 키/) as HTMLInputElement
+    ).value
+    expect(keyAfter).toMatch(/^svc-[0-9a-f]{32}$/)
+    expect(keyAfter).not.toBe('retry-key')
+    await user.click(within(dialog).getByRole('button', { name: '등록' }))
+    await waitFor(() => {
+      expect(clientsApi.createClient).toHaveBeenCalledTimes(2)
+    })
+    const call2 = vi.mocked(clientsApi.createClient).mock.calls[1]!
+    expect(call2[0].client_key).toBe(keyAfter)
+    expect(call2[1].idempotencyKey).not.toBe(idem1)
+  })
+
+  it('warns about duplicate risk when closing while response is uncertain', async () => {
+    const user = userEvent.setup()
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    vi.mocked(clientsApi.listClients).mockResolvedValue(pageResult([]))
+    vi.mocked(clientsApi.createClient).mockRejectedValue(
+      new TypeError('network down'),
+    )
+    renderAt('/clients')
+    await user.click(
+      await screen.findByRole('button', { name: '신규 시스템 등록' }),
+    )
+    const dialog = await screen.findByTestId('client-create-dialog')
+    await user.type(within(dialog).getByLabelText(/표시 이름/), 'CloseMe')
+    await user.click(within(dialog).getByRole('button', { name: '등록' }))
+    expect(
+      await within(dialog).findByTestId('create-uncertain-banner'),
+    ).toBeInTheDocument()
+    await user.click(within(dialog).getByRole('button', { name: '취소' }))
+    expect(confirmSpy).toHaveBeenCalled()
+    expect(String(confirmSpy.mock.calls[0]![0])).toMatch(/중복 등록/)
+    expect(screen.getByTestId('client-create-dialog')).toBeInTheDocument()
   })
 
   it('mints a new Idempotency-Key after explicit regenerate changes payload', async () => {
