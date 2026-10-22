@@ -38,6 +38,14 @@ function mutationErrorMessage(err: unknown): string {
   return '저장에 실패했습니다.'
 }
 
+function formatServerSnapshot(c: ClientApp): string {
+  const desc =
+    c.description === null || c.description === undefined || c.description === ''
+      ? '(없음)'
+      : c.description
+  return `표시 이름="${c.display_name}", 설명=${desc}, updated_at=${c.updated_at}`
+}
+
 export function ClientEditDialog({
   open,
   client,
@@ -47,27 +55,73 @@ export function ClientEditDialog({
   const [displayName, setDisplayName] = useState(client.display_name)
   const [description, setDescription] = useState(client.description ?? '')
   const [baseline, setBaseline] = useState(client)
+  /** Server row from conflict preflight — shown for compare; does not overwrite inputs. */
+  const [conflictServer, setConflictServer] = useState<ClientApp | null>(null)
   const [fieldError, setFieldError] = useState<string | null>(null)
   const [submitError, setSubmitError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
   const [revalidating, setRevalidating] = useState(false)
+
   const idempotencyKeyRef = useRef<string | null>(null)
   const payloadFpRef = useRef<string | null>(null)
   const submitLockRef = useRef(false)
+  const openRef = useRef(false)
+  /** Bumped when a new edit session starts (open or Client ID change). */
+  const sessionGenRef = useRef(0)
+  const sessionClientIdRef = useRef<string | null>(null)
 
-  useEffect(() => {
-    if (!open) return
-    setDisplayName(client.display_name)
-    setDescription(client.description ?? '')
-    setBaseline(client)
+  const initSessionFromClient = (source: ClientApp) => {
+    const previousId = sessionClientIdRef.current
+    sessionGenRef.current += 1
+    sessionClientIdRef.current = source.id
+    setDisplayName(source.display_name)
+    setDescription(source.description ?? '')
+    setBaseline(source)
+    setConflictServer(null)
     setFieldError(null)
     setSubmitError(null)
     setSubmitting(false)
     setRevalidating(false)
-    idempotencyKeyRef.current = null
-    payloadFpRef.current = null
-    submitLockRef.current = false
-  }, [open, client])
+    // New session keys: clear unless an in-flight submit for the same id
+    // still owns the current key/fingerprint (retry after uncertain error).
+    if (!submitLockRef.current || previousId !== source.id) {
+      idempotencyKeyRef.current = null
+      payloadFpRef.current = null
+    }
+  }
+
+  useEffect(() => {
+    if (!open) {
+      openRef.current = false
+      sessionClientIdRef.current = null
+      // Closing must not wipe an in-flight submit's lock/key; finally owns that.
+      if (!submitLockRef.current) {
+        idempotencyKeyRef.current = null
+        payloadFpRef.current = null
+        setSubmitting(false)
+        setRevalidating(false)
+        setConflictServer(null)
+        setSubmitError(null)
+        setFieldError(null)
+      }
+      return
+    }
+
+    openRef.current = true
+    // Initialize only on newly opened dialog or Client ID change — not on
+    // same-id GET refresh prop updates.
+    if (sessionClientIdRef.current !== client.id) {
+      initSessionFromClient(client)
+    }
+    // Parent may unmount this dialog on identity change without open=false.
+    // Invalidate the session so in-flight GET→PATCH cannot continue.
+    return () => {
+      openRef.current = false
+      sessionGenRef.current += 1
+      sessionClientIdRef.current = null
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional: ignore same-id `client` object churn
+  }, [open, client.id])
 
   if (!open) return null
 
@@ -120,14 +174,32 @@ export function ClientEditDialog({
     onClose()
   }
 
+  const adoptConflictServer = () => {
+    if (!conflictServer) return
+    if (submitLockRef.current) return
+    // Explicit user action: replace draft with server latest and require a new key.
+    setBaseline(conflictServer)
+    setDisplayName(conflictServer.display_name)
+    setDescription(conflictServer.description ?? '')
+    setConflictServer(null)
+    setSubmitError(null)
+    setFieldError(null)
+    idempotencyKeyRef.current = null
+    payloadFpRef.current = null
+  }
+
   const onSubmit = async (e: FormEvent) => {
     e.preventDefault()
     if (submitLockRef.current || submitting || revalidating) return
     const patch = buildPatch()
     if (!patch) return
 
+    const lockedClientId = baseline.id
+    const lockedClientKey = baseline.client_key
+    const lockedBaselineUpdatedAt = baseline.updated_at
+    const sessionGen = sessionGenRef.current
     const fp = mutationPayloadFingerprint({
-      client_id: baseline.id,
+      client_id: lockedClientId,
       ...patch,
     })
     let idemKey: string
@@ -140,46 +212,61 @@ export function ClientEditDialog({
       return
     }
 
+    const stillCurrentSession = () =>
+      openRef.current &&
+      sessionClientIdRef.current === lockedClientId &&
+      sessionGenRef.current === sessionGen
+
     submitLockRef.current = true
     setSubmitting(true)
     setRevalidating(true)
     setSubmitError(null)
     try {
-      const latest = await getClient(baseline.id)
-      if (latest.id !== baseline.id || latest.client_key !== baseline.client_key) {
+      const latest = await getClient(lockedClientId)
+      if (!stillCurrentSession()) return
+      if (latest.id !== lockedClientId || latest.client_key !== lockedClientKey) {
         setSubmitError(
           '대상 사용 시스템이 변경되었습니다. 화면을 새로고침한 뒤 다시 확인하세요. 저장을 중단했습니다.',
         )
         return
       }
-      if (latest.updated_at !== baseline.updated_at) {
+      if (latest.updated_at !== lockedBaselineUpdatedAt) {
+        // Keep draft inputs; expose server snapshot for compare. Clear key so a
+        // later save after explicit adopt / continued edit uses a new key.
+        setConflictServer(latest)
         setSubmitError(
-          `다른 변경이 감지되었습니다(updated_at: ${latest.updated_at}). 최신 내용을 다시 확인한 뒤 수정하세요. Frontend 검증은 동시 수정의 완전한 방지책이 아닙니다.`,
+          `다른 변경이 감지되어 저장을 중단했습니다(서버 updated_at=${latest.updated_at}). 작성 중인 입력값은 유지했습니다. 서버 최신: ${formatServerSnapshot(latest)}. 「최신 서버 값으로 편집 다시 시작」을 누르면 서버 값으로 폼을 갱신합니다. GET→PATCH는 원자적이지 않으며 Backend ETag/If-Match는 없습니다.`,
         )
-        setBaseline(latest)
-        setDisplayName(latest.display_name)
-        setDescription(latest.description ?? '')
         idempotencyKeyRef.current = null
         payloadFpRef.current = null
         return
       }
+      if (!stillCurrentSession()) return
       setRevalidating(false)
-      const saved = await updateClient(baseline.id, patch, {
+      const saved = await updateClient(lockedClientId, patch, {
         idempotencyKey: idemKey,
       })
+      if (!stillCurrentSession()) return
+      if (saved.id !== lockedClientId) return
       idempotencyKeyRef.current = null
       payloadFpRef.current = null
       onSaved(saved)
     } catch (err) {
+      if (!stillCurrentSession()) return
       if (err instanceof ApiError && err.code === 'IDEMPOTENCY_KEY_CONFLICT') {
         idempotencyKeyRef.current = null
         payloadFpRef.current = null
       }
       setSubmitError(mutationErrorMessage(err))
     } finally {
-      submitLockRef.current = false
-      setSubmitting(false)
-      setRevalidating(false)
+      if (sessionGenRef.current === sessionGen) {
+        submitLockRef.current = false
+        setSubmitting(false)
+        setRevalidating(false)
+      } else {
+        // Session moved on; only release the lock so a new session can save.
+        submitLockRef.current = false
+      }
     }
   }
 
@@ -215,6 +302,25 @@ export function ClientEditDialog({
         ) : null}
         {submitError ? (
           <SectionError title="수정 오류" message={submitError} />
+        ) : null}
+        {conflictServer ? (
+          <div className="panel-hint panel-hint--warn" data-testid="edit-conflict-banner">
+            <p>
+              서버 최신 값: {formatServerSnapshot(conflictServer)}
+            </p>
+            <p>
+              작성 중 값: 표시 이름=&quot;{displayName}&quot;, 설명=
+              {description.trim() ? description.trim() : '(없음)'}
+            </p>
+            <button
+              type="button"
+              className="btn btn--ghost"
+              disabled={submitting || revalidating}
+              onClick={adoptConflictServer}
+            >
+              최신 서버 값으로 편집 다시 시작
+            </button>
+          </div>
         ) : null}
         <form onSubmit={(e) => void onSubmit(e)}>
           <label className="toolbar__field" htmlFor="edit-display-name">

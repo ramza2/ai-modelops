@@ -291,27 +291,172 @@ describe('ClientDetailPage', () => {
     })
   })
 
-  it('ignores stale edit save for a different client id', async () => {
+  it('keeps draft inputs when same-client refresh succeeds while edit is open', async () => {
     const user = userEvent.setup()
-    vi.mocked(clientsApi.getClient)
-      .mockResolvedValueOnce(makeClient({ id: 'c-a', client_key: 'alzi' }))
-      .mockResolvedValueOnce(makeClient({ id: 'c-a', client_key: 'alzi' }))
-      .mockResolvedValue(makeClient({ id: 'c-b', client_key: 'other', display_name: 'Other' }))
-    vi.mocked(clientsApi.getClientRuntimePolicy)
-      .mockResolvedValueOnce(makePolicy())
-      .mockResolvedValue(
-        makePolicy({
-          client_id: 'c-b',
-          client_key: 'other',
-          policy: null,
-        }),
+    const baseline = makeClient({
+      display_name: 'ALZI',
+      description: 'demo',
+      updated_at: '2026-10-06T01:02:03Z',
+    })
+    vi.mocked(clientsApi.getClient).mockResolvedValue(baseline)
+    vi.mocked(clientsApi.getClientRuntimePolicy).mockResolvedValue(makePolicy())
+    renderDetail()
+    await user.click(
+      await screen.findByRole('button', { name: '등록 정보 수정' }),
+    )
+    const dialog = await screen.findByTestId('client-edit-dialog')
+    const nameInput = within(dialog).getByLabelText(/표시 이름/)
+    await user.clear(nameInput)
+    await user.type(nameInput, 'Draft Name')
+    // Same Client id, new object identity from refresh.
+    vi.mocked(clientsApi.getClient).mockResolvedValue({
+      ...baseline,
+      updated_at: '2026-10-06T01:02:03Z',
+    })
+    await user.click(screen.getByRole('button', { name: '새로고침' }))
+    await waitFor(() => {
+      expect(vi.mocked(clientsApi.getClient).mock.calls.length).toBeGreaterThan(
+        1,
       )
-    let resolveUpdate!: (value: ClientApp) => void
+    })
+    expect(within(dialog).getByLabelText(/표시 이름/)).toHaveValue('Draft Name')
+    expect(within(dialog).getByLabelText(/설명/)).toHaveValue('demo')
+  })
+
+  it('keeps submit lock and single PATCH when refresh runs during save', async () => {
+    const user = userEvent.setup()
+    const baseline = makeClient({ display_name: 'ALZI' })
+    let resolvePreflight!: (value: ClientApp) => void
+    let resolvePatch!: (value: ClientApp) => void
+    let getCalls = 0
+    vi.mocked(clientsApi.getClient).mockImplementation(async () => {
+      getCalls += 1
+      if (getCalls === 1) return baseline
+      // 2nd = preflight during save (hang); later = refresh during save
+      if (getCalls === 2) {
+        return new Promise<ClientApp>((resolve) => {
+          resolvePreflight = resolve
+        })
+      }
+      return baseline
+    })
+    vi.mocked(clientsApi.getClientRuntimePolicy).mockResolvedValue(makePolicy())
     vi.mocked(clientsApi.updateClient).mockImplementation(
       () =>
         new Promise<ClientApp>((resolve) => {
-          resolveUpdate = resolve
+          resolvePatch = resolve
         }),
+    )
+    renderDetail()
+    await user.click(
+      await screen.findByRole('button', { name: '등록 정보 수정' }),
+    )
+    const dialog = await screen.findByTestId('client-edit-dialog')
+    const nameInput = within(dialog).getByLabelText(/표시 이름/)
+    await user.clear(nameInput)
+    await user.type(nameInput, 'Locked')
+    await user.click(within(dialog).getByRole('button', { name: '저장' }))
+    expect(
+      await within(dialog).findByRole('button', { name: '저장 중…' }),
+    ).toBeDisabled()
+    // Same-client refresh while preflight is in flight.
+    await user.click(screen.getByRole('button', { name: '새로고침' }))
+    // Duplicate confirm while locked must not start another save.
+    await user.click(within(dialog).getByRole('button', { name: '저장 중…' }))
+    resolvePreflight(baseline)
+    await waitFor(() => {
+      expect(clientsApi.updateClient).toHaveBeenCalledTimes(1)
+    })
+    const idemKey = vi.mocked(clientsApi.updateClient).mock.calls[0]![2]
+      .idempotencyKey
+    expect(idemKey).toMatch(/^[0-9a-f-]{36}$/i)
+    // Refresh again while PATCH is hanging — still one PATCH, same key.
+    await user.click(screen.getByRole('button', { name: '새로고침' }))
+    expect(clientsApi.updateClient).toHaveBeenCalledTimes(1)
+    expect(
+      vi.mocked(clientsApi.updateClient).mock.calls[0]![2].idempotencyKey,
+    ).toBe(idemKey)
+    resolvePatch(
+      makeClient({
+        display_name: 'Locked',
+        updated_at: '2026-10-09T00:00:00Z',
+      }),
+    )
+    expect(
+      await screen.findByRole('heading', { level: 2, name: 'Locked' }),
+    ).toBeInTheDocument()
+  })
+
+  it('blocks PATCH on updated_at conflict and preserves draft inputs', async () => {
+    const user = userEvent.setup()
+    const baseline = makeClient({
+      display_name: 'ALZI',
+      description: 'old',
+      updated_at: '2026-10-06T01:02:03Z',
+    })
+    vi.mocked(clientsApi.getClient)
+      .mockResolvedValueOnce(baseline)
+      .mockResolvedValueOnce(
+        makeClient({
+          display_name: 'Server Name',
+          description: 'server-desc',
+          updated_at: '2026-10-07T00:00:00Z',
+        }),
+      )
+    vi.mocked(clientsApi.getClientRuntimePolicy).mockResolvedValue(makePolicy())
+    renderDetail()
+    await user.click(
+      await screen.findByRole('button', { name: '등록 정보 수정' }),
+    )
+    const dialog = await screen.findByTestId('client-edit-dialog')
+    const nameInput = within(dialog).getByLabelText(/표시 이름/)
+    await user.clear(nameInput)
+    await user.type(nameInput, 'My Draft')
+    await user.click(within(dialog).getByRole('button', { name: '저장' }))
+    expect(
+      await within(dialog).findByText(/다른 변경이 감지되어 저장을 중단/),
+    ).toBeInTheDocument()
+    expect(clientsApi.updateClient).not.toHaveBeenCalled()
+    expect(within(dialog).getByLabelText(/표시 이름/)).toHaveValue('My Draft')
+    expect(within(dialog).getByTestId('edit-conflict-banner')).toHaveTextContent(
+      'Server Name',
+    )
+    expect(within(dialog).getByTestId('edit-conflict-banner')).toHaveTextContent(
+      'My Draft',
+    )
+  })
+
+  it('does not PATCH when Client ID changes during preflight GET', async () => {
+    const user = userEvent.setup()
+    let resolvePreflight!: (value: ClientApp) => void
+    let getCalls = 0
+    vi.mocked(clientsApi.getClient).mockImplementation(async () => {
+      getCalls += 1
+      if (getCalls === 1) {
+        return makeClient({ id: 'c-a', client_key: 'alzi' })
+      }
+      if (getCalls === 2) {
+        return new Promise<ClientApp>((resolve) => {
+          resolvePreflight = resolve
+        })
+      }
+      return makeClient({
+        id: 'c-b',
+        client_key: 'other',
+        display_name: 'Other',
+      })
+    })
+    vi.mocked(clientsApi.getClientRuntimePolicy).mockImplementation(
+      async (id: string) => {
+        if (id === 'c-b') {
+          return makePolicy({
+            client_id: 'c-b',
+            client_key: 'other',
+            policy: null,
+          })
+        }
+        return makePolicy()
+      },
     )
     renderNavigable('/clients/c-a')
     expect(
@@ -321,28 +466,23 @@ describe('ClientDetailPage', () => {
     const dialog = await screen.findByTestId('client-edit-dialog')
     const nameInput = within(dialog).getByLabelText(/표시 이름/)
     await user.clear(nameInput)
-    await user.type(nameInput, 'Stale')
+    await user.type(nameInput, 'ShouldNotPatch')
     await user.click(within(dialog).getByRole('button', { name: '저장' }))
     await waitFor(() => {
-      expect(clientsApi.updateClient).toHaveBeenCalled()
+      expect(getCalls).toBeGreaterThanOrEqual(2)
     })
     await user.click(screen.getByRole('button', { name: 'go-c-b' }))
     await waitFor(() => {
       expect(
-        screen.queryByRole('heading', { level: 2, name: 'ALZI' }),
+        screen.queryByTestId('client-edit-dialog'),
       ).not.toBeInTheDocument()
     })
-    resolveUpdate(
-      makeClient({
-        id: 'c-a',
-        display_name: 'Stale',
-        updated_at: '2026-10-10T00:00:00Z',
-      }),
-    )
+    resolvePreflight(makeClient({ id: 'c-a', client_key: 'alzi' }))
     await waitFor(() => {
       expect(
-        screen.queryByRole('heading', { level: 2, name: 'Stale' }),
-      ).not.toBeInTheDocument()
+        screen.getByRole('heading', { level: 2, name: 'Other' }),
+      ).toBeInTheDocument()
     })
+    expect(clientsApi.updateClient).not.toHaveBeenCalled()
   })
 })

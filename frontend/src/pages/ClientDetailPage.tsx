@@ -583,6 +583,8 @@ export function ClientDetailPage() {
           client={displayClient}
           onClose={() => setEditOpen(false)}
           onSaved={(saved) => {
+            // Ignore completions that no longer match the routed Client identity.
+            if (saved.id !== activeIdRef.current) return
             if (saved.id !== clientId) return
             setClient(saved)
             setLastUpdated(new Date())
