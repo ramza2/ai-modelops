@@ -627,7 +627,7 @@ describe('ClientDetailPage', () => {
   it('preserves priority=0 and rejects duplicate submit while saving', async () => {
     const user = userEvent.setup()
     const existing = makePolicy().policy!
-    let resolvePut!: (value: ReturnType<typeof makePolicy>['policy']) => void
+    let resolvePut!: (value: NonNullable<ReturnType<typeof makePolicy>['policy']>) => void
     vi.mocked(clientsApi.getClient).mockResolvedValue(makeClient())
     vi.mocked(clientsApi.getClientRuntimePolicy).mockResolvedValue(
       makePolicy({
