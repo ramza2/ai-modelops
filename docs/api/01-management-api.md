@@ -1107,13 +1107,39 @@ GET /api/v1/clients?is_active=true&q=alzi&page=1&page_size=50
 ```
 
 `client_key` is stripped, exact-case preserved (not lowercased), unique, immutable.
+Create sets `is_active=true`. Does **not** auto-create Runtime Policy.
+
+Optional header (P1-22A):
+
+```http
+Idempotency-Key: <client-generated-unique-key>
+```
+
+- Same key + same normalized payload → replay original `201` body (no second row).
+- Same key + different method/resource/payload → `409 IDEMPOTENCY_KEY_CONFLICT`.
+- Duplicate `client_key` (different Idempotency-Key) → `409 CLIENT_KEY_CONFLICT`.
+- Header omitted → Idempotency unused; legacy non-idempotent create (still subject to UNIQUE `client_key`).
+- Header present but invalid (empty, whitespace-only, leading/trailing spaces, illegal chars, length > 255) → `422 VALIDATION_ERROR`; **mutation must not run**.
+- Valid key format: `1..255` of `[A-Za-z0-9._:-]` (kept as-is; not stripped).
+- Durable store: `client_mutation_idempotency` (not `operation.idempotency_key`).
+- Concurrent same-key requests serialize on the idempotency row lock; the waiter replays the completed response.
 
 ### GET /clients/{client_id}
 
 ### PATCH /clients/{client_id}
 
 Mutable: `display_name`, `description`, `is_active`.  
-Immutable: `client_key`. No DELETE — deactivate with `is_active=false`.
+Immutable: `client_key` (`422` if supplied). No DELETE — deactivate with `is_active=false`.
+
+`description: null` clears the field; omitting `description` leaves it unchanged.
+
+Optional `Idempotency-Key` (same rules as POST). Completed replay returns the stored `200` body and does **not** bump `updated_at` again.
+
+#### Concurrent PATCH / lost-update note
+
+Overlapping PATCH transactions on the same `client_id` take a row lock (`SELECT … FOR UPDATE`), so concurrent writers serialize. Non-overlapping last-write-wins remains possible (no `If-Match` / ETag yet). Operators should avoid parallel editors on the same ClientApp until conditional updates exist.
+
+`is_active` is **registration state**, not a Gateway inference kill switch. Inactive clients are omitted from the Gateway PolicySnapshot (with enabled policies); existing invocation logs / policy rows are preserved.
 
 ### GET /clients/{client_id}/runtime-policy
 

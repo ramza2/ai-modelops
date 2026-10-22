@@ -1,11 +1,11 @@
-"""ClientApp + ClientRuntimePolicy Management API (M6-B1)."""
+"""ClientApp + ClientRuntimePolicy Management API (M6-B1 / P1-22A)."""
 
 from __future__ import annotations
 
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Header, Query, Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -93,13 +93,18 @@ async def list_clients(
 @router.post("", status_code=201)
 async def create_client(
     body: CreateClientRequest,
+    response: Response,
     service: ClientService = Depends(get_client_service),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> dict[str, Any]:
-    return await service.create_client(
+    result = await service.create_client(
         client_key=body.client_key,
         display_name=body.display_name,
         description=body.description,
+        idempotency_key=idempotency_key,
     )
+    response.status_code = result.status_code
+    return result.body
 
 
 @router.get("/{client_id}")
@@ -114,9 +119,12 @@ async def get_client(
 async def update_client(
     client_id: uuid.UUID,
     body: UpdateClientRequest,
+    response: Response,
     service: ClientService = Depends(get_client_service),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> dict[str, Any]:
     raw = body.model_dump(exclude_unset=True)
+    fields_set = frozenset(raw.keys())
     kwargs: dict[str, Any] = {}
     if "display_name" in raw:
         kwargs["display_name"] = raw["display_name"]
@@ -126,7 +134,14 @@ async def update_client(
         kwargs["is_active"] = raw["is_active"]
     if "client_key" in raw:
         kwargs["client_key"] = raw["client_key"]
-    return await service.update_client(client_id, **kwargs)
+    result = await service.update_client(
+        client_id,
+        idempotency_key=idempotency_key,
+        fields_set=fields_set,
+        **kwargs,
+    )
+    response.status_code = result.status_code
+    return result.body
 
 
 @router.get("/{client_id}/runtime-policy")
