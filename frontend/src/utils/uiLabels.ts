@@ -52,7 +52,7 @@ export const NAV_ITEMS: NavItem[] = [
   {
     to: '/clients',
     label: 'AI 사용 시스템',
-    description: '모델을 쓰는 업무 서비스와 제한 정책을 봅니다',
+    description: '모델을 쓰는 업무 서비스 등록·수정과 제한 정책을 봅니다',
   },
 ]
 
@@ -135,8 +135,12 @@ export const CLIENT_FIELD_HELP = {
     '이 사용 시스템이 Gateway에서 동시에 진행할 수 있는 요청 수 상한입니다. null이면 이 정책으로 동시 요청을 제한하지 않습니다.',
   priority:
     '숫자가 작을수록 높은 우선순위 의도입니다. null이면 미설정입니다. 요청된 priority가 항상 모델 런타임으로 전달된다고 단정하지 마세요 — Gateway는 신뢰된 스케줄러 증거가 있을 때만 전달합니다.',
-  readOnly:
-    '이 화면은 조회 전용입니다. 사용 시스템 추가·수정·정책 변경은 현재 Admin UI에서 제공하지 않습니다(백엔드 변경 API가 Idempotency-Key를 소비하지 않아 안전하게 열지 않았습니다).',
+  registryEditable:
+    '사용 시스템 등록·표시 이름/설명 수정·등록 상태(활성/비활성) 변경을 할 수 있습니다. 등록만으로 API 별칭·모델 배포가 생기거나, 외부 서비스에 X-AI-Client 헤더가 자동으로 붙지는 않습니다.',
+  policyReadOnly:
+    '런타임 정책(Runtime Policy) 편집 UI는 아직 제공하지 않습니다. 정책 행이 있으면 조회만 가능합니다.',
+  deactivateImpact:
+    '등록 비활성화는 Gateway 추론 요청을 직접 차단하지 않습니다. 활성 등록이 해제되며 Gateway 클라이언트별 Runtime Policy 스냅샷에서 제외될 수 있어 토큰·동시 요청 제한이 적용되지 않을 수 있습니다. 호출 로그의 client_app_id 매핑에도 영향이 있을 수 있고 raw_client_key 이력은 남을 수 있습니다. API 별칭·모델 배포는 중지되지 않으며 해당 API를 통한 추론이 계속 가능할 수 있습니다. 실제 AI 요청 차단에는 별도의 Gateway 인증·권한·호출 차단 정책이 필요합니다.',
 } as const
 
 /** P1-14 — Model Catalog / Cache beginner help (display-only). */

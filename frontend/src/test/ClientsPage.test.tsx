@@ -43,6 +43,10 @@ function renderAt(path: string) {
       <LocationProbe />
       <Routes>
         <Route path="/clients" element={<ClientsPage />} />
+        <Route
+          path="/clients/:clientId"
+          element={<div data-testid="client-detail-route">detail</div>}
+        />
       </Routes>
     </MemoryRouter>,
   )
@@ -53,6 +57,7 @@ describe('ClientsPage', () => {
     vi.spyOn(clientsApi, 'listClients')
     vi.spyOn(clientsApi, 'getClient')
     vi.spyOn(clientsApi, 'getClientRuntimePolicy')
+    vi.spyOn(clientsApi, 'createClient')
   })
 
   afterEach(() => {
@@ -60,13 +65,12 @@ describe('ClientsPage', () => {
     vi.restoreAllMocks()
   })
 
-  it('renders list without N+1 and remains GET-only', async () => {
+  it('renders list without N+1 detail fetches on load', async () => {
     vi.mocked(clientsApi.listClients).mockResolvedValue(
       pageResult([
         makeClient({ id: 'c1', client_key: 'alzi', display_name: 'ALZI' }),
       ]),
     )
-    const fetchSpy = vi.spyOn(globalThis, 'fetch')
     renderAt('/clients')
     expect(await screen.findByRole('link', { name: 'ALZI' })).toHaveAttribute(
       'href',
@@ -75,10 +79,9 @@ describe('ClientsPage', () => {
     expect(clientsApi.listClients).toHaveBeenCalledTimes(1)
     expect(clientsApi.getClient).not.toHaveBeenCalled()
     expect(clientsApi.getClientRuntimePolicy).not.toHaveBeenCalled()
-    const methods = fetchSpy.mock.calls.map(
-      (c) => (c[1] as RequestInit | undefined)?.method || 'GET',
-    )
-    expect(methods.every((m) => m === 'GET')).toBe(true)
+    expect(
+      screen.getByRole('button', { name: '신규 시스템 등록' }),
+    ).toBeInTheDocument()
   })
 
   it.each([
@@ -123,5 +126,100 @@ describe('ClientsPage', () => {
     )) {
       expect(th).toHaveAttribute('scope', 'col')
     }
+  })
+
+  it('creates a client with Idempotency-Key and navigates to detail', async () => {
+    const user = userEvent.setup()
+    vi.mocked(clientsApi.listClients).mockResolvedValue(pageResult([]))
+    vi.mocked(clientsApi.createClient).mockResolvedValue(
+      makeClient({
+        id: 'c-new',
+        client_key: 'AlZi',
+        display_name: '사내 지식 AI 검색',
+        description: 'RAG',
+      }),
+    )
+    renderAt('/clients')
+    await user.click(
+      await screen.findByRole('button', { name: '신규 시스템 등록' }),
+    )
+    const dialog = await screen.findByTestId('client-create-dialog')
+    await user.type(within(dialog).getByLabelText(/서비스 키/), 'AlZi')
+    await user.type(within(dialog).getByLabelText(/표시 이름/), '사내 지식 AI 검색')
+    await user.type(within(dialog).getByLabelText(/설명/), 'RAG')
+    await user.click(within(dialog).getByRole('button', { name: '등록' }))
+    await waitFor(() => {
+      expect(clientsApi.createClient).toHaveBeenCalledTimes(1)
+    })
+    const [body, opts] = vi.mocked(clientsApi.createClient).mock.calls[0]!
+    expect(body).toEqual({
+      client_key: 'AlZi',
+      display_name: '사내 지식 AI 검색',
+      description: 'RAG',
+    })
+    expect(opts.idempotencyKey).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+    )
+    expect(await screen.findByTestId('client-detail-route')).toBeInTheDocument()
+  })
+
+  it('validates required fields and preserves input on CLIENT_KEY_CONFLICT', async () => {
+    const user = userEvent.setup()
+    vi.mocked(clientsApi.listClients).mockResolvedValue(pageResult([]))
+    vi.mocked(clientsApi.createClient).mockRejectedValue(
+      new ApiError('client_key already exists.', {
+        status: 409,
+        code: 'CLIENT_KEY_CONFLICT',
+      }),
+    )
+    renderAt('/clients')
+    await user.click(
+      await screen.findByRole('button', { name: '신규 시스템 등록' }),
+    )
+    const dialog = await screen.findByTestId('client-create-dialog')
+    await user.click(within(dialog).getByRole('button', { name: '등록' }))
+    expect(await within(dialog).findByText(/서비스 키는 필수/)).toBeInTheDocument()
+    expect(clientsApi.createClient).not.toHaveBeenCalled()
+
+    await user.type(within(dialog).getByLabelText(/서비스 키/), 'dup-key')
+    await user.type(within(dialog).getByLabelText(/표시 이름/), 'Dup')
+    await user.click(within(dialog).getByRole('button', { name: '등록' }))
+    expect(
+      await within(dialog).findByText(/CLIENT_KEY_CONFLICT/),
+    ).toBeInTheDocument()
+    expect(within(dialog).getByLabelText(/서비스 키/)).toHaveValue('dup-key')
+    expect(within(dialog).getByLabelText(/표시 이름/)).toHaveValue('Dup')
+  })
+
+  it('reuses Idempotency-Key on uncertain retry with same payload', async () => {
+    const user = userEvent.setup()
+    vi.mocked(clientsApi.listClients).mockResolvedValue(pageResult([]))
+    vi.mocked(clientsApi.createClient)
+      .mockRejectedValueOnce(new TypeError('network down'))
+      .mockResolvedValueOnce(
+        makeClient({
+          id: 'c-retry',
+          client_key: 'retry-key',
+          display_name: 'Retry',
+        }),
+      )
+    renderAt('/clients')
+    await user.click(
+      await screen.findByRole('button', { name: '신규 시스템 등록' }),
+    )
+    const dialog = await screen.findByTestId('client-create-dialog')
+    await user.type(within(dialog).getByLabelText(/서비스 키/), 'retry-key')
+    await user.type(within(dialog).getByLabelText(/표시 이름/), 'Retry')
+    await user.click(within(dialog).getByRole('button', { name: '등록' }))
+    expect(await within(dialog).findByText(/network down/)).toBeInTheDocument()
+    await user.click(within(dialog).getByRole('button', { name: '등록' }))
+    await waitFor(() => {
+      expect(clientsApi.createClient).toHaveBeenCalledTimes(2)
+    })
+    const key1 = vi.mocked(clientsApi.createClient).mock.calls[0]![1]
+      .idempotencyKey
+    const key2 = vi.mocked(clientsApi.createClient).mock.calls[1]![1]
+      .idempotencyKey
+    expect(key1).toBe(key2)
   })
 })
