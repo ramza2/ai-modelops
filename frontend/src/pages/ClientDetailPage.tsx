@@ -624,7 +624,13 @@ export function ClientDetailPage() {
           open={policyEditOpen}
           client={displayClient}
           policy={policy}
-          onClose={() => setPolicyEditOpen(false)}
+          onClose={(opts) => {
+            setPolicyEditOpen(false)
+            // Refresh after gated dismiss — never treat as save success.
+            if (opts?.refresh && activeIdRef.current === clientId) {
+              void load('refresh')
+            }
+          }}
           onSaved={() => {
             if (activeIdRef.current !== clientId) return
             setPolicyEditOpen(false)

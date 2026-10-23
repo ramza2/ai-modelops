@@ -19,12 +19,17 @@ import { CLIENT_FIELD_HELP } from '../utils/uiLabels'
 import { HelpHint, TermLabel } from './HelpHint'
 import { SectionError } from './SectionError'
 
+export type ClientRuntimePolicyDialogCloseOpts = {
+  /** Re-GET detail policy after dismiss; never means save succeeded. */
+  refresh?: boolean
+}
+
 export type ClientRuntimePolicyDialogProps = {
   open: boolean
   client: ClientApp
   /** Current policy row, or null when creating. */
   policy: ClientRuntimePolicy | null
-  onClose: () => void
+  onClose: (opts?: ClientRuntimePolicyDialogCloseOpts) => void
   /** Called after successful PUT; parent should re-GET policy (and optionally client). */
   onSaved: () => void
 }
@@ -292,6 +297,33 @@ export function ClientRuntimePolicyDialog({
 
   const handleClose = () => {
     if (submitting || revalidating) return
+    if (saveGate === 'uncertain' || saveGate === 'reload_failed') {
+      if (
+        !window.confirm(
+          '저장 응답이 불확실하거나 최신 런타임 정책 조회에 실패했습니다. 지금 닫으면 이 창에서 서버 반영 여부를 더 확인하지 않습니다. 닫은 뒤 상세에서 최신 정책을 다시 불러옵니다. 닫으시겠습니까?',
+        )
+      ) {
+        return
+      }
+      onClose({ refresh: true })
+      return
+    }
+    if (saveGate === 'matched') {
+      // Already confirmed equal — dismiss without further PUT; refresh detail.
+      onClose({ refresh: true })
+      return
+    }
+    if (saveGate === 'conflict') {
+      if (
+        !window.confirm(
+          '동시 변경 충돌로 저장이 중단된 상태입니다. 작성 중인 값은 버려지며, 닫은 뒤 상세에서 최신 정책을 다시 불러옵니다. 닫으시겠습니까?',
+        )
+      ) {
+        return
+      }
+      onClose({ refresh: true })
+      return
+    }
     if (
       dirty &&
       !window.confirm('작성 중인 정책 내용이 있습니다. 닫으시겠습니까?')
@@ -304,6 +336,13 @@ export function ClientRuntimePolicyDialog({
   const goConfirm = (e: FormEvent) => {
     e.preventDefault()
     if (submitLockRef.current || submitting || revalidating) return
+    // Conflict can only be cleared by「최신 서버 확인 후 다시 검토」.
+    if (saveGate === 'conflict') {
+      setSubmitError(
+        '동시 변경 충돌 상태입니다. 「뒤로 → 저장 검토」로는 해제되지 않습니다. 「최신 서버 확인 후 다시 검토」로 최신 정책을 비교 기준으로 반영한 뒤 다시 저장 검토·동의하세요.',
+      )
+      return
+    }
     if (saveGate === 'uncertain' || saveGate === 'reload_failed') {
       setSubmitError(
         '응답이 불확실하거나 최신 정책 조회에 실패했습니다. 「최신 값 다시 확인」으로 최신 런타임 정책을 확인한 뒤에만 다시 검토할 수 있습니다.',
@@ -331,6 +370,7 @@ export function ClientRuntimePolicyDialog({
     setPendingBody(body)
     setConsent(false)
     setSubmitError(null)
+    // Never clear conflict here — only acknowledgeServerAndReReview may.
     setSaveGate(null)
     setServerSnapshot(null)
     setServerPolicyMeta(null)
@@ -529,13 +569,18 @@ export function ClientRuntimePolicyDialog({
     } catch (err) {
       if (!stillCurrentSession(sessionGen, lockedClientId)) return
       setConsent(false)
-      if (err instanceof ApiError) {
-        // Confirmed API failure — allow re-review after editing; not "uncertain".
+      if (err instanceof ApiError && err.status >= 400 && err.status < 500) {
+        // Confirmed client/API outcome (400/404/409/422…) — not uncertain.
         setSaveGate(null)
         setSubmitError(policyErrorMessage(err))
       } else {
+        // Network errors and HTTP 5xx: outcome may be ambiguous; no auto re-PUT.
         setSaveGate('uncertain')
-        setSubmitError(policyErrorMessage(err))
+        setSubmitError(
+          err instanceof ApiError && err.status >= 500
+            ? `서버 오류(${err.status}): ${err.message} 응답이 불확실할 수 있습니다. 자동으로 다시 저장하지 않습니다. 「최신 값 다시 확인」으로 최신 런타임 정책 반영 여부를 확인하세요.`
+            : policyErrorMessage(err),
+        )
       }
     } finally {
       if (sessionGenRef.current === sessionGen) {
@@ -834,6 +879,17 @@ export function ClientRuntimePolicyDialog({
               >
                 저장 검토…
               </button>
+              {putBlocked ? (
+                <button
+                  type="button"
+                  className="btn btn--ghost"
+                  disabled={submitting || revalidating}
+                  onClick={handleClose}
+                  data-testid="policy-dialog-close"
+                >
+                  닫기
+                </button>
+              ) : null}
             </div>
           </form>
         ) : null}
@@ -909,14 +965,19 @@ export function ClientRuntimePolicyDialog({
               <button
                 type="button"
                 className="btn btn--ghost"
-                disabled={submitting || revalidating}
+                disabled={
+                  submitting ||
+                  revalidating ||
+                  saveGate === 'uncertain' ||
+                  saveGate === 'reload_failed' ||
+                  saveGate === 'matched'
+                }
                 onClick={() => {
+                  // conflict: allow returning to edit, but saveGate stays conflict
+                  // until「최신 서버 확인 후 다시 검토」.
                   if (putBlocked && saveGate !== 'conflict') return
                   setStep('edit')
                   setConsent(false)
-                  if (saveGate !== 'conflict') {
-                    setSubmitError(null)
-                  }
                 }}
               >
                 뒤로
@@ -930,6 +991,17 @@ export function ClientRuntimePolicyDialog({
               >
                 {submitting || revalidating ? '저장 중…' : '동의하고 저장'}
               </button>
+              {putBlocked ? (
+                <button
+                  type="button"
+                  className="btn btn--ghost"
+                  disabled={submitting || revalidating}
+                  onClick={handleClose}
+                  data-testid="policy-dialog-close"
+                >
+                  {saveGate === 'matched' ? '닫기 (추가 저장 없음)' : '닫기'}
+                </button>
+              ) : null}
             </div>
           </div>
         ) : null}

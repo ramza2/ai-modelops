@@ -640,6 +640,14 @@ describe('ClientDetailPage', () => {
     expect(clientsApi.putClientRuntimePolicy).not.toHaveBeenCalled()
     // Direct re-click blocked even if checkbox forced.
     expect(within(dialog).getByTestId('policy-confirm-put')).toBeDisabled()
+    // Bypass via 뒤로 → 저장 검토 must NOT clear conflict / allow PUT.
+    await user.click(within(dialog).getByRole('button', { name: '뒤로' }))
+    await user.click(within(dialog).getByRole('button', { name: '저장 검토…' }))
+    expect(
+      await within(dialog).findByText(/「뒤로 → 저장 검토」로는 해제되지/),
+    ).toBeInTheDocument()
+    expect(within(dialog).getByTestId('policy-conflict-banner')).toBeInTheDocument()
+    expect(clientsApi.putClientRuntimePolicy).not.toHaveBeenCalled()
     await user.click(within(dialog).getByTestId('policy-ack-conflict'))
     expect(within(dialog).getByLabelText(/입력 토큰 상한/)).toHaveValue('4096')
     await user.click(within(dialog).getByRole('button', { name: '저장 검토…' }))
@@ -648,6 +656,47 @@ describe('ClientDetailPage', () => {
     await waitFor(() => {
       expect(clientsApi.putClientRuntimePolicy).toHaveBeenCalledTimes(1)
     })
+  })
+
+  it('allows closing while conflicted and refreshes detail without treating as save', async () => {
+    const user = userEvent.setup()
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const existing = makePolicy().policy!
+    vi.mocked(clientsApi.getClient).mockResolvedValue(makeClient())
+    vi.mocked(clientsApi.getClientRuntimePolicy)
+      .mockResolvedValueOnce(makePolicy())
+      .mockResolvedValueOnce(
+        makePolicy({
+          policy: { ...existing, updated_at: '2026-10-10T00:00:00Z' },
+        }),
+      )
+      // refresh after close
+      .mockResolvedValueOnce(
+        makePolicy({
+          policy: { ...existing, updated_at: '2026-10-10T00:00:00Z' },
+        }),
+      )
+    renderDetail()
+    await user.click(await screen.findByRole('button', { name: '정책 수정' }))
+    const dialog = await screen.findByTestId('client-runtime-policy-dialog')
+    const inputField = within(dialog).getByLabelText(/입력 토큰 상한/)
+    await user.clear(inputField)
+    await user.type(inputField, '4096')
+    await user.click(within(dialog).getByRole('button', { name: '저장 검토…' }))
+    await user.click(within(dialog).getByRole('checkbox'))
+    await user.click(within(dialog).getByTestId('policy-confirm-put'))
+    expect(
+      await within(dialog).findByTestId('policy-conflict-banner'),
+    ).toBeInTheDocument()
+    await user.click(within(dialog).getByTestId('policy-dialog-close'))
+    expect(confirmSpy).toHaveBeenCalled()
+    expect(String(confirmSpy.mock.calls.at(-1)?.[0])).toMatch(/충돌/)
+    await waitFor(() => {
+      expect(
+        screen.queryByTestId('client-runtime-policy-dialog'),
+      ).not.toBeInTheDocument()
+    })
+    expect(clientsApi.putClientRuntimePolicy).not.toHaveBeenCalled()
   })
 
   it('blocks re-PUT after network uncertainty until reload; matched skips PUT', async () => {
@@ -698,6 +747,72 @@ describe('ClientDetailPage', () => {
     ).toBeInTheDocument()
     expect(within(dialog).getByTestId('policy-confirm-put')).toBeDisabled()
     expect(clientsApi.putClientRuntimePolicy).toHaveBeenCalledTimes(1)
+    // Matched dismiss closes without further PUT; parent may refresh.
+    vi.mocked(clientsApi.getClientRuntimePolicy).mockResolvedValue(
+      makePolicy({
+        policy: {
+          ...existing,
+          priority: 0,
+          max_output_tokens: null,
+          updated_at: '2026-10-11T00:00:00Z',
+        },
+      }),
+    )
+    await user.click(within(dialog).getByTestId('policy-dialog-close'))
+    await waitFor(() => {
+      expect(
+        screen.queryByTestId('client-runtime-policy-dialog'),
+      ).not.toBeInTheDocument()
+    })
+    expect(clientsApi.putClientRuntimePolicy).toHaveBeenCalledTimes(1)
+  })
+
+  it('blocks PUT retry after HTTP 500 until latest policy is checked', async () => {
+    const user = userEvent.setup()
+    const existing = makePolicy().policy!
+    vi.mocked(clientsApi.getClient).mockResolvedValue(makeClient())
+    vi.mocked(clientsApi.getClientRuntimePolicy)
+      .mockResolvedValueOnce(
+        makePolicy({
+          policy: { ...existing, priority: null, max_output_tokens: null },
+        }),
+      )
+      .mockResolvedValueOnce(
+        makePolicy({
+          policy: { ...existing, priority: null, max_output_tokens: null },
+        }),
+      )
+      .mockResolvedValueOnce(
+        makePolicy({
+          policy: {
+            ...existing,
+            priority: 0,
+            max_output_tokens: null,
+            updated_at: '2026-10-12T00:00:00Z',
+          },
+        }),
+      )
+    vi.mocked(clientsApi.putClientRuntimePolicy).mockRejectedValueOnce(
+      new ApiError('upstream failed', { status: 500 }),
+    )
+    renderDetail()
+    await user.click(await screen.findByRole('button', { name: '정책 수정' }))
+    const dialog = await screen.findByTestId('client-runtime-policy-dialog')
+    await user.type(within(dialog).getByLabelText(/요청 우선순위/), '0')
+    await user.click(within(dialog).getByRole('button', { name: '저장 검토…' }))
+    await user.click(within(dialog).getByRole('checkbox'))
+    await user.click(within(dialog).getByTestId('policy-confirm-put'))
+    expect(
+      await within(dialog).findByTestId('policy-uncertain-banner'),
+    ).toHaveTextContent(/최신 런타임 정책/)
+    expect(await within(dialog).findByText(/서버 오류\(500\)/)).toBeInTheDocument()
+    expect(within(dialog).getByTestId('policy-confirm-put')).toBeDisabled()
+    expect(clientsApi.putClientRuntimePolicy).toHaveBeenCalledTimes(1)
+    await user.click(within(dialog).getByTestId('policy-reload-server'))
+    expect(
+      await within(dialog).findByTestId('policy-matched-banner'),
+    ).toBeInTheDocument()
+    expect(clientsApi.putClientRuntimePolicy).toHaveBeenCalledTimes(1)
   })
 
   it('keeps PUT blocked when latest policy reload fails after uncertainty', async () => {
@@ -734,6 +849,18 @@ describe('ClientDetailPage', () => {
       await within(dialog).findByText(/추가 PUT을 계속 차단/),
     ).toBeInTheDocument()
     expect(within(dialog).getByTestId('policy-confirm-put')).toBeDisabled()
+    expect(clientsApi.putClientRuntimePolicy).toHaveBeenCalledTimes(1)
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    vi.mocked(clientsApi.getClientRuntimePolicy).mockResolvedValue(
+      makePolicy({ policy: { ...existing, priority: null } }),
+    )
+    await user.click(within(dialog).getByTestId('policy-dialog-close'))
+    expect(String(confirmSpy.mock.calls.at(-1)?.[0])).toMatch(/불확실|실패/)
+    await waitFor(() => {
+      expect(
+        screen.queryByTestId('client-runtime-policy-dialog'),
+      ).not.toBeInTheDocument()
+    })
     expect(clientsApi.putClientRuntimePolicy).toHaveBeenCalledTimes(1)
   })
 
