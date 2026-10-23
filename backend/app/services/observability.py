@@ -107,6 +107,8 @@ class InvocationObservabilityService:
         if group_by == "deployment":
             name = row.get("deployment_name")
             item["deployment_name"] = str(name) if name else None
+        if group_by == "client":
+            item["last_called_at"] = _iso_z(row.get("last_called_at"))
         return item
 
 
@@ -120,3 +122,21 @@ def _i(value: Any) -> int | None:
     if value is None:
         return None
     return int(value)
+
+
+def _iso_z(value: Any) -> str | None:
+    """Serialize TIMESTAMPTZ / datetime to UTC ISO 8601 with ``Z`` suffix."""
+    if value is None:
+        return None
+    if isinstance(value, dt.datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=dt.UTC)
+        else:
+            value = value.astimezone(dt.UTC)
+        return value.isoformat().replace("+00:00", "Z")
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.endswith("+00:00"):
+        return text[:-6] + "Z"
+    return text

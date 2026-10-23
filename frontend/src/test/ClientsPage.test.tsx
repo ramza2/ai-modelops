@@ -3,9 +3,19 @@ import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MemoryRouter, Route, Routes, useSearchParams } from 'react-router-dom'
 import { ApiError } from '../api/client'
-import type { ClientApp, Paginated } from '../api/types'
+import type {
+  ClientApp,
+  InvocationSummaryResponse,
+  Paginated,
+} from '../api/types'
 import { ClientsPage } from '../pages/ClientsPage'
 import * as clientsApi from '../api/clients'
+import * as observabilityApi from '../api/observability'
+import { formatApiDateTime } from '../utils/date'
+
+function emptyUsage(): InvocationSummaryResponse {
+  return { hours: 24, group_by: 'client', items: [] }
+}
 
 function makeClient(
   overrides: Partial<ClientApp> & Pick<ClientApp, 'id' | 'client_key'>,
@@ -58,6 +68,9 @@ describe('ClientsPage', () => {
     vi.spyOn(clientsApi, 'getClient')
     vi.spyOn(clientsApi, 'getClientRuntimePolicy')
     vi.spyOn(clientsApi, 'createClient')
+    vi.spyOn(observabilityApi, 'getInvocationSummary').mockResolvedValue(
+      emptyUsage(),
+    )
   })
 
   afterEach(() => {
@@ -78,11 +91,80 @@ describe('ClientsPage', () => {
       '/clients/c1',
     )
     expect(clientsApi.listClients).toHaveBeenCalledTimes(1)
+    expect(observabilityApi.getInvocationSummary).toHaveBeenCalledTimes(1)
+    expect(observabilityApi.getInvocationSummary).toHaveBeenCalledWith(
+      expect.objectContaining({ hours: 24, groupBy: 'client' }),
+    )
     expect(clientsApi.getClient).not.toHaveBeenCalled()
     expect(clientsApi.getClientRuntimePolicy).not.toHaveBeenCalled()
     expect(
       screen.getByRole('button', { name: '신규 시스템 등록' }),
     ).toBeInTheDocument()
+  })
+
+  it('joins 24h usage by exact client_key and separates zero vs failed', async () => {
+    vi.mocked(clientsApi.listClients).mockResolvedValue(
+      pageResult([
+        makeClient({ id: 'c1', client_key: 'hit', display_name: 'Hit' }),
+        makeClient({ id: 'c2', client_key: 'silent', display_name: 'Silent' }),
+      ]),
+    )
+    vi.mocked(observabilityApi.getInvocationSummary).mockResolvedValue({
+      hours: 24,
+      group_by: 'client',
+      items: [
+        {
+          group_key: 'hit',
+          request_count: 5,
+          success_count: 4,
+          error_count: 1,
+          tokenized_request_count: 3,
+          last_called_at: '2026-10-22T17:30:00Z',
+        },
+        {
+          group_key: 'unknown',
+          request_count: 99,
+          success_count: 0,
+          error_count: 99,
+          tokenized_request_count: 0,
+          last_called_at: '2026-10-22T18:00:00Z',
+        },
+      ],
+    })
+    renderAt('/clients')
+    expect(await screen.findByRole('link', { name: 'Hit' })).toBeInTheDocument()
+    expect(screen.getByTestId('usage-status-hit')).toHaveTextContent(
+      '최근 24시간 호출 확인',
+    )
+    expect(screen.getByTestId('usage-status-silent')).toHaveTextContent(
+      '최근 24시간 호출 없음',
+    )
+    expect(screen.getByText('5')).toBeInTheDocument()
+    expect(screen.getByText('4')).toBeInTheDocument()
+    expect(screen.getByText('1')).toBeInTheDocument()
+    expect(
+      screen.getByText(formatApiDateTime('2026-10-22T17:30:00Z')),
+    ).toBeInTheDocument()
+    // unknown must not be attributed to registered rows
+    expect(screen.queryByText('99')).not.toBeInTheDocument()
+  })
+
+  it('keeps registry rows when summary fails and marks usage unavailable', async () => {
+    vi.mocked(clientsApi.listClients).mockResolvedValue(
+      pageResult([
+        makeClient({ id: 'c1', client_key: 'keep', display_name: 'Keep' }),
+      ]),
+    )
+    vi.mocked(observabilityApi.getInvocationSummary).mockRejectedValue(
+      new ApiError('summary down', { status: 503 }),
+    )
+    renderAt('/clients')
+    expect(await screen.findByRole('link', { name: 'Keep' })).toBeInTheDocument()
+    expect(await screen.findByText(/summary down/)).toBeInTheDocument()
+    expect(screen.getByTestId('usage-status-keep')).toHaveTextContent(
+      '집계 확인 불가',
+    )
+    expect(screen.getAllByText('조회 실패').length).toBeGreaterThan(0)
   })
 
   it.each([
@@ -114,6 +196,71 @@ describe('ClientsPage', () => {
     await user.click(screen.getByRole('button', { name: '새로고침' }))
     expect(await screen.findByText(/refresh fail/)).toBeInTheDocument()
     expect(screen.getByRole('link', { name: 'Keep' })).toBeInTheDocument()
+  })
+
+  it('ignores stale usage responses after a newer list load', async () => {
+    let resolveSlow: (value: InvocationSummaryResponse) => void
+    const slow = new Promise<InvocationSummaryResponse>((resolve) => {
+      resolveSlow = resolve
+    })
+    vi.mocked(clientsApi.listClients)
+      .mockResolvedValueOnce(
+        pageResult([
+          makeClient({ id: 'c1', client_key: 'old', display_name: 'Old' }),
+        ]),
+      )
+      .mockResolvedValueOnce(
+        pageResult([
+          makeClient({ id: 'c2', client_key: 'new', display_name: 'New' }),
+        ]),
+      )
+    vi.mocked(observabilityApi.getInvocationSummary)
+      .mockImplementationOnce(() => slow)
+      .mockResolvedValueOnce({
+        hours: 24,
+        group_by: 'client',
+        items: [
+          {
+            group_key: 'new',
+            request_count: 2,
+            success_count: 2,
+            error_count: 0,
+            tokenized_request_count: 0,
+            last_called_at: '2026-10-22T12:00:00Z',
+          },
+        ],
+      })
+    const user = userEvent.setup()
+    renderAt('/clients')
+    await waitFor(() => {
+      expect(clientsApi.listClients).toHaveBeenCalled()
+    })
+    await user.click(screen.getByRole('button', { name: '새로고침' }))
+    expect(await screen.findByRole('link', { name: 'New' })).toBeInTheDocument()
+    expect(screen.getByTestId('usage-status-new')).toHaveTextContent(
+      '최근 24시간 호출 확인',
+    )
+    resolveSlow!({
+      hours: 24,
+      group_by: 'client',
+      items: [
+        {
+          group_key: 'old',
+          request_count: 99,
+          success_count: 0,
+          error_count: 99,
+          tokenized_request_count: 0,
+          last_called_at: '2026-10-22T11:00:00Z',
+        },
+      ],
+    })
+    await waitFor(() => {
+      expect(screen.queryByRole('link', { name: 'Old' })).not.toBeInTheDocument()
+    })
+    expect(screen.getByTestId('usage-status-new')).toHaveTextContent(
+      '최근 24시간 호출 확인',
+    )
+    expect(screen.queryByText('99')).not.toBeInTheDocument()
   })
 
   it('uses scope=col', async () => {

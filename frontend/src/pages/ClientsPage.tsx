@@ -2,7 +2,8 @@ import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { ApiError } from '../api/client'
 import { listClients } from '../api/clients'
-import type { ClientApp } from '../api/types'
+import { getInvocationSummary } from '../api/observability'
+import type { ClientApp, InvocationSummaryItem } from '../api/types'
 import { ActiveBadge } from '../components/ActiveBadge'
 import { AppShell } from '../components/AppShell'
 import { ClientCreateDialog } from '../components/ClientCreateDialog'
@@ -10,6 +11,11 @@ import { HelpHint, TermLabel } from '../components/HelpHint'
 import { LoadingBlock } from '../components/LoadingBlock'
 import { Pagination } from '../components/Pagination'
 import { SectionError } from '../components/SectionError'
+import {
+  CLIENT_USAGE_HOURS,
+  indexClientUsageByKey,
+  resolveClientUsage,
+} from '../utils/clientUsage'
 import { formatApiDateTime } from '../utils/date'
 import { parsePositivePage } from '../utils/query'
 import { CLIENT_FIELD_HELP, userFacingLoadError } from '../utils/uiLabels'
@@ -44,6 +50,12 @@ export function ClientsPage() {
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [usageByKey, setUsageByKey] = useState<Map<
+    string,
+    InvocationSummaryItem
+  > | null>(null)
+  const [usageFailed, setUsageFailed] = useState(false)
+  const [usageError, setUsageError] = useState<string | null>(null)
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
   const [createOpen, setCreateOpen] = useState(false)
   const abortRef = useRef<AbortController | null>(null)
@@ -103,14 +115,56 @@ export function ClientsPage() {
       else setRefreshing(true)
       setError(null)
       try {
-        const result = await listClients({
-          q,
-          isActive,
-          page,
-          pageSize: PAGE_SIZE,
-          signal: controller.signal,
-        })
+        const [listOutcome, usageOutcome] = await Promise.allSettled([
+          listClients({
+            q,
+            isActive,
+            page,
+            pageSize: PAGE_SIZE,
+            signal: controller.signal,
+          }),
+          getInvocationSummary({
+            hours: CLIENT_USAGE_HOURS,
+            groupBy: 'client',
+            signal: controller.signal,
+          }),
+        ])
         if (controller.signal.aborted || gen !== readGenRef.current) return
+
+        if (usageOutcome.status === 'fulfilled') {
+          setUsageByKey(indexClientUsageByKey(usageOutcome.value))
+          setUsageFailed(false)
+          setUsageError(null)
+        } else {
+          const err = usageOutcome.reason
+          if (!(err instanceof DOMException && err.name === 'AbortError')) {
+            setUsageByKey(null)
+            setUsageFailed(true)
+            setUsageError(
+              err instanceof ApiError
+                ? err.message
+                : err instanceof Error
+                  ? err.message
+                  : '호출 집계를 불러오지 못했습니다.',
+            )
+          }
+        }
+
+        if (listOutcome.status === 'rejected') {
+          const err = listOutcome.reason
+          if (err instanceof DOMException && err.name === 'AbortError') return
+          const message =
+            err instanceof ApiError
+              ? err.message
+              : err instanceof Error
+                ? err.message
+                : '목록을 불러오지 못했습니다.'
+          setError(message)
+          if (!hasLoadedRef.current) setItems(null)
+          return
+        }
+
+        const result = listOutcome.value
         const maxPage = Math.max(1, Math.ceil(result.total / PAGE_SIZE) || 1)
         if (page > maxPage) {
           if (result.total === 0) {
@@ -181,6 +235,12 @@ export function ClientsPage() {
         비활성(INACTIVE)은 Gateway 추론을 직접 막는 스위치가 아닙니다. 자세한
         의미는 「등록 상태」 도움말을 보세요.
       </p>
+      <p className="panel-hint secondary-text" role="note">
+        최근 {CLIENT_USAGE_HOURS}시간 AI 호출 현황은 Invocation Summary
+        집계를 재사용합니다. 호출 없음은 서비스 키 미설정이나 연동 장애를
+        단정하지 않습니다. 마지막 호출 시각은 선택한 조회 기간 안의 최신
+        시각입니다.
+      </p>
 
       <div className="toolbar toolbar--wrap">
         <div className="toolbar__actions">
@@ -242,6 +302,13 @@ export function ClientsPage() {
           action={listError.action}
         />
       ) : null}
+      {usageFailed && usageError ? (
+        <SectionError
+          title="AI 호출 집계 조회 실패"
+          message={`등록 시스템 목록은 유지합니다. 사용량 열만 확인할 수 없습니다. 원인: ${usageError}`}
+          action="네트워크·권한을 확인한 뒤 새로고침을 다시 시도하세요. 호출 없음과 집계 실패는 다릅니다."
+        />
+      ) : null}
 
       {loading && items === null ? (
         <LoadingBlock label="AI 사용 시스템 목록을 불러오는 중…" />
@@ -272,6 +339,27 @@ export function ClientsPage() {
                   </th>
                   <th scope="col">
                     <TermLabel
+                      text={`최근 ${CLIENT_USAGE_HOURS}시간 요청`}
+                      apiTerm="request_count"
+                    />
+                  </th>
+                  <th scope="col">
+                    <TermLabel text="성공" apiTerm="success_count" />
+                  </th>
+                  <th scope="col">
+                    <TermLabel text="오류" apiTerm="error_count" />
+                  </th>
+                  <th scope="col">
+                    <TermLabel
+                      text={`마지막 호출(${CLIENT_USAGE_HOURS}시간 내)`}
+                      apiTerm="last_called_at"
+                    />
+                  </th>
+                  <th scope="col">
+                    <TermLabel text="최근 호출 상태" apiTerm="usage_status" />
+                  </th>
+                  <th scope="col">
+                    <TermLabel
                       text="수정 시각"
                       apiTerm="updated_at"
                       help={CLIENT_FIELD_HELP.updatedAt}
@@ -280,23 +368,53 @@ export function ClientsPage() {
                 </tr>
               </thead>
               <tbody>
-                {items.map((client) => (
-                  <tr key={client.id}>
-                    <td>
-                      <Link
-                        className="table-link"
-                        to={`/clients/${client.id}`}
-                      >
-                        {client.display_name}
-                      </Link>
-                    </td>
-                    <td className="mono">{client.client_key}</td>
-                    <td>
-                      <ActiveBadge active={client.is_active} />
-                    </td>
-                    <td>{formatApiDateTime(client.updated_at)}</td>
-                  </tr>
-                ))}
+                {items.map((client) => {
+                  const usage = resolveClientUsage(
+                    client.client_key,
+                    usageByKey,
+                    usageFailed,
+                  )
+                  return (
+                    <tr key={client.id}>
+                      <td>
+                        <Link
+                          className="table-link"
+                          to={`/clients/${client.id}`}
+                        >
+                          {client.display_name}
+                        </Link>
+                      </td>
+                      <td className="mono">{client.client_key}</td>
+                      <td>
+                        <ActiveBadge active={client.is_active} />
+                      </td>
+                      <td>
+                        {usage.requestCount === null
+                          ? '조회 실패'
+                          : usage.requestCount}
+                      </td>
+                      <td>
+                        {usage.successCount === null
+                          ? '조회 실패'
+                          : usage.successCount}
+                      </td>
+                      <td>
+                        {usage.errorCount === null
+                          ? '조회 실패'
+                          : usage.errorCount}
+                      </td>
+                      <td>
+                        {usage.status === 'unavailable'
+                          ? '조회 실패'
+                          : formatApiDateTime(usage.lastCalledAt)}
+                      </td>
+                      <td data-testid={`usage-status-${client.client_key}`}>
+                        {usage.statusLabel}
+                      </td>
+                      <td>{formatApiDateTime(client.updated_at)}</td>
+                    </tr>
+                  )
+                })}
               </tbody>
             </table>
           </div>
