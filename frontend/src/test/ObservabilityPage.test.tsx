@@ -213,7 +213,7 @@ describe('ObservabilityPage', () => {
     )
     expect(screen.queryByRole('link', { name: 'all-MiniLM-L6-v2-managed' })).not.toBeInTheDocument()
 
-    await user.click(screen.getByLabelText('종료·중지된 Deployment 포함 (과거 데이터)'))
+    await user.click(screen.getByLabelText('종료·중지된 배포 포함 (과거 데이터)'))
     expect(await screen.findByRole('link', { name: 'all-MiniLM-L6-v2-managed' })).toBeInTheDocument()
     expect(screen.getByText(/RETIRED/)).toBeInTheDocument()
     expect(screen.getByText('수집 당시: AVAILABLE')).toBeInTheDocument()
@@ -223,7 +223,7 @@ describe('ObservabilityPage', () => {
     expect(screen.getByTestId('location-search')).toHaveTextContent('include_inactive=true')
     expect(observabilityApi.getInvocationSummary).toHaveBeenCalledTimes(1)
 
-    await user.click(screen.getByLabelText('종료·중지된 Deployment 포함 (과거 데이터)'))
+    await user.click(screen.getByLabelText('종료·중지된 배포 포함 (과거 데이터)'))
     await waitFor(() => {
       expect(screen.queryByRole('link', { name: 'all-MiniLM-L6-v2-managed' })).not.toBeInTheDocument()
       expect(screen.getByTestId('location-search')).toHaveTextContent(/^$/)

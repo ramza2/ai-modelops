@@ -109,9 +109,8 @@ describe('ClientDetailPage', () => {
       await screen.findByRole('heading', { level: 2, name: 'ALZI' }),
     ).toBeInTheDocument()
     expect(screen.getAllByText(/제한 없음/).length).toBeGreaterThan(0)
-    expect(screen.getAllByText(/null \(unrestricted\)/).length).toBeGreaterThan(
-      0,
-    )
+    // API null hint lives in help disclosure bodies (not primary inline labels).
+    expect(screen.queryByText(/\(null \(unrestricted\)\)/)).toBeNull()
     expect(
       screen.getByRole('button', { name: '등록 정보 수정' }),
     ).toBeInTheDocument()
@@ -212,7 +211,7 @@ describe('ClientDetailPage', () => {
     expect(
       await screen.findByText('svc-aabbccddeeff00112233445566778899'),
     ).toBeInTheDocument()
-    expect(screen.getByText(/MODELOPS_CLIENT_KEY/)).toBeInTheDocument()
+    expect(screen.getAllByText(/MODELOPS_CLIENT_KEY/).length).toBeGreaterThan(0)
     // Read-only: no editable key input on detail.
     expect(screen.queryByLabelText(/서비스 키/)).not.toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: '서비스 키 복사' }))
@@ -702,7 +701,7 @@ describe('ClientDetailPage', () => {
     renderDetail()
     await user.click(await screen.findByRole('button', { name: '정책 수정' }))
     const dialog = await screen.findByTestId('client-runtime-policy-dialog')
-    const inputField = within(dialog).getByLabelText(/입력 토큰 상한/)
+    const inputField = within(dialog).getByLabelText(/입력 토큰 제한/)
     await user.clear(inputField)
     await user.type(inputField, '0')
     await user.click(within(dialog).getByRole('button', { name: '저장 검토…' }))
@@ -733,7 +732,7 @@ describe('ClientDetailPage', () => {
     expect(within(dialog).getByTestId('policy-conflict-banner')).toBeInTheDocument()
     expect(clientsApi.putClientRuntimePolicy).not.toHaveBeenCalled()
     await user.click(within(dialog).getByTestId('policy-ack-conflict'))
-    expect(within(dialog).getByLabelText(/입력 토큰 상한/)).toHaveValue('4096')
+    expect(within(dialog).getByLabelText(/입력 토큰 제한/)).toHaveValue('4096')
     await user.click(within(dialog).getByRole('button', { name: '저장 검토…' }))
     await user.click(within(dialog).getByRole('checkbox'))
     await user.click(within(dialog).getByTestId('policy-confirm-put'))
@@ -763,7 +762,7 @@ describe('ClientDetailPage', () => {
     renderDetail()
     await user.click(await screen.findByRole('button', { name: '정책 수정' }))
     const dialog = await screen.findByTestId('client-runtime-policy-dialog')
-    const inputField = within(dialog).getByLabelText(/입력 토큰 상한/)
+    const inputField = within(dialog).getByLabelText(/입력 토큰 제한/)
     await user.clear(inputField)
     await user.type(inputField, '4096')
     await user.click(within(dialog).getByRole('button', { name: '저장 검토…' }))

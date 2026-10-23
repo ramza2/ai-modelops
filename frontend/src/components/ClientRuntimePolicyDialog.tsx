@@ -15,8 +15,8 @@ import {
   runtimePolicyBodiesEqual,
   type RuntimePolicyFormBody,
 } from '../utils/runtimePolicyForm'
-import { CLIENT_FIELD_HELP } from '../utils/uiLabels'
-import { HelpHint, TermLabel } from './HelpHint'
+import { CLIENT_FIELD_HELP, PAGE_INTRO } from '../utils/uiLabels'
+import { TermLabel } from './HelpHint'
 import { SectionError } from './SectionError'
 
 export type ClientRuntimePolicyDialogCloseOpts = {
@@ -607,20 +607,24 @@ export function ClientRuntimePolicyDialog({
     >
       <div className="modal-card">
         <h2 id="client-policy-dialog-title">{title}</h2>
-        <p className="panel-hint">
-          PUT은 전체 필드 교체(upsert)입니다. 빈 숫자 칸은 null(제한 없음)로
-          저장됩니다. Idempotency-Key는 사용하지 않습니다.
-          {creating
-            ? ' 정책 행이 없을 때 기본값(사용 안함·제한 null)을 그대로 저장하면 새 행이 생성됩니다.'
-            : null}
-        </p>
+        <p className="panel-hint">{PAGE_INTRO.runtimePolicyDialog}</p>
         <p className="panel-hint secondary-text">
-          대상: <span className="mono">{client.client_key}</span> /{' '}
-          {client.display_name}
+          대상: <strong>{client.display_name}</strong>{' '}
+          <span className="mono secondary-text">({client.client_key})</span>
           {!client.is_active
             ? ' — 등록이 비활성이면 Gateway 정책 스냅샷에 올라가지 않을 수 있습니다.'
             : null}
         </p>
+        <details className="help-glossary">
+          <summary>기술 상세</summary>
+          <p className="panel-hint">
+            PUT은 전체 필드 교체(upsert)입니다. 빈 숫자 칸은 null(제한 없음)로
+            저장됩니다. Idempotency-Key는 사용하지 않습니다.
+            {creating
+              ? ' 정책 행이 없을 때 기본값(사용 안함·제한 null)을 그대로 저장하면 새 행이 생성됩니다.'
+              : null}
+          </p>
+        </details>
 
         {submitError ? (
           <SectionError title="정책 저장 오류" message={submitError} />
@@ -711,7 +715,13 @@ export function ClientRuntimePolicyDialog({
                 <TermLabel
                   text="정책 사용 여부"
                   apiTerm="is_enabled"
-                  help={CLIENT_FIELD_HELP.policyEnabled}
+                  showApiTerm={false}
+                  help={
+                    <>
+                      {CLIENT_FIELD_HELP.policyEnabled} 새 정책 기본값은 사용
+                      안함입니다.
+                    </>
+                  }
                 />
               </span>
               <select
@@ -723,20 +733,16 @@ export function ClientRuntimePolicyDialog({
                 <option value="false">사용 안함</option>
                 <option value="true">사용</option>
               </select>
-              <span className="form-field-hint">
-                사용 안함은 AI 호출 차단이 아니라 클라이언트별 정책 제한
-                미적용입니다. 새 정책 기본값은 사용 안함입니다.
-              </span>
             </label>
 
             <label className="toolbar__field" htmlFor="policy-max-input">
               <span>
                 <TermLabel
-                  text="입력 토큰 상한"
+                  text="입력 토큰 제한"
                   apiTerm="max_input_tokens"
+                  showApiTerm={false}
                   help={CLIENT_FIELD_HELP.maxInputTokens}
-                />{' '}
-                <span className="form-field-hint">선택 · 양의 정수</span>
+                />
               </span>
               <input
                 id="policy-max-input"
@@ -749,13 +755,9 @@ export function ClientRuntimePolicyDialog({
                   saveGate === 'matched'
                 }
                 onChange={(e) => setMaxInput(e.target.value)}
-                placeholder="비우면 null (제한 없음)"
+                placeholder="비우면 제한 없음 (null)"
                 aria-invalid={Boolean(fieldErrors.max_input_tokens)}
               />
-              <HelpHint label="입력 토큰">
-                한 번의 Chat 요청에서 사용할 수 있는 프롬프트 크기 상한입니다.
-                VLM 등 토큰 계산을 지원하지 못하는 요청은 거부될 수 있습니다.
-              </HelpHint>
               {fieldErrors.max_input_tokens ? (
                 <span className="form-field-error">
                   {fieldErrors.max_input_tokens}
@@ -766,11 +768,11 @@ export function ClientRuntimePolicyDialog({
             <label className="toolbar__field" htmlFor="policy-max-output">
               <span>
                 <TermLabel
-                  text="출력 토큰 상한"
+                  text="출력 토큰 제한"
                   apiTerm="max_output_tokens"
+                  showApiTerm={false}
                   help={CLIENT_FIELD_HELP.maxOutputTokens}
-                />{' '}
-                <span className="form-field-hint">선택 · 양의 정수</span>
+                />
               </span>
               <input
                 id="policy-max-output"
@@ -783,7 +785,7 @@ export function ClientRuntimePolicyDialog({
                   saveGate === 'matched'
                 }
                 onChange={(e) => setMaxOutput(e.target.value)}
-                placeholder="비우면 null (제한 없음)"
+                placeholder="비우면 제한 없음 (null)"
                 aria-invalid={Boolean(fieldErrors.max_output_tokens)}
               />
               {fieldErrors.max_output_tokens ? (
@@ -796,11 +798,11 @@ export function ClientRuntimePolicyDialog({
             <label className="toolbar__field" htmlFor="policy-max-concurrent">
               <span>
                 <TermLabel
-                  text="동시 요청 상한"
+                  text="동시 요청 제한"
                   apiTerm="max_concurrent_requests"
+                  showApiTerm={false}
                   help={CLIENT_FIELD_HELP.maxConcurrentRequests}
-                />{' '}
-                <span className="form-field-hint">선택 · 양의 정수</span>
+                />
               </span>
               <input
                 id="policy-max-concurrent"
@@ -813,12 +815,9 @@ export function ClientRuntimePolicyDialog({
                   saveGate === 'matched'
                 }
                 onChange={(e) => setMaxConcurrent(e.target.value)}
-                placeholder="비우면 null (제한 없음)"
+                placeholder="비우면 제한 없음 (null)"
                 aria-invalid={Boolean(fieldErrors.max_concurrent_requests)}
               />
-              <span className="form-field-hint">
-                Gateway 프로세스별 제한입니다. 분산 세마포어가 아닙니다.
-              </span>
               {fieldErrors.max_concurrent_requests ? (
                 <span className="form-field-error">
                   {fieldErrors.max_concurrent_requests}
@@ -831,9 +830,9 @@ export function ClientRuntimePolicyDialog({
                 <TermLabel
                   text="요청 우선순위"
                   apiTerm="priority"
+                  showApiTerm={false}
                   help={CLIENT_FIELD_HELP.priority}
-                />{' '}
-                <span className="form-field-hint">선택 · 정수(0 허용)</span>
+                />
               </span>
               <input
                 id="policy-priority"
@@ -846,13 +845,9 @@ export function ClientRuntimePolicyDialog({
                   saveGate === 'matched'
                 }
                 onChange={(e) => setPriority(e.target.value)}
-                placeholder="비우면 null (미설정)"
+                placeholder="비우면 미설정 (null), 0 허용"
                 aria-invalid={Boolean(fieldErrors.priority)}
               />
-              <span className="form-field-hint">
-                null=미설정, 0=중립값(null과 다름), 비0=신뢰된 priority
-                scheduler가 없으면 요청이 거부될 수 있습니다.
-              </span>
               {fieldErrors.priority ? (
                 <span className="form-field-error">{fieldErrors.priority}</span>
               ) : null}

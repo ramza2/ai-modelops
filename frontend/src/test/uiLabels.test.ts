@@ -6,6 +6,8 @@ import {
   FIT_RESULT_HELP,
   MODEL_TYPE_HELP,
   NAV_ITEMS,
+  OBSERVABILITY_FIELD_HELP,
+  PAGE_INTRO,
   RUNTIME_FIELD_HELP,
   WIZARD_FIELD_HELP,
   WIZARD_STEP_LABELS,
@@ -77,6 +79,18 @@ describe('uiLabels (P1-13)', () => {
     expect(CLIENT_FIELD_HELP.priority).toMatch(/null=미설정/)
     expect(CLIENT_FIELD_HELP.deactivateImpact).toMatch(/직접 차단하지 않습니다/)
     expect(CLIENT_FIELD_HELP.deactivateImpact).toMatch(/토큰·동시 요청 제한/)
+  })
+})
+
+describe('uiLabels (P1-26A page intros)', () => {
+  it('keeps short beginner intros and P95 non-max wording', () => {
+    expect(PAGE_INTRO.dashboard).toMatch(/한눈에/)
+    expect(PAGE_INTRO.observability).toMatch(/저장된 데이터/)
+    expect(PAGE_INTRO.clients).toMatch(/업무 서비스/)
+    expect(PAGE_INTRO.runtimePolicyDialog).toMatch(/비워두면/)
+    expect(OBSERVABILITY_FIELD_HELP.latency).toMatch(/최대값/)
+    expect(OBSERVABILITY_FIELD_HELP.lastCalledAt).toMatch(/조회 기간/)
+    expect(OBSERVABILITY_FIELD_HELP.usageStatus).toMatch(/집계 확인 불가/)
   })
 })
 

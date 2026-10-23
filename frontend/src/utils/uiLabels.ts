@@ -16,7 +16,7 @@ export const NAV_ITEMS: NavItem[] = [
   {
     to: '/dashboard',
     label: '대시보드',
-    description: '전체 운영 현황을 한눈에 봅니다',
+    description: 'AI 모델과 서버의 전체 운영 상태를 한눈에 확인합니다',
     end: true,
   },
   {
@@ -47,14 +47,27 @@ export const NAV_ITEMS: NavItem[] = [
   {
     to: '/observability',
     label: '운영 모니터링',
-    description: '호출량·런타임 지표를 조회합니다',
+    description: 'AI 요청량과 모델 실행 상태를 확인합니다',
   },
   {
     to: '/clients',
     label: 'AI 사용 시스템',
-    description: '모델을 쓰는 업무 서비스 등록·수정과 제한 정책을 봅니다',
+    description: '업무 서비스 등록과 호출 현황·사용 제한을 관리합니다',
   },
 ]
+
+/** P1-26A — short page intros (1–2 sentences). Fold details in the page body. */
+export const PAGE_INTRO = {
+  dashboard: 'AI 모델과 서버의 전체 운영 상태를 한눈에 확인합니다.',
+  observability:
+    'AI 요청량과 모델 실행 상태를 확인합니다. 표시된 통계는 저장된 데이터 기준입니다.',
+  clients:
+    'AI 모델을 이용하는 업무 서비스를 등록하고, 각 서비스의 호출 현황과 사용 제한을 관리합니다.',
+  clientDetail:
+    '등록 정보, 최근 호출 현황, 런타임 제한을 확인·관리합니다. 직원 계정이 아닌 업무 서비스입니다.',
+  runtimePolicyDialog:
+    '이 시스템에 적용할 AI 요청 제한을 설정합니다. 값을 비워두면 해당 항목은 제한하지 않습니다.',
+} as const
 
 /** Common status display: Korean first, API code kept for operators. */
 export function formatStatusDisplay(code: string | null | undefined): {
@@ -371,21 +384,25 @@ export const OBSERVABILITY_FIELD_HELP = {
   overview:
     '운영 모니터링은 DB에 저장된 집계·스냅샷을 보여 줍니다. 실시간 scrape/측정 화면이 아니며, 최근 샘플 시각과 화면 새로고침 시각을 구분하세요.',
   invocations:
-    'AI 요청 사용 현황(Invocation Summary)은 선택한 구간의 Gateway 호출 집계입니다. Token coverage는 토큰이 기록된 행의 비율이며 전체 요청이 모두 토큰화되었다고 보지 마세요.',
+    'AI 요청 사용 현황은 선택한 구간의 Gateway 호출 집계입니다(API: Invocation Summary). 토큰 정보 수집률(Token coverage)은 토큰이 기록된 행의 비율이며, 전체 요청이 모두 토큰화되었다고 보지 마세요.',
   tokens:
-    '입력/출력 토큰 percentile·평균은 토큰이 있는 행만 사용합니다. 누적 카운터와 구간별 사용량을 혼동하지 마세요.',
+    '입력/출력 토큰 백분위·평균은 토큰이 있는 행만 사용합니다. 누적 카운터와 구간별 사용량을 혼동하지 마세요.',
   latency:
-    'Latency p95 등은 응답시간 분포 요약입니다. Runtime analytics의 P50/P95는 classic histogram bucket 추정값이며 exact request percentile이 아닙니다.',
+    '응답시간 상위 5% 기준(P95)은 응답시간 분포 요약입니다(최대값·최악 1건이 아님). Runtime analytics의 P50/P95는 classic histogram bucket 추정값이며 exact request percentile이 아닙니다.',
   runtimeLatest:
-    '최근 모델 실행 상태(Runtime Latest)는 저장된 마지막 metric snapshot입니다. 샘플 시각이 2분을 넘으면 STALE로 표시합니다(실시간 Health와 다름).',
+    '최근 모델 실행 상태는 저장된 마지막 metric snapshot입니다(API: Runtime Latest). 샘플 시각이 2분을 넘으면 STALE로 표시합니다(실시간 Health와 다름).',
   capacity:
     '모델 자원 사용 정보(Capacity Profile)는 요청 설정과 관측값·analytics를 비교합니다. 런타임 기본값을 합성하지 않으며 GPU VRAM은 GPU별로만 봅니다.',
   runningWaiting:
-    '처리 중(Running)·대기 중(Waiting)은 런타임 스케줄러 게이지입니다. 요청 성공률이나 Deployment HEALTHY와 같은 의미가 아닙니다.',
+    '처리 중·대기 중은 런타임 스케줄러 게이지입니다(API: Running/Waiting). 요청 성공률이나 Deployment HEALTHY와 같은 의미가 아닙니다.',
   missingVsZero:
     '측정값 없음(—/null)과 실제 0은 다릅니다. 없는 값을 0으로 채우지 않습니다.',
   gpuVram:
     'GPU별 VRAM을 여러 장의 합산 자원처럼 해석하지 마세요. 카드마다 독립적으로 봅니다.',
+  lastCalledAt:
+    '마지막 호출 시각은 선택한 조회 기간 안의 최신 호출 시각입니다. 전체 기간의 마지막 호출이 아닙니다.',
+  usageStatus:
+    '최근 호출 확인=기간 내 호출 있음, 호출 없음=기간 내 기록 없음(연동 장애·키 미설정을 단정하지 않음), 집계 확인 불가=집계 API 실패.',
 } as const
 
 /** P1-17 — Model / Model Version detail beginner help (display-only). */
@@ -507,13 +524,13 @@ export const DASHBOARD_FIELD_HELP = {
   healthVsReady:
     'Health는 Management API 프로세스 생존(응답 가능)이고, Ready는 의존성(DB 등)까지 준비되어 요청을 받을 수 있는 상태입니다. Health 정상 ≠ Ready 준비됨.',
   deploymentStates:
-    '활성 모델 배포(Active)=퇴역하지 않은 Deployment 수, 실행 중(Running)=runtime_status=RUNNING, 정상(Healthy)=health_status=HEALTHY입니다. 모델 레지스트리 등록과 다릅니다.',
+    '활성 모델 배포=퇴역하지 않은 Deployment 수, 실행 중=runtime_status=RUNNING, 정상=health_status=HEALTHY입니다. 모델 레지스트리 등록과 다릅니다.',
   endpointTraffic:
     '사용 설정(Enabled)은 Alias가 켜져 있는지이고, SERVING은 요청 처리 상태입니다. Enabled여도 Traffic이 DRAINING/MAINTENANCE이면 신규 요청이 차단될 수 있습니다.',
   invocations:
-    '최근 24시간 요청·오류·성공률은 Gateway Invocation 집계입니다. 요청 성공률 ≠ Runtime HEALTHY입니다. Token coverage는 토큰이 기록된 요청 비율입니다.',
+    '최근 24시간 요청·오류·성공률은 Gateway 호출 집계입니다. 요청 성공률 ≠ Runtime HEALTHY입니다. 토큰 정보 수집률은 토큰이 기록된 요청 비율입니다.',
   p95:
-    'P95 Latency·입력 토큰은 Deployment 단위 95백분위입니다(전역 P95가 아님). 상위 표는 요청 수 기준 상위 Deployment입니다.',
+    '응답시간·입력 토큰의 상위 5% 기준(P95)은 Deployment 단위 분포 요약입니다(전역 P95·최대값이 아님). 상위 표는 요청 수 기준 상위 Deployment입니다.',
   missingCounts:
     '0=실제로 해당 건수가 없음, 미수집=값을 받지 못함(null), 확인 불가=해당 구역 API 오류입니다.',
 } as const

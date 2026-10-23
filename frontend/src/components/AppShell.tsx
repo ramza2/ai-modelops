@@ -5,7 +5,8 @@ import { NAV_ITEMS } from '../utils/uiLabels'
 
 type AppShellProps = {
   title: string
-  description: string
+  /** Short page purpose (1–2 sentences). Prefer Korean; fold details in page body. */
+  description: ReactNode
   children: ReactNode
   onRefresh: () => void
   refreshing: boolean
