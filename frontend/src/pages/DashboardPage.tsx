@@ -12,7 +12,7 @@ import { StatCard } from '../components/StatCard'
 import { StatusBadge } from '../components/StatusBadge'
 import { formatApiDateTime, operationElapsed, shortId } from '../utils/date'
 import { formatInt, formatMs, formatPercent } from '../utils/number'
-import { DASHBOARD_FIELD_HELP } from '../utils/uiLabels'
+import { DASHBOARD_FIELD_HELP, PAGE_INTRO } from '../utils/uiLabels'
 
 const REFRESH_MS = 15_000
 
@@ -137,21 +137,21 @@ export function DashboardPage() {
   return (
     <AppShell
       title="대시보드"
-      description="관리 시스템·모델 배포·API 연결·작업·최근 24시간 호출 현황을 한눈에 확인합니다. (읽기 전용)"
+      description={PAGE_INTRO.dashboard}
       onRefresh={refresh}
       refreshing={refreshing || loading}
       lastUpdated={data?.fetchedAt ?? null}
     >
-      <p className="panel-hint" role="note">
-        {DASHBOARD_FIELD_HELP.overview}
-      </p>
       <details className="help-glossary">
-        <summary>용어 및 상태 안내</summary>
+        <summary>자세히 알아보기</summary>
+        <p className="panel-hint" role="note">
+          {DASHBOARD_FIELD_HELP.overview}
+        </p>
         <div className="help-glossary__items">
-          <HelpHint showTopic label="Health vs Ready">
+          <HelpHint showTopic label="Health와 Ready">
             {DASHBOARD_FIELD_HELP.healthVsReady}
           </HelpHint>
-          <HelpHint showTopic label="배포·실행·Healthy">
+          <HelpHint showTopic label="배포·실행·정상">
             {DASHBOARD_FIELD_HELP.deploymentStates}
           </HelpHint>
           <HelpHint showTopic label="API 연결·Traffic">
@@ -160,7 +160,7 @@ export function DashboardPage() {
           <HelpHint showTopic label="24시간 호출 집계">
             {DASHBOARD_FIELD_HELP.invocations}
           </HelpHint>
-          <HelpHint showTopic label="P95">
+          <HelpHint showTopic label="상위 5% 기준(P95)">
             {DASHBOARD_FIELD_HELP.p95}
           </HelpHint>
           <HelpHint showTopic label="0 / 미수집 / 확인 불가">
@@ -187,11 +187,11 @@ export function DashboardPage() {
 
       <section className="panel" aria-labelledby="cp-heading">
         <div className="panel__head">
-          <h2 id="cp-heading">관리 시스템 상태 (Control Plane)</h2>
+          <h2 id="cp-heading">관리 시스템 상태</h2>
         </div>
         <p className="panel__intro">
-          Health는 프로세스 생존, Ready는 의존성 준비입니다. 자세한 차이는 「용어
-          및 상태 안내」를 보세요.
+          Health는 프로세스 생존, Ready는 의존성 준비입니다. 자세한 차이는
+          「자세히 알아보기」를 보세요.
         </p>
         {loading && !data ? (
           <LoadingBlock rows={2} />
@@ -325,8 +325,8 @@ export function DashboardPage() {
           <h2 id="inv-heading">최근 24시간 호출</h2>
         </div>
         <p className="panel__intro">
-          최근 24시간 Gateway 집계입니다(현재 실행 상태와 별개). 요청 성공률 ≠
-          Runtime HEALTHY. P95는 Deployment 단위입니다.
+          최근 24시간 Gateway 호출 집계입니다. 요청 성공률은 모델 실행
+          정상(HEALTHY)과 다릅니다. 상위 5% 기준(P95)은 배포 단위입니다.
         </p>
         {loading && !data ? (
           <LoadingBlock />
@@ -336,22 +336,22 @@ export function DashboardPage() {
           <>
             <div className="stat-grid">
               <StatCard
-                label="최근 24시간 요청 (24h Requests)"
+                label="최근 24시간 요청"
                 value={formatInt(inv.requestCount)}
                 unit="건"
               />
               <StatCard
-                label="최근 24시간 오류 (24h Errors)"
+                label="최근 24시간 오류"
                 value={formatInt(inv.errorCount)}
                 unit="건"
               />
               <StatCard
-                label="요청 성공률 (24h Success Rate)"
+                label="요청 성공률"
                 value={rateDisplay(inv.successRate, null)}
                 help={DASHBOARD_FIELD_HELP.invocations}
               />
               <StatCard
-                label="토큰 집계 포함률 (Token Coverage)"
+                label="토큰 정보 수집률"
                 value={rateDisplay(inv.tokenCoverage, null)}
                 help={DASHBOARD_FIELD_HELP.invocations}
               />
@@ -362,16 +362,16 @@ export function DashboardPage() {
               <div className="table-wrap">
                 <table>
                   <caption className="sr-only">
-                    Deployment별 호출 상위 5건 (요청 수 기준). P95는
-                    Deployment 단위이며 전역 P95가 아닙니다.
+                    모델 배포별 호출 상위 5건(요청 수 기준). 상위 5% 기준(P95)은
+                    배포 단위이며 전역·최대값이 아닙니다.
                   </caption>
                   <thead>
                     <tr>
-                      <th scope="col">모델 배포 (Deployment)</th>
-                      <th scope="col">요청 건수 (Requests)</th>
-                      <th scope="col">오류 (Errors)</th>
-                      <th scope="col">응답시간 95백분위 (P95 Latency)</th>
-                      <th scope="col">입력 토큰 95백분위 (P95 Input Tokens)</th>
+                      <th scope="col">모델 배포</th>
+                      <th scope="col">요청 건수</th>
+                      <th scope="col">오류</th>
+                      <th scope="col">응답시간 상위 5% 기준(P95)</th>
+                      <th scope="col">입력 토큰 상위 5% 기준(P95)</th>
                     </tr>
                   </thead>
                   <tbody>

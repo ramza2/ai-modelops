@@ -122,7 +122,7 @@ describe('DashboardPage', () => {
     })
     expect(screen.getByText('온라인 서버 (ONLINE Node)')).toBeInTheDocument()
     expect(
-      screen.getByText('최근 24시간 요청 (24h Requests)'),
+      screen.getByText('최근 24시간 요청'),
     ).toBeInTheDocument()
     expect(screen.getByText('15')).toBeInTheDocument()
     expect(
@@ -216,9 +216,7 @@ describe('DashboardPage', () => {
     })
     expect(screen.getByText('온라인 서버 (ONLINE Node)')).toBeInTheDocument()
     expect(screen.getByText('summary unavailable')).toBeInTheDocument()
-    expect(
-      screen.queryByText('최근 24시간 요청 (24h Requests)'),
-    ).not.toBeInTheDocument()
+    expect(screen.queryByText('최근 24시간 요청')).not.toBeInTheDocument()
   })
 
   it('does not synthesize a global p95 label', async () => {
@@ -230,7 +228,7 @@ describe('DashboardPage', () => {
     expect(screen.queryByText(/global p95/i)).not.toBeInTheDocument()
     expect(screen.getByText('120 ms')).toBeInTheDocument()
     expect(
-      screen.getByText('응답시간 95백분위 (P95 Latency)'),
+      screen.getByText('응답시간 상위 5% 기준(P95)'),
     ).toBeInTheDocument()
   })
 

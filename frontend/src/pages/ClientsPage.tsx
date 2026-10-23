@@ -18,7 +18,12 @@ import {
 } from '../utils/clientUsage'
 import { formatApiDateTime } from '../utils/date'
 import { parsePositivePage } from '../utils/query'
-import { CLIENT_FIELD_HELP, userFacingLoadError } from '../utils/uiLabels'
+import {
+  CLIENT_FIELD_HELP,
+  OBSERVABILITY_FIELD_HELP,
+  PAGE_INTRO,
+  userFacingLoadError,
+} from '../utils/uiLabels'
 
 const PAGE_SIZE = 20
 
@@ -225,22 +230,31 @@ export function ClientsPage() {
   return (
     <AppShell
       title="AI 사용 시스템"
-      description="여기의 ‘사용 시스템’은 직원 계정이 아니라, AI 모델을 호출하는 업무 서비스입니다. 등록·수정·등록 상태 변경이 가능합니다."
+      description={PAGE_INTRO.clients}
       onRefresh={() => void load('refresh')}
       refreshing={refreshing}
       lastUpdated={lastUpdated}
     >
-      <p className="panel-hint" role="note">
-        {CLIENT_FIELD_HELP.registryEditable} {CLIENT_FIELD_HELP.policyEditable}{' '}
-        비활성(INACTIVE)은 Gateway 추론을 직접 막는 스위치가 아닙니다. 자세한
-        의미는 「등록 상태」 도움말을 보세요.
-      </p>
-      <p className="panel-hint secondary-text" role="note">
-        최근 {CLIENT_USAGE_HOURS}시간 AI 호출 현황은 Invocation Summary
-        집계를 재사용합니다. 호출 없음은 서비스 키 미설정이나 연동 장애를
-        단정하지 않습니다. 마지막 호출 시각은 선택한 조회 기간 안의 최신
-        시각입니다.
-      </p>
+      <details className="help-glossary">
+        <summary>자세히 알아보기</summary>
+        <p className="panel-hint" role="note">
+          {CLIENT_FIELD_HELP.registryEditable} {CLIENT_FIELD_HELP.policyEditable}{' '}
+          비활성(INACTIVE)은 Gateway 추론을 직접 막는 스위치가 아닙니다.
+        </p>
+        <div className="help-glossary__items">
+          <HelpHint showTopic label="등록 상태">
+            {CLIENT_FIELD_HELP.isActive}
+          </HelpHint>
+          <HelpHint showTopic label="최근 호출 현황">
+            최근 {CLIENT_USAGE_HOURS}시간 호출 집계를 재사용합니다.{' '}
+            {OBSERVABILITY_FIELD_HELP.lastCalledAt}{' '}
+            {OBSERVABILITY_FIELD_HELP.usageStatus}
+          </HelpHint>
+          <HelpHint showTopic label="서비스 키">
+            {CLIENT_FIELD_HELP.clientKey}
+          </HelpHint>
+        </div>
+      </details>
 
       <div className="toolbar toolbar--wrap">
         <div className="toolbar__actions">
@@ -321,12 +335,18 @@ export function ClientsPage() {
               <thead>
                 <tr>
                   <th scope="col">
-                    <TermLabel text="표시 이름" apiTerm="display_name" />
+                    <TermLabel
+                      text="표시 이름"
+                      apiTerm="display_name"
+                      showApiTerm={false}
+                      help={CLIENT_FIELD_HELP.displayName}
+                    />
                   </th>
                   <th scope="col">
                     <TermLabel
                       text="서비스 키"
                       apiTerm="client_key"
+                      showApiTerm={false}
                       help={CLIENT_FIELD_HELP.clientKey}
                     />
                   </th>
@@ -334,6 +354,7 @@ export function ClientsPage() {
                     <TermLabel
                       text="등록 상태"
                       apiTerm="is_active"
+                      showApiTerm={false}
                       help={CLIENT_FIELD_HELP.isActive}
                     />
                   </th>
@@ -341,27 +362,47 @@ export function ClientsPage() {
                     <TermLabel
                       text={`최근 ${CLIENT_USAGE_HOURS}시간 요청`}
                       apiTerm="request_count"
+                      showApiTerm={false}
+                      help="선택한 조회 기간의 Gateway 요청 건수입니다."
                     />
                   </th>
                   <th scope="col">
-                    <TermLabel text="성공" apiTerm="success_count" />
+                    <TermLabel
+                      text="성공"
+                      apiTerm="success_count"
+                      showApiTerm={false}
+                      help="HTTP 2xx–3xx로 분류된 성공 건수입니다."
+                    />
                   </th>
                   <th scope="col">
-                    <TermLabel text="오류" apiTerm="error_count" />
+                    <TermLabel
+                      text="오류"
+                      apiTerm="error_count"
+                      showApiTerm={false}
+                      help="HTTP 2xx–3xx가 아닌 오류 건수입니다."
+                    />
                   </th>
                   <th scope="col">
                     <TermLabel
                       text={`마지막 호출(${CLIENT_USAGE_HOURS}시간 내)`}
                       apiTerm="last_called_at"
+                      showApiTerm={false}
+                      help={OBSERVABILITY_FIELD_HELP.lastCalledAt}
                     />
                   </th>
                   <th scope="col">
-                    <TermLabel text="최근 호출 상태" apiTerm="usage_status" />
+                    <TermLabel
+                      text="최근 호출 상태"
+                      apiTerm="usage_status"
+                      showApiTerm={false}
+                      help={OBSERVABILITY_FIELD_HELP.usageStatus}
+                    />
                   </th>
                   <th scope="col">
                     <TermLabel
                       text="수정 시각"
                       apiTerm="updated_at"
+                      showApiTerm={false}
                       help={CLIENT_FIELD_HELP.updatedAt}
                     />
                   </th>

@@ -35,6 +35,8 @@ import {
 } from '../utils/idempotencyKey'
 import {
   CLIENT_FIELD_HELP,
+  OBSERVABILITY_FIELD_HELP,
+  PAGE_INTRO,
   formatNullableLimit,
   formatPriorityDisplay,
   userFacingLoadError,
@@ -378,7 +380,7 @@ export function ClientDetailPage() {
   return (
     <AppShell
       title={displayClient ? displayClient.display_name : '사용 시스템 상세'}
-      description="직원 계정이 아니라 AI 모델을 호출하는 업무 서비스의 등록 정보와 런타임 제한을 관리합니다."
+      description={PAGE_INTRO.clientDetail}
       onRefresh={() => void load('refresh')}
       refreshing={refreshing}
       lastUpdated={lastUpdated}
@@ -387,9 +389,24 @@ export function ClientDetailPage() {
         ← AI 사용 시스템 목록
       </Link>
 
-      <p className="panel-hint" role="note">
-        {CLIENT_FIELD_HELP.registryEditable} {CLIENT_FIELD_HELP.policyEditable}
-      </p>
+      <details className="help-glossary">
+        <summary>자세히 알아보기</summary>
+        <p className="panel-hint" role="note">
+          {CLIENT_FIELD_HELP.registryEditable} {CLIENT_FIELD_HELP.policyEditable}
+        </p>
+        <div className="help-glossary__items">
+          <HelpHint showTopic label="등록 상태">
+            {CLIENT_FIELD_HELP.isActive}
+          </HelpHint>
+          <HelpHint showTopic label="서비스 키">
+            {CLIENT_FIELD_HELP.clientKey} {CLIENT_FIELD_HELP.clientKeyIntegration}
+          </HelpHint>
+          <HelpHint showTopic label="AI 사용 현황">
+            {OBSERVABILITY_FIELD_HELP.lastCalledAt}{' '}
+            {OBSERVABILITY_FIELD_HELP.usageStatus}
+          </HelpHint>
+        </div>
+      </details>
 
       {clientErr ? (
         <SectionError
@@ -416,8 +433,8 @@ export function ClientDetailPage() {
             <ActiveBadge active={displayClient.is_active} />
           </div>
           <p className="panel-hint">
-            등록 상태(ACTIVE/INACTIVE)는 레지스트리 플래그입니다. 실제 Gateway
-            호출 가능 여부는 Endpoint Alias·배포·정책에 따라 달라집니다.
+            등록 상태는 관리 목록 플래그입니다. 실제 호출 가능 여부는 API
+            별칭·배포·트래픽 상태에 따릅니다.
           </p>
           <dl className="meta-grid">
             <div>
@@ -425,15 +442,18 @@ export function ClientDetailPage() {
                 <TermLabel
                   text="서비스 키"
                   apiTerm="client_key"
-                  help={CLIENT_FIELD_HELP.clientKey}
+                  showApiTerm={false}
+                  help={
+                    <>
+                      {CLIENT_FIELD_HELP.clientKey}{' '}
+                      {CLIENT_FIELD_HELP.clientKeyIntegration}
+                    </>
+                  }
                 />
               </dt>
               <dd>
                 <span className="mono">{displayClient.client_key}</span>
                 <ClientKeyCopyActions clientKey={displayClient.client_key} />
-                <p className="form-field-hint">
-                  {CLIENT_FIELD_HELP.clientKeyIntegration}
-                </p>
               </dd>
             </div>
             <div>
@@ -441,6 +461,7 @@ export function ClientDetailPage() {
                 <TermLabel
                   text="설명"
                   apiTerm="description"
+                  showApiTerm={false}
                   help={CLIENT_FIELD_HELP.description}
                 />
               </dt>
@@ -451,6 +472,7 @@ export function ClientDetailPage() {
                 <TermLabel
                   text="등록 시각"
                   apiTerm="created_at"
+                  showApiTerm={false}
                   help={CLIENT_FIELD_HELP.createdAt}
                 />
               </dt>
@@ -461,6 +483,7 @@ export function ClientDetailPage() {
                 <TermLabel
                   text="수정 시각"
                   apiTerm="updated_at"
+                  showApiTerm={false}
                   help={CLIENT_FIELD_HELP.updatedAt}
                 />
               </dt>
@@ -518,12 +541,15 @@ export function ClientDetailPage() {
         >
           <div className="detail-panel__heading">
             <h2 id="client-usage-heading">AI 사용 현황</h2>
-            <span className="term-label__api">(Invocation Summary)</span>
+            <HelpHint label="AI 사용 현황">
+              최근 {CLIENT_USAGE_HOURS}시간 호출 집계(읽기 전용)입니다. 런타임
+              정책과 별개입니다. {OBSERVABILITY_FIELD_HELP.lastCalledAt}{' '}
+              {OBSERVABILITY_FIELD_HELP.usageStatus}
+            </HelpHint>
           </div>
           <p className="panel-hint">
-            최근 {CLIENT_USAGE_HOURS}시간 Invocation 집계(읽기 전용)입니다.
-            런타임 정책과 별개이며, 마지막 호출 시각은 조회 기간 안의 최신
-            시각입니다. 호출 없음은 연동 장애를 단정하지 않습니다.
+            최근 {CLIENT_USAGE_HOURS}시간 요청·성공·오류입니다. 호출 없음과
+            집계 실패는 다릅니다.
           </p>
           {usageFailed && usageError ? (
             <SectionError
@@ -551,6 +577,7 @@ export function ClientDetailPage() {
                           <TermLabel
                             text={`최근 ${CLIENT_USAGE_HOURS}시간 요청`}
                             apiTerm="request_count"
+                            showApiTerm={false}
                           />
                         </dt>
                         <dd>
@@ -561,7 +588,11 @@ export function ClientDetailPage() {
                       </div>
                       <div>
                         <dt>
-                          <TermLabel text="성공" apiTerm="success_count" />
+                          <TermLabel
+                            text="성공"
+                            apiTerm="success_count"
+                            showApiTerm={false}
+                          />
                         </dt>
                         <dd>
                           {usage.successCount === null
@@ -571,7 +602,11 @@ export function ClientDetailPage() {
                       </div>
                       <div>
                         <dt>
-                          <TermLabel text="오류" apiTerm="error_count" />
+                          <TermLabel
+                            text="오류"
+                            apiTerm="error_count"
+                            showApiTerm={false}
+                          />
                         </dt>
                         <dd>
                           {usage.errorCount === null
@@ -581,7 +616,12 @@ export function ClientDetailPage() {
                       </div>
                       <div>
                         <dt>
-                          <TermLabel text="오류율" apiTerm="error_rate" />
+                          <TermLabel
+                            text="오류율"
+                            apiTerm="error_rate"
+                            showApiTerm={false}
+                            help="오류 건수 ÷ 요청 건수 × 100입니다. 요청이 0건이면 — 로 표시합니다."
+                          />
                         </dt>
                         <dd>
                           {formatErrorRatePercent(usage.errorRatePercent)}
@@ -592,6 +632,8 @@ export function ClientDetailPage() {
                           <TermLabel
                             text="마지막 호출 시각(조회 기간 내)"
                             apiTerm="last_called_at"
+                            showApiTerm={false}
+                            help={OBSERVABILITY_FIELD_HELP.lastCalledAt}
                           />
                         </dt>
                         <dd>
@@ -605,6 +647,8 @@ export function ClientDetailPage() {
                           <TermLabel
                             text="최근 호출 상태"
                             apiTerm="usage_status"
+                            showApiTerm={false}
+                            help={OBSERVABILITY_FIELD_HELP.usageStatus}
                           />
                         </dt>
                         <dd data-testid="client-usage-status">
@@ -634,14 +678,14 @@ export function ClientDetailPage() {
       >
         <div className="detail-panel__heading">
           <h2 id="client-policy-heading">런타임 정책</h2>
-          <span className="term-label__api">(Runtime Policy)</span>
           <HelpHint label="런타임 정책">
-            {CLIENT_FIELD_HELP.runtimePolicy}
+            {CLIENT_FIELD_HELP.runtimePolicy} {CLIENT_FIELD_HELP.policyEditable}{' '}
+            {CLIENT_FIELD_HELP.policySaveImpact}
           </HelpHint>
         </div>
-        <p className="panel-hint">{CLIENT_FIELD_HELP.runtimePolicy}</p>
-        <p className="panel-hint secondary-text">
-          {CLIENT_FIELD_HELP.policyEditable} {CLIENT_FIELD_HELP.policySaveImpact}
+        <p className="panel-hint">
+          이 시스템에 적용할 AI 요청 제한입니다. 값이 비어 있으면 해당 항목은
+          제한하지 않습니다.
         </p>
         {policyErr ? (
           <SectionError
@@ -678,8 +722,9 @@ export function ClientDetailPage() {
             <div>
               <dt>
                 <TermLabel
-                  text="정책 사용"
+                  text="정책 사용 여부"
                   apiTerm="is_enabled"
+                  showApiTerm={false}
                   help={CLIENT_FIELD_HELP.policyEnabled}
                 />
               </dt>
@@ -693,77 +738,78 @@ export function ClientDetailPage() {
             <div>
               <dt>
                 <TermLabel
-                  text="입력 토큰 상한"
+                  text="입력 토큰 제한"
                   apiTerm="max_input_tokens"
-                  help={CLIENT_FIELD_HELP.maxInputTokens}
+                  showApiTerm={false}
+                  help={
+                    <>
+                      {CLIENT_FIELD_HELP.maxInputTokens} API 원본:{' '}
+                      {formatNullableLimit(policy.max_input_tokens).apiHint}
+                    </>
+                  }
                 />
               </dt>
-              <dd>
-                {formatNullableLimit(policy.max_input_tokens).display}
-                <span className="term-label__api">
-                  {' '}
-                  ({formatNullableLimit(policy.max_input_tokens).apiHint})
-                </span>
-              </dd>
+              <dd>{formatNullableLimit(policy.max_input_tokens).display}</dd>
             </div>
             <div>
               <dt>
                 <TermLabel
-                  text="출력 토큰 상한"
+                  text="출력 토큰 제한"
                   apiTerm="max_output_tokens"
-                  help={CLIENT_FIELD_HELP.maxOutputTokens}
+                  showApiTerm={false}
+                  help={
+                    <>
+                      {CLIENT_FIELD_HELP.maxOutputTokens} API 원본:{' '}
+                      {formatNullableLimit(policy.max_output_tokens).apiHint}
+                    </>
+                  }
                 />
               </dt>
-              <dd>
-                {formatNullableLimit(policy.max_output_tokens).display}
-                <span className="term-label__api">
-                  {' '}
-                  ({formatNullableLimit(policy.max_output_tokens).apiHint})
-                </span>
-              </dd>
+              <dd>{formatNullableLimit(policy.max_output_tokens).display}</dd>
             </div>
             <div>
               <dt>
                 <TermLabel
-                  text="동시 요청 상한"
+                  text="동시 요청 제한"
                   apiTerm="max_concurrent_requests"
-                  help={CLIENT_FIELD_HELP.maxConcurrentRequests}
+                  showApiTerm={false}
+                  help={
+                    <>
+                      {CLIENT_FIELD_HELP.maxConcurrentRequests} API 원본:{' '}
+                      {
+                        formatNullableLimit(policy.max_concurrent_requests)
+                          .apiHint
+                      }
+                    </>
+                  }
                 />
               </dt>
               <dd>
                 {formatNullableLimit(policy.max_concurrent_requests).display}
-                <span className="term-label__api">
-                  {' '}
-                  (
-                  {
-                    formatNullableLimit(policy.max_concurrent_requests)
-                      .apiHint
-                  }
-                  )
-                </span>
               </dd>
             </div>
             <div>
               <dt>
                 <TermLabel
-                  text="우선순위"
+                  text="요청 우선순위"
                   apiTerm="priority"
-                  help={CLIENT_FIELD_HELP.priority}
+                  showApiTerm={false}
+                  help={
+                    <>
+                      {CLIENT_FIELD_HELP.priority} API 원본:{' '}
+                      {formatPriorityDisplay(policy.priority).apiHint}
+                    </>
+                  }
                 />
               </dt>
-              <dd>
-                {formatPriorityDisplay(policy.priority).display}
-                <span className="term-label__api">
-                  {' '}
-                  ({formatPriorityDisplay(policy.priority).apiHint})
-                </span>
-              </dd>
+              <dd>{formatPriorityDisplay(policy.priority).display}</dd>
             </div>
             <div>
               <dt>
                 <TermLabel
                   text="정책 수정 시각"
                   apiTerm="updated_at"
+                  showApiTerm={false}
                   help={CLIENT_FIELD_HELP.updatedAt}
                 />
               </dt>

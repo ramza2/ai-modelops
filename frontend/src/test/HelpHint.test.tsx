@@ -36,6 +36,25 @@ describe('HelpHint / TermLabel markup', () => {
     expect(container.querySelector('span.term-label')).toBeNull()
   })
 
+  it('can hide inline API term and keep it inside help', async () => {
+    const user = userEvent.setup()
+    render(
+      <TermLabel
+        text="토큰 정보 수집률"
+        apiTerm="Token coverage"
+        showApiTerm={false}
+        help="토큰이 기록된 행 비율"
+      />,
+    )
+    expect(screen.getByText('토큰 정보 수집률')).toBeInTheDocument()
+    expect(screen.queryByText('(Token coverage)')).toBeNull()
+    const summary = screen.getByText('토큰 정보 수집률 도움말').closest('summary')
+    await user.click(summary!)
+    expect(screen.getByText(/API 필드:/)).toBeVisible()
+    expect(screen.getByText('Token coverage')).toBeVisible()
+    expect(screen.getByText('토큰이 기록된 행 비율')).toBeVisible()
+  })
+
   it('keeps section heading free of nested details', () => {
     const { container } = render(
       <div className="detail-panel__heading">

@@ -560,6 +560,17 @@ th {
   max-width: 28rem;
 }
 
+.term-label__api-note {
+  margin: 0 0 0.35rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.term-label__api-note code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.9em;
+}
+
 .help-glossary {
   margin-bottom: 0.75rem;
   border: 1px solid var(--border);

@@ -44,10 +44,15 @@ export function HelpHint({
 type TermLabelProps = {
   /** Korean (or short) display label. */
   text: string
-  /** Optional API / English term shown beside the label. */
+  /** Optional API / English term. Shown beside the label when showApiTerm. */
   apiTerm?: string
   help?: ReactNode
   helpLabel?: string
+  /**
+   * When false (default for beginner screens), hide the inline English API
+   * term and surface it inside the help disclosure instead.
+   */
+  showApiTerm?: boolean
 }
 
 /**
@@ -63,18 +68,32 @@ export function TermLabel({
   apiTerm,
   help,
   helpLabel,
+  showApiTerm = true,
 }: TermLabelProps) {
+  const showInlineApi = Boolean(apiTerm) && showApiTerm
+  const helpContent =
+    help || apiTerm ? (
+      <>
+        {apiTerm && !showApiTerm ? (
+          <p className="term-label__api-note">
+            API 필드: <code>{apiTerm}</code>
+          </p>
+        ) : null}
+        {help}
+      </>
+    ) : null
+
   return (
     <div className="term-label">
       {text ? <span className="term-label__text">{text}</span> : null}
-      {apiTerm ? (
+      {showInlineApi ? (
         <span className="term-label__api" title={apiTerm}>
           ({apiTerm})
         </span>
       ) : null}
-      {help ? (
+      {helpContent ? (
         <HelpHint label={helpLabel || text || apiTerm || '항목'}>
-          {help}
+          {helpContent}
         </HelpHint>
       ) : null}
     </div>
