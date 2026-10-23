@@ -7,7 +7,11 @@ import type {
   InvocationSummaryResponse,
   RuntimeLatestResponse,
 } from '../api/types'
-import { ObservabilityPage, displayedRuntimeAvailability } from '../pages/ObservabilityPage'
+import {
+  ClientGroupLabel,
+  ObservabilityPage,
+  displayedRuntimeAvailability,
+} from '../pages/ObservabilityPage'
 import * as observabilityApi from '../api/observability'
 import * as deploymentsApi from '../api/deployments'
 import * as clientsApi from '../api/clients'
@@ -38,6 +42,8 @@ function summary(
     items: [
       {
         group_key: 'alzi',
+        client_display_name: null,
+        client_app_id: null,
         request_count: 10,
         success_count: 8,
         error_count: 2,
@@ -99,7 +105,8 @@ describe('ObservabilityPage', () => {
     )
     vi.mocked(observabilityApi.getRuntimeLatest).mockResolvedValue(latest())
     renderAt('/observability')
-    expect(await screen.findByText('alzi')).toBeInTheDocument()
+    expect(await screen.findByText('미등록 시스템')).toBeInTheDocument()
+    expect(screen.getByText('alzi')).toBeInTheDocument()
     expect(screen.getByText('50.0% (5/10)')).toBeInTheDocument()
     expect(
       screen.getByRole('link', { name: 'chat-prod' }),
@@ -112,6 +119,73 @@ describe('ObservabilityPage', () => {
     expect(deploymentsApi.getDeployment).not.toHaveBeenCalled()
     expect(clientsApi.getClient).not.toHaveBeenCalled()
     expect(modelsApi.getModel).not.toHaveBeenCalled()
+  })
+
+  it('shows registered client display_name with detail link and service key', async () => {
+    vi.mocked(observabilityApi.getInvocationSummary).mockResolvedValue(
+      summary({
+        items: [
+          {
+            group_key: 'svc-ideaflow',
+            client_display_name: 'Ideaflow',
+            client_app_id: 'client-uuid-1',
+            request_count: 3,
+            success_count: 3,
+            error_count: 0,
+            tokenized_request_count: 2,
+          },
+          {
+            group_key: 'unknown',
+            client_display_name: null,
+            client_app_id: null,
+            request_count: 1,
+            success_count: 0,
+            error_count: 1,
+            tokenized_request_count: 0,
+          },
+          {
+            group_key: 'ghost-key',
+            client_display_name: null,
+            client_app_id: null,
+            request_count: 2,
+            success_count: 2,
+            error_count: 0,
+            tokenized_request_count: 0,
+          },
+        ],
+      }),
+    )
+    vi.mocked(observabilityApi.getRuntimeLatest).mockResolvedValue({ items: [] })
+    renderAt('/observability')
+    const link = await screen.findByRole('link', { name: 'Ideaflow' })
+    expect(link).toHaveAttribute('href', '/clients/client-uuid-1')
+    expect(screen.getByText('svc-ideaflow')).toBeInTheDocument()
+    expect(screen.getByText('미식별 시스템')).toBeInTheDocument()
+    expect(screen.getByText('미등록 시스템')).toBeInTheDocument()
+    expect(screen.getByText('ghost-key')).toBeInTheDocument()
+    expect(clientsApi.getClient).not.toHaveBeenCalled()
+  })
+
+  it('keeps alias group_key text unchanged', async () => {
+    vi.mocked(observabilityApi.getInvocationSummary).mockResolvedValue(
+      summary({
+        group_by: 'alias',
+        items: [
+          {
+            group_key: 'chat-prod-alias',
+            request_count: 4,
+            success_count: 4,
+            error_count: 0,
+            tokenized_request_count: 4,
+          },
+        ],
+      }),
+    )
+    vi.mocked(observabilityApi.getRuntimeLatest).mockResolvedValue({ items: [] })
+    renderAt('/observability?group_by=alias')
+    expect(await screen.findByText('chat-prod-alias')).toBeInTheDocument()
+    expect(screen.queryByText('미등록 시스템')).not.toBeInTheDocument()
+    expect(screen.queryByText('미식별 시스템')).not.toBeInTheDocument()
   })
 
   it('shows active deployments by default and retired snapshots only on opt-in', async () => {
@@ -253,11 +327,13 @@ describe('ObservabilityPage', () => {
       .mockResolvedValueOnce(latest())
       .mockRejectedValueOnce(new ApiError('rt boom', { status: 500 }))
     renderAt('/observability')
-    expect(await screen.findByText('alzi')).toBeInTheDocument()
+    expect(await screen.findByText('미등록 시스템')).toBeInTheDocument()
+    expect(screen.getByText('alzi')).toBeInTheDocument()
     expect(screen.getByRole('link', { name: 'chat-prod' })).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: '새로고침' }))
     expect(await screen.findByText(/inv boom/)).toBeInTheDocument()
     expect(screen.getByText(/rt boom/)).toBeInTheDocument()
+    expect(screen.getByText('미등록 시스템')).toBeInTheDocument()
     expect(screen.getByText('alzi')).toBeInTheDocument()
     expect(screen.getByRole('link', { name: 'chat-prod' })).toBeInTheDocument()
   })
@@ -269,7 +345,7 @@ describe('ObservabilityPage', () => {
     vi.mocked(observabilityApi.getRuntimeLatest).mockResolvedValue(latest())
     const fetchSpy = vi.spyOn(globalThis, 'fetch')
     renderAt('/observability')
-    await screen.findByText('alzi')
+    await screen.findByText('미등록 시스템')
     for (const table of screen.getAllByRole('table')) {
       for (const th of within(table).getAllByRole('columnheader')) {
         expect(th).toHaveAttribute('scope', 'col')
@@ -279,5 +355,65 @@ describe('ObservabilityPage', () => {
     expect(urls.some((u) => u.includes('/analytics'))).toBe(false)
     expect(urls.some((u) => u.includes('/capacity-profile'))).toBe(false)
     expect(urls.some((u) => u.includes('/internal/'))).toBe(false)
+  })
+})
+
+describe('ClientGroupLabel', () => {
+  it('renders registered, unknown, and unregistered labels', () => {
+    const { rerender } = render(
+      <MemoryRouter>
+        <ClientGroupLabel
+          item={{
+            group_key: 'k1',
+            client_display_name: 'Alpha',
+            client_app_id: 'id-1',
+            request_count: 1,
+            success_count: 1,
+            error_count: 0,
+            tokenized_request_count: 0,
+          }}
+        />
+      </MemoryRouter>,
+    )
+    expect(screen.getByRole('link', { name: 'Alpha' })).toHaveAttribute(
+      'href',
+      '/clients/id-1',
+    )
+    expect(screen.getByText('k1')).toBeInTheDocument()
+
+    rerender(
+      <MemoryRouter>
+        <ClientGroupLabel
+          item={{
+            group_key: 'unknown',
+            client_display_name: null,
+            client_app_id: null,
+            request_count: 1,
+            success_count: 0,
+            error_count: 1,
+            tokenized_request_count: 0,
+          }}
+        />
+      </MemoryRouter>,
+    )
+    expect(screen.getByText('미식별 시스템')).toBeInTheDocument()
+
+    rerender(
+      <MemoryRouter>
+        <ClientGroupLabel
+          item={{
+            group_key: 'orphan',
+            client_display_name: null,
+            client_app_id: null,
+            request_count: 1,
+            success_count: 1,
+            error_count: 0,
+            tokenized_request_count: 0,
+          }}
+        />
+      </MemoryRouter>,
+    )
+    expect(screen.getByText('미등록 시스템')).toBeInTheDocument()
+    expect(screen.getByText('orphan')).toBeInTheDocument()
   })
 })

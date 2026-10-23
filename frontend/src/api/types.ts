@@ -485,6 +485,10 @@ export type RetryOperationResponse = {
 export type InvocationSummaryItem = {
   group_key: string
   deployment_name?: string | null
+  /** Present when group_by=client; registered ClientApp display name. */
+  client_display_name?: string | null
+  /** Present when group_by=client; registered ClientApp id for detail link. */
+  client_app_id?: string | null
   request_count: number
   success_count: number
   error_count: number
