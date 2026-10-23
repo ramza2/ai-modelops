@@ -38,8 +38,37 @@ type FieldErrors = {
 
 type Step = 'edit' | 'confirm'
 
+/**
+ * Blocks direct PUT until the operator explicitly re-reviews.
+ * - conflict: concurrent ClientApp/policy change during preflight
+ * - uncertain: PUT outcome unknown (network); must reload policy
+ * - matched: server already equals pending; no further PUT
+ * - reload_failed: latest policy GET failed; keep blocking PUT
+ */
+type SaveGate = null | 'conflict' | 'uncertain' | 'matched' | 'reload_failed'
+
 function nullableToInput(value: number | null): string {
   return value === null || value === undefined ? '' : String(value)
+}
+
+function policyToBody(p: ClientRuntimePolicy): RuntimePolicyFormBody {
+  return {
+    is_enabled: p.is_enabled,
+    max_input_tokens: p.max_input_tokens,
+    max_output_tokens: p.max_output_tokens,
+    max_concurrent_requests: p.max_concurrent_requests,
+    priority: p.priority,
+  }
+}
+
+function emptyCreateBody(): RuntimePolicyFormBody {
+  return {
+    is_enabled: false,
+    max_input_tokens: null,
+    max_output_tokens: null,
+    max_concurrent_requests: null,
+    priority: null,
+  }
 }
 
 function policyErrorMessage(err: unknown): string {
@@ -53,9 +82,61 @@ function policyErrorMessage(err: unknown): string {
     return `저장 실패(${err.status}${err.code ? ` ${err.code}` : ''}): ${err.message}`
   }
   if (err instanceof Error) {
-    return `${err.message} 응답이 불확실할 수 있습니다. 자동으로 다시 저장하지 않습니다. 「최신 값 다시 확인」으로 서버 상태를 조회한 뒤, 이미 요청값과 같은지 확인하세요.`
+    return `${err.message} 응답이 불확실할 수 있습니다. 자동으로 다시 저장하지 않습니다. 「최신 값 다시 확인」으로 최신 런타임 정책을 조회한 뒤, 이미 요청값과 같은지 확인하세요.`
   }
-  return '저장에 실패했습니다. 최신 정책을 다시 확인하세요.'
+  return '저장에 실패했습니다. 최신 런타임 정책을 다시 확인하세요.'
+}
+
+function PolicyCompareRows({
+  leftLabel,
+  rightLabel,
+  left,
+  right,
+}: {
+  leftLabel: string
+  rightLabel: string
+  left: RuntimePolicyFormBody
+  right: RuntimePolicyFormBody
+}) {
+  return (
+    <dl className="meta-grid" data-testid="policy-compare-rows">
+      <div>
+        <dt>정책 사용 ({leftLabel} → {rightLabel})</dt>
+        <dd>
+          {formatPolicyScalar(left.is_enabled)} →{' '}
+          {formatPolicyScalar(right.is_enabled)}
+        </dd>
+      </div>
+      <div>
+        <dt>입력 토큰 상한</dt>
+        <dd>
+          {formatPolicyScalar(left.max_input_tokens)} →{' '}
+          {formatPolicyScalar(right.max_input_tokens)}
+        </dd>
+      </div>
+      <div>
+        <dt>출력 토큰 상한</dt>
+        <dd>
+          {formatPolicyScalar(left.max_output_tokens)} →{' '}
+          {formatPolicyScalar(right.max_output_tokens)}
+        </dd>
+      </div>
+      <div>
+        <dt>동시 요청 상한</dt>
+        <dd>
+          {formatPolicyScalar(left.max_concurrent_requests)} →{' '}
+          {formatPolicyScalar(right.max_concurrent_requests)}
+        </dd>
+      </div>
+      <div>
+        <dt>요청 우선순위</dt>
+        <dd>
+          {formatPriorityCompare(left.priority)} →{' '}
+          {formatPriorityCompare(right.priority)}
+        </dd>
+      </div>
+    </dl>
+  )
 }
 
 export function ClientRuntimePolicyDialog({
@@ -80,11 +161,20 @@ export function ClientRuntimePolicyDialog({
   const [pendingBody, setPendingBody] = useState<RuntimePolicyFormBody | null>(
     null,
   )
-  const [responseUncertain, setResponseUncertain] = useState(false)
+  const [saveGate, setSaveGate] = useState<SaveGate>(null)
+  /** Latest server policy body shown after conflict / reload (null = no row). */
+  const [serverSnapshot, setServerSnapshot] =
+    useState<RuntimePolicyFormBody | null>(null)
+  const [serverPolicyMeta, setServerPolicyMeta] = useState<{
+    id: string | null
+    updated_at: string | null
+  } | null>(null)
 
   const baselineRef = useRef<RuntimePolicyFormBody | null>(null)
   const baselineClientRef = useRef<ClientApp | null>(null)
   const baselinePolicyRef = useRef<ClientRuntimePolicy | null>(null)
+  /** True when dialog opened with no policy row (create). */
+  const creatingRef = useRef(true)
   const submitLockRef = useRef(false)
   const openRef = useRef(false)
   const sessionGenRef = useRef(0)
@@ -95,21 +185,10 @@ export function ClientRuntimePolicyDialog({
     sessionClientIdRef.current = c.id
     baselineClientRef.current = c
     baselinePolicyRef.current = p
+    creatingRef.current = p === null
     const baseline: RuntimePolicyFormBody = p
-      ? {
-          is_enabled: p.is_enabled,
-          max_input_tokens: p.max_input_tokens,
-          max_output_tokens: p.max_output_tokens,
-          max_concurrent_requests: p.max_concurrent_requests,
-          priority: p.priority,
-        }
-      : {
-          is_enabled: false,
-          max_input_tokens: null,
-          max_output_tokens: null,
-          max_concurrent_requests: null,
-          priority: null,
-        }
+      ? policyToBody(p)
+      : emptyCreateBody()
     baselineRef.current = baseline
     setIsEnabled(baseline.is_enabled)
     setMaxInput(nullableToInput(baseline.max_input_tokens))
@@ -122,7 +201,9 @@ export function ClientRuntimePolicyDialog({
     setSubmitting(false)
     setRevalidating(false)
     setPendingBody(null)
-    setResponseUncertain(false)
+    setSaveGate(null)
+    setServerSnapshot(null)
+    setServerPolicyMeta(null)
     setStep('edit')
     submitLockRef.current = false
   }
@@ -134,7 +215,6 @@ export function ClientRuntimePolicyDialog({
       return
     }
     openRef.current = true
-    // Re-init when opening or when Client / policy identity changes.
     const policyId = policy?.id ?? null
     const needInit =
       sessionClientIdRef.current !== client.id ||
@@ -176,14 +256,6 @@ export function ClientRuntimePolicyDialog({
     }
   }
 
-  const dirty =
-    baselineRef.current !== null &&
-    (() => {
-      const parsed = parseBodyQuiet()
-      if (!parsed || !baselineRef.current) return true
-      return !runtimePolicyBodiesEqual(parsed, baselineRef.current)
-    })()
-
   function parseBodyQuiet(): RuntimePolicyFormBody | null {
     const input = parseOptionalPositiveLimit(maxInput, '입력 토큰 상한')
     const output = parseOptionalPositiveLimit(maxOutput, '출력 토큰 상한')
@@ -202,6 +274,22 @@ export function ClientRuntimePolicyDialog({
     }
   }
 
+  const dirty =
+    baselineRef.current !== null &&
+    (() => {
+      const parsed = parseBodyQuiet()
+      if (!parsed || !baselineRef.current) return true
+      // Creating a row with defaults still counts as dirty work-in-progress.
+      if (creatingRef.current) return true
+      return !runtimePolicyBodiesEqual(parsed, baselineRef.current)
+    })()
+
+  const putBlocked =
+    saveGate === 'conflict' ||
+    saveGate === 'uncertain' ||
+    saveGate === 'matched' ||
+    saveGate === 'reload_failed'
+
   const handleClose = () => {
     if (submitting || revalidating) return
     if (
@@ -216,16 +304,36 @@ export function ClientRuntimePolicyDialog({
   const goConfirm = (e: FormEvent) => {
     e.preventDefault()
     if (submitLockRef.current || submitting || revalidating) return
+    if (saveGate === 'uncertain' || saveGate === 'reload_failed') {
+      setSubmitError(
+        '응답이 불확실하거나 최신 정책 조회에 실패했습니다. 「최신 값 다시 확인」으로 최신 런타임 정책을 확인한 뒤에만 다시 검토할 수 있습니다.',
+      )
+      return
+    }
+    if (saveGate === 'matched') {
+      setSubmitError(
+        '서버 정책이 이미 요청값과 같습니다. 추가 PUT을 보내지 않습니다. 창을 닫거나 상세를 새로고침하세요.',
+      )
+      return
+    }
     const body = parseBody()
     if (!body) return
-    if (baselineRef.current && runtimePolicyBodiesEqual(body, baselineRef.current)) {
-      setSubmitError('변경된 내용이 없습니다. 저장하지 않습니다.')
+    // Existing policy: block no-op PUT. Create (policy=null): allow defaults
+    // so a disabled unrestricted row can be inserted.
+    if (
+      !creatingRef.current &&
+      baselineRef.current &&
+      runtimePolicyBodiesEqual(body, baselineRef.current)
+    ) {
+      setSubmitError('변경된 내용이 없습니다. 기존 정책에 대해 저장하지 않습니다.')
       return
     }
     setPendingBody(body)
     setConsent(false)
     setSubmitError(null)
-    setResponseUncertain(false)
+    setSaveGate(null)
+    setServerSnapshot(null)
+    setServerPolicyMeta(null)
     setStep('confirm')
   }
 
@@ -233,6 +341,42 @@ export function ClientRuntimePolicyDialog({
     openRef.current &&
     sessionClientIdRef.current === lockedClientId &&
     sessionGenRef.current === sessionGen
+
+  const applyConflict = (
+    latestClient: ClientApp,
+    latestPolicy: ClientRuntimePolicy | null,
+    message: string,
+  ) => {
+    setConsent(false)
+    setSaveGate('conflict')
+    setServerSnapshot(latestPolicy ? policyToBody(latestPolicy) : null)
+    setServerPolicyMeta({
+      id: latestPolicy?.id ?? null,
+      updated_at: latestPolicy?.updated_at ?? null,
+    })
+    baselineClientRef.current = latestClient
+    baselinePolicyRef.current = latestPolicy
+    setSubmitError(
+      `${message} 작성 중인 값은 유지했습니다. 최신 서버 정책과 작성값을 비교한 뒤 「최신 서버 확인 후 다시 검토」를 눌러 저장 검토·동의를 다시 진행하세요. 조용히 덮어쓰지 않습니다. GET→PUT은 원자적이지 않으며 Backend ETag/If-Match는 없습니다.`,
+    )
+  }
+
+  /** After conflict/uncertain mismatch: adopt server as new baseline base, keep draft inputs, return to edit. */
+  const acknowledgeServerAndReReview = () => {
+    if (submitting || revalidating || submitLockRef.current) return
+    if (saveGate !== 'conflict') return
+    const latestPolicy = baselinePolicyRef.current
+    creatingRef.current = latestPolicy === null
+    baselineRef.current = latestPolicy
+      ? policyToBody(latestPolicy)
+      : emptyCreateBody()
+    setConsent(false)
+    setSaveGate(null)
+    setSubmitError(null)
+    setServerSnapshot(null)
+    setServerPolicyMeta(null)
+    setStep('edit')
+  }
 
   const reloadServerSnapshot = async () => {
     if (submitLockRef.current || submitting) return
@@ -247,39 +391,46 @@ export function ClientRuntimePolicyDialog({
       ])
       if (!stillCurrentSession(sessionGen, lockedClientId)) return
       if (latestClient.id !== lockedClientId) {
-        setSubmitError('대상 사용 시스템이 변경되었습니다.')
+        setConsent(false)
+        setSaveGate('reload_failed')
+        setSubmitError('대상 사용 시스템이 변경되었습니다. 추가 PUT을 차단합니다.')
         return
       }
       const serverPolicy = latestPolicyResp.policy
       const pending = pendingBody
+      baselineClientRef.current = latestClient
+      baselinePolicyRef.current = serverPolicy
+      setServerSnapshot(serverPolicy ? policyToBody(serverPolicy) : null)
+      setServerPolicyMeta({
+        id: serverPolicy?.id ?? null,
+        updated_at: serverPolicy?.updated_at ?? null,
+      })
+      setConsent(false)
+
       if (
         pending &&
         serverPolicy &&
-        runtimePolicyBodiesEqual(
-          {
-            is_enabled: serverPolicy.is_enabled,
-            max_input_tokens: serverPolicy.max_input_tokens,
-            max_output_tokens: serverPolicy.max_output_tokens,
-            max_concurrent_requests: serverPolicy.max_concurrent_requests,
-            priority: serverPolicy.priority,
-          },
-          pending,
-        )
+        runtimePolicyBodiesEqual(policyToBody(serverPolicy), pending)
       ) {
+        setSaveGate('matched')
         setSubmitError(
-          '서버 정책이 이미 요청값과 같습니다. 자동 재저장하지 않습니다. 확인 후 창을 닫거나 상세를 새로고침하세요.',
+          '최신 런타임 정책이 이미 요청값과 같습니다. 저장이 완료되었을 수 있습니다. 추가 PUT을 보내지 않습니다. 확인 후 창을 닫거나 상세를 새로고침하세요.',
         )
-      } else {
-        setSubmitError(
-          '서버 최신 값을 다시 읽었습니다. 작성 중인 값은 유지했습니다. 차이가 있으면 상세를 확인한 뒤 유지된 입력을 검토해 다시 저장하세요. 자동 PUT 재시도는 하지 않습니다. GET→PUT은 원자적이지 않습니다.',
-        )
+        return
       }
-      // Refresh baselines for next conflict check without wiping draft inputs.
-      baselineClientRef.current = latestClient
-      baselinePolicyRef.current = serverPolicy
+
+      // Still uncertain/conflict path: show diff, require explicit re-review.
+      setSaveGate('conflict')
+      setSubmitError(
+        '최신 런타임 정책을 다시 읽었습니다. 작성 중인 값은 유지했습니다. 서버값과 작성값이 다릅니다. 「최신 서버 확인 후 다시 검토」로 저장 검토·동의를 다시 진행하세요. 자동 PUT 재시도는 하지 않습니다. GET→PUT은 원자적이지 않습니다.',
+      )
     } catch (err) {
       if (!stillCurrentSession(sessionGen, lockedClientId)) return
-      setSubmitError(policyErrorMessage(err))
+      setConsent(false)
+      setSaveGate('reload_failed')
+      setSubmitError(
+        `${policyErrorMessage(err)} 최신 런타임 정책 조회에 실패하여 추가 PUT을 계속 차단합니다.`,
+      )
     } finally {
       if (sessionGenRef.current === sessionGen) {
         setRevalidating(false)
@@ -290,6 +441,12 @@ export function ClientRuntimePolicyDialog({
   const executePut = async () => {
     if (submitLockRef.current || submitting || revalidating) return
     if (!consent || !pendingBody) return
+    if (putBlocked) {
+      setSubmitError(
+        '저장이 차단된 상태입니다. 최신 런타임 정책을 확인하고 다시 검토·동의한 뒤에만 PUT할 수 있습니다.',
+      )
+      return
+    }
     const baselineClient = baselineClientRef.current
     if (!baselineClient) return
 
@@ -305,7 +462,6 @@ export function ClientRuntimePolicyDialog({
     setSubmitting(true)
     setRevalidating(true)
     setSubmitError(null)
-    setResponseUncertain(false)
     try {
       const [latestClient, latestPolicyResp] = await Promise.all([
         getClient(lockedClientId),
@@ -316,8 +472,10 @@ export function ClientRuntimePolicyDialog({
         latestClient.id !== lockedClientId ||
         latestClient.client_key !== lockedClientKey
       ) {
-        setSubmitError(
-          '대상 사용 시스템이 변경되었습니다. 저장을 중단했습니다. 작성 중인 값은 유지했습니다.',
+        applyConflict(
+          latestClient,
+          latestPolicyResp.policy,
+          '대상 사용 시스템이 변경되어 저장을 중단했습니다.',
         )
         return
       }
@@ -325,38 +483,41 @@ export function ClientRuntimePolicyDialog({
         latestClient.is_active !== lockedActive ||
         latestClient.updated_at !== lockedClientUpdatedAt
       ) {
-        setSubmitError(
-          `ClientApp 상태가 변경되어 저장을 중단했습니다(is_active=${String(latestClient.is_active)}, updated_at=${latestClient.updated_at}). 작성 중인 값은 유지했습니다. GET→PUT은 원자적이지 않으며 Backend ETag/If-Match는 없습니다.`,
+        applyConflict(
+          latestClient,
+          latestPolicyResp.policy,
+          `ClientApp 상태가 변경되어 저장을 중단했습니다(is_active=${String(latestClient.is_active)}, updated_at=${latestClient.updated_at}).`,
         )
-        baselineClientRef.current = latestClient
-        baselinePolicyRef.current = latestPolicyResp.policy
         return
       }
       const latestPolicy = latestPolicyResp.policy
       if (lockedPolicy === null) {
         if (latestPolicy !== null) {
-          setSubmitError(
-            `다른 변경으로 정책 행이 이미 생겼습니다(policy id=${latestPolicy.id}, updated_at=${latestPolicy.updated_at}). PUT을 보내지 않았습니다. 작성 중인 값은 유지했습니다.`,
+          applyConflict(
+            latestClient,
+            latestPolicy,
+            `다른 변경으로 정책 행이 이미 생겼습니다(policy id=${latestPolicy.id}, updated_at=${latestPolicy.updated_at}). PUT을 보내지 않았습니다.`,
           )
-          baselinePolicyRef.current = latestPolicy
           return
         }
       } else {
         if (latestPolicy === null) {
-          setSubmitError(
-            '정책 행이 없어졌습니다. PUT을 보내지 않았습니다. 작성 중인 값은 유지했습니다.',
+          applyConflict(
+            latestClient,
+            null,
+            '정책 행이 없어졌습니다. PUT을 보내지 않았습니다.',
           )
-          baselinePolicyRef.current = null
           return
         }
         if (
           latestPolicy.id !== lockedPolicy.id ||
           latestPolicy.updated_at !== lockedPolicy.updated_at
         ) {
-          setSubmitError(
-            `정책이 다른 변경으로 갱신되었습니다(서버 updated_at=${latestPolicy.updated_at}). PUT을 보내지 않았습니다. 작성 중인 값은 유지했습니다.`,
+          applyConflict(
+            latestClient,
+            latestPolicy,
+            `정책이 다른 변경으로 갱신되었습니다(서버 updated_at=${latestPolicy.updated_at}). PUT을 보내지 않았습니다.`,
           )
-          baselinePolicyRef.current = latestPolicy
           return
         }
       }
@@ -367,10 +528,15 @@ export function ClientRuntimePolicyDialog({
       onSaved()
     } catch (err) {
       if (!stillCurrentSession(sessionGen, lockedClientId)) return
-      if (!(err instanceof ApiError)) {
-        setResponseUncertain(true)
+      setConsent(false)
+      if (err instanceof ApiError) {
+        // Confirmed API failure — allow re-review after editing; not "uncertain".
+        setSaveGate(null)
+        setSubmitError(policyErrorMessage(err))
+      } else {
+        setSaveGate('uncertain')
+        setSubmitError(policyErrorMessage(err))
       }
-      setSubmitError(policyErrorMessage(err))
     } finally {
       if (sessionGenRef.current === sessionGen) {
         submitLockRef.current = false
@@ -384,6 +550,7 @@ export function ClientRuntimePolicyDialog({
 
   const baseline = baselineRef.current
   const title = creating ? '새 런타임 정책 만들기' : '런타임 정책 수정'
+  const canConsentPut = Boolean(consent) && !putBlocked && !submitting && !revalidating
 
   return (
     <div
@@ -398,6 +565,9 @@ export function ClientRuntimePolicyDialog({
         <p className="panel-hint">
           PUT은 전체 필드 교체(upsert)입니다. 빈 숫자 칸은 null(제한 없음)로
           저장됩니다. Idempotency-Key는 사용하지 않습니다.
+          {creating
+            ? ' 정책 행이 없을 때 기본값(사용 안함·제한 null)을 그대로 저장하면 새 행이 생성됩니다.'
+            : null}
         </p>
         <p className="panel-hint secondary-text">
           대상: <span className="mono">{client.client_key}</span> /{' '}
@@ -410,23 +580,81 @@ export function ClientRuntimePolicyDialog({
         {submitError ? (
           <SectionError title="정책 저장 오류" message={submitError} />
         ) : null}
-        {responseUncertain ? (
+
+        {saveGate === 'uncertain' || saveGate === 'reload_failed' ? (
           <div
             className="panel-hint panel-hint--warn"
             data-testid="policy-uncertain-banner"
           >
             <p>
-              응답이 불확실합니다. 자동으로 PUT을 다시 보내지 않습니다. 목록에서
-              등록 여부를 확인한 뒤 「최신 값 다시 확인」으로 서버 상태를
-              조회하세요.
+              {saveGate === 'uncertain'
+                ? '응답이 불확실합니다. 자동으로 PUT을 다시 보내지 않습니다. 「최신 값 다시 확인」으로 최신 런타임 정책을 조회하세요.'
+                : '최신 런타임 정책 조회에 실패했습니다. 추가 PUT을 차단합니다. 다시 조회해 보세요.'}
             </p>
             <button
               type="button"
               className="btn btn--ghost btn--small"
               disabled={submitting || revalidating}
               onClick={() => void reloadServerSnapshot()}
+              data-testid="policy-reload-server"
             >
               최신 값 다시 확인
+            </button>
+          </div>
+        ) : null}
+
+        {saveGate === 'matched' ? (
+          <div
+            className="panel-hint panel-hint--warn"
+            data-testid="policy-matched-banner"
+          >
+            <p>
+              서버 최신 런타임 정책이 요청값과 같습니다. 추가 PUT을 보내지
+              않습니다.
+            </p>
+          </div>
+        ) : null}
+
+        {saveGate === 'conflict' && pendingBody ? (
+          <div
+            className="panel-hint panel-hint--warn"
+            data-testid="policy-conflict-banner"
+          >
+            <p>
+              동시 변경이 감지되어 PUT을 중단했습니다. 아래는 최신 서버 정책과
+              작성 중인 값입니다. 작성값은 유지되며, 동의 상태는 무효화되었습니다.
+              {serverPolicyMeta
+                ? ` (서버 policy id=${serverPolicyMeta.id ?? 'null'}, updated_at=${serverPolicyMeta.updated_at ?? 'null'})`
+                : null}
+            </p>
+            <h3 className="detail-panel__subheading">서버 최신 ↔ 작성 중</h3>
+            <PolicyCompareRows
+              leftLabel="서버"
+              rightLabel="작성"
+              left={
+                serverSnapshot ?? {
+                  is_enabled: false,
+                  max_input_tokens: null,
+                  max_output_tokens: null,
+                  max_concurrent_requests: null,
+                  priority: null,
+                }
+              }
+              right={pendingBody}
+            />
+            {!serverSnapshot ? (
+              <p className="form-field-hint">
+                서버에 정책 행이 없습니다(policy = null).
+              </p>
+            ) : null}
+            <button
+              type="button"
+              className="btn btn--ghost btn--small"
+              disabled={submitting || revalidating}
+              onClick={acknowledgeServerAndReReview}
+              data-testid="policy-ack-conflict"
+            >
+              최신 서버 확인 후 다시 검토
             </button>
           </div>
         ) : null}
@@ -444,7 +672,7 @@ export function ClientRuntimePolicyDialog({
               <select
                 id="policy-is-enabled"
                 value={isEnabled ? 'true' : 'false'}
-                disabled={submitting}
+                disabled={submitting || saveGate === 'uncertain' || saveGate === 'reload_failed' || saveGate === 'matched'}
                 onChange={(e) => setIsEnabled(e.target.value === 'true')}
               >
                 <option value="false">사용 안함</option>
@@ -469,7 +697,12 @@ export function ClientRuntimePolicyDialog({
                 id="policy-max-input"
                 inputMode="numeric"
                 value={maxInput}
-                disabled={submitting}
+                disabled={
+                  submitting ||
+                  saveGate === 'uncertain' ||
+                  saveGate === 'reload_failed' ||
+                  saveGate === 'matched'
+                }
                 onChange={(e) => setMaxInput(e.target.value)}
                 placeholder="비우면 null (제한 없음)"
                 aria-invalid={Boolean(fieldErrors.max_input_tokens)}
@@ -498,7 +731,12 @@ export function ClientRuntimePolicyDialog({
                 id="policy-max-output"
                 inputMode="numeric"
                 value={maxOutput}
-                disabled={submitting}
+                disabled={
+                  submitting ||
+                  saveGate === 'uncertain' ||
+                  saveGate === 'reload_failed' ||
+                  saveGate === 'matched'
+                }
                 onChange={(e) => setMaxOutput(e.target.value)}
                 placeholder="비우면 null (제한 없음)"
                 aria-invalid={Boolean(fieldErrors.max_output_tokens)}
@@ -523,7 +761,12 @@ export function ClientRuntimePolicyDialog({
                 id="policy-max-concurrent"
                 inputMode="numeric"
                 value={maxConcurrent}
-                disabled={submitting}
+                disabled={
+                  submitting ||
+                  saveGate === 'uncertain' ||
+                  saveGate === 'reload_failed' ||
+                  saveGate === 'matched'
+                }
                 onChange={(e) => setMaxConcurrent(e.target.value)}
                 placeholder="비우면 null (제한 없음)"
                 aria-invalid={Boolean(fieldErrors.max_concurrent_requests)}
@@ -551,7 +794,12 @@ export function ClientRuntimePolicyDialog({
                 id="policy-priority"
                 inputMode="numeric"
                 value={priority}
-                disabled={submitting}
+                disabled={
+                  submitting ||
+                  saveGate === 'uncertain' ||
+                  saveGate === 'reload_failed' ||
+                  saveGate === 'matched'
+                }
                 onChange={(e) => setPriority(e.target.value)}
                 placeholder="비우면 null (미설정)"
                 aria-invalid={Boolean(fieldErrors.priority)}
@@ -574,7 +822,16 @@ export function ClientRuntimePolicyDialog({
               >
                 취소
               </button>
-              <button type="submit" className="btn" disabled={submitting}>
+              <button
+                type="submit"
+                className="btn"
+                disabled={
+                  submitting ||
+                  saveGate === 'uncertain' ||
+                  saveGate === 'reload_failed' ||
+                  saveGate === 'matched'
+                }
+              >
                 저장 검토…
               </button>
             </div>
@@ -589,43 +846,19 @@ export function ClientRuntimePolicyDialog({
               </p>
             ) : null}
             <h3 className="detail-panel__subheading">변경 비교</h3>
-            <dl className="meta-grid">
-              <div>
-                <dt>정책 사용</dt>
-                <dd>
-                  {formatPolicyScalar(baseline.is_enabled)} →{' '}
-                  {formatPolicyScalar(pendingBody.is_enabled)}
-                </dd>
-              </div>
-              <div>
-                <dt>입력 토큰 상한</dt>
-                <dd>
-                  {formatPolicyScalar(baseline.max_input_tokens)} →{' '}
-                  {formatPolicyScalar(pendingBody.max_input_tokens)}
-                </dd>
-              </div>
-              <div>
-                <dt>출력 토큰 상한</dt>
-                <dd>
-                  {formatPolicyScalar(baseline.max_output_tokens)} →{' '}
-                  {formatPolicyScalar(pendingBody.max_output_tokens)}
-                </dd>
-              </div>
-              <div>
-                <dt>동시 요청 상한</dt>
-                <dd>
-                  {formatPolicyScalar(baseline.max_concurrent_requests)} →{' '}
-                  {formatPolicyScalar(pendingBody.max_concurrent_requests)}
-                </dd>
-              </div>
-              <div>
-                <dt>요청 우선순위</dt>
-                <dd>
-                  {formatPriorityCompare(baseline.priority)} →{' '}
-                  {formatPriorityCompare(pendingBody.priority)}
-                </dd>
-              </div>
-            </dl>
+            <PolicyCompareRows
+              leftLabel="기준"
+              rightLabel="저장 예정"
+              left={baseline}
+              right={pendingBody}
+            />
+            {creatingRef.current &&
+            runtimePolicyBodiesEqual(pendingBody, emptyCreateBody()) ? (
+              <p className="panel-hint" data-testid="policy-create-defaults-hint">
+                정책 행이 없는 상태에서 기본값(사용 안함·제한 null)으로 새 정책
+                행을 생성합니다. 기존 정책의 무변경 저장과는 다릅니다.
+              </p>
+            ) : null}
             <ul className="panel-hint-list">
               <li>
                 정책 사용 안함은 Gateway 호출 차단이 아닙니다. 클라이언트별 제한만
@@ -647,9 +880,7 @@ export function ClientRuntimePolicyDialog({
                 max_output_tokens를 넘는 요청은 거부될 수 있습니다(조용한 자르기
                 없음).
               </li>
-              <li>
-                동시 요청 상한은 Gateway 프로세스별입니다.
-              </li>
+              <li>동시 요청 상한은 Gateway 프로세스별입니다.</li>
               <li>
                 priority가 0이 아니면 신뢰된 priority scheduler 증거가 없을 때
                 요청이 거부될 수 있습니다.
@@ -666,7 +897,7 @@ export function ClientRuntimePolicyDialog({
               <input
                 type="checkbox"
                 checked={consent}
-                disabled={submitting || revalidating}
+                disabled={submitting || revalidating || putBlocked}
                 onChange={(e) => setConsent(e.target.checked)}
               />
               <span>
@@ -680,9 +911,12 @@ export function ClientRuntimePolicyDialog({
                 className="btn btn--ghost"
                 disabled={submitting || revalidating}
                 onClick={() => {
+                  if (putBlocked && saveGate !== 'conflict') return
                   setStep('edit')
                   setConsent(false)
-                  setSubmitError(null)
+                  if (saveGate !== 'conflict') {
+                    setSubmitError(null)
+                  }
                 }}
               >
                 뒤로
@@ -690,8 +924,9 @@ export function ClientRuntimePolicyDialog({
               <button
                 type="button"
                 className="btn"
-                disabled={!consent || submitting || revalidating}
+                disabled={!canConsentPut}
                 onClick={() => void executePut()}
+                data-testid="policy-confirm-put"
               >
                 {submitting || revalidating ? '저장 중…' : '동의하고 저장'}
               </button>
