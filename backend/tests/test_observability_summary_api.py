@@ -304,6 +304,9 @@ async def test_summary_client_grouping_and_percentiles(obs_client) -> None:
     assert idea["input_tokens_max"] != 9999
     assert idea["client_display_name"] == "Ideaflow"
     assert idea["client_app_id"] == str(fixture["client_id"])
+    # r5 is newest in-window (30m); r4 at 48h must not win last_called_at
+    assert idea["last_called_at"] is not None
+    assert idea["last_called_at"].endswith("Z")
 
     unk = items[fixture["unknown_key"]]
     assert unk["request_count"] == 1
@@ -314,6 +317,88 @@ async def test_summary_client_grouping_and_percentiles(obs_client) -> None:
     assert unk["input_tokens_p50"] is None
     assert unk["client_display_name"] is None
     assert unk["client_app_id"] is None
+    assert unk["last_called_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_summary_client_last_called_at_window(obs_client) -> None:
+    """P1-24B: last_called_at is MAX(requested_at) inside the hours window."""
+    suffix = uuid.uuid4().hex[:8]
+    now = dt.datetime.now(tz=dt.UTC)
+    session_factory = obs_client["session_factory"]
+    ac = obs_client["client"]
+    client_id = uuid.uuid4()
+    client_key = f"lastcall-{suffix}"
+
+    newest_in = now - dt.timedelta(hours=1)
+    older_in = now - dt.timedelta(hours=3)
+    outside = now - dt.timedelta(hours=48)
+    # Newest in-window is an error — last_called_at must still be that time.
+    newest_error = now - dt.timedelta(minutes=20)
+
+    async with session_factory() as session:
+        await session.execute(
+            text(
+                """
+                INSERT INTO client_app (id, client_key, display_name, is_active)
+                VALUES (:id, :key, 'Last Call App', true)
+                """
+            ),
+            {"id": str(client_id), "key": client_key},
+        )
+        for idx, (at, status) in enumerate(
+            (
+                (outside, 200),
+                (older_in, 200),
+                (newest_in, 200),
+                (newest_error, 500),
+            )
+        ):
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO invocation_log (
+                      request_id, requested_at, client_app_id, raw_client_key,
+                      api_path, http_status, latency_ms, is_streaming
+                    ) VALUES (
+                      :rid, :at, CAST(:client_app_id AS uuid), :raw,
+                      '/v1/chat/completions', :status, 100, false
+                    )
+                    """
+                ),
+                {
+                    "rid": f"lc-{suffix}-{idx}",
+                    "at": at,
+                    "client_app_id": str(client_id),
+                    "raw": client_key,
+                    "status": status,
+                },
+            )
+        await session.commit()
+
+    resp = await ac.get(
+        "/api/v1/observability/invocations/summary",
+        params={"hours": 24, "group_by": "client"},
+    )
+    assert resp.status_code == 200
+    items = {i["group_key"]: i for i in resp.json()["items"]}
+    row = items[client_key]
+    assert row["request_count"] == 3  # outside excluded
+    assert row["success_count"] == 2
+    assert row["error_count"] == 1
+    assert row["last_called_at"] is not None
+    got = dt.datetime.fromisoformat(
+        str(row["last_called_at"]).replace("Z", "+00:00")
+    )
+    assert abs((got - newest_error).total_seconds()) < 1.0
+
+    alias_resp = await ac.get(
+        "/api/v1/observability/invocations/summary",
+        params={"hours": 24, "group_by": "alias"},
+    )
+    assert alias_resp.status_code == 200
+    for item in alias_resp.json()["items"]:
+        assert "last_called_at" not in item
 
 
 @pytest.mark.asyncio
@@ -437,6 +522,7 @@ async def test_summary_client_display_name_enrichment(obs_client) -> None:
     for item in alias_resp.json()["items"]:
         assert "client_display_name" not in item
         assert "client_app_id" not in item
+        assert "last_called_at" not in item
 
 
 @pytest.mark.asyncio

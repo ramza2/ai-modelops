@@ -3,9 +3,19 @@ import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom'
 import { ApiError } from '../api/client'
-import type { ClientApp, ClientRuntimePolicyResponse } from '../api/types'
+import type {
+  ClientApp,
+  ClientRuntimePolicyResponse,
+  InvocationSummaryResponse,
+} from '../api/types'
 import { ClientDetailPage } from '../pages/ClientDetailPage'
 import * as clientsApi from '../api/clients'
+import * as observabilityApi from '../api/observability'
+import { formatApiDateTime } from '../utils/date'
+
+function emptyUsage(): InvocationSummaryResponse {
+  return { hours: 24, group_by: 'client', items: [] }
+}
 
 function makeClient(overrides: Partial<ClientApp> = {}): ClientApp {
   return {
@@ -80,6 +90,9 @@ describe('ClientDetailPage', () => {
     vi.spyOn(clientsApi, 'listClients')
     vi.spyOn(clientsApi, 'updateClient')
     vi.spyOn(clientsApi, 'putClientRuntimePolicy')
+    vi.spyOn(observabilityApi, 'getInvocationSummary').mockResolvedValue(
+      emptyUsage(),
+    )
   })
 
   afterEach(() => {
@@ -111,6 +124,77 @@ describe('ClientDetailPage', () => {
     expect(clientsApi.listClients).not.toHaveBeenCalled()
     expect(clientsApi.updateClient).not.toHaveBeenCalled()
     expect(clientsApi.putClientRuntimePolicy).not.toHaveBeenCalled()
+    expect(observabilityApi.getInvocationSummary).toHaveBeenCalledWith(
+      expect.objectContaining({ hours: 24, groupBy: 'client' }),
+    )
+  })
+
+  it('shows read-only AI usage panel with observability link', async () => {
+    vi.mocked(clientsApi.getClient).mockResolvedValue(makeClient())
+    vi.mocked(clientsApi.getClientRuntimePolicy).mockResolvedValue(makePolicy())
+    vi.mocked(observabilityApi.getInvocationSummary).mockResolvedValue({
+      hours: 24,
+      group_by: 'client',
+      items: [
+        {
+          group_key: 'alzi',
+          request_count: 10,
+          success_count: 7,
+          error_count: 3,
+          tokenized_request_count: 5,
+          last_called_at: '2026-10-22T15:45:00Z',
+        },
+      ],
+    })
+    renderDetail()
+    const panel = await screen.findByTestId('client-usage-panel')
+    expect(
+      within(panel).getByRole('heading', { name: 'AI 사용 현황' }),
+    ).toBeInTheDocument()
+    expect(within(panel).getByText('10')).toBeInTheDocument()
+    expect(within(panel).getByText('7')).toBeInTheDocument()
+    expect(within(panel).getByText('3')).toBeInTheDocument()
+    expect(within(panel).getByText('30.0%')).toBeInTheDocument()
+    expect(
+      within(panel).getByText(formatApiDateTime('2026-10-22T15:45:00Z')),
+    ).toBeInTheDocument()
+    expect(screen.getByTestId('client-usage-status')).toHaveTextContent(
+      '최근 24시간 호출 확인',
+    )
+    expect(
+      screen.getByRole('link', {
+        name: '운영 모니터링에서 AI 요청 사용 현황 보기',
+      }),
+    ).toHaveAttribute('href', '/observability?hours=24&group_by=client')
+    // Policy section remains independent
+    expect(
+      screen.getByRole('heading', { name: '런타임 정책' }),
+    ).toBeInTheDocument()
+  })
+
+  it('shows zero-usage and summary failure without breaking policy', async () => {
+    vi.mocked(clientsApi.getClient).mockResolvedValue(makeClient())
+    vi.mocked(clientsApi.getClientRuntimePolicy).mockResolvedValue(makePolicy())
+    vi.mocked(observabilityApi.getInvocationSummary).mockResolvedValueOnce(
+      emptyUsage(),
+    )
+    renderDetail()
+    expect(await screen.findByTestId('client-usage-status')).toHaveTextContent(
+      '최근 24시간 호출 없음',
+    )
+    expect(screen.getByTestId('client-usage-panel')).toHaveTextContent('—')
+
+    vi.mocked(observabilityApi.getInvocationSummary).mockRejectedValueOnce(
+      new ApiError('usage boom', { status: 500 }),
+    )
+    await userEvent.setup().click(screen.getByRole('button', { name: '새로고침' }))
+    expect(await screen.findByText(/usage boom/)).toBeInTheDocument()
+    expect(screen.getByTestId('client-usage-status')).toHaveTextContent(
+      '집계 확인 불가',
+    )
+    expect(
+      screen.getByRole('button', { name: '정책 수정' }),
+    ).toBeInTheDocument()
   })
 
   it('shows registered client_key read-only with copy actions', async () => {

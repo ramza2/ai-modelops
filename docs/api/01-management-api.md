@@ -890,6 +890,7 @@ latency_ms_avg / p50 / p95 / max
 deployment_name        # only when group_by=deployment
 client_display_name    # only when group_by=client; null if unregistered/unknown
 client_app_id          # only when group_by=client; null if unregistered/unknown
+last_called_at         # only when group_by=client; MAX(requested_at) within hours window
 ```
 
 Notes:
@@ -899,6 +900,8 @@ Notes:
 - When `group_by=client`, display metadata is enriched after aggregation by exact
   `group_key` → `client_app.client_key` match (inactive apps included). Aggregation
   / `GROUP BY` / stats are unchanged; duplicate display names stay separate groups.
+- `last_called_at` is the latest `requested_at` **inside the selected `hours` window**
+  (not all-time). UTC ISO 8601 with `Z`. Absent for alias/deployment grouping.
 - Alias grouping uses Endpoint Alias name; deployment grouping returns id + name.
 - No context-overflow classifier; no prompt/response storage.
 - Does **not** scrape vLLM `/metrics` (see M6-A2 runtime endpoints below).

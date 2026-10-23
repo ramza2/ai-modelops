@@ -35,7 +35,8 @@ class InvocationRepository:
             join_sql = """
                 LEFT JOIN client_app ca ON ca.id = il.client_app_id
             """
-            extra_select = ""
+            # Window-scoped last call only (WHERE requested_at >= :since).
+            extra_select = ", MAX(il.requested_at) AS last_called_at"
             order_sql = "group_key ASC"
         elif group_by == "alias":
             group_expr = """

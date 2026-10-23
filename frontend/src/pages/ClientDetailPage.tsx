@@ -6,7 +6,12 @@ import {
   getClientRuntimePolicy,
   updateClient,
 } from '../api/clients'
-import type { ClientApp, ClientRuntimePolicyResponse } from '../api/types'
+import { getInvocationSummary } from '../api/observability'
+import type {
+  ClientApp,
+  ClientRuntimePolicyResponse,
+  InvocationSummaryItem,
+} from '../api/types'
 import { ActiveBadge } from '../components/ActiveBadge'
 import { AppShell } from '../components/AppShell'
 import { ClientEditDialog } from '../components/ClientEditDialog'
@@ -17,6 +22,12 @@ import { HelpHint, TermLabel } from '../components/HelpHint'
 import { LoadingBlock } from '../components/LoadingBlock'
 import { SectionError } from '../components/SectionError'
 import { StatusBadge } from '../components/StatusBadge'
+import {
+  CLIENT_USAGE_HOURS,
+  formatErrorRatePercent,
+  indexClientUsageByKey,
+  resolveClientUsage,
+} from '../utils/clientUsage'
 import { formatApiDateTime } from '../utils/date'
 import {
   createIdempotencyKey,
@@ -35,8 +46,15 @@ export function ClientDetailPage() {
   const [client, setClient] = useState<ClientApp | null>(null)
   const [policyResp, setPolicyResp] =
     useState<ClientRuntimePolicyResponse | null>(null)
+  const [usageByKey, setUsageByKey] = useState<Map<
+    string,
+    InvocationSummaryItem
+  > | null>(null)
+  const [usageFailed, setUsageFailed] = useState(false)
+  const [usageError, setUsageError] = useState<string | null>(null)
   const [clientLoading, setClientLoading] = useState(true)
   const [policyLoading, setPolicyLoading] = useState(true)
+  const [usageLoading, setUsageLoading] = useState(true)
   const [clientError, setClientError] = useState<string | null>(null)
   const [policyError, setPolicyError] = useState<string | null>(null)
   const [notFound, setNotFound] = useState(false)
@@ -63,6 +81,9 @@ export function ClientDetailPage() {
   const resetIdentity = useCallback(() => {
     setClient(null)
     setPolicyResp(null)
+    setUsageByKey(null)
+    setUsageFailed(false)
+    setUsageError(null)
     setClientError(null)
     setPolicyError(null)
     setNotFound(false)
@@ -84,6 +105,7 @@ export function ClientDetailPage() {
         setNotFound(true)
         setClientLoading(false)
         setPolicyLoading(false)
+        setUsageLoading(false)
         setClientError('요청한 사용 시스템을 찾을 수 없습니다.')
         return
       }
@@ -101,6 +123,7 @@ export function ClientDetailPage() {
         resetIdentity()
         setClientLoading(true)
         setPolicyLoading(true)
+        setUsageLoading(true)
       } else {
         setRefreshing(true)
       }
@@ -120,6 +143,7 @@ export function ClientDetailPage() {
           if (err instanceof ApiError && err.status === 404) {
             setClient(null)
             setPolicyResp(null)
+            setUsageByKey(null)
             setNotFound(true)
             setClientError('요청한 사용 시스템을 찾을 수 없습니다.')
             return
@@ -164,7 +188,36 @@ export function ClientDetailPage() {
           if (isCurrent()) setPolicyLoading(false)
         })
 
-      await Promise.all([clientPromise, policyPromise])
+      const usagePromise = getInvocationSummary({
+        hours: CLIENT_USAGE_HOURS,
+        groupBy: 'client',
+        signal: controller.signal,
+      })
+        .then((data) => {
+          if (!isCurrent()) return
+          setUsageByKey(indexClientUsageByKey(data))
+          setUsageFailed(false)
+          setUsageError(null)
+          setLastUpdated(new Date())
+        })
+        .catch((err: unknown) => {
+          if (!isCurrent()) return
+          if (err instanceof DOMException && err.name === 'AbortError') return
+          setUsageByKey(null)
+          setUsageFailed(true)
+          setUsageError(
+            err instanceof ApiError
+              ? err.message
+              : err instanceof Error
+                ? err.message
+                : '호출 집계를 불러오지 못했습니다.',
+          )
+        })
+        .finally(() => {
+          if (isCurrent()) setUsageLoading(false)
+        })
+
+      await Promise.all([clientPromise, policyPromise, usagePromise])
       if (isCurrent()) setRefreshing(false)
     },
     [clientId, resetIdentity],
@@ -454,6 +507,124 @@ export function ClientDetailPage() {
               </button>
             )}
           </div>
+        </section>
+      ) : null}
+
+      {displayClient ? (
+        <section
+          className="detail-panel"
+          aria-labelledby="client-usage-heading"
+          data-testid="client-usage-panel"
+        >
+          <div className="detail-panel__heading">
+            <h2 id="client-usage-heading">AI 사용 현황</h2>
+            <span className="term-label__api">(Invocation Summary)</span>
+          </div>
+          <p className="panel-hint">
+            최근 {CLIENT_USAGE_HOURS}시간 Invocation 집계(읽기 전용)입니다.
+            런타임 정책과 별개이며, 마지막 호출 시각은 조회 기간 안의 최신
+            시각입니다. 호출 없음은 연동 장애를 단정하지 않습니다.
+          </p>
+          {usageFailed && usageError ? (
+            <SectionError
+              title="AI 호출 집계 조회 실패"
+              message={`사용 현황을 확인할 수 없습니다. 원인: ${usageError}`}
+              action="등록 정보·런타임 정책은 유지됩니다. 새로고침 후 다시 확인하세요."
+            />
+          ) : null}
+          {usageLoading && usageByKey === null && !usageFailed ? (
+            <LoadingBlock label="AI 사용 현황을 불러오는 중…" />
+          ) : null}
+          {!usageLoading || usageByKey !== null || usageFailed ? (
+            <>
+              {(() => {
+                const usage = resolveClientUsage(
+                  displayClient.client_key,
+                  usageByKey,
+                  usageFailed,
+                )
+                return (
+                  <>
+                    <dl className="meta-grid">
+                      <div>
+                        <dt>
+                          <TermLabel
+                            text={`최근 ${CLIENT_USAGE_HOURS}시간 요청`}
+                            apiTerm="request_count"
+                          />
+                        </dt>
+                        <dd>
+                          {usage.requestCount === null
+                            ? '조회 실패'
+                            : usage.requestCount}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>
+                          <TermLabel text="성공" apiTerm="success_count" />
+                        </dt>
+                        <dd>
+                          {usage.successCount === null
+                            ? '조회 실패'
+                            : usage.successCount}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>
+                          <TermLabel text="오류" apiTerm="error_count" />
+                        </dt>
+                        <dd>
+                          {usage.errorCount === null
+                            ? '조회 실패'
+                            : usage.errorCount}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>
+                          <TermLabel text="오류율" apiTerm="error_rate" />
+                        </dt>
+                        <dd>
+                          {formatErrorRatePercent(usage.errorRatePercent)}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>
+                          <TermLabel
+                            text="마지막 호출 시각(조회 기간 내)"
+                            apiTerm="last_called_at"
+                          />
+                        </dt>
+                        <dd>
+                          {usage.status === 'unavailable'
+                            ? '조회 실패'
+                            : formatApiDateTime(usage.lastCalledAt)}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>
+                          <TermLabel
+                            text="최근 호출 상태"
+                            apiTerm="usage_status"
+                          />
+                        </dt>
+                        <dd data-testid="client-usage-status">
+                          {usage.statusLabel}
+                        </dd>
+                      </div>
+                    </dl>
+                    <p className="panel-hint" style={{ marginTop: '0.75rem' }}>
+                      <Link
+                        className="table-link"
+                        to={`/observability?hours=${CLIENT_USAGE_HOURS}&group_by=client`}
+                      >
+                        운영 모니터링에서 AI 요청 사용 현황 보기
+                      </Link>
+                    </p>
+                  </>
+                )
+              })()}
+            </>
+          ) : null}
         </section>
       ) : null}
 

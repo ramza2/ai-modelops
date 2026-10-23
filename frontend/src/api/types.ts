@@ -489,6 +489,8 @@ export type InvocationSummaryItem = {
   client_display_name?: string | null
   /** Present when group_by=client; registered ClientApp id for detail link. */
   client_app_id?: string | null
+  /** Present when group_by=client; MAX(requested_at) within the hours window. */
+  last_called_at?: string | null
   request_count: number
   success_count: number
   error_count: number
