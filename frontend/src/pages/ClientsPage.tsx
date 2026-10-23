@@ -177,7 +177,7 @@ export function ClientsPage() {
       lastUpdated={lastUpdated}
     >
       <p className="panel-hint" role="note">
-        {CLIENT_FIELD_HELP.registryEditable} {CLIENT_FIELD_HELP.policyReadOnly}{' '}
+        {CLIENT_FIELD_HELP.registryEditable} {CLIENT_FIELD_HELP.policyEditable}{' '}
         비활성(INACTIVE)은 Gateway 추론을 직접 막는 스위치가 아닙니다. 자세한
         의미는 「등록 상태」 도움말을 보세요.
       </p>

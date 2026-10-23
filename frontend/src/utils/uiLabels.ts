@@ -126,21 +126,26 @@ export const CLIENT_FIELD_HELP = {
   runtimePolicy:
     'Gateway가 적용할 수 있는 런타임 제한입니다. 정책 행이 없으면(policy = null) 별도 제한 행이 없는 것입니다. 제한 값이 null이면 해당 항목은 제한 없음(unrestricted)입니다.',
   policyNull:
-    'Runtime Policy 행이 없습니다(policy = null). 이는 “정책을 꺼 둠”과 다르며, 클라이언트별 제한 행 자체가 없는 상태입니다. 이 화면에서는 정책을 새로 만들 수 없습니다.',
+    'Runtime Policy 행이 없습니다(policy = null). 이는 “정책을 꺼 둠”과 다르며, 클라이언트별 제한 행 자체가 없는 상태입니다. 「새 정책 만들기」로 행을 추가할 수 있습니다.',
   policyEnabled:
-    '사용 중(enabled)이면 Gateway가 이 정책 행을 스냅샷에 올릴 수 있습니다. 중지됨(disabled)이면 이 정책 행은 적용되지 않습니다. 사용 시스템 자체의 활성(ACTIVE)과는 별개입니다.',
+    '사용(enabled)이면 Gateway가 이 정책 행을 스냅샷에 올릴 수 있습니다. 사용 안함(disabled)이면 이 정책 행의 제한이 적용되지 않습니다(AI 호출 차단이 아님). 사용 시스템 자체의 활성(ACTIVE)과는 별개입니다.',
   maxInputTokens:
-    '한 번의 Chat 요청에서 허용하는 입력(프롬프트) 토큰 상한입니다. null이면 이 정책으로 입력 토큰을 제한하지 않습니다. 실제 적용은 Gateway의 신뢰된 토큰 계산 경로에 따릅니다.',
+    '한 번의 Chat 요청에서 사용할 수 있는 프롬프트(입력) 토큰 상한입니다. null이면 이 정책으로 입력 토큰을 제한하지 않습니다. 실제 적용은 Gateway의 신뢰된 토큰 계산 경로에 따르며, 지원되지 않는 요청은 거부될 수 있습니다.',
   maxOutputTokens:
-    '한 번의 Chat 요청에서 허용하는 출력 토큰 상한입니다. null이면 이 정책으로 출력 토큰을 제한하지 않습니다.',
+    '한 번의 Chat 요청에서 생성할 수 있는 출력 토큰 상한입니다. null이면 이 정책으로 출력 토큰을 제한하지 않습니다. 상한을 넘는 요청은 거부될 수 있습니다.',
   maxConcurrentRequests:
-    '이 사용 시스템이 Gateway에서 동시에 진행할 수 있는 요청 수 상한입니다. null이면 이 정책으로 동시 요청을 제한하지 않습니다.',
+    '같은 사용 시스템이 Gateway에서 동시에 진행할 수 있는 요청 수 상한입니다(Gateway 프로세스별). null이면 이 정책으로 동시 요청을 제한하지 않습니다.',
   priority:
-    '숫자가 작을수록 높은 우선순위 의도입니다. null이면 미설정입니다. 요청된 priority가 항상 모델 런타임으로 전달된다고 단정하지 마세요 — Gateway는 신뢰된 스케줄러 증거가 있을 때만 전달합니다.',
+    '숫자가 작을수록 높은 우선순위 의도입니다. null=미설정, 0=중립값(null과 구별). 비0 값은 신뢰된 priority scheduler 증거가 있을 때만 전달되며, 없으면 요청이 거부될 수 있습니다.',
   registryEditable:
-    '사용 시스템 등록·표시 이름/설명 수정·등록 상태(활성/비활성) 변경을 할 수 있습니다. 등록만으로 API 별칭·모델 배포가 생기거나, 외부 서비스에 X-AI-Client 헤더가 자동으로 붙지는 않습니다.',
+    '사용 시스템 등록·표시 이름/설명 수정·등록 상태(활성/비활성) 변경·런타임 정책 생성/수정을 할 수 있습니다. 등록만으로 API 별칭·모델 배포가 생기거나, 외부 서비스에 X-AI-Client 헤더가 자동으로 붙지는 않습니다.',
+  policyEditable:
+    '런타임 정책은 전체 필드 교체(PUT upsert)로 저장합니다. Frontend 확인창은 SSO/RBAC가 아니며, Management API는 신뢰된 관리자 네트워크 전제입니다. DB 저장과 Gateway 적용 확인은 별개일 수 있습니다.',
+  /** @deprecated P1-23 — use policyEditable */
   policyReadOnly:
-    '런타임 정책(Runtime Policy) 편집 UI는 아직 제공하지 않습니다. 정책 행이 있으면 조회만 가능합니다.',
+    '런타임 정책은 상세 화면에서 생성·수정할 수 있습니다. Frontend 확인창은 SSO/RBAC가 아닙니다.',
+  policySaveImpact:
+    '정책 저장은 운영 중 AI 호출에 영향을 줄 수 있습니다. 사용 안함=호출 차단 아님. ClientApp 비활성·헤더 불일치 시 의도한 정책이 적용되지 않을 수 있습니다. priority 비0은 신뢰된 scheduler가 없으면 거부될 수 있습니다.',
   deactivateImpact:
     '등록 비활성화는 Gateway 추론 요청을 직접 차단하지 않습니다. 활성 등록이 해제되며 Gateway 클라이언트별 Runtime Policy 스냅샷에서 제외될 수 있어 토큰·동시 요청 제한이 적용되지 않을 수 있습니다. 호출 로그의 client_app_id 매핑에도 영향이 있을 수 있고 raw_client_key 이력은 남을 수 있습니다. API 별칭·모델 배포는 중지되지 않으며 해당 API를 통한 추론이 계속 가능할 수 있습니다. 실제 AI 요청 차단에는 별도의 Gateway 인증·권한·호출 차단 정책이 필요합니다.',
 } as const

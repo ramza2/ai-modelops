@@ -1,6 +1,7 @@
-import { apiGet, apiPatch, apiPost } from './client'
+import { apiGet, apiPatch, apiPost, apiPut } from './client'
 import type {
   ClientApp,
+  ClientRuntimePolicy,
   ClientRuntimePolicyResponse,
   Paginated,
 } from './types'
@@ -64,6 +65,39 @@ export async function getClientRuntimePolicy(
   return apiGet<ClientRuntimePolicyResponse>(
     `/api/v1/clients/${clientId}/runtime-policy`,
     { signal },
+  )
+}
+
+/**
+ * Full-replacement upsert body. Every field must be sent explicitly.
+ * ``null`` clears a nullable limit/priority (unrestricted / unset).
+ * Do not send Idempotency-Key — PUT is not under the ClientApp POST/PATCH contract.
+ */
+export type PutClientRuntimePolicyBody = {
+  is_enabled: boolean
+  max_input_tokens: number | null
+  max_output_tokens: number | null
+  max_concurrent_requests: number | null
+  priority: number | null
+}
+
+export async function putClientRuntimePolicy(
+  clientId: string,
+  body: PutClientRuntimePolicyBody,
+  opts: { signal?: AbortSignal } = {},
+): Promise<ClientRuntimePolicy> {
+  return apiPut<ClientRuntimePolicy>(
+    `/api/v1/clients/${clientId}/runtime-policy`,
+    {
+      body: {
+        is_enabled: body.is_enabled,
+        max_input_tokens: body.max_input_tokens,
+        max_output_tokens: body.max_output_tokens,
+        max_concurrent_requests: body.max_concurrent_requests,
+        priority: body.priority,
+      },
+      signal: opts.signal,
+    },
   )
 }
 
