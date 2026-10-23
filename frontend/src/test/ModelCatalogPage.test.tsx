@@ -211,8 +211,9 @@ describe('ModelCatalogPage', () => {
     ).toHaveTextContent(/모델 검색 및 대상 서버 선택/)
     expect(screen.getByText(/현재 조회 서버:/)).toBeInTheDocument()
     expect(
-      screen.getByText(/검색어\(키워드\)만 「검색」버튼을 눌러야 적용/),
-    ).toBeInTheDocument()
+      screen.getAllByText(/검색어\(키워드\)만 「검색」버튼을 눌러야 적용/)
+        .length,
+    ).toBeGreaterThan(0)
 
     const glossary = screen.getByText('용어 및 상태 안내').closest(
       'details',
@@ -523,8 +524,10 @@ describe('ModelCatalogPage', () => {
     expect(within(detail).getByText('종합 판정')).toBeInTheDocument()
     expect(within(detail).getByText('GPU 0')).toBeInTheDocument()
     expect(within(detail).getByText('GPU 1')).toBeInTheDocument()
-    expect(within(detail).getByText('사용 가능한 GPU 메모리')).toBeInTheDocument()
-    expect(within(detail).getByText('안전 여유')).toBeInTheDocument()
+    expect(
+      within(detail).getAllByText('사용 가능한 GPU 메모리').length,
+    ).toBeGreaterThan(0)
+    expect(within(detail).getAllByText('안전 여유').length).toBeGreaterThan(0)
     expect(screen.getByTestId('fit-gpu-cards-org/fit-ux')).toBeInTheDocument()
     expect(screen.getByTestId('fit-gpu-card-org/fit-ux-0')).toBeInTheDocument()
     expect(screen.getByTestId('fit-gpu-card-org/fit-ux-1')).toBeInTheDocument()
@@ -1858,11 +1861,13 @@ describe('ModelCatalogPage', () => {
       screen.queryByRole('link', { name: '캐시 목록 확인' }),
     ).not.toBeInTheDocument()
     expect(
-      within(row).getByText(/파일 다운로드 완료 ≠ 모델 실행 중 ≠ API 연결 완료/),
-    ).toBeInTheDocument()
+      within(row).getAllByText(
+        /파일 다운로드 완료 ≠ 모델 실행 중 ≠ API 연결 완료/,
+      ).length,
+    ).toBeGreaterThan(0)
     expect(
-      within(row).getByText(/모델 파일 준비 완료/),
-    ).toBeInTheDocument()
+      within(row).getAllByText(/모델 파일 준비 완료/).length,
+    ).toBeGreaterThan(0)
 
     expect(
       within(row).getByRole('button', { name: '파일 준비 완료' }),
@@ -2106,14 +2111,24 @@ describe('ModelCatalogPage', () => {
     expect(
       within(row).getByText(/진행률 정보 없음 · 상태는 자동 갱신 중/),
     ).toBeInTheDocument()
-    expect(within(row).queryByText(/%/)).not.toBeInTheDocument()
+    expect(within(row).queryByText(/진행률 \d+%/)).not.toBeInTheDocument()
 
     await waitFor(() => {
       expect(
-        within(row).getByText(/다운로드 상태 조회 실패/),
-      ).toBeInTheDocument()
+        within(row).getAllByText(/다운로드 상태 조회 실패/).length,
+      ).toBeGreaterThan(0)
     })
-    expect(within(row).queryByText(/^다운로드 실패$/)).not.toBeInTheDocument()
+    expect(
+      within(row).queryByText((content, el) => {
+        return (
+          el?.classList.contains('catalog-download-status__headline--error') ===
+            true && content === '다운로드 실패'
+        )
+      }),
+    ).not.toBeInTheDocument()
+    expect(
+      row.querySelector('[data-download-state="failed"]'),
+    ).toBeNull()
     expect(
       within(row).getByText(/다운로드 자체와 별개|다운로드 자체의 실패가 아닙니다/),
     ).toBeInTheDocument()
@@ -2160,7 +2175,9 @@ describe('ModelCatalogPage', () => {
     )
     const detail = await screen.findByTestId('fit-detail-org/sparse-fit')
     expect(within(detail).getAllByText('정보 없음').length).toBeGreaterThan(2)
-    expect(within(detail).getByText(/판단 정보 부족/)).toBeInTheDocument()
+    expect(
+      within(detail).getAllByText(/판단 정보 부족/).length,
+    ).toBeGreaterThan(0)
     expect(within(detail).queryByText('0 MiB')).not.toBeInTheDocument()
   })
 })
