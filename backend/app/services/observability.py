@@ -8,6 +8,7 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import ValidationError
+from app.repositories.clients import ClientRepository
 from app.repositories.invocations import InvocationRepository
 
 ALLOWED_GROUP_BY = frozenset({"client", "alias", "deployment"})
@@ -19,6 +20,7 @@ class InvocationObservabilityService:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
         self._repo = InvocationRepository(session)
+        self._clients = ClientRepository(session)
 
     async def invocation_capacity_summary(
         self,
@@ -49,6 +51,8 @@ class InvocationObservabilityService:
         since = now - dt.timedelta(hours=hours)
         rows = await self._repo.capacity_summary(since=since, group_by=group_by)
         items = [self._serialize_group(row, group_by=group_by) for row in rows]
+        if group_by == "client":
+            await self._enrich_client_display(items)
         return {
             "hours": hours,
             "group_by": group_by,
@@ -56,6 +60,30 @@ class InvocationObservabilityService:
             "window_end": now.isoformat().replace("+00:00", "Z"),
             "items": items,
         }
+
+    async def _enrich_client_display(self, items: list[dict[str, Any]]) -> None:
+        """Attach ClientApp display metadata without changing aggregation keys.
+
+        Lookup is by exact ``group_key`` (== client_key / raw_client_key). Inactive
+        ClientApps are included. Unregistered keys and ``unknown`` stay null.
+        """
+        keys = sorted(
+            {
+                item["group_key"]
+                for item in items
+                if item.get("group_key") and item["group_key"] != "unknown"
+            }
+        )
+        clients = await self._clients.list_by_keys(keys)
+        by_key = {client.client_key: client for client in clients}
+        for item in items:
+            client = by_key.get(item["group_key"])
+            if client is None:
+                item["client_display_name"] = None
+                item["client_app_id"] = None
+            else:
+                item["client_display_name"] = client.display_name
+                item["client_app_id"] = str(client.id)
 
     @staticmethod
     def _serialize_group(row: dict[str, Any], *, group_by: str) -> dict[str, Any]:

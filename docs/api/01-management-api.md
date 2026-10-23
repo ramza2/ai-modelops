@@ -888,12 +888,17 @@ output_tokens_avg
 total_tokens_avg
 latency_ms_avg / p50 / p95 / max
 deployment_name        # only when group_by=deployment
+client_display_name    # only when group_by=client; null if unregistered/unknown
+client_app_id          # only when group_by=client; null if unregistered/unknown
 ```
 
 Notes:
 
 - Token percentiles use PostgreSQL `percentile_cont` (NULL token rows ignored).
 - Client grouping prefers `client_app.client_key`, else `raw_client_key`, else `unknown`.
+- When `group_by=client`, display metadata is enriched after aggregation by exact
+  `group_key` → `client_app.client_key` match (inactive apps included). Aggregation
+  / `GROUP BY` / stats are unchanged; duplicate display names stay separate groups.
 - Alias grouping uses Endpoint Alias name; deployment grouping returns id + name.
 - No context-overflow classifier; no prompt/response storage.
 - Does **not** scrape vLLM `/metrics` (see M6-A2 runtime endpoints below).

@@ -302,6 +302,8 @@ async def test_summary_client_grouping_and_percentiles(obs_client) -> None:
     assert idea["latency_ms_max"] == 3000
     # 48h outlier must not appear
     assert idea["input_tokens_max"] != 9999
+    assert idea["client_display_name"] == "Ideaflow"
+    assert idea["client_app_id"] == str(fixture["client_id"])
 
     unk = items[fixture["unknown_key"]]
     assert unk["request_count"] == 1
@@ -310,6 +312,131 @@ async def test_summary_client_grouping_and_percentiles(obs_client) -> None:
     assert unk["tokenized_request_count"] == 0
     assert unk["input_tokens_avg"] is None
     assert unk["input_tokens_p50"] is None
+    assert unk["client_display_name"] is None
+    assert unk["client_app_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_summary_client_display_name_enrichment(obs_client) -> None:
+    """P1-24A: display_name / client_app_id enrichment without changing aggregates."""
+    suffix = uuid.uuid4().hex[:8]
+    now = dt.datetime.now(tz=dt.UTC)
+    session_factory = obs_client["session_factory"]
+    ac = obs_client["client"]
+
+    active_id = uuid.uuid4()
+    inactive_id = uuid.uuid4()
+    twin_a_id = uuid.uuid4()
+    twin_b_id = uuid.uuid4()
+    active_key = f"active-{suffix}"
+    inactive_key = f"inactive-{suffix}"
+    twin_a_key = f"twin-a-{suffix}"
+    twin_b_key = f"twin-b-{suffix}"
+    raw_only_key = inactive_key  # registered inactive; log has null client_app_id
+    unregistered_key = f"ghost-{suffix}"
+
+    async with session_factory() as session:
+        for cid, key, name, active in (
+            (active_id, active_key, "Active App", True),
+            (inactive_id, inactive_key, "Inactive App", False),
+            (twin_a_id, twin_a_key, "Shared Name", True),
+            (twin_b_id, twin_b_key, "Shared Name", True),
+        ):
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO client_app (id, client_key, display_name, is_active)
+                    VALUES (:id, :key, :name, :active)
+                    """
+                ),
+                {
+                    "id": str(cid),
+                    "key": key,
+                    "name": name,
+                    "active": active,
+                },
+            )
+
+        log_rows = [
+            # registered active via client_app_id
+            (str(active_id), active_key),
+            # registered inactive via raw_client_key only
+            (None, raw_only_key),
+            # duplicate display_name, distinct keys
+            (str(twin_a_id), twin_a_key),
+            (str(twin_b_id), twin_b_key),
+            # unregistered
+            (None, unregistered_key),
+            # unknown (null/empty raw)
+            (None, None),
+        ]
+        for idx, (app_id, raw) in enumerate(log_rows):
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO invocation_log (
+                      request_id, requested_at, client_app_id, raw_client_key,
+                      api_path, http_status, latency_ms, is_streaming
+                    ) VALUES (
+                      :rid, :at, CAST(:client_app_id AS uuid), :raw,
+                      '/v1/chat/completions', 200, 100, false
+                    )
+                    """
+                ),
+                {
+                    "rid": f"p124a-{suffix}-{idx}",
+                    "at": now - dt.timedelta(minutes=10 + idx),
+                    "client_app_id": app_id,
+                    "raw": raw,
+                },
+            )
+        await session.commit()
+
+    resp = await ac.get(
+        "/api/v1/observability/invocations/summary",
+        params={"hours": 24, "group_by": "client"},
+    )
+    assert resp.status_code == 200
+    items = {i["group_key"]: i for i in resp.json()["items"]}
+
+    active = items[active_key]
+    assert active["client_display_name"] == "Active App"
+    assert active["client_app_id"] == str(active_id)
+    assert active["request_count"] == 1
+
+    inactive = items[inactive_key]
+    assert inactive["client_display_name"] == "Inactive App"
+    assert inactive["client_app_id"] == str(inactive_id)
+    assert inactive["request_count"] == 1
+
+    twin_a = items[twin_a_key]
+    twin_b = items[twin_b_key]
+    assert twin_a["client_display_name"] == "Shared Name"
+    assert twin_b["client_display_name"] == "Shared Name"
+    assert twin_a["client_app_id"] == str(twin_a_id)
+    assert twin_b["client_app_id"] == str(twin_b_id)
+    assert twin_a["request_count"] == 1
+    assert twin_b["request_count"] == 1
+
+    ghost = items[unregistered_key]
+    assert ghost["client_display_name"] is None
+    assert ghost["client_app_id"] is None
+    assert ghost["request_count"] == 1
+
+    unknown = items["unknown"]
+    assert unknown["client_display_name"] is None
+    assert unknown["client_app_id"] is None
+    assert unknown["request_count"] == 1
+
+    # alias/deployment must not carry client enrichment fields
+    alias_resp = await ac.get(
+        "/api/v1/observability/invocations/summary",
+        params={"hours": 24, "group_by": "alias"},
+    )
+    assert alias_resp.status_code == 200
+    for item in alias_resp.json()["items"]:
+        assert "client_display_name" not in item
+        assert "client_app_id" not in item
 
 
 @pytest.mark.asyncio

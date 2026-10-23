@@ -66,6 +66,13 @@ class ClientRepository:
         stmt = select(ClientApp).where(ClientApp.client_key == client_key)
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
+    async def list_by_keys(self, client_keys: list[str]) -> list[ClientApp]:
+        """Batch lookup by exact client_key. Includes inactive apps (no is_active filter)."""
+        if not client_keys:
+            return []
+        stmt = select(ClientApp).where(ClientApp.client_key.in_(client_keys))
+        return list((await self._session.execute(stmt)).scalars().all())
+
     async def add(self, client: ClientApp) -> ClientApp:
         self._session.add(client)
         await self._session.flush()

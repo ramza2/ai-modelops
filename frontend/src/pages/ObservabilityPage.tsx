@@ -41,6 +41,29 @@ function tokenCoverage(item: InvocationSummaryItem): string {
   return `${((tok / req) * 100).toFixed(1)}% (${tok}/${req})`
 }
 
+/** Client-group cell: prefer registered display_name; keep group_key as service key. */
+export function ClientGroupLabel({ item }: { item: InvocationSummaryItem }) {
+  if (item.group_key === 'unknown') {
+    return <span>미식별 시스템</span>
+  }
+  if (item.client_app_id && item.client_display_name) {
+    return (
+      <div>
+        <Link className="table-link" to={`/clients/${item.client_app_id}`}>
+          {item.client_display_name}
+        </Link>
+        <div className="secondary-text mono">{item.group_key}</div>
+      </div>
+    )
+  }
+  return (
+    <div>
+      <span>미등록 시스템</span>
+      <div className="secondary-text mono">{item.group_key}</div>
+    </div>
+  )
+}
+
 function formatRatio(ratio: number | null | undefined): string {
   if (ratio === null || ratio === undefined || Number.isNaN(ratio)) return '—'
   return `${ratio.toFixed(3)} (${(ratio * 100).toFixed(1)}%)`
@@ -405,7 +428,7 @@ export function ObservabilityPage() {
               <tbody>
                 {items.map((item) => (
                   <tr key={`${groupBy}:${item.group_key}`}>
-                    <td className="mono">
+                    <td className={groupBy === 'client' ? undefined : 'mono'}>
                       {groupBy === 'deployment' ? (
                         <Link
                           className="table-link mono"
@@ -413,6 +436,8 @@ export function ObservabilityPage() {
                         >
                           {shortId(item.group_key, 12)}
                         </Link>
+                      ) : groupBy === 'client' ? (
+                        <ClientGroupLabel item={item} />
                       ) : (
                         item.group_key
                       )}
