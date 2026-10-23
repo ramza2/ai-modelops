@@ -526,7 +526,12 @@ describe('ModelCachePage', () => {
     expect(
       await screen.findByText(/다운로드 상태 갱신에 실패/),
     ).toBeInTheDocument()
+    expect(screen.getAllByText(/상태 확인 실패/).length).toBeGreaterThan(0)
+    expect(
+      screen.getByText(/다운로드 자체의 실패가 아닙니다/),
+    ).toBeInTheDocument()
     expect(screen.getByTitle('PREPARING')).toBeInTheDocument()
+    expect(screen.getByText(/자동 갱신 중 — 활성 다운로드/)).toBeInTheDocument()
 
     await userEvent.click(screen.getByRole('button', { name: '다시 시도' }))
     await waitFor(() => {
