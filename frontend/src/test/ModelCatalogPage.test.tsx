@@ -206,6 +206,14 @@ describe('ModelCatalogPage', () => {
     expect(screen.getByText('org/tight-model')).toBeInTheDocument()
     expect(screen.getAllByText(/적합/).length).toBeGreaterThan(0)
     expect(screen.getAllByText(/여유 부족/).length).toBeGreaterThan(0)
+    expect(
+      screen.getByRole('list', { name: '사용 안내' }),
+    ).toHaveTextContent(/모델 검색 및 대상 서버 선택/)
+    expect(screen.getByText(/현재 조회 서버:/)).toBeInTheDocument()
+    expect(
+      screen.getAllByText(/검색어\(키워드\)만 「검색」버튼을 눌러야 적용/)
+        .length,
+    ).toBeGreaterThan(0)
 
     const glossary = screen.getByText('용어 및 상태 안내').closest(
       'details',
@@ -215,6 +223,7 @@ describe('ModelCatalogPage', () => {
     expect(within(glossary).getByText('Fit 판정 기준')).toBeVisible()
     expect(within(glossary).getByText('GPU 적합성')).toBeVisible()
     expect(within(glossary).getByText('다운로드 상태')).toBeVisible()
+    expect(within(glossary).getByText('설치 가능만')).toBeVisible()
 
     const fitBadge = screen.getByTitle(/자원 적합\(FIT\)/)
     expect(fitBadge).toHaveTextContent(/\(FIT\)/)
@@ -297,11 +306,14 @@ describe('ModelCatalogPage', () => {
     )
 
     renderAt('/models/catalog?node_id=node-1')
-    const row = (await screen.findByText('org/fail-model')).closest('tr')
-    await userEvent.click(
-      within(row as HTMLElement).getByRole('button', { name: '다운로드' }),
-    )
-    expect(await screen.findByText('Hub timeout')).toBeInTheDocument()
+    const row = (await screen.findByText('org/fail-model')).closest(
+      'tr',
+    ) as HTMLElement
+    await userEvent.click(within(row).getByRole('button', { name: '다운로드' }))
+    expect(await within(row).findByText('Hub timeout')).toBeInTheDocument()
+    expect(within(row).getByText('다운로드 실패')).toBeInTheDocument()
+    expect(within(row).getByText(/다운로드 실패 원인/)).toBeInTheDocument()
+    expect(row.querySelector('[data-download-state="failed"]')).not.toBeNull()
     await userEvent.click(screen.getByRole('button', { name: '다시 다운로드' }))
     await waitFor(() => {
       expect(downloadsApi.startHfDownload).toHaveBeenCalledTimes(2)
@@ -366,8 +378,8 @@ describe('ModelCatalogPage', () => {
     const vramRow = screen.getByText('org/vram-bad').closest('tr') as HTMLElement
     const diskRow = screen.getByText('org/disk-bad').closest('tr') as HTMLElement
 
-    await userEvent.click(within(vramRow).getByRole('button', { name: 'Fit 분석' }))
-    await userEvent.click(within(diskRow).getByRole('button', { name: 'Fit 분석' }))
+    await userEvent.click(within(vramRow).getByRole('button', { name: 'GPU 적합성 분석' }))
+    await userEvent.click(within(diskRow).getByRole('button', { name: 'GPU 적합성 분석' }))
 
     await waitFor(() => {
       expect(
@@ -446,7 +458,7 @@ describe('ModelCatalogPage', () => {
     const row = screen.getByText('org/analyze-me').closest('tr')
     expect(row).not.toBeNull()
     await userEvent.click(
-      within(row as HTMLElement).getByRole('button', { name: 'Fit 분석' }),
+      within(row as HTMLElement).getByRole('button', { name: 'GPU 적합성 분석' }),
     )
     const detail = await screen.findByTestId('fit-detail-org/analyze-me')
     expect(within(detail).getAllByText(/부족/).length).toBeGreaterThan(0)
@@ -484,10 +496,10 @@ describe('ModelCatalogPage', () => {
     expect(within(row).getByText('List summary only')).toBeInTheDocument()
     expect(within(row).getByText('목록 요약')).toBeInTheDocument()
 
-    await userEvent.click(within(row).getByRole('button', { name: 'Fit 분석' }))
+    await userEvent.click(within(row).getByRole('button', { name: 'GPU 적합성 분석' }))
     expect(row).toHaveAttribute('data-fit-loading', 'true')
     expect(
-      within(row).getByText(/GPU 적합성\(Fit\) 분석 중/),
+      within(row).getByText(/선택한 서버의 GPU 자원을 확인하는 중/),
     ).toBeInTheDocument()
     expect(within(row).getByRole('button', { name: '분석 중…' })).toBeDisabled()
 
@@ -512,9 +524,13 @@ describe('ModelCatalogPage', () => {
     expect(
       within(detail).getByRole('heading', { name: /GPU 적합성 상세 분석/ }),
     ).toHaveFocus()
-    expect(within(detail).getByText('종합 결과')).toBeInTheDocument()
+    expect(within(detail).getByText('종합 판정')).toBeInTheDocument()
     expect(within(detail).getByText('GPU 0')).toBeInTheDocument()
     expect(within(detail).getByText('GPU 1')).toBeInTheDocument()
+    expect(
+      within(detail).getAllByText('현재 여유 GPU 메모리').length,
+    ).toBeGreaterThan(0)
+    expect(within(detail).getAllByText('안전 여유').length).toBeGreaterThan(0)
     expect(screen.getByTestId('fit-gpu-cards-org/fit-ux')).toBeInTheDocument()
     expect(screen.getByTestId('fit-gpu-card-org/fit-ux-0')).toBeInTheDocument()
     expect(screen.getByTestId('fit-gpu-card-org/fit-ux-1')).toBeInTheDocument()
@@ -522,7 +538,10 @@ describe('ModelCatalogPage', () => {
     expect(within(detail).getByText('Do not pool VRAM')).toBeInTheDocument()
     expect(within(detail).getByText('Assumes single-GPU placement')).toBeInTheDocument()
     expect(within(detail).getByText('추천 GPU 및 판단 근거')).toBeInTheDocument()
-    expect(within(detail).getByText(/추천 GPU \(참고\)/)).toBeInTheDocument()
+    expect(within(detail).getByText(/추천 GPU \(참고/)).toBeInTheDocument()
+    expect(
+      within(row).getByTestId('fit-success-org/fit-ux'),
+    ).toHaveTextContent(/GPU 적합성 분석 완료/)
     expect(
       within(detail).getAllByText(/Cache Deploy Wizard/).length,
     ).toBeGreaterThan(0)
@@ -588,7 +607,7 @@ describe('ModelCatalogPage', () => {
     const row = (await screen.findByText('org/fit-fail')).closest(
       'tr',
     ) as HTMLElement
-    await userEvent.click(within(row).getByRole('button', { name: 'Fit 분석' }))
+    await userEvent.click(within(row).getByRole('button', { name: 'GPU 적합성 분석' }))
     expect(await screen.findByTestId('fit-error-org/fit-fail')).toHaveTextContent(
       'Node Agent unreachable',
     )
@@ -617,7 +636,7 @@ describe('ModelCatalogPage', () => {
     const row = (await screen.findByText('org/stale-fit')).closest(
       'tr',
     ) as HTMLElement
-    await userEvent.click(within(row).getByRole('button', { name: 'Fit 분석' }))
+    await userEvent.click(within(row).getByRole('button', { name: 'GPU 적합성 분석' }))
     await waitFor(() => {
       expect(resolveLate).not.toBeNull()
     })
@@ -678,7 +697,7 @@ describe('ModelCatalogPage', () => {
     const row = (await screen.findByText('org/rev-swap')).closest(
       'tr',
     ) as HTMLElement
-    await userEvent.click(within(row).getByRole('button', { name: 'Fit 분석' }))
+    await userEvent.click(within(row).getByRole('button', { name: 'GPU 적합성 분석' }))
 
     expect(await screen.findByTestId('fit-detail-org/rev-swap')).toBeInTheDocument()
     expect(screen.getByText('Disk full on rev-a')).toBeInTheDocument()
@@ -714,7 +733,7 @@ describe('ModelCatalogPage', () => {
       within(rowB).getByRole('button', { name: '다운로드' }),
     ).not.toBeDisabled()
     expect(
-      within(rowB).getByRole('button', { name: 'Fit 분석' }),
+      within(rowB).getByRole('button', { name: 'GPU 적합성 분석' }),
     ).toBeInTheDocument()
 
     resolveLateA!(
@@ -785,10 +804,10 @@ describe('ModelCatalogPage', () => {
       expect(within(okRow).getByText(/진행률 20%/)).toBeInTheDocument()
     })
 
-    await userEvent.click(within(okRow).getByRole('button', { name: 'Fit 분석' }))
+    await userEvent.click(within(okRow).getByRole('button', { name: 'GPU 적합성 분석' }))
     expect(await screen.findByTestId('fit-detail-org/ok-fit')).toBeInTheDocument()
 
-    await userEvent.click(within(failRow).getByRole('button', { name: 'Fit 분석' }))
+    await userEvent.click(within(failRow).getByRole('button', { name: 'GPU 적합성 분석' }))
     expect(await screen.findByTestId('fit-error-org/fail-fit')).toHaveTextContent(
       'Fit upstream timeout',
     )
@@ -987,13 +1006,53 @@ describe('ModelCatalogPage', () => {
     )
 
     renderAt('/models/catalog?node_id=node-1')
-    expect(await screen.findByText('disk full')).toBeInTheDocument()
+    const row = (await screen.findByText('org/fail-restore')).closest(
+      'tr',
+    ) as HTMLElement
+    expect(await within(row).findByText('disk full')).toBeInTheDocument()
+    expect(within(row).getByText('다운로드 실패')).toBeInTheDocument()
+    expect(within(row).getByText(/다운로드 실패 원인/)).toBeInTheDocument()
+    expect(row.querySelector('[data-download-state="failed"]')).not.toBeNull()
     expect(downloadsApi.startHfDownload).not.toHaveBeenCalled()
 
     await userEvent.click(screen.getByRole('button', { name: '다시 다운로드' }))
     await waitFor(() => {
       expect(downloadsApi.startHfDownload).toHaveBeenCalledTimes(1)
     })
+  })
+
+  it('shows CANCELED as 다운로드 취소됨 without failure-cause framing', async () => {
+    vi.mocked(catalogApi.listHfCatalog).mockResolvedValue(
+      pageResult([makeItem({ repository_id: 'org/canceled' })]),
+    )
+    vi.mocked(downloadsApi.startHfDownload).mockResolvedValue(
+      makeJob({
+        job_id: 'job-canceled',
+        repository_id: 'org/canceled',
+        status: 'CANCELED',
+        error_message: 'canceled by operator',
+      }),
+    )
+
+    renderAt('/models/catalog?node_id=node-1')
+    const row = (await screen.findByText('org/canceled')).closest(
+      'tr',
+    ) as HTMLElement
+    await userEvent.click(within(row).getByRole('button', { name: '다운로드' }))
+
+    expect(
+      await within(row).findByText('다운로드 취소됨'),
+    ).toBeInTheDocument()
+    expect(row.querySelector('[data-download-state="canceled"]')).not.toBeNull()
+    expect(row.querySelector('[data-download-state="failed"]')).toBeNull()
+    expect(within(row).queryByText('다운로드 실패')).not.toBeInTheDocument()
+    expect(
+      within(row).queryByText(/다운로드 실패 원인/),
+    ).not.toBeInTheDocument()
+    expect(within(row).queryByText('canceled by operator')).not.toBeInTheDocument()
+    expect(
+      within(row).getByRole('button', { name: '다시 다운로드' }),
+    ).toBeInTheDocument()
   })
 
   it('isolates download tracking by node and requested_revision', async () => {
@@ -1679,11 +1738,11 @@ describe('ModelCatalogPage', () => {
 
     await userEvent.selectOptions(screen.getByLabelText(/대상 서버/), 'node-2')
     expect(
-      await screen.findByText(/카탈로그를 다시 불러오는 중/),
+      await screen.findByText(/서버 변경 적용 중/),
     ).toBeInTheDocument()
     expect(within(row).getByText('목록 갱신 중…')).toBeInTheDocument()
     expect(
-      within(row).getByRole('button', { name: 'Fit 분석' }),
+      within(row).getByRole('button', { name: 'GPU 적합성 분석' }),
     ).toBeDisabled()
     expect(
       within(row).getByRole('button', { name: '다운로드' }),
@@ -1698,7 +1757,7 @@ describe('ModelCatalogPage', () => {
       }),
     )
 
-    await userEvent.click(within(row).getByRole('button', { name: 'Fit 분석' }))
+    await userEvent.click(within(row).getByRole('button', { name: 'GPU 적합성 분석' }))
     await userEvent.click(within(row).getByRole('button', { name: '다운로드' }))
     expect(catalogApi.analyzeHfResourceFit).not.toHaveBeenCalled()
     expect(downloadsApi.startHfDownload).not.toHaveBeenCalled()
@@ -1713,9 +1772,8 @@ describe('ModelCatalogPage', () => {
     )
     expect(await screen.findByText('org/node2-only')).toBeInTheDocument()
     expect(screen.queryByText('org/node1-only')).not.toBeInTheDocument()
-    expect(
-      screen.queryByText(/카탈로그를 다시 불러오는 중/),
-    ).not.toBeInTheDocument()
+    expect(screen.queryByText(/서버 변경 적용 중/)).not.toBeInTheDocument()
+    expect(screen.getByText(/현재 조회 서버:/)).toBeInTheDocument()
     expect(
       within(
         (screen.getByText('org/node2-only').closest('tr') as HTMLElement),
@@ -1810,7 +1868,7 @@ describe('ModelCatalogPage', () => {
       'tr',
     ) as HTMLElement
     expect(row.querySelector('.catalog-row-actions')).not.toBeNull()
-    await userEvent.click(within(row).getByRole('button', { name: 'Fit 분석' }))
+    await userEvent.click(within(row).getByRole('button', { name: 'GPU 적합성 분석' }))
     expect(await screen.findByTestId('fit-detail-org/nowrap')).toBeInTheDocument()
     const expand = within(row).getByRole('button', { name: '접기' })
     expect(expand.className).toContain('btn')
@@ -1846,17 +1904,18 @@ describe('ModelCatalogPage', () => {
       screen.queryByRole('link', { name: '캐시 목록 확인' }),
     ).not.toBeInTheDocument()
     expect(
-      screen.getAllByText(/READY는 대상 서버에 파일 캐시가 준비된 상태/)
-        .length,
+      within(row).getAllByText(
+        /파일 다운로드 완료 ≠ 모델 실행 중 ≠ API 연결 완료/,
+      ).length,
     ).toBeGreaterThan(0)
     expect(
-      within(row).getByText(/READY는 대상 서버에 파일 캐시가 준비된 상태/),
-    ).toBeInTheDocument()
+      within(row).getAllByText(/모델 파일 준비 완료/).length,
+    ).toBeGreaterThan(0)
 
     expect(
-      within(row).getByRole('button', { name: '다운로드됨' }),
+      within(row).getByRole('button', { name: '파일 준비 완료' }),
     ).toBeDisabled()
-    await userEvent.click(within(row).getByRole('button', { name: '다운로드됨' }))
+    await userEvent.click(within(row).getByRole('button', { name: '파일 준비 완료' }))
     expect(downloadsApi.startHfDownload).toHaveBeenCalledTimes(1)
   })
 
@@ -1920,7 +1979,7 @@ describe('ModelCatalogPage', () => {
     ).toHaveAttribute('href', '/models/cache/cache-f5/deploy')
     expect(downloadsApi.startHfDownload).not.toHaveBeenCalled()
     expect(
-      screen.getByRole('button', { name: '다운로드됨' }),
+      screen.getByRole('button', { name: '파일 준비 완료' }),
     ).toBeDisabled()
   })
 
@@ -2034,5 +2093,134 @@ describe('ModelCatalogPage', () => {
       expect(screen.getByText('/data/hf/second')).toBeInTheDocument()
     })
     expect(downloadsApi.startHfDownload).not.toHaveBeenCalled()
+  })
+
+  it('shows pending keyword hint until Search is pressed; other filters apply immediately', async () => {
+    vi.mocked(catalogApi.listHfCatalog).mockResolvedValue(
+      pageResult([makeItem({ repository_id: 'org/kw' })]),
+    )
+    renderAt('/models/catalog?node_id=node-1')
+    expect(await screen.findByText('org/kw')).toBeInTheDocument()
+    expect(
+      screen.queryByText(/검색 버튼을 누르면 입력한 검색어가 적용됩니다/),
+    ).not.toBeInTheDocument()
+
+    await userEvent.type(screen.getByLabelText('검색어'), 'qwen')
+    expect(
+      screen.getByText(/검색 버튼을 누르면 입력한 검색어가 적용됩니다/),
+    ).toBeInTheDocument()
+    expect(catalogApi.listHfCatalog).toHaveBeenCalledWith(
+      expect.objectContaining({ q: null, nodeId: 'node-1' }),
+    )
+
+    await userEvent.click(screen.getByRole('button', { name: '검색' }))
+    await waitFor(() => {
+      expect(catalogApi.listHfCatalog).toHaveBeenCalledWith(
+        expect.objectContaining({ q: 'qwen', nodeId: 'node-1' }),
+      )
+    })
+    expect(
+      screen.queryByText(/검색 버튼을 누르면 입력한 검색어가 적용됩니다/),
+    ).not.toBeInTheDocument()
+  })
+
+  it('shows progress-missing copy without inventing percent; poll failure is not download failure', async () => {
+    vi.mocked(catalogApi.listHfCatalog).mockResolvedValue(
+      pageResult([makeItem({ repository_id: 'org/prog' })]),
+    )
+    vi.mocked(downloadsApi.startHfDownload).mockResolvedValue(
+      makeJob({
+        job_id: 'job-prog',
+        repository_id: 'org/prog',
+        status: 'DOWNLOADING',
+        progress_percent: null,
+        bytes_downloaded: null,
+        total_bytes: null,
+      }),
+    )
+    vi.mocked(downloadsApi.getHfDownload).mockRejectedValue(
+      new ApiError('poll boom', { status: 503, code: 'DEPENDENCY_UNAVAILABLE' }),
+    )
+
+    renderAt('/models/catalog?node_id=node-1')
+    const row = (await screen.findByText('org/prog')).closest(
+      'tr',
+    ) as HTMLElement
+    await userEvent.click(within(row).getByRole('button', { name: '다운로드' }))
+
+    expect(
+      await within(row).findByText(/다운로드 진행 중 \(자동 갱신\)/),
+    ).toBeInTheDocument()
+    expect(
+      within(row).getByText(/진행률 정보 없음 · 상태는 자동 갱신 중/),
+    ).toBeInTheDocument()
+    expect(within(row).queryByText(/진행률 \d+%/)).not.toBeInTheDocument()
+
+    await waitFor(() => {
+      expect(
+        within(row).getAllByText(/다운로드 상태 조회 실패/).length,
+      ).toBeGreaterThan(0)
+    })
+    expect(
+      within(row).queryByText((content, el) => {
+        return (
+          el?.classList.contains('catalog-download-status__headline--error') ===
+            true && content === '다운로드 실패'
+        )
+      }),
+    ).not.toBeInTheDocument()
+    expect(
+      row.querySelector('[data-download-state="failed"]'),
+    ).toBeNull()
+    expect(
+      within(row).getByText(/다운로드 자체와 별개|다운로드 자체의 실패가 아닙니다/),
+    ).toBeInTheDocument()
+  })
+
+  it('shows 정보 없음 for missing Fit GPU metrics instead of zero', async () => {
+    vi.mocked(catalogApi.listHfCatalog).mockResolvedValue(
+      pageResult([makeItem({ repository_id: 'org/sparse-fit' })]),
+    )
+    vi.mocked(catalogApi.analyzeHfResourceFit).mockResolvedValue(
+      makeFitAnalysis({
+        repository_id: 'org/sparse-fit',
+        result: 'UNKNOWN',
+        estimated_required_vram_mb: null,
+        disk_free_mb: null,
+        disk_ok: null,
+        gpu_results: [
+          {
+            gpu_device_id: 'gpu-x',
+            gpu_index: null,
+            name: null,
+            // Defensive UI path: treat absent telemetry as unknown, never as 0.
+            vram_total_mb: null as unknown as number,
+            vram_free_mb: null as unknown as number,
+            safety_margin_mb: null as unknown as number,
+            estimated_required_vram_mb: null,
+            result: 'UNKNOWN',
+            reasons: [],
+          },
+        ],
+        suggested_gpu_device_ids: [],
+        assumptions: [],
+        warnings: [],
+        reasons: ['Insufficient telemetry'],
+      }),
+    )
+
+    renderAt('/models/catalog?node_id=node-1')
+    const row = (await screen.findByText('org/sparse-fit')).closest(
+      'tr',
+    ) as HTMLElement
+    await userEvent.click(
+      within(row).getByRole('button', { name: 'GPU 적합성 분석' }),
+    )
+    const detail = await screen.findByTestId('fit-detail-org/sparse-fit')
+    expect(within(detail).getAllByText('정보 없음').length).toBeGreaterThan(2)
+    expect(
+      within(detail).getAllByText(/판단 정보 부족/).length,
+    ).toBeGreaterThan(0)
+    expect(within(detail).queryByText('0 MiB')).not.toBeInTheDocument()
   })
 })

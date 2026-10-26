@@ -19,7 +19,12 @@ import { TruncatedValue } from '../components/TruncatedValue'
 import { formatApiDateTime } from '../utils/date'
 import { abbreviateMiddle } from '../utils/format'
 import { parsePositivePage } from '../utils/query'
-import { CACHE_FIELD_HELP, CATALOG_FIELD_HELP } from '../utils/uiLabels'
+import {
+  CACHE_FIELD_HELP,
+  CACHE_STATUS_LABELS,
+  CATALOG_FIELD_HELP,
+  DOWNLOAD_STATUS_LABELS,
+} from '../utils/uiLabels'
 
 const PAGE_SIZE = 20
 /** P1-8A: Cache page live download sync interval (Catalog remains 2s). */
@@ -491,6 +496,9 @@ export function ModelCachePage() {
           <HelpHint showTopic label="다운로드 상태">
             {CACHE_FIELD_HELP.progress} {CATALOG_FIELD_HELP.downloadReady}
           </HelpHint>
+          <HelpHint showTopic label="자동 갱신">
+            {CACHE_FIELD_HELP.autoRefresh}
+          </HelpHint>
           <HelpHint showTopic label="캐시 삭제 안내">
             {CACHE_FIELD_HELP.purge}
           </HelpHint>
@@ -534,10 +542,16 @@ export function ModelCachePage() {
       ) : null}
       {pollWarning ? (
         <SectionError
-          title="다운로드 상태 갱신"
-          message={pollWarning}
+          title={CACHE_STATUS_LABELS.pollFailed}
+          message={`${pollWarning} (${DOWNLOAD_STATUS_LABELS.pollFailed} — 다운로드 자체의 실패가 아닙니다.)`}
           onRetry={() => void retryPoll()}
         />
+      ) : null}
+
+      {activePollSignature ? (
+        <p className="cache-auto-refresh" role="status">
+          자동 갱신 중 — 활성 다운로드 Job을 주기적으로 다시 읽습니다.
+        </p>
       ) : null}
 
       {loading && items === null ? (
@@ -643,7 +657,18 @@ export function ModelCachePage() {
                         ) : null}
                       </td>
                       <td>
-                        <StatusBadge status={row.status} />
+                        <StatusBadge
+                          status={row.status}
+                          label={
+                            row.status === 'READY'
+                              ? CACHE_STATUS_LABELS.ready
+                              : row.status === 'PREPARING'
+                                ? CACHE_STATUS_LABELS.preparing
+                                : row.status === 'FAILED'
+                                  ? CACHE_STATUS_LABELS.failed
+                                  : undefined
+                          }
+                        />
                         {!listMatchesContext ? (
                           <div className="secondary-text">목록 갱신 중…</div>
                         ) : null}
@@ -652,35 +677,48 @@ export function ModelCachePage() {
                             className="secondary-text"
                             data-testid={`cache-download-progress-${row.id}`}
                           >
+                            <p className="catalog-download-status__headline">
+                              {CACHE_STATUS_LABELS.downloading}
+                            </p>
                             <StatusBadge status={job.status} />{' '}
                             {job.progress_percent != null
                               ? `진행률 ${job.progress_percent}%`
-                              : '진행률 없음 (서버 미제공 · 임의 %를 만들지 않음)'}
+                              : DOWNLOAD_STATUS_LABELS.progressMissing}
                             {tracked?.lastSuccessAt ? (
                               <div>
-                                마지막 상태 조회:{' '}
+                                마지막 정상 조회:{' '}
                                 {formatApiDateTime(
                                   tracked.lastSuccessAt.toISOString(),
                                 )}
                               </div>
                             ) : null}
+                            <p className="panel-hint">
+                              {CACHE_FIELD_HELP.autoRefresh}
+                            </p>
                           </div>
                         ) : null}
                         {listMatchesContext &&
                         row.status === 'FAILED' &&
                         row.error_message ? (
-                          <div className="secondary-text">{row.error_message}</div>
+                          <div className="secondary-text">
+                            <span className="catalog-download-status__headline catalog-download-status__headline--error">
+                              {CACHE_STATUS_LABELS.failed}
+                            </span>
+                            <div>{row.error_message}</div>
+                          </div>
                         ) : null}
                         {listMatchesContext &&
                         row.status === 'PREPARING' &&
                         !row.active_download_job_id ? (
                           <div className="secondary-text">
-                            활성 다운로드 Job 없음 — READY로 추정하지 않습니다.
+                            {CACHE_STATUS_LABELS.preparing} · 활성 다운로드 Job
+                            없음 — READY로 추정하지 않습니다.
                           </div>
                         ) : null}
                         {listMatchesContext && row.status === 'READY' ? (
                           <div className="secondary-text">
-                            캐시 준비 완료 · 배포 설정으로 이동할 수 있습니다
+                            {CACHE_STATUS_LABELS.ready} · 배포 설정으로 이동할 수
+                            있습니다
                           </div>
                         ) : null}
                         {listMatchesContext &&

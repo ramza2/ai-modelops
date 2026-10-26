@@ -108,11 +108,16 @@ describe('uiLabels (P1-14 catalog/cache)', () => {
   it('keeps catalog/cache advisory boundaries clear', () => {
     expect(CATALOG_FIELD_HELP.fit).toMatch(/합산하지 않습니다/)
     expect(CATALOG_FIELD_HELP.fit).toMatch(/Deploy Wizard/)
-    expect(CATALOG_FIELD_HELP.downloadReady).toMatch(/파일 캐시/)
-    expect(CATALOG_FIELD_HELP.downloadReady).not.toMatch(/게시된 상태입니다\.$/)
+    expect(CATALOG_FIELD_HELP.downloadReady).toMatch(/모델 파일 준비 완료/)
+    expect(CATALOG_FIELD_HELP.downloadReady).toMatch(
+      /파일 다운로드 완료 ≠ 모델 실행 중 ≠ API 연결 완료/,
+    )
     expect(CACHE_FIELD_HELP.purge).toMatch(/로컬/)
     expect(CACHE_FIELD_HELP.purge).toMatch(/레지스트리/)
-    expect(CACHE_FIELD_HELP.overview).toMatch(/캐시 READY/)
+    expect(CACHE_FIELD_HELP.overview).toMatch(/파일 준비 완료/)
+    expect(CACHE_FIELD_HELP.overview).toMatch(
+      /파일 준비 완료 ≠ 모델 실행 중 ≠ API 연결 완료/,
+    )
   })
 })
 
