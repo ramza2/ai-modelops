@@ -223,6 +223,7 @@ export const DOWNLOAD_STATUS_LABELS = {
   inProgress: '다운로드 진행 중 (자동 갱신)',
   pollFailed: '다운로드 상태 조회 실패',
   failed: '다운로드 실패',
+  canceled: '다운로드 취소됨',
   ready: '모델 파일 준비 완료',
   restoring: '새로고침 후 다운로드 상태 복원 중',
   progressMissing: '진행률 정보 없음 · 상태는 자동 갱신 중',

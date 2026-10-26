@@ -1231,16 +1231,20 @@ export function ModelCatalogPage() {
     const cacheReadyForDeploy =
       trackMatched && isDownloadCacheReadyForDeploy(job)
     const active = isActiveDownloadStatus(job.status)
-    const failed = status === 'FAILED' || status === 'CANCELED'
+    const isFailed = status === 'FAILED'
+    const isCanceled = status === 'CANCELED'
+    const terminalRetryable = isFailed || isCanceled
     const headline = starting
       ? DOWNLOAD_STATUS_LABELS.requesting
       : active
         ? DOWNLOAD_STATUS_LABELS.inProgress
-        : failed
+        : isFailed
           ? DOWNLOAD_STATUS_LABELS.failed
-          : status === 'READY'
-            ? DOWNLOAD_STATUS_LABELS.ready
-            : null
+          : isCanceled
+            ? DOWNLOAD_STATUS_LABELS.canceled
+            : status === 'READY'
+              ? DOWNLOAD_STATUS_LABELS.ready
+              : null
 
     return (
       <div
@@ -1252,21 +1256,25 @@ export function ModelCatalogPage() {
             ? 'requesting'
             : active
               ? 'in-progress'
-              : failed
+              : isFailed
                 ? 'failed'
-                : status === 'READY'
-                  ? 'ready'
-                  : 'tracked'
+                : isCanceled
+                  ? 'canceled'
+                  : status === 'READY'
+                    ? 'ready'
+                    : 'tracked'
         }
       >
         {headline ? (
           <p
             className={`catalog-download-status__headline${
-              failed
+              isFailed
                 ? ' catalog-download-status__headline--error'
-                : status === 'READY'
-                  ? ' catalog-download-status__headline--ok'
-                  : ''
+                : isCanceled
+                  ? ' catalog-download-status__headline--warn'
+                  : status === 'READY'
+                    ? ' catalog-download-status__headline--ok'
+                    : ''
             }`}
             role="status"
           >
@@ -1328,7 +1336,7 @@ export function ModelCatalogPage() {
             )}
           </div>
         ) : null}
-        {job.error_message && failed ? (
+        {job.error_message && isFailed ? (
           <div>
             <span className="secondary-text">다운로드 실패 원인: </span>
             {job.error_message}
@@ -1356,7 +1364,7 @@ export function ModelCatalogPage() {
             </button>
           </p>
         ) : null}
-        {failed && !starting ? (
+        {terminalRetryable && !starting ? (
           <button
             type="button"
             className="btn"
@@ -2147,7 +2155,7 @@ export function ModelCatalogPage() {
                                         ) : null}
                                         <dl className="catalog-fit-gpu-card__metrics">
                                           <div>
-                                            <dt>사용 가능한 GPU 메모리</dt>
+                                            <dt>현재 여유 GPU 메모리</dt>
                                             <dd>
                                               {formatMb(gpu.vram_free_mb)}
                                               <span className="secondary-text">

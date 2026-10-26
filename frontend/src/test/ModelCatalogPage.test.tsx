@@ -525,7 +525,7 @@ describe('ModelCatalogPage', () => {
     expect(within(detail).getByText('GPU 0')).toBeInTheDocument()
     expect(within(detail).getByText('GPU 1')).toBeInTheDocument()
     expect(
-      within(detail).getAllByText('사용 가능한 GPU 메모리').length,
+      within(detail).getAllByText('현재 여유 GPU 메모리').length,
     ).toBeGreaterThan(0)
     expect(within(detail).getAllByText('안전 여유').length).toBeGreaterThan(0)
     expect(screen.getByTestId('fit-gpu-cards-org/fit-ux')).toBeInTheDocument()
@@ -1003,13 +1003,53 @@ describe('ModelCatalogPage', () => {
     )
 
     renderAt('/models/catalog?node_id=node-1')
-    expect(await screen.findByText('disk full')).toBeInTheDocument()
+    const row = (await screen.findByText('org/fail-restore')).closest(
+      'tr',
+    ) as HTMLElement
+    expect(await within(row).findByText('disk full')).toBeInTheDocument()
+    expect(within(row).getByText('다운로드 실패')).toBeInTheDocument()
+    expect(within(row).getByText(/다운로드 실패 원인/)).toBeInTheDocument()
+    expect(row.querySelector('[data-download-state="failed"]')).not.toBeNull()
     expect(downloadsApi.startHfDownload).not.toHaveBeenCalled()
 
     await userEvent.click(screen.getByRole('button', { name: '다시 다운로드' }))
     await waitFor(() => {
       expect(downloadsApi.startHfDownload).toHaveBeenCalledTimes(1)
     })
+  })
+
+  it('shows CANCELED as 다운로드 취소됨 without failure-cause framing', async () => {
+    vi.mocked(catalogApi.listHfCatalog).mockResolvedValue(
+      pageResult([makeItem({ repository_id: 'org/canceled' })]),
+    )
+    vi.mocked(downloadsApi.startHfDownload).mockResolvedValue(
+      makeJob({
+        job_id: 'job-canceled',
+        repository_id: 'org/canceled',
+        status: 'CANCELED',
+        error_message: 'canceled by operator',
+      }),
+    )
+
+    renderAt('/models/catalog?node_id=node-1')
+    const row = (await screen.findByText('org/canceled')).closest(
+      'tr',
+    ) as HTMLElement
+    await userEvent.click(within(row).getByRole('button', { name: '다운로드' }))
+
+    expect(
+      await within(row).findByText('다운로드 취소됨'),
+    ).toBeInTheDocument()
+    expect(row.querySelector('[data-download-state="canceled"]')).not.toBeNull()
+    expect(row.querySelector('[data-download-state="failed"]')).toBeNull()
+    expect(within(row).queryByText('다운로드 실패')).not.toBeInTheDocument()
+    expect(
+      within(row).queryByText(/다운로드 실패 원인/),
+    ).not.toBeInTheDocument()
+    expect(within(row).queryByText('canceled by operator')).not.toBeInTheDocument()
+    expect(
+      within(row).getByRole('button', { name: '다시 다운로드' }),
+    ).toBeInTheDocument()
   })
 
   it('isolates download tracking by node and requested_revision', async () => {
