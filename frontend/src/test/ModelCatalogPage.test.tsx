@@ -306,11 +306,14 @@ describe('ModelCatalogPage', () => {
     )
 
     renderAt('/models/catalog?node_id=node-1')
-    const row = (await screen.findByText('org/fail-model')).closest('tr')
-    await userEvent.click(
-      within(row as HTMLElement).getByRole('button', { name: '다운로드' }),
-    )
-    expect(await screen.findByText('Hub timeout')).toBeInTheDocument()
+    const row = (await screen.findByText('org/fail-model')).closest(
+      'tr',
+    ) as HTMLElement
+    await userEvent.click(within(row).getByRole('button', { name: '다운로드' }))
+    expect(await within(row).findByText('Hub timeout')).toBeInTheDocument()
+    expect(within(row).getByText('다운로드 실패')).toBeInTheDocument()
+    expect(within(row).getByText(/다운로드 실패 원인/)).toBeInTheDocument()
+    expect(row.querySelector('[data-download-state="failed"]')).not.toBeNull()
     await userEvent.click(screen.getByRole('button', { name: '다시 다운로드' }))
     await waitFor(() => {
       expect(downloadsApi.startHfDownload).toHaveBeenCalledTimes(2)
