@@ -11,6 +11,23 @@ type EndpointTrafficDisplayProps = {
 }
 
 /**
+ * Title for live (enabled + ACTIVE Route) Traffic StatusBadge.
+ * Reuses ENDPOINT_FIELD_HELP.traffic wording; SERVING keeps trafficServingOk.
+ */
+function liveTrafficTitle(code: string): string {
+  if (code === 'SERVING') return ENDPOINT_FIELD_HELP.trafficServingOk
+  if (code === 'DRAINING') {
+    // Same meaning as ENDPOINT_FIELD_HELP.traffic DRAINING clause.
+    return '요청 처리 상태(Traffic) DRAINING: 신규 요청 차단·진행 중 요청 대기.'
+  }
+  if (code === 'MAINTENANCE') {
+    // Same meaning as ENDPOINT_FIELD_HELP.traffic MAINTENANCE clause.
+    return '요청 처리 상태(Traffic) MAINTENANCE: 신규 요청 차단·upstream 전달 금지.'
+  }
+  return ENDPOINT_FIELD_HELP.traffic
+}
+
+/**
  * Endpoint-only traffic presentation.
  * Does not change global StatusBadge meanings or mutate API traffic_state.
  */
@@ -61,7 +78,7 @@ export function EndpointTrafficDisplay({
       <StatusBadge
         status={trafficState}
         label={trafficLabel}
-        title={ENDPOINT_FIELD_HELP.trafficServingOk}
+        title={liveTrafficTitle(code)}
       />
     </span>
   )
