@@ -1887,17 +1887,17 @@ export function CacheDeployWizardPage() {
               ) : null}
               {lifecyclePhase === 'health_timeout' ? (
                 <SectionError
-                  title={WIZARD_START_STATUS.healthTimeout}
-                  message="Operation은 성공했지만 Deployment가 RUNNING + HEALTHY로 전환되지 않았습니다. Deployment 상세에서 상태를 확인하세요."
+                  title="Health 대기 시간 초과"
+                  message={WIZARD_START_STATUS.healthTimeout}
                 />
               ) : null}
               {lifecyclePhase === 'failed' ? (
                 <SectionError
-                  title={WIZARD_START_STATUS.failed}
+                  title="Operation 실패"
                   message={
                     formatOperationError(operation.error) !== '—'
-                      ? formatOperationError(operation.error)
-                      : `Operation status: ${operation.status}`
+                      ? `${WIZARD_START_STATUS.failed} ${formatOperationError(operation.error)}`
+                      : `${WIZARD_START_STATUS.failed} Operation status: ${operation.status}`
                   }
                 />
               ) : null}

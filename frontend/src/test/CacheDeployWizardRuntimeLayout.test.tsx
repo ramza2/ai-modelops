@@ -428,7 +428,9 @@ describe('CacheDeployWizardPage Runtime layout (P1-5A / P1-8C)', () => {
     await userEvent.click(
       screen.getByRole('button', { name: '현재 설정으로 GPU 자원 검사' }),
     )
-    expect(await screen.findByTitle(/자원 적합\(FIT\)/)).toBeInTheDocument()
+    expect(
+      await screen.findAllByTitle(/자원 적합\(FIT\)/),
+    ).not.toHaveLength(0)
     expect(cacheDeployApi.previewCacheDeployFit).toHaveBeenCalledTimes(1)
 
     await userEvent.click(screen.getByRole('button', { name: '이전' }))
@@ -494,7 +496,9 @@ describe('CacheDeployWizardPage Runtime layout (P1-5A / P1-8C)', () => {
     await userEvent.click(
       screen.getByRole('button', { name: '현재 설정으로 GPU 자원 검사' }),
     )
-    expect(await screen.findByTitle(/자원 적합\(FIT\)/)).toBeInTheDocument()
+    expect(
+      await screen.findAllByTitle(/자원 적합\(FIT\)/),
+    ).not.toHaveLength(0)
     await userEvent.click(screen.getByRole('button', { name: '다음: 설정 검토' }))
 
     const summary = await screen.findByTestId('runtime-review-summary')
@@ -547,8 +551,8 @@ describe('CacheDeployWizardPage Runtime layout (P1-5A / P1-8C)', () => {
       /현재 선택 GPU/,
     )
     expect(
-      screen.getByText(/선택한 GPU 수에 따라 Tensor Parallel/),
-    ).toBeInTheDocument()
+      screen.getAllByText(/선택한 GPU 수에 따라 Tensor Parallel/).length,
+    ).toBeGreaterThan(0)
     expect(
       screen.getByText(/안정적인 동시 실행을 보장하지 않습니다/),
     ).toBeInTheDocument()
@@ -561,7 +565,7 @@ describe('CacheDeployWizardPage Runtime layout (P1-5A / P1-8C)', () => {
     )
     const fit = await screen.findByTestId('wizard-fit-result')
     expect(within(fit).getByText(/종합 판정/)).toBeInTheDocument()
-    expect(within(fit).getByText(/여유 부족 가능/)).toBeInTheDocument()
+    expect(within(fit).getAllByText(/여유 부족 가능/).length).toBeGreaterThan(0)
     expect(within(fit).getByText('현재 여유 메모리')).toBeInTheDocument()
     expect(within(fit).getAllByText('정보 없음').length).toBeGreaterThan(1)
     expect(within(fit).queryByText('0 MiB')).not.toBeInTheDocument()

@@ -339,11 +339,13 @@ export const WIZARD_START_STATUS = {
   beforeRequest: '모델 실행 요청 전 — 아직 컨테이너를 시작하지 않았습니다.',
   operationActive: '모델 실행 작업 진행 중 — Operation 상태를 자동으로 갱신합니다.',
   healthWait:
-    '작업 성공 후 모델 정상 상태 확인 중 — Operation SUCCEEDED와 RUNNING+HEALTHY는 다릅니다.',
-  ready: '모델 실행 정상 완료 — Deployment가 RUNNING이고 Health가 HEALTHY입니다.',
-  failed: '작업 실패 — Operation이 실패했습니다. 오류를 확인한 뒤 다시 시도하세요.',
+    '작업 성공 후 모델 정상 상태 확인 중 — Operation SUCCEEDED와 RUNNING+HEALTHY는 다릅니다. Deployment가 RUNNING + HEALTHY가 될 때까지 제한적으로 상태를 확인합니다.',
+  ready:
+    '모델 실행 정상 완료 — 배포가 실행 중(RUNNING)이고 Health가 정상(HEALTHY)입니다.',
+  failed: 'Operation 실패 — 모델 실행 작업이 실패했습니다. 오류를 확인한 뒤 다시 시도하세요.',
   pollFailed: '상태 조회 실패 — 실행 자체와 별개로 상태만 다시 확인하세요.',
-  healthTimeout: 'Health 확인 시간 초과 — Operation은 성공했지만 RUNNING+HEALTHY를 확인하지 못했습니다.',
+  healthTimeout:
+    'Health 대기 시간 초과 — Operation은 성공했지만 RUNNING+HEALTHY를 확인하지 못했습니다.',
 } as const
 
 export const RUNTIME_FIELD_HELP = {
