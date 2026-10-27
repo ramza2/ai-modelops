@@ -1,10 +1,30 @@
 import { StatusBadge } from './StatusBadge'
-import { ENDPOINT_FIELD_HELP } from '../utils/uiLabels'
+import {
+  ENDPOINT_FIELD_HELP,
+  TRAFFIC_STATE_LABELS,
+} from '../utils/uiLabels'
 
 type EndpointTrafficDisplayProps = {
   isEnabled: boolean
   trafficState: string | null | undefined
   hasActiveRoute: boolean
+}
+
+/**
+ * Title for live (enabled + ACTIVE Route) Traffic StatusBadge.
+ * Reuses ENDPOINT_FIELD_HELP.traffic wording; SERVING keeps trafficServingOk.
+ */
+function liveTrafficTitle(code: string): string {
+  if (code === 'SERVING') return ENDPOINT_FIELD_HELP.trafficServingOk
+  if (code === 'DRAINING') {
+    // Same meaning as ENDPOINT_FIELD_HELP.traffic DRAINING clause.
+    return '요청 처리 상태(Traffic) DRAINING: 신규 요청 차단·진행 중 요청 대기.'
+  }
+  if (code === 'MAINTENANCE') {
+    // Same meaning as ENDPOINT_FIELD_HELP.traffic MAINTENANCE clause.
+    return '요청 처리 상태(Traffic) MAINTENANCE: 신규 요청 차단·upstream 전달 금지.'
+  }
+  return ENDPOINT_FIELD_HELP.traffic
 }
 
 /**
@@ -52,11 +72,13 @@ export function EndpointTrafficDisplay({
     )
   }
 
+  const trafficLabel = TRAFFIC_STATE_LABELS[code]
   return (
     <span data-testid="endpoint-traffic-display" data-traffic-code={code}>
       <StatusBadge
         status={trafficState}
-        title={ENDPOINT_FIELD_HELP.trafficServingOk}
+        label={trafficLabel}
+        title={liveTrafficTitle(code)}
       />
     </span>
   )

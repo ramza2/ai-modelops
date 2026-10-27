@@ -435,11 +435,11 @@ describe('EndpointDetailPage', () => {
       'target-dep',
     )
     await user.click(screen.getByRole('button', { name: /Preflight Preview/ }))
-    expect(await screen.findByText('preview_only')).toBeInTheDocument()
+    expect(await screen.findByText('참고용 사전 검사')).toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: '새로고침' }))
     await waitFor(() => {
-      expect(screen.queryByText('preview_only')).not.toBeInTheDocument()
+      expect(screen.queryByText('참고용 사전 검사')).not.toBeInTheDocument()
     })
     expect(
       screen.queryByRole('button', { name: /Switch Enqueue/ }),
@@ -450,13 +450,13 @@ describe('EndpointDetailPage', () => {
       'target-dep',
     )
     await user.click(screen.getByRole('button', { name: /Preflight Preview/ }))
-    expect(await screen.findByText('preview_only')).toBeInTheDocument()
+    expect(await screen.findByText('참고용 사전 검사')).toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: '새로고침' }))
     await waitFor(() => {
       expect(screen.getByText(/기존 Endpoint 정보를 표시/)).toBeInTheDocument()
     })
-    expect(screen.getByText('preview_only')).toBeInTheDocument()
+    expect(screen.getByText('참고용 사전 검사')).toBeInTheDocument()
     expect(
       screen.getByRole('button', { name: /Switch Enqueue/ }),
     ).toBeInTheDocument()
@@ -482,8 +482,15 @@ describe('EndpointDetailPage', () => {
       'target-dep',
     )
     await user.click(screen.getByRole('button', { name: /Preflight Preview/ }))
-    expect(await screen.findByText('preview_only')).toBeInTheDocument()
-    expect(screen.getByText('worker_must_revalidate')).toBeInTheDocument()
+    expect(await screen.findByText('참고용 사전 검사')).toBeInTheDocument()
+    expect(screen.getByText('실행 직전 재검증 필요')).toBeInTheDocument()
+    expect(screen.getByText(/\(preview_only\)/)).toBeInTheDocument()
+    expect(screen.getByText(/\(worker_must_revalidate\)/)).toBeInTheDocument()
+    expect(screen.getByText('현재 여유 메모리')).toBeInTheDocument()
+    expect(screen.getByText('예상 필요 메모리')).toBeInTheDocument()
+    expect(screen.getByText('HOT 전환 시 가용 메모리')).toBeInTheDocument()
+    expect(screen.getByText('기존 자원 회수 후 가용 메모리')).toBeInTheDocument()
+    expect(screen.getAllByText('안전 여유').length).toBeGreaterThan(0)
     expect(screen.getByText('gpu-0').closest('tr')).toBeTruthy()
     expect(screen.getByText('gpu-1').closest('tr')).toBeTruthy()
     const strategy = screen.getByLabelText(/Strategy/)
@@ -546,6 +553,67 @@ describe('EndpointDetailPage', () => {
     ).not.toBeInTheDocument()
   })
 
+  it('shows 정보 없음 for missing preflight GPU memory and Korean route history headers', async () => {
+    const user = userEvent.setup()
+    vi.mocked(endpointsApi.getEndpoint).mockResolvedValue(makeEndpoint())
+    vi.mocked(endpointsApi.listEndpointRoutes).mockResolvedValue({
+      items: [
+        makeRoute({
+          id: 'r1',
+          status: 'ACTIVE',
+          rewrite_model_name: 'served-v1',
+          operation_id: 'op-hist-1',
+        }),
+      ],
+      total: 1,
+    })
+    vi.mocked(deploymentsApi.listDeployments).mockResolvedValue(
+      pageResult([makeDeployment({ id: 'target-dep', name: 'target-candidate' })]),
+    )
+    vi.mocked(endpointsApi.createPreflightPreview).mockResolvedValue(
+      makePreview({
+        required_peak_vram_mb: null,
+        gpu_results: [
+          {
+            gpu_device_id: 'gpu-missing',
+            free_vram_mb: null,
+            reclaimable_vram_mb: null,
+            required_vram_mb: 8000,
+            available_hot_vram_mb: null,
+            available_after_reclaim_mb: null,
+            effective_available_mb: null,
+            result: 'COLD_SWITCH_ONLY',
+            safety_margin_mb: 1024,
+          },
+        ],
+      }),
+    )
+    renderDetail()
+    expect(await screen.findByText('연결 상태')).toBeInTheDocument()
+    expect(screen.getAllByText('모델 배포').length).toBeGreaterThan(0)
+    expect(screen.getByText('모델 이름 재작성')).toBeInTheDocument()
+    expect(screen.getAllByText('활성화 시각').length).toBeGreaterThan(0)
+    expect(screen.getByText('비활성화 시각')).toBeInTheDocument()
+    expect(screen.getByText('served-v1')).toBeInTheDocument()
+    await user.selectOptions(
+      screen.getByLabelText(/Target Deployment/),
+      'target-dep',
+    )
+    await user.click(screen.getByRole('button', { name: /Preflight Preview/ }))
+    expect(await screen.findByText('참고용 사전 검사')).toBeInTheDocument()
+    const missingRow = screen.getByText('gpu-missing').closest('tr')
+    expect(missingRow).toBeTruthy()
+    expect(
+      within(missingRow as HTMLElement).getAllByText('정보 없음').length,
+    ).toBeGreaterThanOrEqual(3)
+    expect(
+      within(missingRow as HTMLElement).getByText('7.8 GiB'),
+    ).toBeInTheDocument()
+    expect(
+      within(missingRow as HTMLElement).queryByText('0 MB'),
+    ).not.toBeInTheDocument()
+  })
+
   it('invalidates preview when target changes', async () => {
     const user = userEvent.setup()
     vi.mocked(endpointsApi.getEndpoint).mockResolvedValue(makeEndpoint())
@@ -568,9 +636,9 @@ describe('EndpointDetailPage', () => {
       'target-dep',
     )
     await user.click(screen.getByRole('button', { name: /Preflight Preview/ }))
-    expect(await screen.findByText('preview_only')).toBeInTheDocument()
+    expect(await screen.findByText('참고용 사전 검사')).toBeInTheDocument()
     await user.selectOptions(screen.getByLabelText(/Target Deployment/), 'target-b')
-    expect(screen.queryByText('preview_only')).not.toBeInTheDocument()
+    expect(screen.queryByText('참고용 사전 검사')).not.toBeInTheDocument()
     expect(
       screen.queryByRole('button', { name: /Switch Enqueue/ }),
     ).not.toBeInTheDocument()
@@ -619,7 +687,7 @@ describe('EndpointDetailPage', () => {
       expect(endpointsApi.getEndpoint).toHaveBeenCalledTimes(2)
     })
     // Successful re-read invalidates preview; in-flight Switch blocks enqueue UI.
-    expect(screen.queryByText('preview_only')).not.toBeInTheDocument()
+    expect(screen.queryByText('참고용 사전 검사')).not.toBeInTheDocument()
     expect(
       screen.queryByRole('button', { name: /Switch Enqueue/ }),
     ).not.toBeInTheDocument()
@@ -667,7 +735,7 @@ describe('EndpointDetailPage', () => {
     })
     // Post-switch re-read clears preview; active Switch blocks further enqueue UI.
     await waitFor(() => {
-      expect(screen.queryByText('preview_only')).not.toBeInTheDocument()
+      expect(screen.queryByText('참고용 사전 검사')).not.toBeInTheDocument()
     })
     expect(screen.getByRole('button', { name: '새로고침' })).not.toBeDisabled()
     expect(await screen.findByTestId('switch-op-active')).toBeInTheDocument()
@@ -909,7 +977,16 @@ describe('EndpointDetailPage', () => {
         screen.queryByRole('button', { name: /Unpublish/ }),
       ).not.toBeInTheDocument()
     })
-    expect(screen.getByText(/비활성/)).toBeInTheDocument()
+    await waitFor(() => {
+      expect(
+        screen.getByText((_, el) => {
+          if (!el || el.className !== 'status-badge__text') return false
+          return (el.textContent || '').replace(/\s+/g, ' ').includes(
+            '비활성 (INACTIVE)',
+          )
+        }),
+      ).toBeInTheDocument()
+    })
     // load('refresh') bumps readGen; busy must still clear afterward.
     await waitFor(() => {
       expect(screen.getByRole('button', { name: '새로고침' })).not.toBeDisabled()

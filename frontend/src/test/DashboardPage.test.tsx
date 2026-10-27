@@ -128,8 +128,8 @@ describe('DashboardPage', () => {
     expect(
       screen.getByText('진행 중인 작업 (Active Operations)'),
     ).toBeInTheDocument()
-    expect(screen.getByText('START')).toBeInTheDocument()
-    expect(screen.getByText('STOP')).toBeInTheDocument()
+    expect(screen.getByText(/모델 실행 \(START\)/)).toBeInTheDocument()
+    expect(screen.getByText(/모델 중지 \(STOP\)/)).toBeInTheDocument()
     // newest-first API order preserved (START before STOP in DOM order)
     const rows = screen.getAllByRole('row')
     const text = rows.map((r) => r.textContent || '').join('\n')

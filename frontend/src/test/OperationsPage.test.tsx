@@ -108,10 +108,33 @@ describe('OperationsPage', () => {
       'href',
       '/deployments/tttttttt-tttt-tttt-tttt-tttttttttttt',
     )
+    expect(screen.getAllByText(/모델 전환 \(SWITCH\)/).length).toBeGreaterThan(0)
+    expect(screen.getAllByText(/모델 실행 \(START\)/).length).toBeGreaterThan(0)
     expect(operationsApi.listOperations).toHaveBeenCalledTimes(1)
     expect(operationsApi.getOperation).not.toHaveBeenCalled()
     expect(operationsApi.cancelOperation).not.toHaveBeenCalled()
     expect(operationsApi.retryOperation).not.toHaveBeenCalled()
+  })
+
+  it('keeps unknown operation_type raw and filter option values as API codes', async () => {
+    vi.mocked(operationsApi.listOperations).mockResolvedValue(
+      pageResult([
+        makeOp({
+          id: 'op-unknown-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+          operation_type: 'CUSTOM_OP',
+        }),
+      ]),
+    )
+    renderAt('/operations')
+    expect(await screen.findByText('CUSTOM_OP')).toBeInTheDocument()
+    expect(screen.queryByText(/모델 전환 \(CUSTOM_OP\)/)).not.toBeInTheDocument()
+    const typeFilter = screen.getByLabelText(/Type/)
+    expect(
+      within(typeFilter).getByRole('option', { name: /모델 전환 \(SWITCH\)/ }),
+    ).toHaveValue('SWITCH')
+    expect(
+      within(typeFilter).getByRole('option', { name: /모델 중지 \(STOP\)/ }),
+    ).toHaveValue('STOP')
   })
 
   it('applies status/type/active filters with mutual exclusion', async () => {

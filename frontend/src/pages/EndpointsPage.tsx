@@ -16,6 +16,8 @@ import { formatApiDateTime, shortId } from '../utils/date'
 import { parsePositivePage } from '../utils/query'
 import {
   ENDPOINT_FIELD_HELP,
+  formatApiTypeDisplay,
+  formatTrafficStateDisplay,
   userFacingLoadError,
 } from '../utils/uiLabels'
 
@@ -330,8 +332,8 @@ export function EndpointsPage() {
             }}
           >
             <option value="ALL">전체</option>
-            <option value="CHAT">CHAT</option>
-            <option value="EMBEDDING">EMBEDDING</option>
+            <option value="CHAT">{formatApiTypeDisplay('CHAT')}</option>
+            <option value="EMBEDDING">{formatApiTypeDisplay('EMBEDDING')}</option>
           </select>
         </label>
         <div className="toolbar__field">
@@ -411,7 +413,7 @@ export function EndpointsPage() {
             <option value="ALL">전체</option>
             {[...KNOWN_TRAFFIC].map((s) => (
               <option key={s} value={s}>
-                {s}
+                {formatTrafficStateDisplay(s)}
               </option>
             ))}
           </select>
@@ -424,6 +426,7 @@ export function EndpointsPage() {
             지우기
           </button>
         </div>
+        <p className="toolbar__hint">{ENDPOINT_FIELD_HELP.filterApply}</p>
       </form>
 
       {listError ? (
@@ -498,7 +501,7 @@ export function EndpointsPage() {
                         </Link>
                         <div className="secondary-text mono">{ep.alias}</div>
                       </td>
-                      <td>{ep.api_type || '—'}</td>
+                      <td>{formatApiTypeDisplay(ep.api_type)}</td>
                       <td>
                         <ActiveBadge active={ep.is_enabled} />
                       </td>

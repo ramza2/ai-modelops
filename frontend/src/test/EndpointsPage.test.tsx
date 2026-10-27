@@ -143,8 +143,52 @@ describe('EndpointsPage', () => {
     expect(badges[0]).toHaveTextContent('Traffic: SERVING')
     expect(badges[0].className).toContain('muted')
     expect(badges[1]).toHaveTextContent('모델 미연결')
-    expect(badges[2]).toHaveTextContent(/서빙/)
+    expect(badges[2]).toHaveTextContent(/요청 처리 중/)
+    expect(badges[2]).toHaveTextContent('(SERVING)')
     expect(badges[2].querySelector('.status-badge--ok')).toBeTruthy()
+  })
+
+  it('shows Korean API type labels and keeps filter option values as API codes', async () => {
+    vi.mocked(endpointsApi.listEndpoints).mockResolvedValue(
+      pageResult([
+        makeEndpoint({ id: 'e1', alias: 'chat-main', display_name: 'Chat Main' }),
+        makeEndpoint({
+          id: 'e2',
+          alias: 'embed',
+          display_name: 'Embed',
+          api_type: 'EMBEDDING',
+          active_route: null,
+        }),
+      ]),
+    )
+    renderAt('/endpoints')
+    expect(
+      (await screen.findAllByText('대화형 API (CHAT)')).length,
+    ).toBeGreaterThan(0)
+    expect(screen.getAllByText('임베딩 API (EMBEDDING)').length).toBeGreaterThan(
+      0,
+    )
+    expect(screen.getByText(/검색어/)).toBeInTheDocument()
+    const apiType = screen.getByLabelText(/API Type/)
+    expect(
+      within(apiType).getByRole('option', { name: /대화형 API \(CHAT\)/ }),
+    ).toHaveValue('CHAT')
+    expect(
+      within(apiType).getByRole('option', {
+        name: /임베딩 API \(EMBEDDING\)/,
+      }),
+    ).toHaveValue('EMBEDDING')
+    const traffic = screen.getByLabelText(/Traffic/)
+    expect(
+      within(traffic).getByRole('option', {
+        name: /요청 처리 중 \(SERVING\)/,
+      }),
+    ).toHaveValue('SERVING')
+    expect(
+      within(traffic).getByRole('option', {
+        name: /요청 종료 중 \(DRAINING\)/,
+      }),
+    ).toHaveValue('DRAINING')
   })
 
   it('applies filters and submits search without keystroke requests', async () => {

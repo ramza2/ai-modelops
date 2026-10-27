@@ -12,7 +12,11 @@ import { StatCard } from '../components/StatCard'
 import { StatusBadge } from '../components/StatusBadge'
 import { formatApiDateTime, operationElapsed, shortId } from '../utils/date'
 import { formatInt, formatMs, formatPercent } from '../utils/number'
-import { DASHBOARD_FIELD_HELP, PAGE_INTRO } from '../utils/uiLabels'
+import {
+  DASHBOARD_FIELD_HELP,
+  PAGE_INTRO,
+  formatOperationTypeDisplay,
+} from '../utils/uiLabels'
 
 const REFRESH_MS = 15_000
 
@@ -431,7 +435,7 @@ export function DashboardPage() {
                     op.source_deployment_id
                   return (
                     <tr key={op.id}>
-                      <td>{op.operation_type}</td>
+                      <td>{formatOperationTypeDisplay(op.operation_type)}</td>
                       <td>
                         <StatusBadge status={op.status} />
                       </td>
