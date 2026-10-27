@@ -842,14 +842,23 @@ th {
 
 .wizard-steps__item {
   display: inline-flex;
-  align-items: center;
-  padding: 0.25rem 0.55rem;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.1rem;
+  padding: 0.3rem 0.55rem;
   border: 1px solid var(--border);
   border-radius: 6px;
   background: var(--surface);
   color: var(--muted);
   font-size: 0.78rem;
   line-height: 1.3;
+}
+
+.wizard-steps__state {
+  font-size: 0.68rem;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  text-transform: none;
 }
 
 .wizard-steps__item--current {
@@ -861,10 +870,103 @@ th {
 
 .wizard-steps__item--done {
   color: var(--text);
+  border-color: color-mix(in srgb, var(--ok, #2f6f4e) 35%, var(--border));
+}
+
+.wizard-steps__item--todo {
+  opacity: 0.78;
+}
+
+.wizard-step-banner {
+  display: grid;
+  gap: 0.25rem;
+  margin: 0 0 0.85rem;
+}
+
+.wizard-step-banner__purpose {
+  margin: 0;
+  font-size: 0.95rem;
+  line-height: 1.45;
 }
 
 .wizard-step-hint {
-  margin: 0 0 0.85rem;
+  margin: 0;
+}
+
+.wizard-gpu-selection {
+  margin: 0.5rem 0 0.75rem;
+  padding: 0.55rem 0.7rem;
+  border: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.wizard-gpu-selection ul {
+  margin: 0.35rem 0;
+  padding-left: 1.1rem;
+}
+
+.wizard-gpu-row--selected td {
+  background: color-mix(in srgb, var(--accent, #2563eb) 6%, var(--surface));
+}
+
+.wizard-fit-result {
+  display: grid;
+  gap: 0.75rem;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.wizard-fit-result__verdict {
+  margin: 0;
+  font-weight: 650;
+}
+
+.wizard-fit-assumptions {
+  margin-top: 0.25rem;
+}
+
+.wizard-tech-details {
+  margin: 0.75rem 0;
+}
+
+.wizard-tech-details > summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.wizard-primary-action {
+  display: grid;
+  gap: 0.25rem;
+  justify-items: start;
+}
+
+.wizard-lifecycle-status {
+  margin: 0.35rem 0;
+  padding: 0.4rem 0.55rem;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.wizard-lifecycle-status--ok {
+  border-color: color-mix(in srgb, var(--ok, #2f6f4e) 40%, var(--border));
+  background: color-mix(in srgb, var(--ok, #2f6f4e) 7%, var(--surface));
+}
+
+.wizard-publish-modes {
+  display: grid;
+  gap: 0.35rem;
+  margin: 0.5rem 0 0.75rem;
+  padding: 0.5rem 0.65rem;
+  border: 1px solid var(--border);
+}
+
+.wizard-publish-modes legend {
+  padding: 0 0.25rem;
+  font-weight: 650;
 }
 
 .form-section {

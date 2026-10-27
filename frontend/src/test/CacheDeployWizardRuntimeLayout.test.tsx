@@ -425,8 +425,12 @@ describe('CacheDeployWizardPage Runtime layout (P1-5A / P1-8C)', () => {
     renderWizard('/models/cache/cache-1/deploy?step=gpu')
     await screen.findByRole('heading', { level: 2, name: /3\. GPU 선택/ })
     // First GPU is pre-selected on load.
-    await userEvent.click(screen.getByRole('button', { name: 'Fresh Fit 실행' }))
-    expect(await screen.findByTitle(/자원 적합\(FIT\)/)).toBeInTheDocument()
+    await userEvent.click(
+      screen.getByRole('button', { name: '현재 설정으로 GPU 자원 검사' }),
+    )
+    expect(
+      await screen.findAllByTitle(/자원 적합\(FIT\)/),
+    ).not.toHaveLength(0)
     expect(cacheDeployApi.previewCacheDeployFit).toHaveBeenCalledTimes(1)
 
     await userEvent.click(screen.getByRole('button', { name: '이전' }))
@@ -438,9 +442,10 @@ describe('CacheDeployWizardPage Runtime layout (P1-5A / P1-8C)', () => {
     await userEvent.click(screen.getByRole('button', { name: '다음: GPU 선택 및 자원 검사' }))
     await screen.findByRole('heading', { level: 2, name: /3\. GPU 선택/ })
     expect(
-      screen.getByText(/Fresh Fit을 다시 실행해야/),
+      screen.getByText(/설정으로 GPU 자원 검사」를 실행해야/),
     ).toBeInTheDocument()
     expect(screen.queryByTitle('FIT')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('wizard-fit-result')).not.toBeInTheDocument()
   })
 
   it('restores draft Runtime values and shows Review applied/unset partition', async () => {
@@ -488,12 +493,18 @@ describe('CacheDeployWizardPage Runtime layout (P1-5A / P1-8C)', () => {
 
     await userEvent.click(screen.getByRole('button', { name: '다음: GPU 선택 및 자원 검사' }))
     await screen.findByRole('heading', { level: 2, name: /3\. GPU 선택/ })
-    await userEvent.click(screen.getByRole('button', { name: 'Fresh Fit 실행' }))
-    expect(await screen.findByTitle(/자원 적합\(FIT\)/)).toBeInTheDocument()
+    await userEvent.click(
+      screen.getByRole('button', { name: '현재 설정으로 GPU 자원 검사' }),
+    )
+    expect(
+      await screen.findAllByTitle(/자원 적합\(FIT\)/),
+    ).not.toHaveLength(0)
     await userEvent.click(screen.getByRole('button', { name: '다음: 설정 검토' }))
 
     const summary = await screen.findByTestId('runtime-review-summary')
-    expect(within(summary).getByText('Runtime 설정 요약')).toBeInTheDocument()
+    expect(within(summary).getByText('배포 설정 요약')).toBeInTheDocument()
+    expect(within(summary).getByText('Fresh Fit 결과')).toBeInTheDocument()
+    expect(within(summary).getByText('선택한 GPU')).toBeInTheDocument()
     const applied = within(summary).getByTestId('runtime-review-applied')
     expect(applied).toHaveTextContent('max_model_len')
     expect(applied).toHaveTextContent('2048')
@@ -511,5 +522,84 @@ describe('CacheDeployWizardPage Runtime layout (P1-5A / P1-8C)', () => {
     expect(summary).toHaveTextContent(/thinking_token_budget/)
 
     clearWizardDraft(sessionStorage, 'cache-1')
+  })
+
+  it('shows Korean GPU selection summary and Fit cards with 정보 없음 for missing metrics', async () => {
+    vi.spyOn(cacheDeployApi, 'previewCacheDeployFit').mockResolvedValue({
+      ...makeFit(),
+      result: 'TIGHT',
+      gpu_results: [
+        {
+          gpu_device_id: 'gpu-0',
+          gpu_index: 0,
+          gpu_uuid: 'GPU-0',
+          name: 'Mock GPU',
+          vram_total_mb: 16384,
+          vram_free_mb: null,
+          vram_used_mb: null,
+          safety_margin_mb: 1024,
+          estimated_required_vram_mb: null,
+          result: 'TIGHT',
+          reasons: ['thin headroom'],
+        },
+      ],
+    })
+
+    renderWizard('/models/cache/cache-1/deploy?step=gpu')
+    await screen.findByRole('heading', { level: 2, name: /3\. GPU 선택/ })
+    expect(screen.getByTestId('wizard-gpu-selection-summary')).toHaveTextContent(
+      /현재 선택 GPU/,
+    )
+    expect(
+      screen.getAllByText(/선택한 GPU 수에 따라 Tensor Parallel/).length,
+    ).toBeGreaterThan(0)
+    expect(
+      screen.getByText(/안정적인 동시 실행을 보장하지 않습니다/),
+    ).toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: '현재 설정으로 GPU 자원 검사' }),
+    ).toBeInTheDocument()
+
+    await userEvent.click(
+      screen.getByRole('button', { name: '현재 설정으로 GPU 자원 검사' }),
+    )
+    const fit = await screen.findByTestId('wizard-fit-result')
+    expect(within(fit).getByText(/종합 판정/)).toBeInTheDocument()
+    expect(within(fit).getAllByText(/여유 부족 가능/).length).toBeGreaterThan(0)
+    expect(within(fit).getByText('현재 여유 메모리')).toBeInTheDocument()
+    expect(within(fit).getAllByText('정보 없음').length).toBeGreaterThan(1)
+    expect(within(fit).queryByText('0 MiB')).not.toBeInTheDocument()
+    expect(within(fit).getByText('thin headroom')).toBeInTheDocument()
+  })
+
+  it('hides internal step key from the main chrome and keeps URL step sync', async () => {
+    renderWizard('/models/cache/cache-1/deploy?step=runtime')
+    await screen.findByRole('heading', { level: 2, name: '2. 모델 실행 설정' })
+    expect(screen.queryByText(/내부 단계 키:/)).not.toBeInTheDocument()
+    expect(screen.getByRole('list', { name: '배포 설정 단계' })).toHaveTextContent(
+      /현재/,
+    )
+    expect(screen.getByText(/이 단계에서 하는 일/)).toBeInTheDocument()
+    await userEvent.click(screen.getByText('용어 및 기술 안내'))
+    expect(screen.getByText(/내부 키입니다\(현재: runtime\)/)).toBeInTheDocument()
+  })
+
+  it('does not substitute LLM guidance for unknown model types', async () => {
+    vi.mocked(modelsApi.getModel).mockResolvedValue(
+      makeModel({ model_type: 'CUSTOM_OTHER' }),
+    )
+    renderWizard('/models/cache/cache-1/deploy?step=cache')
+    expect(await screen.findByTestId('cache-model-type-note')).toHaveTextContent(
+      /모델 유형에 대한 안내가 없습니다/,
+    )
+    expect(screen.queryByText(/텍스트 생성·대화/)).not.toBeInTheDocument()
+
+    await userEvent.click(
+      screen.getByRole('button', { name: '다음: 모델 실행 설정' }),
+    )
+    expect(
+      await screen.findByTestId('runtime-model-type-note'),
+    ).toHaveTextContent(/등록된 유형을 확인하세요/)
+    expect(screen.queryByText(/텍스트 생성·대화/)).not.toBeInTheDocument()
   })
 })
