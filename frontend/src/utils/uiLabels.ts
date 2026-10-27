@@ -333,6 +333,8 @@ export const WIZARD_FIELD_HELP = {
     '현재 모델 유형 VLM: 이미지와 텍스트를 함께 처리합니다. 다중 이미지 요청 가능성을 고려하세요. 이미지 1장 제한을 기본값으로 넣지 않습니다.',
   modelTypeEmbedding:
     '현재 모델 유형 EMBEDDING: 텍스트 벡터화·검색에 사용합니다. 특정 모델(예: BGE-M3) 전용 프로필이 없으면 일반 Embedding에 추가 기본값을 적용하지 않습니다.',
+  modelTypeUnknown:
+    '모델 유형에 대한 안내가 없습니다. 등록된 유형을 확인하세요.',
 } as const
 
 export const WIZARD_START_STATUS = {

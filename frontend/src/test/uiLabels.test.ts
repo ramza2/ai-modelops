@@ -150,5 +150,9 @@ describe('uiLabels (P1-15 wizard/models)', () => {
     expect(WIZARD_FIELD_HELP.registryList).toMatch(/실행 중인 Deployment/)
     expect(WIZARD_STEP_PURPOSE.gpu).toMatch(/Fit은 모델을 실행/)
     expect(WIZARD_START_STATUS.healthWait).toMatch(/RUNNING\+HEALTHY/)
+    expect(WIZARD_FIELD_HELP.modelTypeUnknown).toMatch(
+      /모델 유형에 대한 안내가 없습니다/,
+    )
+    expect(WIZARD_FIELD_HELP.modelTypeUnknown).not.toMatch(/텍스트 생성/)
   })
 })

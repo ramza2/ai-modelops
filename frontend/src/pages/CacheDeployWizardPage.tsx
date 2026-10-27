@@ -52,7 +52,6 @@ import { formatApiDateTime, operationElapsed } from '../utils/date'
 import {
   FIT_RESULT_HELP,
   FIT_RESULT_LABELS,
-  MODEL_TYPE_HELP,
   RUNTIME_FIELD_HELP,
   WIZARD_FIELD_HELP,
   WIZARD_START_STATUS,
@@ -117,6 +116,16 @@ function formatMbOrUnknown(value: number | null | undefined): string {
 function displayOrUnknown(value: string | null | undefined): string {
   const trimmed = (value ?? '').trim()
   return trimmed.length > 0 ? trimmed : '정보 없음'
+}
+
+/** Display-only model-type note — never invent LLM guidance for unknown types. */
+function modelTypeGuidance(modelType: string | null | undefined): string | null {
+  if (!modelType) return null
+  const code = modelType.toUpperCase()
+  if (code === 'LLM') return WIZARD_FIELD_HELP.modelTypeLlm
+  if (code === 'VLM') return WIZARD_FIELD_HELP.modelTypeVlm
+  if (code === 'EMBEDDING') return WIZARD_FIELD_HELP.modelTypeEmbedding
+  return WIZARD_FIELD_HELP.modelTypeUnknown
 }
 
 function WizardStepStrip({ current }: { current: Step }) {
@@ -790,6 +799,8 @@ export function CacheDeployWizardPage() {
     )
   }
 
+  const modelTypeNote = modelTypeGuidance(model?.model_type)
+
   return (
     <AppShell
       title="모델 배포 설정"
@@ -870,15 +881,13 @@ export function CacheDeployWizardPage() {
               <dd>{model?.model_type || '정보 없음'}</dd>
             </div>
           </dl>
-          {model?.model_type ? (
-            <p className="panel-hint" role="note">
-              {(model.model_type || '').toUpperCase() === 'LLM'
-                ? WIZARD_FIELD_HELP.modelTypeLlm
-                : (model.model_type || '').toUpperCase() === 'VLM'
-                  ? WIZARD_FIELD_HELP.modelTypeVlm
-                  : (model.model_type || '').toUpperCase() === 'EMBEDDING'
-                    ? WIZARD_FIELD_HELP.modelTypeEmbedding
-                    : MODEL_TYPE_HELP.LLM}
+          {modelTypeNote ? (
+            <p
+              className="panel-hint"
+              role="note"
+              data-testid="cache-model-type-note"
+            >
+              {modelTypeNote}
             </p>
           ) : null}
           <button
@@ -900,15 +909,13 @@ export function CacheDeployWizardPage() {
               알려진 프로파일 사전 입력: {knownProfileLabel}
             </p>
           ) : null}
-          {model?.model_type ? (
-            <p className="panel-hint" role="note" data-testid="runtime-model-type-note">
-              {(model.model_type || '').toUpperCase() === 'LLM'
-                ? WIZARD_FIELD_HELP.modelTypeLlm
-                : (model.model_type || '').toUpperCase() === 'VLM'
-                  ? WIZARD_FIELD_HELP.modelTypeVlm
-                  : (model.model_type || '').toUpperCase() === 'EMBEDDING'
-                    ? WIZARD_FIELD_HELP.modelTypeEmbedding
-                    : null}
+          {modelTypeNote ? (
+            <p
+              className="panel-hint"
+              role="note"
+              data-testid="runtime-model-type-note"
+            >
+              {modelTypeNote}
             </p>
           ) : null}
           <p className="secondary-text">{RUNTIME_FIELD_HELP.unsetKeepsDefault}</p>

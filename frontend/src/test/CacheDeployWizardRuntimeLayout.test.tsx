@@ -583,4 +583,23 @@ describe('CacheDeployWizardPage Runtime layout (P1-5A / P1-8C)', () => {
     await userEvent.click(screen.getByText('용어 및 기술 안내'))
     expect(screen.getByText(/내부 키입니다\(현재: runtime\)/)).toBeInTheDocument()
   })
+
+  it('does not substitute LLM guidance for unknown model types', async () => {
+    vi.mocked(modelsApi.getModel).mockResolvedValue(
+      makeModel({ model_type: 'CUSTOM_OTHER' }),
+    )
+    renderWizard('/models/cache/cache-1/deploy?step=cache')
+    expect(await screen.findByTestId('cache-model-type-note')).toHaveTextContent(
+      /모델 유형에 대한 안내가 없습니다/,
+    )
+    expect(screen.queryByText(/텍스트 생성·대화/)).not.toBeInTheDocument()
+
+    await userEvent.click(
+      screen.getByRole('button', { name: '다음: 모델 실행 설정' }),
+    )
+    expect(
+      await screen.findByTestId('runtime-model-type-note'),
+    ).toHaveTextContent(/등록된 유형을 확인하세요/)
+    expect(screen.queryByText(/텍스트 생성·대화/)).not.toBeInTheDocument()
+  })
 })
