@@ -13,6 +13,8 @@ import { formatApiDateTime, shortId } from '../utils/date'
 import { parsePositivePage } from '../utils/query'
 import {
   OPERATION_FIELD_HELP,
+  OPERATION_TYPE_LABELS,
+  formatOperationTypeDisplay,
   userFacingLoadError,
 } from '../utils/uiLabels'
 
@@ -321,7 +323,9 @@ export function OperationsPage() {
             <option value="ALL">전체</option>
             {[...KNOWN_TYPES].map((t) => (
               <option key={t} value={t}>
-                {t}
+                {OPERATION_TYPE_LABELS[t]
+                  ? `${OPERATION_TYPE_LABELS[t]} (${t})`
+                  : t}
               </option>
             ))}
           </select>
@@ -429,7 +433,7 @@ export function OperationsPage() {
                         {shortId(op.id, 12)}
                       </Link>
                     </td>
-                    <td>{op.operation_type || '—'}</td>
+                    <td>{formatOperationTypeDisplay(op.operation_type)}</td>
                     <td>
                       <StatusBadge status={op.status} />
                     </td>

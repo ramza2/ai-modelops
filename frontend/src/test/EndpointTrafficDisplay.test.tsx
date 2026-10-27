@@ -46,8 +46,38 @@ describe('EndpointTrafficDisplay', () => {
       />,
     )
     const el = screen.getByTestId('endpoint-traffic-display')
-    expect(el).toHaveTextContent(/서빙/)
+    expect(el).toHaveTextContent(/요청 처리 중/)
     expect(el).toHaveTextContent('(SERVING)')
+    expect(el).not.toHaveTextContent(/서빙/)
     expect(el.querySelector('.status-badge--ok')).toBeTruthy()
+  })
+
+  it('labels DRAINING and MAINTENANCE in Korean without changing codes', () => {
+    const { rerender } = render(
+      <EndpointTrafficDisplay
+        isEnabled={true}
+        trafficState="DRAINING"
+        hasActiveRoute={true}
+      />,
+    )
+    expect(screen.getByTestId('endpoint-traffic-display')).toHaveTextContent(
+      /요청 종료 중/,
+    )
+    expect(screen.getByTestId('endpoint-traffic-display')).toHaveTextContent(
+      '(DRAINING)',
+    )
+    rerender(
+      <EndpointTrafficDisplay
+        isEnabled={true}
+        trafficState="MAINTENANCE"
+        hasActiveRoute={true}
+      />,
+    )
+    expect(screen.getByTestId('endpoint-traffic-display')).toHaveTextContent(
+      /유지보수/,
+    )
+    expect(screen.getByTestId('endpoint-traffic-display')).toHaveTextContent(
+      '(MAINTENANCE)',
+    )
   })
 })

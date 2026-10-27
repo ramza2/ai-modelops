@@ -31,7 +31,6 @@ import { SectionError } from '../components/SectionError'
 import { StatusBadge } from '../components/StatusBadge'
 import { useEndpointEnabledAction } from '../hooks/useEndpointEnabledAction'
 import { formatApiDateTime, shortId } from '../utils/date'
-import { formatMemoryMb } from '../utils/number'
 import {
   formatOperationError,
   isActiveOperationStatus,
@@ -40,7 +39,13 @@ import {
   OPERATION_POLL_MS,
   operationPollConfig,
 } from '../utils/operationLifecycle'
-import { ENDPOINT_FIELD_HELP } from '../utils/uiLabels'
+import {
+  ENDPOINT_FIELD_HELP,
+  PREFLIGHT_FLAG_HELP,
+  PREFLIGHT_GPU_COLUMN_HELP,
+  formatOperationTypeDisplay,
+  formatPreflightMemoryMb,
+} from '../utils/uiLabels'
 
 const SWITCH_OPERATION_QUERY = 'switch_operation_id'
 
@@ -1406,9 +1411,9 @@ export function EndpointDetailPage() {
               {ENDPOINT_FIELD_HELP.hotSwitch} {ENDPOINT_FIELD_HELP.coldSwitch}
             </p>
             <p className="panel-hint">
-              Preview 응답의 `preview_only` / `worker_must_revalidate` 값을
-              확인하세요. 합산 VRAM으로 가능 여부를 추론하지 말고 GPU별 결과를
-              보세요.
+              Preview는 참고용이며 Worker가 실제 실행 직전 다시 검증합니다.
+              `preview_only` / `worker_must_revalidate` 원본 값을 확인하세요.
+              합산 VRAM으로 가능 여부를 추론하지 말고 GPU별 결과를 보세요.
             </p>
 
             {switchTrackingUnresolved ? (
@@ -1535,7 +1540,11 @@ export function EndpointDetailPage() {
                             apiTerm="Required Peak VRAM"
                           />
                         </dt>
-                        <dd>{formatMemoryMb(preview.required_peak_vram_mb)}</dd>
+                        <dd>
+                          {formatPreflightMemoryMb(
+                            preview.required_peak_vram_mb,
+                          )}
+                        </dd>
                       </div>
                       <div>
                         <dt>
@@ -1545,7 +1554,9 @@ export function EndpointDetailPage() {
                           />
                         </dt>
                         <dd>
-                          {formatMemoryMb(preview.available_hot_vram_mb)}
+                          {formatPreflightMemoryMb(
+                            preview.available_hot_vram_mb,
+                          )}
                         </dd>
                       </div>
                       <div>
@@ -1555,7 +1566,11 @@ export function EndpointDetailPage() {
                             apiTerm="Reclaimable VRAM"
                           />
                         </dt>
-                        <dd>{formatMemoryMb(preview.reclaimable_vram_mb)}</dd>
+                        <dd>
+                          {formatPreflightMemoryMb(
+                            preview.reclaimable_vram_mb,
+                          )}
+                        </dd>
                       </div>
                       <div>
                         <dt>
@@ -1565,7 +1580,9 @@ export function EndpointDetailPage() {
                           />
                         </dt>
                         <dd>
-                          {formatMemoryMb(preview.available_after_reclaim_mb)}
+                          {formatPreflightMemoryMb(
+                            preview.available_after_reclaim_mb,
+                          )}
                         </dd>
                       </div>
                       <div>
@@ -1575,7 +1592,9 @@ export function EndpointDetailPage() {
                             apiTerm="Safety Margin"
                           />
                         </dt>
-                        <dd>{formatMemoryMb(preview.safety_margin_mb)}</dd>
+                        <dd>
+                          {formatPreflightMemoryMb(preview.safety_margin_mb)}
+                        </dd>
                       </div>
                       <div>
                         <dt>
@@ -1584,13 +1603,37 @@ export function EndpointDetailPage() {
                         <dd>{formatApiDateTime(preview.evaluated_at)}</dd>
                       </div>
                       <div>
-                        <dt>preview_only</dt>
-                        <dd>{preview.preview_only ? 'true' : 'false'}</dd>
+                        <dt>
+                          <TermLabel
+                            text="참고용 사전 검사"
+                            apiTerm="preview_only"
+                            help={PREFLIGHT_FLAG_HELP.previewOnly}
+                          />
+                        </dt>
+                        <dd>
+                          {preview.preview_only ? 'true' : 'false'}
+                          <span className="secondary-text">
+                            {preview.preview_only
+                              ? ' — 참고용(실제 Switch 실행 아님)'
+                              : ''}
+                          </span>
+                        </dd>
                       </div>
                       <div>
-                        <dt>worker_must_revalidate</dt>
+                        <dt>
+                          <TermLabel
+                            text="실행 직전 재검증 필요"
+                            apiTerm="worker_must_revalidate"
+                            help={PREFLIGHT_FLAG_HELP.workerMustRevalidate}
+                          />
+                        </dt>
                         <dd>
                           {preview.worker_must_revalidate ? 'true' : 'false'}
+                          <span className="secondary-text">
+                            {preview.worker_must_revalidate
+                              ? ' — Worker가 실행 직전 다시 검증'
+                              : ''}
+                          </span>
                         </dd>
                       </div>
                     </dl>
@@ -1598,20 +1641,63 @@ export function EndpointDetailPage() {
                     <h3 className="section-subheading">GPU별 결과 (GPU Results)</h3>
                     <p className="panel-hint">
                       GPU별 판정입니다. 부모 aggregate 합계만으로 HOT/COLD 가능
-                      여부를 결정하지 마세요.
+                      여부를 결정하지 마세요. 없는 수치는 정보 없음이며 0으로
+                      대체하지 않습니다.
                     </p>
                     {preview.gpu_results.length > 0 ? (
                       <div className="table-wrap">
                         <table className="data-table">
                           <thead>
                             <tr>
-                              <th scope="col">GPU Device</th>
-                              <th scope="col">Free</th>
-                              <th scope="col">Required</th>
-                              <th scope="col">Hot Available</th>
-                              <th scope="col">After Reclaim</th>
-                              <th scope="col">Margin</th>
-                              <th scope="col">Result</th>
+                              <th scope="col">
+                                <TermLabel
+                                  text="GPU"
+                                  apiTerm="GPU Device"
+                                  help={PREFLIGHT_GPU_COLUMN_HELP.gpuDevice}
+                                />
+                              </th>
+                              <th scope="col">
+                                <TermLabel
+                                  text="현재 여유 메모리"
+                                  apiTerm="Free"
+                                  help={PREFLIGHT_GPU_COLUMN_HELP.free}
+                                />
+                              </th>
+                              <th scope="col">
+                                <TermLabel
+                                  text="예상 필요 메모리"
+                                  apiTerm="Required"
+                                  help={PREFLIGHT_GPU_COLUMN_HELP.required}
+                                />
+                              </th>
+                              <th scope="col">
+                                <TermLabel
+                                  text="HOT 전환 시 가용 메모리"
+                                  apiTerm="Hot Available"
+                                  help={PREFLIGHT_GPU_COLUMN_HELP.hotAvailable}
+                                />
+                              </th>
+                              <th scope="col">
+                                <TermLabel
+                                  text="기존 자원 회수 후 가용 메모리"
+                                  apiTerm="After Reclaim"
+                                  help={PREFLIGHT_GPU_COLUMN_HELP.afterReclaim}
+                                />
+                              </th>
+                              <th scope="col">
+                                <TermLabel
+                                  text="안전 여유"
+                                  apiTerm="Margin"
+                                  help={PREFLIGHT_GPU_COLUMN_HELP.margin}
+                                />
+                              </th>
+                              <th scope="col">
+                                <TermLabel
+                                  text="판정"
+                                  apiTerm="Result"
+                                  help={PREFLIGHT_GPU_COLUMN_HELP.result}
+                                />
+                              </th>
                             </tr>
                           </thead>
                           <tbody>
@@ -1620,17 +1706,27 @@ export function EndpointDetailPage() {
                                 <td className="mono">
                                   {shortId(g.gpu_device_id, 12)}
                                 </td>
-                                <td>{formatMemoryMb(g.free_vram_mb)}</td>
-                                <td>{formatMemoryMb(g.required_vram_mb)}</td>
                                 <td>
-                                  {formatMemoryMb(g.available_hot_vram_mb)}
+                                  {formatPreflightMemoryMb(g.free_vram_mb)}
                                 </td>
                                 <td>
-                                  {formatMemoryMb(
+                                  {formatPreflightMemoryMb(g.required_vram_mb)}
+                                </td>
+                                <td>
+                                  {formatPreflightMemoryMb(
+                                    g.available_hot_vram_mb,
+                                  )}
+                                </td>
+                                <td>
+                                  {formatPreflightMemoryMb(
                                     g.available_after_reclaim_mb,
                                   )}
                                 </td>
-                                <td>{formatMemoryMb(g.safety_margin_mb)}</td>
+                                <td>
+                                  {formatPreflightMemoryMb(
+                                    g.safety_margin_mb,
+                                  )}
+                                </td>
                                 <td>
                                   <StatusBadge status={g.result} />
                                 </td>
@@ -1756,7 +1852,9 @@ export function EndpointDetailPage() {
                     <dt>
                       <TermLabel text="작업 유형" apiTerm="Type" />
                     </dt>
-                    <dd>{lastOperation.operation_type}</dd>
+                    <dd>
+                      {formatOperationTypeDisplay(lastOperation.operation_type)}
+                    </dd>
                   </div>
                   <div>
                     <dt>
@@ -1811,12 +1909,30 @@ export function EndpointDetailPage() {
                 <table className="data-table">
                   <thead>
                     <tr>
-                      <th scope="col">Status</th>
-                      <th scope="col">Deployment</th>
-                      <th scope="col">Rewrite</th>
-                      <th scope="col">Activated</th>
-                      <th scope="col">Deactivated</th>
-                      <th scope="col">Operation</th>
+                      <th scope="col">
+                        <TermLabel text="연결 상태" apiTerm="Status" />
+                      </th>
+                      <th scope="col">
+                        <TermLabel text="모델 배포" apiTerm="Deployment" />
+                      </th>
+                      <th scope="col">
+                        <TermLabel
+                          text="모델 이름 재작성"
+                          apiTerm="Rewrite"
+                        />
+                      </th>
+                      <th scope="col">
+                        <TermLabel text="활성화 시각" apiTerm="Activated" />
+                      </th>
+                      <th scope="col">
+                        <TermLabel
+                          text="비활성화 시각"
+                          apiTerm="Deactivated"
+                        />
+                      </th>
+                      <th scope="col">
+                        <TermLabel text="작업" apiTerm="Operation" />
+                      </th>
                     </tr>
                   </thead>
                   <tbody>

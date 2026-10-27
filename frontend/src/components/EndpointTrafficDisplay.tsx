@@ -1,5 +1,8 @@
 import { StatusBadge } from './StatusBadge'
-import { ENDPOINT_FIELD_HELP } from '../utils/uiLabels'
+import {
+  ENDPOINT_FIELD_HELP,
+  TRAFFIC_STATE_LABELS,
+} from '../utils/uiLabels'
 
 type EndpointTrafficDisplayProps = {
   isEnabled: boolean
@@ -52,10 +55,12 @@ export function EndpointTrafficDisplay({
     )
   }
 
+  const trafficLabel = TRAFFIC_STATE_LABELS[code]
   return (
     <span data-testid="endpoint-traffic-display" data-traffic-code={code}>
       <StatusBadge
         status={trafficState}
+        label={trafficLabel}
         title={ENDPOINT_FIELD_HELP.trafficServingOk}
       />
     </span>

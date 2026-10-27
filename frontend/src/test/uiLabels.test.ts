@@ -7,15 +7,20 @@ import {
   MODEL_TYPE_HELP,
   NAV_ITEMS,
   OBSERVABILITY_FIELD_HELP,
+  OPERATION_TYPE_LABELS,
   PAGE_INTRO,
   RUNTIME_FIELD_HELP,
   WIZARD_FIELD_HELP,
   WIZARD_START_STATUS,
   WIZARD_STEP_LABELS,
   WIZARD_STEP_PURPOSE,
+  formatApiTypeDisplay,
   formatNullableLimit,
+  formatOperationTypeDisplay,
+  formatPreflightMemoryMb,
   formatPriorityDisplay,
   formatStatusDisplay,
+  formatTrafficStateDisplay,
   userFacingLoadError,
 } from '../utils/uiLabels'
 
@@ -93,6 +98,43 @@ describe('uiLabels (P1-26A page intros)', () => {
     expect(OBSERVABILITY_FIELD_HELP.latency).toMatch(/최대값/)
     expect(OBSERVABILITY_FIELD_HELP.lastCalledAt).toMatch(/조회 기간/)
     expect(OBSERVABILITY_FIELD_HELP.usageStatus).toMatch(/집계 확인 불가/)
+  })
+})
+
+describe('uiLabels (P1-26D display helpers)', () => {
+  it('maps known operation types and leaves unknown enums raw', () => {
+    expect(OPERATION_TYPE_LABELS.SWITCH).toBe('모델 전환')
+    expect(formatOperationTypeDisplay('START')).toBe('모델 실행 (START)')
+    expect(formatOperationTypeDisplay('DELETE')).toBe(
+      '모델 컨테이너 제거 (DELETE)',
+    )
+    expect(formatOperationTypeDisplay('WEIRD_CUSTOM')).toBe('WEIRD_CUSTOM')
+    expect(formatOperationTypeDisplay(null)).toBe('—')
+    expect(formatOperationTypeDisplay('')).toBe('—')
+  })
+
+  it('formats API type and traffic with Korean labels and codes', () => {
+    expect(formatApiTypeDisplay('CHAT')).toBe('대화형 API (CHAT)')
+    expect(formatApiTypeDisplay('EMBEDDING')).toBe('임베딩 API (EMBEDDING)')
+    expect(formatApiTypeDisplay('OTHER')).toBe('OTHER')
+    expect(formatTrafficStateDisplay('SERVING')).toBe(
+      '요청 처리 중 (SERVING)',
+    )
+    expect(formatTrafficStateDisplay('DRAINING')).toBe(
+      '요청 종료 중 (DRAINING)',
+    )
+    expect(formatTrafficStateDisplay('MAINTENANCE')).toBe(
+      '유지보수 (MAINTENANCE)',
+    )
+  })
+
+  it('shows 정보 없음 for missing preflight memory without inventing 0', () => {
+    expect(formatPreflightMemoryMb(null)).toBe('정보 없음')
+    expect(formatPreflightMemoryMb(undefined)).toBe('정보 없음')
+    expect(formatPreflightMemoryMb(Number.NaN)).toBe('정보 없음')
+    expect(formatPreflightMemoryMb(0)).toBe('0 MB')
+    expect(formatPreflightMemoryMb(512)).toBe('512 MB')
+    expect(formatPreflightMemoryMb(16384)).toBe('16.0 GiB')
   })
 })
 

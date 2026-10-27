@@ -59,7 +59,7 @@ export function AppShell({
       <header className="shell__top">
         <div className="shell__brand">
           <span className="shell__product">ModelOps</span>
-          <span className="shell__tag">Admin</span>
+          <span className="shell__tag">관리자</span>
         </div>
         <div className="shell__actions">
           <span className="shell__updated" aria-live="polite">

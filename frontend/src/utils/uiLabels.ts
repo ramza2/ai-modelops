@@ -445,14 +445,122 @@ export const ENDPOINT_FIELD_HELP = {
     '활성 연결 없음: ACTIVE Route가 없습니다. Enabled여도 Gateway가 모델을 연결할 수 없는 미사용(또는 미연결) 별칭일 수 있습니다. 과거 INACTIVE Route 이력은 별도로 남습니다.',
   connectedAlias:
     '모델 연결됨: ACTIVE Route가 Deployment를 가리킵니다. 사용 중지 시 이 Alias를 호출하는 업무 시스템 요청이 실패할 수 있습니다.',
+  filterApply:
+    '검색어(별칭·표시 이름)는 「검색」버튼을 눌러야 적용됩니다. API 유형·사용 설정·요청 처리 상태는 변경 즉시 목록에 반영됩니다. 사용 설정(is_enabled)·요청 처리 상태(traffic_state)·ACTIVE Route 여부는 서로 다른 개념입니다.',
 } as const
+
+/** P1-26D — known Operation type display labels (display-only; unknown stays raw). */
+export const OPERATION_TYPE_LABELS: Record<string, string> = {
+  DEPLOY: '모델 배포',
+  START: '모델 실행',
+  STOP: '모델 중지',
+  RESTART: '모델 재시작',
+  SWITCH: '모델 전환',
+  ROLLBACK: '이전 상태 복원',
+  DELETE: '모델 컨테이너 제거',
+  IMPORT: '외부 모델 등록',
+}
+
+/**
+ * Korean label with API code for known types; unknown enums stay as the raw value.
+ * Does not invent translations for unlisted codes.
+ */
+export function formatOperationTypeDisplay(
+  code: string | null | undefined,
+): string {
+  if (code == null || String(code).trim() === '') return '—'
+  const raw = String(code)
+  const upper = raw.toUpperCase()
+  const label = OPERATION_TYPE_LABELS[upper]
+  if (!label) return raw
+  return `${label} (${upper})`
+}
+
+/** Endpoint Alias api_type display (display-only). */
+export const API_TYPE_LABELS: Record<string, string> = {
+  CHAT: '대화형 API',
+  EMBEDDING: '임베딩 API',
+}
+
+export function formatApiTypeDisplay(
+  code: string | null | undefined,
+): string {
+  if (code == null || String(code).trim() === '') return '—'
+  const raw = String(code)
+  const upper = raw.toUpperCase()
+  const label = API_TYPE_LABELS[upper]
+  if (!label) return raw
+  return `${label} (${upper})`
+}
+
+/**
+ * Traffic state Korean labels for filters / StatusBadge overrides.
+ * Does not change global StatusBadge defaults; callers pass label explicitly.
+ */
+export const TRAFFIC_STATE_LABELS: Record<string, string> = {
+  SERVING: '요청 처리 중',
+  DRAINING: '요청 종료 중',
+  MAINTENANCE: '유지보수',
+}
+
+export function formatTrafficStateDisplay(
+  code: string | null | undefined,
+): string {
+  if (code == null || String(code).trim() === '') return '—'
+  const raw = String(code)
+  const upper = raw.toUpperCase()
+  const label = TRAFFIC_STATE_LABELS[upper]
+  if (!label) return raw
+  return `${label} (${upper})`
+}
+
+/** Preflight GPU column help (English field meaning for operators). */
+export const PREFLIGHT_GPU_COLUMN_HELP = {
+  gpuDevice:
+    'GPU Device: 검사 대상 물리 GPU 식별자입니다. VRAM은 GPU별로만 판단하며 합산하지 않습니다.',
+  free: 'Free: 해당 GPU의 현재 여유 VRAM(MB)입니다. 없는 값은 정보 없음이며 0으로 대체하지 않습니다.',
+  required:
+    'Required: Target에 필요할 것으로 예상되는 VRAM(MB)입니다. 없는 값은 정보 없음입니다.',
+  hotAvailable:
+    'Hot Available: HOT 전환 시 가용으로 보는 VRAM(MB)입니다. 없는 값은 정보 없음입니다.',
+  afterReclaim:
+    'After Reclaim: Source 자원 회수 후 가용으로 보는 VRAM(MB)입니다. 없는 값은 정보 없음입니다.',
+  margin:
+    'Margin (Safety Margin): 안정 실행을 위해 남겨 두는 안전 여유 VRAM(MB)입니다.',
+  result:
+    'Result: GPU별 사전 검사 판정(HOT_SWITCH_AVAILABLE / COLD_SWITCH_ONLY / RESOURCE_INSUFFICIENT 등)입니다.',
+} as const
+
+export const PREFLIGHT_FLAG_HELP = {
+  previewOnly:
+    'preview_only=true이면 이 결과는 참고용 Preflight Preview입니다. Switch를 실제로 실행한 것이 아닙니다.',
+  workerMustRevalidate:
+    'worker_must_revalidate=true이면 Worker가 실제 Switch 실행 직전에 자원 상태를 다시 검증합니다. Preview와 판정이 달라질 수 있습니다.',
+} as const
+
+/**
+ * Preflight memory display: missing/invalid → 정보 없음 (never invent 0).
+ * Finite numbers use MB / GiB (1024-based), matching formatMemoryMb.
+ */
+export function formatPreflightMemoryMb(
+  value: number | null | undefined,
+): string {
+  if (value === null || value === undefined || !Number.isFinite(value)) {
+    return '정보 없음'
+  }
+  if (Math.abs(value) < 1024) {
+    return `${Math.round(value)} MB`
+  }
+  return `${(value / 1024).toFixed(1)} GiB`
+}
 
 export const OPERATION_FIELD_HELP = {
   overview:
     '작업 이력(Operation)은 배포·전환 등 비동기 작업의 진행과 결과를 추적합니다. 목록의 상태는 API 원본 코드를 유지하며, 상세에서 Safe Cancel / Explicit Retry를 제공합니다.',
   status:
     '진행 상태 예: QUEUED=대기, RUNNING=실행 중, SUCCEEDED=성공, FAILED=실패, CANCELLED/CANCELED=취소됨, ROLLING_BACK=롤백 중, ROLLED_BACK=롤백 완료, MANUAL_INTERVENTION_REQUIRED=수동 개입 필요.',
-  type: '작업 유형(Type)은 SWITCH·DEPLOYMENT_START 등 Operation이 수행하는 작업 종류입니다.',
+  type:
+    '작업 유형(Type)은 DEPLOY·START·STOP·RESTART·SWITCH·ROLLBACK·DELETE·IMPORT 등 Operation이 수행하는 작업 종류입니다. 화면에는 한글 설명을 보이고 괄호에 API 원본 코드를 둡니다. 등록되지 않은 유형은 원본값 그대로 표시합니다.',
   strategy: '전환 방식(Strategy)은 HOT/COLD 등 Switch 전략입니다. 목록·상세의 원본 코드를 확인하세요.',
   sourceTarget:
     '기존 대상(Source)은 전환 전 Deployment, 변경 대상(Target)은 전환 후 Deployment입니다.',

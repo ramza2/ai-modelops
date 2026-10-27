@@ -23,7 +23,10 @@ import {
   OPERATION_POLL_MS,
   operationPollConfig,
 } from '../utils/operationLifecycle'
-import { OPERATION_FIELD_HELP } from '../utils/uiLabels'
+import {
+  OPERATION_FIELD_HELP,
+  formatOperationTypeDisplay,
+} from '../utils/uiLabels'
 
 const CANCEL_STATUSES = new Set(['QUEUED', 'RUNNING', 'ROLLING_BACK'])
 const RETRY_STATUSES = new Set(['FAILED', 'ROLLED_BACK'])
@@ -402,7 +405,9 @@ export function OperationDetailPage() {
                     help={OPERATION_FIELD_HELP.type}
                   />
                 </dt>
-                <dd>{displayOperation.operation_type || '—'}</dd>
+                <dd>
+                  {formatOperationTypeDisplay(displayOperation.operation_type)}
+                </dd>
               </div>
               <div>
                 <dt>
