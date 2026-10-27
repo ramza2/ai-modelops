@@ -274,14 +274,33 @@ export const WIZARD_STEP_LABELS: Record<WizardStepKey, string> = {
   done: '7. API 연결 결과 확인',
 }
 
+/** Short purpose shown at the top of each wizard step (1–2 sentences). */
+export const WIZARD_STEP_PURPOSE: Record<WizardStepKey, string> = {
+  cache: '다운로드가 끝난 모델 파일이 대상 서버에 준비됐는지 확인합니다. 아직 모델을 실행하거나 API를 연결하지 않습니다.',
+  runtime:
+    '관리용 이름과 모델 실행 옵션을 입력합니다. GPU를 고르거나 컨테이너를 시작하지 않습니다.',
+  gpu: '사용할 GPU를 고르고, 현재 설정으로 자원 적합성(Fresh Fit)을 검사합니다. Fit은 모델을 실행하거나 GPU를 점유하지 않습니다.',
+  review:
+    '입력한 설정과 Fit 결과를 검토한 뒤 배포 정보(메타데이터)만 등록합니다. 모델 실행은 다음 단계입니다.',
+  start:
+    '선택한 GPU에서 모델 컨테이너 실행을 요청하고, Operation 성공과 실제 RUNNING+HEALTHY를 구분해서 확인합니다.',
+  publish:
+    '업무 시스템이 호출할 API 별칭을 이 배포에 연결합니다. 서비스 호출 경로에 영향을 줄 수 있습니다.',
+  done: 'API 연결·Gateway 검증 결과를 확인합니다. 검증 실패·미수행을 성공으로 보지 마세요.',
+}
+
 export const WIZARD_STEP_HINTS: Record<WizardStepKey, string> = {
-  cache: '다운로드가 끝난 모델 파일을 확인한 뒤, 실행 설정으로 갑니다.',
-  runtime: '배포·컨테이너·런타임 옵션을 입력합니다. 미설정은 런타임 기본 동작을 따릅니다.',
-  gpu: '사용할 GPU를 고르고 Fresh Fit(현재 설정으로의 자원 검사)을 실행합니다. Fit은 모델을 실행하지 않습니다.',
-  review: '설정을 검토한 뒤 배포 정보만 생성합니다. 아직 모델은 실행되지 않습니다.',
-  start: '실제 모델 컨테이너 실행을 요청하고 Operation·Health 상태를 확인합니다.',
-  publish: '업무 시스템이 호출할 API 별칭(Alias)을 연결합니다. 서비스 라우팅에 영향을 줄 수 있습니다.',
-  done: 'API 연결·Gateway 검증 결과를 확인합니다.',
+  cache: '이 단계에서 하는 일: 캐시 READY·저장소·서버를 확인합니다. 다음 단계: 모델 실행 설정.',
+  runtime:
+    '이 단계에서 하는 일: 배포·컨테이너·런타임 옵션 입력. 미설정은 런타임 기본 동작을 따릅니다. 다음 단계: GPU 선택 및 자원 검사.',
+  gpu: '이 단계에서 하는 일: GPU 선택 + 현재 설정으로 GPU 자원 검사. 다음 단계: 설정 검토 및 배포 정보 생성.',
+  review:
+    '이 단계에서 하는 일: 설정·Fit 검토 후 배포 정보 생성(Create). 다음 단계: 모델 실행 요청.',
+  start:
+    '이 단계에서 하는 일: 모델 실행(Start)과 Health 확인. 다음 단계: API 연결 설정(RUNNING+HEALTHY 이후).',
+  publish:
+    '이 단계에서 하는 일: 신규/기존 API 별칭 연결(Publish). 다음 단계: API 연결 결과 확인.',
+  done: '이 단계에서 하는 일: 별칭·Gateway 검증·배포/Endpoint 링크 확인. 다음 단계: 필요 시 배포·Endpoint 상세로 이동.',
 }
 
 export const WIZARD_FIELD_HELP = {
@@ -292,51 +311,72 @@ export const WIZARD_FIELD_HELP = {
   start:
     '모델 실행(Start Deployment)은 선택한 GPU에서 Managed 컨테이너를 기동하는 비동기 Operation을 요청합니다.',
   publish:
-    'API 연결(Publish)은 Endpoint Alias를 ACTIVE Route로 이 Deployment에 연결합니다. 업무 시스템의 Gateway 호출 경로에 영향을 줄 수 있습니다.',
+    'API 연결(Publish)은 Endpoint Alias를 ACTIVE Route로 이 Deployment에 연결합니다. API 연결은 업무 시스템이 사용하는 모델 호출 경로에 영향을 줄 수 있습니다.',
   verify:
     'API 연결 결과 확인은 Alias·Route·Gateway 검증 상태를 보여 줍니다. 모델 파일 다운로드나 Fit과는 별개입니다.',
   freshFit:
     'Fresh Fit은 지금 선택한 GPU와 Runtime 설정으로 Node Agent가 새로 측정한 자원 적합성 검사입니다. 모델을 실행하거나 GPU를 점유하지 않으며, VRAM을 GPU끼리 합산하지 않습니다.',
   tensorParallel:
-    'GPU를 여러 장 고르면 Tensor Parallel(TP) 크기가 선택 수와 같아집니다. 이는 모델 샤딩이며, 여러 GPU의 여유 VRAM을 하나의 큰 메모리로 합치는 것과 다릅니다.',
+    '선택한 GPU 수에 따라 Tensor Parallel 크기가 설정됩니다. GPU별 메모리를 단순 합산해 사용하는 방식이 아닙니다.',
+  gpuShareCaution:
+    '같은 GPU에서 여러 모델을 실행하면 가용 메모리가 변할 수 있습니다. 현재 여유 메모리와 Fit 판정은 실행 성공이나 안정적인 동시 실행을 보장하지 않습니다.',
   unknownAck:
-    'UNKNOWN은 정보 부족으로 적합성을 단정하지 못한 상태입니다. 계속하려면 아래 동의 체크가 필요합니다.',
+    'UNKNOWN(판단 정보 부족)은 적합성을 단정하지 못한 상태입니다. 계속하려면 아래 동의 체크가 필요합니다.',
   alias:
     'API 별칭(Endpoint Alias)은 업무 시스템이 Gateway에 보내는 model 이름입니다. Served model name은 실제 런타임이 인식하는 모델 id이며, Publish 시 rewrite로 연결될 수 있습니다.',
   aliasModes:
     '신규 Alias는 새 별칭을 만들고 이 Deployment에 연결합니다. 기존 Alias는 ACTIVE Route가 없는 항목만 선택 가능합니다. ACTIVE Route가 있으면 이 단계에서 임의 전환할 수 없으며 Switch를 사용하세요.',
   registryList:
     '이 목록은 레지스트리에 등록된 모델 정의·버전을 조회합니다. 지금 서버에서 실행 중인 Deployment 목록과 다릅니다.',
+  modelTypeLlm: '현재 모델 유형 LLM: 텍스트 생성·대화에 사용합니다. 유형만으로 실행 옵션을 자동 바꾸지 않습니다.',
+  modelTypeVlm:
+    '현재 모델 유형 VLM: 이미지와 텍스트를 함께 처리합니다. 다중 이미지 요청 가능성을 고려하세요. 이미지 1장 제한을 기본값으로 넣지 않습니다.',
+  modelTypeEmbedding:
+    '현재 모델 유형 EMBEDDING: 텍스트 벡터화·검색에 사용합니다. 특정 모델(예: BGE-M3) 전용 프로필이 없으면 일반 Embedding에 추가 기본값을 적용하지 않습니다.',
+} as const
+
+export const WIZARD_START_STATUS = {
+  beforeRequest: '모델 실행 요청 전 — 아직 컨테이너를 시작하지 않았습니다.',
+  operationActive: '모델 실행 작업 진행 중 — Operation 상태를 자동으로 갱신합니다.',
+  healthWait:
+    '작업 성공 후 모델 정상 상태 확인 중 — Operation SUCCEEDED와 RUNNING+HEALTHY는 다릅니다.',
+  ready: '모델 실행 정상 완료 — Deployment가 RUNNING이고 Health가 HEALTHY입니다.',
+  failed: '작업 실패 — Operation이 실패했습니다. 오류를 확인한 뒤 다시 시도하세요.',
+  pollFailed: '상태 조회 실패 — 실행 자체와 별개로 상태만 다시 확인하세요.',
+  healthTimeout: 'Health 확인 시간 초과 — Operation은 성공했지만 RUNNING+HEALTHY를 확인하지 못했습니다.',
 } as const
 
 export const RUNTIME_FIELD_HELP = {
-  deploymentName: '관리 화면에 보이는 배포 이름입니다(Deployment name).',
+  deploymentName:
+    '관리 화면에 표시되는 모델 실행 이름입니다(Deployment name).',
   containerName:
-    'Node에서 Managed 컨테이너에 붙는 이름입니다(Container name). 같은 Node 안에서 고유해야 합니다.',
+    '서버에서 실행할 컨테이너의 고유 이름입니다(Container name). 같은 서버 안에서 겹치면 안 됩니다.',
   servedModelName:
-    '런타임이 노출하는 모델 실행 이름입니다(Served model name). Publish 시 upstream rewrite 기본값으로도 쓰입니다.',
-  runtimePort: '컨테이너가 listen하는 모델 실행 포트입니다(Runtime port, 1–65535).',
+    '모델 API 내부에서 사용하는 이름입니다(Served model name). Publish 시 upstream rewrite 기본값으로도 쓰입니다.',
+  runtimePort:
+    '컨테이너 내부 API 서비스 포트입니다(Runtime port, 1–65535).',
   maxModelLen:
-    '최대 문맥 길이입니다(max_model_len). 비우면 런타임 기본값을 사용하며, 임의 기본값을 만들지 않습니다.',
+    '한 번의 요청에서 처리할 문맥 길이 상한입니다(max_model_len). 예: 4096은 모델 자체의 최대 한계가 아니며, 비우면 런타임 기본 동작을 따릅니다.',
   maxNumSeqs:
-    '동시 처리 시퀀스 상한입니다(max_num_seqs). 스케줄러 용량이며 동시 사용자 수 보장이 아닙니다. 비우면 기본 동작입니다.',
+    '모델 실행 엔진이 동시에 처리할 시퀀스 한도입니다(max_num_seqs). 동시 사용자 수를 보장하지 않습니다. 비우면 기본 동작입니다.',
   gpuMemoryUtilization:
-    'GPU 메모리 사용 비율입니다(gpu_memory_utilization, 0 초과–1 이하). GPU별로 적용되며 합산하지 않습니다.',
-  dtype: '연산 데이터 형식입니다(dtype). 선택 사항이며 추측으로 채우지 않습니다.',
+    '런타임의 GPU별 메모리 사용 목표 비율입니다(gpu_memory_utilization, 0 초과–1 이하). 예: 0.65는 해당 GPU 설정값이며 다른 모델과의 안전한 동시 실행을 보장하지 않습니다.',
+  dtype:
+    '모델 계산에 사용할 데이터 형식입니다(dtype). 선택 사항이며 추측해서 자동 선택하지 않습니다.',
   quantization:
-    '모델 양자화 방식입니다(quantization). 선택 사항이며 확인되지 않은 값을 자동 선택하지 않습니다.',
+    '모델 메모리 사용량을 줄이는 압축·표현 방식입니다(quantization). 선택 사항이며 확인되지 않은 값을 자동 선택하지 않습니다.',
   runner:
     '생성/임베딩 실행 모드입니다(runner: generate / pooling). 아래 vLLM Model Runner(Auto/V1)와는 다른 설정입니다.',
   reasoningParser:
-    '추론 내용 분리 설정입니다(Reasoning Parser, --reasoning-parser). 요청별 enable_thinking과 별개입니다.',
+    '추론(사고) 내용을 응답에서 분리하는 설정입니다(Reasoning Parser, --reasoning-parser). 요청별 enable_thinking과 별개입니다.',
   autoToolChoice:
-    '자동 도구 선택입니다(Auto Tool Choice). ON일 때만 --enable-auto-tool-choice와 parser를 추가합니다.',
+    '모델이 도구 사용을 자동으로 고르게 하는 설정입니다(Auto Tool Choice). ON일 때만 --enable-auto-tool-choice와 parser를 추가합니다.',
   toolCallParser:
-    '도구 호출 분석 방식입니다(Tool Call Parser). Auto Tool Choice ON일 때 필요합니다.',
+    '도구 호출 형식을 해석하는 방식입니다(Tool Call Parser). Auto Tool Choice ON일 때 필요합니다.',
   vllmModelRunner:
-    '엔진 실행 방식입니다(vLLM Model Runner: Auto/V1). runner(generate/pooling)와 다릅니다.',
+    'vLLM 엔진 실행 방식입니다(vLLM Model Runner: Auto/V1). runner(generate/pooling)와 다릅니다.',
   unsetKeepsDefault:
-    '미설정 필드는 실제 Runtime 기본 동작을 따릅니다. 임의의 기본값이나 모델별 설정을 자동 생성하지 않습니다.',
+    '미설정(null) 필드는 기존 런타임 기본 동작을 따릅니다. 임의의 기본값이나 모델별 설정을 자동 생성하지 않습니다.',
 } as const
 
 /** P1-19 — Nodes / GPUs beginner help (display-only). */

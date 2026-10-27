@@ -10,7 +10,9 @@ import {
   PAGE_INTRO,
   RUNTIME_FIELD_HELP,
   WIZARD_FIELD_HELP,
+  WIZARD_START_STATUS,
   WIZARD_STEP_LABELS,
+  WIZARD_STEP_PURPOSE,
   formatNullableLimit,
   formatPriorityDisplay,
   formatStatusDisplay,
@@ -136,9 +138,17 @@ describe('uiLabels (P1-15 wizard/models)', () => {
     expect(WIZARD_FIELD_HELP.create).toMatch(/컨테이너를 시작하지 않습니다/)
     expect(WIZARD_FIELD_HELP.start).toMatch(/기동/)
     expect(WIZARD_FIELD_HELP.publish).toMatch(/Alias/)
+    expect(WIZARD_FIELD_HELP.publish).toMatch(
+      /업무 시스템이 사용하는 모델 호출 경로/,
+    )
     expect(WIZARD_FIELD_HELP.freshFit).toMatch(/실행하거나 GPU를 점유하지 않/)
-    expect(WIZARD_FIELD_HELP.tensorParallel).toMatch(/합치는 것과 다릅니다/)
+    expect(WIZARD_FIELD_HELP.tensorParallel).toMatch(/단순 합산/)
+    expect(WIZARD_FIELD_HELP.gpuShareCaution).toMatch(/안정적인 동시 실행/)
     expect(RUNTIME_FIELD_HELP.unsetKeepsDefault).toMatch(/자동 생성하지 않습니다/)
+    expect(RUNTIME_FIELD_HELP.maxModelLen).toMatch(/모델 자체의 최대 한계가 아니/)
+    expect(RUNTIME_FIELD_HELP.maxNumSeqs).toMatch(/동시 사용자 수를 보장하지/)
     expect(WIZARD_FIELD_HELP.registryList).toMatch(/실행 중인 Deployment/)
+    expect(WIZARD_STEP_PURPOSE.gpu).toMatch(/Fit은 모델을 실행/)
+    expect(WIZARD_START_STATUS.healthWait).toMatch(/RUNNING\+HEALTHY/)
   })
 })
