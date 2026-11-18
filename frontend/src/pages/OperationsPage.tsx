@@ -233,6 +233,28 @@ export function OperationsPage() {
     }
   }, [load])
 
+  const quickView =
+    status === 'FAILED'
+      ? 'FAILED'
+      : status === 'MANUAL_INTERVENTION_REQUIRED'
+        ? 'MANUAL_INTERVENTION_REQUIRED'
+        : status === null && active === true
+          ? 'ACTIVE'
+          : status === null && active === null
+            ? 'ALL'
+            : 'CUSTOM'
+
+  const selectQuickView = (
+    next: 'ALL' | 'ACTIVE' | 'FAILED' | 'MANUAL_INTERVENTION_REQUIRED',
+  ) => {
+    syncUrl({
+      status: next === 'FAILED' || next === 'MANUAL_INTERVENTION_REQUIRED' ? next : null,
+      active: next === 'ACTIVE' ? true : null,
+      operationType,
+      page: 1,
+    })
+  }
+
   const hasFilters =
     status !== null || operationType !== null || active !== null
   const emptyFiltered = items !== null && items.length === 0 && hasFilters
@@ -254,6 +276,38 @@ export function OperationsPage() {
       <p className="panel-hint" role="note">
         {OPERATION_FIELD_HELP.overview}
       </p>
+      <section className="operation-triage" aria-label="작업 상태 빠른 탐색">
+        <div className="operation-triage__heading">
+          <strong>빠른 확인</strong>
+          <span>기존 조회 필터로 이동하며 작업을 실행하거나 취소하지 않습니다.</span>
+        </div>
+        <div className="operation-triage__options" role="group" aria-label="작업 상태">
+          {([
+            ['ALL', '전체 작업'],
+            ['ACTIVE', '진행 중'],
+            ['FAILED', '실패'],
+            ['MANUAL_INTERVENTION_REQUIRED', '수동 확인 필요'],
+          ] as const).map(([value, label]) => (
+            <button
+              key={value}
+              type="button"
+              className={
+                'operation-triage__option' +
+                (quickView === value ? ' operation-triage__option--active' : '')
+              }
+              aria-pressed={quickView === value}
+              onClick={() => selectQuickView(value)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        <p className="operation-triage__note">
+          진행 중은 QUEUED·RUNNING 등 API의 active 작업을 포함합니다. 실패와 수동 확인은
+          각각 별도 상태이며, 실제 조치는 작업 상세에서 판단하세요.
+        </p>
+      </section>
+
       <details className="help-glossary">
         <summary>용어 및 상태 안내</summary>
         <div className="help-glossary__items">
@@ -358,6 +412,16 @@ export function OperationsPage() {
         </p>
       </div>
 
+      {items !== null ? (
+        <p className="operation-triage__results" role="status">
+          {refreshing || listError ? '이전 조회 결과' : '현재 필터 결과'}:{' '}
+          <strong>{total.toLocaleString('ko-KR')}건</strong>
+          {' · '}현재 표시 {items.length}건
+          {refreshing ? ' · 새 조회 진행 중' : ''}
+          {listError ? ' · 조회 오류가 있어 아래 안내를 확인하세요.' : ''}
+        </p>
+      ) : null}
+
       {listError ? (
         <SectionError
           title={listError.title}
@@ -436,6 +500,15 @@ export function OperationsPage() {
                     <td>{formatOperationTypeDisplay(op.operation_type)}</td>
                     <td>
                       <StatusBadge status={op.status} />
+                      {op.status === 'FAILED' ? (
+                        <span className="operation-triage__row-hint">
+                          상세에서 실패 원인 확인
+                        </span>
+                      ) : op.status === 'MANUAL_INTERVENTION_REQUIRED' ? (
+                        <span className="operation-triage__row-hint">
+                          상세에서 수동 조치 필요 여부 확인
+                        </span>
+                      ) : null}
                     </td>
                     <td>{op.switch_strategy || '—'}</td>
                     <td>
