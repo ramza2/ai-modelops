@@ -950,6 +950,14 @@ MVP에서 미래 확장성을 이유로 불필요한 분산 시스템이나 추�
 - UX20-C2 Node/GPU 최신 스냅샷 개선과 GPU history API 추가는 이번 PR에 포함하지 않는다.
 - 전체 Vitest/typecheck/build 및 격리 브라우저 수용검사 후 병합; 운영 배포는 별도 승인. 신규 차트 패키지 금지.
 
+## Frontend CI 우선 검증 / Cursor 토큰 절약 (2026-11-18)
+
+- `.github/workflows/frontend-ci.yml`은 `main` 대상 Frontend 변경 PR과 `main` Frontend 변경 push에서 `npm ci`, `npm test`, `npm run typecheck`, `npm run build`를 실행한다.
+- 프런트 코드 수정은 가능하면 GitHub에서 직접 반영하고 PR의 Actions 체크를 먼저 확인한다. Cursor에 동일 전체 테스트를 중복 지시하지 않는다.
+- CI가 FAIL일 때는 해당 Step과 오류 출력만 확인해 최소 수정한다. CI가 실행되지 않았으면 PASS로 간주하지 않는다.
+- CI는 Node/npm만 실행한다. 비밀 값, `.env`, 운영 서버, GPU/DB/Docker 접근 권한을 부여하지 않는다.
+- UI의 브라우저 상호작용·반응형 수용검사는 별도이며 CI 통과가 이를 대체하지 않는다.
+
 ## ModelOps UI/UX 2.0 — UX20-C2 구현 전용 지침 (2026-11-18)
 
 - 기준 문서: `docs/uiux/modelops-uiux-2.0-ux20c2.md`. UX20-C2는 Node 상세의 **persisted 최신 Host/GPU 스냅샷 가독성**에만 집중한다.
