@@ -205,16 +205,18 @@ async function run() {
     '--disable-extensions', '--disable-sync', '--disable-component-update',
     '--remote-allow-origins=*', '--remote-debugging-port=0',
     '--user-data-dir=' + chromeProfile, 'about:blank',
-  ], { stdio: 'ignore' })
+  ], { stdio: ['ignore', 'ignore', 'pipe'] })
+  let chromeLog = ''
+  chrome.stderr.on('data', (chunk) => { chromeLog += String(chunk).slice(-3000) })
   let chromePort = 0
   await waitUntil(async () => {
-    if (chrome.exitCode !== null) throw new Error('Chrome exited unexpectedly')
+    if (chrome.exitCode !== null) throw new Error('Chrome exited unexpectedly: ' + chromeLog)
     try {
       const contents = await readFile(join(chromeProfile, 'DevToolsActivePort'), 'utf8')
       chromePort = Number(contents.split('\n')[0])
       return chromePort > 0
     } catch { return false }
-  }, 'Chrome DevTools port')
+  }, 'Chrome DevTools port (stderr: ' + chromeLog + ')', 45000)
   const cdp = await connectCdp(chromePort)
   await cdp.call('Page.enable')
   await cdp.call('Runtime.enable')
