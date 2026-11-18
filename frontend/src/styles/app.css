@@ -49,7 +49,8 @@
 
 body {
   margin: 0;
-  min-width: 320px;
+  /* Native scrollbars shrink the CSS viewport on Linux: avoid a 15px side-scroll at 320px. */
+  min-width: min(320px, 100%);
   font-size: 14px;
   background: var(--bg);
   color: var(--text);
