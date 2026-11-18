@@ -2323,3 +2323,184 @@ th {
     font-size: 8px;
   }
 }
+
+/* —— UX20-C2: stored Node/GPU snapshot view (scope: NodeDetail resource panel) —— */
+.node-resource-v2 {
+  min-width: 0;
+}
+
+.node-resource-v2__overview {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr));
+  gap: 0.7rem;
+  margin: 0.85rem 0 1rem;
+}
+
+.node-resource-v2__summary {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  min-width: 0;
+  padding: 0.85rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+
+.node-resource-v2__eyebrow {
+  color: var(--muted);
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.node-resource-v2__summary strong {
+  overflow-wrap: anywhere;
+  font-size: 1.05rem;
+  line-height: 1.35;
+}
+
+.node-resource-v2__summary > span:last-child {
+  color: var(--muted);
+  font-size: 0.875rem;
+  line-height: 1.4;
+}
+
+.node-resource-v2__host {
+  margin: 1rem 0 1.15rem;
+  min-width: 0;
+}
+
+.node-resource-v2__section-head {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.45rem 0.9rem;
+  margin: 0 0 0.65rem;
+}
+
+.node-resource-v2__section-head h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.node-resource-v2__host-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr));
+  gap: 0.75rem;
+}
+
+.node-resource-v2__metric-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+  min-width: 0;
+  padding: 0.85rem 0.9rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+
+.node-resource-v2 .usage-bar__meta {
+  flex-wrap: wrap;
+  overflow-wrap: anywhere;
+  min-width: 0;
+  font-size: 0.9rem;
+}
+
+.node-resource-v2 .usage-bar__value {
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+
+.node-resource-v2 .metric-line {
+  line-height: 1.45;
+  font-size: 0.9rem;
+  overflow-wrap: anywhere;
+}
+
+.node-resource-v2__gpu-grid {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 23rem), 1fr));
+  min-width: 0;
+}
+
+.node-resource-v2__gpu-card {
+  min-width: 0;
+  padding: 1rem;
+}
+
+.node-resource-v2__gpu-card .gpu-card__header h4 {
+  font-size: 1.02rem;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.node-resource-v2__gpu-readings {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  min-width: 0;
+}
+
+.node-resource-v2__gpu-readings > .sampled-at {
+  font-size: 0.875rem;
+}
+
+.node-resource-v2__vram {
+  background: var(--surface);
+}
+
+.node-resource-v2__util-grid,
+.node-resource-v2__facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 12rem), 1fr));
+  gap: 0.65rem;
+  min-width: 0;
+}
+
+.node-resource-v2__util-grid .node-resource-v2__metric-card {
+  background: var(--surface);
+}
+
+.node-resource-v2__facts > .metric-line {
+  padding: 0.5rem 0;
+  color: var(--text);
+}
+
+.node-resource-v2__safety {
+  margin: 0.75rem 0 0;
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
+.node-resource-v2__safety strong {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.node-resource-v2__gpu-identity {
+  margin-top: 0.85rem;
+  border-top: 1px solid var(--border);
+  padding-top: 0.65rem;
+}
+
+.node-resource-v2__gpu-identity summary {
+  cursor: pointer;
+  color: var(--text);
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+.node-resource-v2__gpu-identity .meta-grid {
+  margin-top: 0.75rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 375px) {
+  .node-resource-v2__summary,
+  .node-resource-v2__metric-card,
+  .node-resource-v2__gpu-card {
+    padding: 0.7rem;
+  }
+}
