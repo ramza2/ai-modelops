@@ -316,7 +316,8 @@ async function run() {
     const postCount = requests.filter((x) => x === 'POST /api/v1/nodes/node-ux20c2/resources/refresh').length
     assert.equal(postCount, 1)
     postFailure = true
-    await evaluate(cdp, "Array.from(document.querySelectorAll('button')).find(b=>b.textContent.trim()==='리소스 갱신').click()")
+    await waitUntil(async () => evaluate(cdp, "Array.from(document.querySelectorAll('button')).some(b => b.textContent.trim() === '리소스 갱신' && !b.disabled)"), 'resource collection button re-enabled')
+    await evaluate(cdp, "Array.from(document.querySelectorAll('button')).find(b=>b.textContent.trim()==='리소스 갱신' && !b.disabled).click()")
     await waitUntil(async () => evaluate(cdp, "document.body.innerText.includes('Mock collection failed') && document.body.innerText.includes('이전에 조회한 스냅샷')"), 'mock POST error')
     assert.ok((await evaluate(cdp, "document.body.innerText")).includes('55.0%'))
     assert.equal(requests.filter((x) => x.startsWith('POST ')).length, 2)
