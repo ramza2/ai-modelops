@@ -10,6 +10,7 @@ import type {
 } from '../api/types'
 import { NodeDetailPage } from '../pages/NodeDetailPage'
 import * as nodesApi from '../api/nodes'
+import { formatApiDateTime } from '../utils/date'
 
 function makeGpu(
   overrides: Partial<GPUDevice> &
@@ -571,8 +572,12 @@ describe('NodeDetailPage', () => {
     expect(within(second).getByText('12.0 GiB / 24.0 GiB')).toBeInTheDocument()
     expect(within(first).getByText(/GPU 온도.*42.0 °C/)).toBeInTheDocument()
     expect(within(second).getByText(/GPU 온도.*—/)).toBeInTheDocument()
-    expect(within(first).getByText(/2026.*10.*06.*01.*00.*00/)).toBeInTheDocument()
-    expect(within(second).getByText(/2026.*10.*06.*03.*00.*00/)).toBeInTheDocument()
+    expect(first.querySelector('.sampled-at')).toHaveTextContent(
+      formatApiDateTime('2026-10-06T01:00:00Z'),
+    )
+    expect(second.querySelector('.sampled-at')).toHaveTextContent(
+      formatApiDateTime('2026-10-06T03:00:00Z'),
+    )
     expect(nodesApi.refreshNodeResources).not.toHaveBeenCalled()
     expect(screen.queryByText(/합산 VRAM|전체 GPU 가용 메모리/)).not.toBeInTheDocument()
   })
