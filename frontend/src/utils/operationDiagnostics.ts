@@ -39,7 +39,7 @@ export function operationDiagnosticGuidance(status: string): string {
     case 'QUEUED':
     case 'RUNNING':
     case 'ROLLING_BACK':
-      return '진행 중인 작업입니다. 단계 상태와 최신 조회 시각을 확인하세요. 자동 갱신 중에는 단계 기록이 달라질 수 있습니다.'
+      return '진행 중인 작업입니다. 단계 상태와 최신 조회 시각을 확인하세요. 주기적인 상태 조회로 단계 기록이 달라질 수 있습니다.'
     case 'SUCCEEDED':
       return '작업이 완료된 상태입니다. 실제 서비스 상태는 관련 배포·API 화면에서 별도로 확인하세요.'
     default:
