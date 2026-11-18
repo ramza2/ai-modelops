@@ -269,6 +269,23 @@ describe('NodeDetailPage', () => {
     expect(screen.getByText('12.5%')).toBeInTheDocument()
   })
 
+  it('labels retained resource measurements when a later GET fails', async () => {
+    const user = userEvent.setup()
+    vi.mocked(nodesApi.getNode).mockResolvedValue(makeNode())
+    vi.mocked(nodesApi.getNodeResources)
+      .mockResolvedValueOnce(makeResources())
+      .mockRejectedValueOnce(new ApiError('resource refetch failed', { status: 503 }))
+
+    renderDetail()
+    expect(await screen.findByText('12.5%')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: '새로고침' }))
+    expect(await screen.findByText(/resource refetch failed/)).toBeInTheDocument()
+    expect(screen.getByText(/이전에 조회한 스냅샷을 표시/)).toBeInTheDocument()
+    expect(screen.getByText('12.5%')).toBeInTheDocument()
+    expect(nodesApi.refreshNodeResources).not.toHaveBeenCalled()
+  })
+
   it('shows 404 with back link', async () => {
     vi.mocked(nodesApi.getNode).mockRejectedValue(
       new ApiError('not found', { status: 404 }),
@@ -346,6 +363,7 @@ describe('NodeDetailPage', () => {
 
     await user.click(screen.getByRole('button', { name: '리소스 갱신' }))
     expect(await screen.findByText('agent unreachable')).toBeInTheDocument()
+    expect(screen.getByText(/이전에 조회한 스냅샷을 표시/)).toBeInTheDocument()
     expect(screen.getByText('12.5%')).toBeInTheDocument()
   })
 
