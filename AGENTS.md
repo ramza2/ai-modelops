@@ -973,3 +973,10 @@ MVP에서 미래 확장성을 이유로 불필요한 분산 시스템이나 추�
 - 전체/진행 중/실패/수동 확인 필요 바로가기는 기존 필터 상태를 조합한다. `status`·`active` 상호배타, `operation_type`·pagination·조회 실패·Abort·GET-only 유지.
 - `total`은 현재 필터 결과 전체 건수이지 시스템 전체 오류 건수 아님. 미수집/실패/0 구분하고 상태에 따라 실행·취소·재시도 자동 호출 금지.
 - ChatGPT에서 GitHub 코드 수정·CI 검증 우선. Cursor는 실제 브라우저 추가 조작 등 필수 때만 사용.
+
+## ModelOps UX20-D2 — Operation 진단 탐색 (2026-11-18)
+
+- 기준: `docs/uiux/modelops-uiux-2.0-ux20d2.md`. 작업 상세 응답의 steps/오류/관련 배포 링크만 사용한다. 컨테이너 실시간 로그 API가 확인되지 않아 Dozzle식 실제 로그 스트리밍을 구현하지 않는다.
+- Operation 상세 검색·오류 단계 필터는 **클라이언트 측**. `GET /operations/{id}` 외 신규 원격 조회 금지. `/operations/{id}/steps`, `/logs` 가정 금지.
+- Safe Cancel/Explicit Retry 기존 게이트·4초 폴링·Abort·ID 가드·오류 후 이전 값·입력 유지. 검색/링크 조작은 POST 불가. Backend/DB/GPU/Gateway/Node Agent/Docker 동작 변경 금지.
+- 관련 테스트와 GitHub CI + 격리 Chrome Mock 검증까지 ChatGPT 직접 수행. 병합과 Frontend 운영 배포는 각각 별도 게이트.
