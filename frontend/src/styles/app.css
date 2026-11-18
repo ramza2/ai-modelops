@@ -50,6 +50,7 @@
 body {
   margin: 0;
   min-width: 320px;
+  font-size: 14px;
   background: var(--bg);
   color: var(--text);
 }
@@ -92,16 +93,54 @@ a:focus-visible {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 1rem;
+  gap: 0.75rem 1rem;
   padding: 0.75rem 1.25rem;
   background: var(--surface);
   border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+
+.shell__top-start {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  min-width: 0;
+}
+
+.shell__menu-toggle {
+  display: none;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0;
+  padding: 0.4rem 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-2);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.shell__menu-toggle-bars {
+  display: inline-block;
+  width: 1rem;
+  height: 0.75rem;
+  background:
+    linear-gradient(var(--text), var(--text)) 0 0 / 100% 2px no-repeat,
+    linear-gradient(var(--text), var(--text)) 0 50% / 100% 2px no-repeat,
+    linear-gradient(var(--text), var(--text)) 0 100% / 100% 2px no-repeat;
+}
+
+.shell__menu-toggle-text {
+  line-height: 1;
 }
 
 .shell__brand {
   display: flex;
   align-items: baseline;
   gap: 0.5rem;
+  min-width: 0;
 }
 
 .shell__product {
@@ -112,35 +151,83 @@ a:focus-visible {
 
 .shell__tag {
   color: var(--muted);
-  font-size: 0.85rem;
+  font-size: 0.875rem;
 }
 
 .shell__actions {
   display: flex;
   align-items: center;
-  gap: 0.75rem;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 0.5rem 0.75rem;
+  min-width: 0;
 }
 
 .shell__updated {
   color: var(--muted);
-  font-size: 0.85rem;
+  font-size: 0.875rem;
+  white-space: normal;
+  word-break: keep-all;
+}
+
+.shell__backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 35;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: rgba(16, 24, 40, 0.45);
+  cursor: pointer;
 }
 
 .shell__body {
   display: grid;
-  grid-template-columns: 220px 1fr;
+  grid-template-columns: 240px minmax(0, 1fr);
   flex: 1;
   min-height: 0;
+  min-width: 0;
 }
 
 .shell__nav {
   background: var(--surface);
   border-right: 1px solid var(--border);
-  padding: 1rem 0.75rem;
+  padding: 0.85rem 0.75rem 1rem;
+  min-width: 0;
+  overflow: auto;
+}
+
+.shell__nav-toolbar {
+  display: none;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin: 0 0 0.75rem;
+  padding: 0 0.25rem;
+}
+
+.shell__nav-title {
+  margin: 0;
+  font-size: 0.875rem;
+  font-weight: 650;
+  color: var(--muted);
+}
+
+.shell__nav-close {
+  margin: 0;
+  padding: 0.35rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-2);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 0.875rem;
+  font-weight: 600;
 }
 
 .shell__main {
   padding: 1.25rem;
+  min-width: 0;
 }
 
 .page-header h1 {
@@ -152,6 +239,8 @@ a:focus-visible {
   margin: 0 0 1.25rem;
   color: var(--muted);
   max-width: 60rem;
+  font-size: 0.95rem;
+  line-height: 1.45;
 }
 
 .nav-link {
@@ -174,8 +263,18 @@ a:focus-visible {
   line-height: 1.3;
 }
 
+/* Desktop: keep one-line labels; description stays available via title + SR text. */
 .nav-link__desc {
-  font-size: 0.75rem;
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+  font-size: 0.875rem;
   font-weight: 400;
   line-height: 1.35;
   color: var(--muted);
@@ -1718,18 +1817,75 @@ th {
   font-size: 0.95rem;
 }
 
-@media (max-width: 860px) {
+/* —— UX20-B: AppShell responsive navigation —— */
+@media (max-width: 1023px) {
+  .shell__menu-toggle {
+    display: inline-flex;
+  }
+
   .shell__body {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .shell__nav {
-    border-right: 0;
-    border-bottom: 1px solid var(--border);
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    z-index: 40;
+    width: min(20rem, calc(100vw - 3rem));
+    max-width: 100%;
+    padding: 1rem 0.85rem 1.25rem;
+    border-right: 1px solid var(--border);
+    border-bottom: 0;
+    box-shadow: var(--shadow);
+    transform: translateX(-105%);
+    visibility: hidden;
+    pointer-events: none;
+    transition: transform 0.18s ease, visibility 0.18s ease;
+  }
+
+  .shell__nav--open {
+    transform: translateX(0);
+    visibility: visible;
+    pointer-events: auto;
+  }
+
+  .shell__nav-toolbar {
+    display: flex;
+  }
+
+  .nav-link {
+    gap: 0.25rem;
+  }
+
+  .nav-link__desc {
+    position: static;
+    width: auto;
+    height: auto;
+    margin: 0;
+    overflow: visible;
+    clip: auto;
+    white-space: normal;
+    font-size: 0.875rem;
   }
 
   .shell__top {
-    flex-wrap: wrap;
+    align-items: flex-start;
+  }
+
+  .shell__actions {
+    width: 100%;
+  }
+
+  .shell__updated {
+    flex: 1 1 auto;
+  }
+}
+
+@media (max-width: 1023px) and (prefers-reduced-motion: reduce) {
+  .shell__nav {
+    transition: none;
   }
 }
 
