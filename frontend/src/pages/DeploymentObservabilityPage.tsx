@@ -14,6 +14,7 @@ import type {
 import { AppShell } from '../components/AppShell'
 import { HelpHint, TermLabel } from '../components/HelpHint'
 import { LoadingBlock } from '../components/LoadingBlock'
+import { RuntimeHistoryChart } from '../components/RuntimeHistoryChart'
 import { SectionError } from '../components/SectionError'
 import { StatusBadge } from '../components/StatusBadge'
 import { formatApiDateTime, shortId } from '../utils/date'
@@ -613,7 +614,9 @@ export function DeploymentObservabilityPage() {
           <LoadingBlock label="Runtime history를 불러오는 중…" />
         ) : null}
         {displayHistory && displayHistory.length > 0 ? (
-          <div className="table-wrap">
+          <>
+            <RuntimeHistoryChart items={displayHistory} />
+            <div className="table-wrap">
             <table className="data-table">
               <thead>
                 <tr>
@@ -675,6 +678,7 @@ export function DeploymentObservabilityPage() {
               </tbody>
             </table>
           </div>
+          </>
         ) : null}
         {displayHistory && displayHistory.length === 0 ? (
           <p className="empty-state" role="status">
