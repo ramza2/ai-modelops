@@ -940,3 +940,12 @@ MVP에서 미래 확장성을 이유로 불필요한 분산 시스템이나 추�
 - 모바일 메뉴는 Escape·포커스·닫기·페이지 이동·스크롤 대응. 320px부터 수평 넘침 없이 라이트/다크 모두 지원.
 - Backend/Gateway/Worker/Node Agent/DB/Docker/GPU/모델 운영 변경 및 신규 패키지 금지. 상세 페이지 기능과 UX20-C 범위는 변경하지 않는다.
 - Draft PR 및 로컬 테스트까지만 수행하고 병합·운영 배포는 별도 승인한다.
+
+## ModelOps UI/UX 2.0 — UX20-C1 모델 실행 이력 차트 (2026-11-18)
+
+- UX20-A/B는 main에 병합 완료. 이번 작업은 `docs/uiux/modelops-uiux-2.0-ux20c1.md`의 **Runtime persisted history 시각화**만 구현한다.
+- `DeploymentObservabilityPage.tsx`, 필요한 전용 차트 컴포넌트, chart CSS 및 관련 테스트만 최소 변경한다.
+- `getRuntimeHistory`와 기존 RuntimeSnapshot을 사용하고 API·DB·Gateway·Node Agent·Worker 및 GPU 모델 Docker를 변경하지 않는다.
+- `sampled_at` 결측, null·0, runtime instance 변경, 수집 공백을 사실적으로 처리; 생성/보간/허위 시계열 금지. 기존 history 표와 404/abort/stale/필터 동작 유지.
+- UX20-C2 Node/GPU 최신 스냅샷 개선과 GPU history API 추가는 이번 PR에 포함하지 않는다.
+- 전체 Vitest/typecheck/build 및 격리 브라우저 수용검사 후 병합; 운영 배포는 별도 승인. 신규 차트 패키지 금지.
