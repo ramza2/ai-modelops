@@ -208,6 +208,13 @@ export function AppShell({
       const first = focusables[0]
       const last = focusables[focusables.length - 1]
       const active = document.activeElement
+      // If focus is still outside the drawer (e.g. toggle/header/backdrop),
+      // pull it back to the first/last drawer control instead of leaving.
+      if (!(active instanceof Node) || !panel.contains(active)) {
+        event.preventDefault()
+        ;(event.shiftKey ? last : first).focus()
+        return
+      }
       if (event.shiftKey && active === first) {
         event.preventDefault()
         last.focus()
@@ -269,6 +276,7 @@ export function AppShell({
           type="button"
           className="shell__backdrop"
           aria-label="메뉴 배경 닫기"
+          tabIndex={-1}
           onClick={closeNav}
         />
       ) : null}

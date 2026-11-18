@@ -1840,9 +1840,11 @@ th {
     border-bottom: 0;
     box-shadow: var(--shadow);
     transform: translateX(-105%);
+    /* visibility must flip immediately so open-focus can land inside the drawer.
+       Animate transform only — do not transition visibility. */
     visibility: hidden;
     pointer-events: none;
-    transition: transform 0.18s ease, visibility 0.18s ease;
+    transition: transform 0.18s ease;
   }
 
   .shell__nav--open {

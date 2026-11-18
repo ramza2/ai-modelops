@@ -261,6 +261,31 @@ describe('AppShell (UX20-B)', () => {
     expect(menuToggle()).toHaveAttribute('aria-expanded', 'false')
   })
 
+  it('pulls Tab and Shift+Tab back into the drawer when focus escapes', async () => {
+    const user = userEvent.setup()
+    renderShell('/dashboard')
+    const toggle = menuToggle()
+    await user.click(toggle)
+    const panel = document.getElementById(toggle.getAttribute('aria-controls')!)
+    expect(panel).toBeTruthy()
+    await waitFor(() => {
+      expect(panel!.contains(document.activeElement)).toBe(true)
+    })
+
+    screen.getByRole('button', { name: '새로고침' }).focus()
+    expect(panel!.contains(document.activeElement)).toBe(false)
+    await user.tab()
+    await waitFor(() => {
+      expect(panel!.contains(document.activeElement)).toBe(true)
+    })
+
+    screen.getByRole('button', { name: '새로고침' }).focus()
+    await user.tab({ shift: true })
+    await waitFor(() => {
+      expect(panel!.contains(document.activeElement)).toBe(true)
+    })
+  })
+
   it('cancels a scheduled open-focus frame when the drawer closes first', async () => {
     const user = userEvent.setup()
     const pending: Array<FrameRequestCallback | null> = []
