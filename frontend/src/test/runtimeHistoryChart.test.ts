@@ -7,6 +7,7 @@ import {
   kvRatioToPercent,
   measuredNonNegative,
   RUNTIME_HISTORY_MIN_GAP_MS,
+  RUNTIME_HISTORY_DEFAULT_GAP_MS,
   runtimeInstanceKey,
   toTimedSamples,
 } from '../utils/runtimeHistoryChart'
@@ -43,6 +44,8 @@ describe('runtimeHistoryChart helpers (UX20-C1)', () => {
     expect(measuredNonNegative(-1)).toBeNull()
     expect(kvRatioToPercent(0)).toBe(0)
     expect(kvRatioToPercent(0.25)).toBe(25)
+    expect(kvRatioToPercent(1)).toBe(100)
+    expect(kvRatioToPercent(1.1)).toBeNull()
     expect(kvRatioToPercent(null)).toBeNull()
   })
 
@@ -137,6 +140,48 @@ describe('runtimeHistoryChart helpers (UX20-C1)', () => {
     expect(segs).toHaveLength(2)
     expect(segs[0]?.map((p) => p.value)).toEqual([0, 1, 1])
     expect(segs[1]?.map((p) => p.value)).toEqual([2, 3])
+  })
+
+  it('breaks on restart count change even when container ID is unchanged', () => {
+    const samples = toTimedSamples([
+      snap({
+        sampled_at: '2026-10-07T00:00:00Z',
+        runtime_instance: {
+          container_id: 'ctr-a',
+          started_at: '2026-10-06T00:00:00Z',
+          restart_count: 0,
+        },
+      }),
+      snap({
+        sampled_at: '2026-10-07T00:01:00Z',
+        runtime_instance: {
+          container_id: 'ctr-a',
+          started_at: '2026-10-06T00:00:00Z',
+          restart_count: 1,
+        },
+      }),
+    ])
+    expect(samples[0]?.instanceKey).not.toBe(samples[1]?.instanceKey)
+    expect(buildMetricSegments(samples, 'running')).toHaveLength(2)
+  })
+
+  it('breaks sparse long gaps instead of using them as the sampling cadence', () => {
+    const start = Date.parse('2026-10-07T00:00:00Z')
+    expect(computeGapThresholdMs([start, start + 60 * 60_000])).toBe(
+      RUNTIME_HISTORY_DEFAULT_GAP_MS,
+    )
+    expect(computeGapThresholdMs([
+      start,
+      start + 60_000,
+      start + 61 * 60_000,
+    ])).toBe(RUNTIME_HISTORY_MIN_GAP_MS)
+
+    const samples = toTimedSamples([
+      snap({ sampled_at: '2026-10-07T00:00:00Z' }),
+      snap({ sampled_at: '2026-10-07T00:01:00Z' }),
+      snap({ sampled_at: '2026-10-07T01:01:00Z' }),
+    ])
+    expect(buildMetricSegments(samples, 'running')).toHaveLength(2)
   })
 
   it('keeps a continuous segment for dense same-instance measured zeros', () => {
