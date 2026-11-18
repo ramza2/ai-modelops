@@ -460,6 +460,13 @@ export function NodeDetailPage() {
           />
         ) : null}
 
+        {resources && (resourceError || refreshError) ? (
+          <p className="node-resource-v2__stale" role="status">
+            이전에 조회한 스냅샷을 표시하고 있습니다. 새 조회·수집 실패와
+            별개로 각 자원의 측정 시각을 확인하세요.
+          </p>
+        ) : null}
+
         {resourceLoading && !resources ? (
           <LoadingBlock label="자원 스냅샷을 불러오는 중…" />
         ) : null}
