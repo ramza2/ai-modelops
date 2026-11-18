@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
@@ -525,4 +525,118 @@ describe('NodeDetailPage', () => {
     expect(screen.getByText(/자원 수집은 성공했지만/)).toBeInTheDocument()
     expect(screen.getAllByText(/저하/).length).toBeGreaterThan(0)
   })
+  it('shows independently measured GPU timestamps and separate resource values', async () => {
+    const gpu0 = makeGpu({ id: 'g0', device_index: 0, model_name: 'GPU-A' })
+    const gpu1 = makeGpu({ id: 'g1', device_index: 1, model_name: 'GPU-B' })
+    vi.mocked(nodesApi.getNode).mockResolvedValue(makeNode({ gpus: [gpu0, gpu1] }))
+    vi.mocked(nodesApi.getNodeResources).mockResolvedValue(
+      makeResources({
+        source: 'persisted_snapshot',
+        gpus: [
+          {
+            gpu: gpu0,
+            snapshot: {
+              sampled_at: '2026-10-06T01:00:00Z',
+              vram_total_mb: 16384,
+              vram_used_mb: 4096,
+              vram_free_mb: 12288,
+              gpu_utilization_pct: 40,
+              memory_utilization_pct: 0,
+              temperature_c: 42,
+              power_w: 80,
+            },
+          },
+          {
+            gpu: gpu1,
+            snapshot: {
+              sampled_at: '2026-10-06T03:00:00Z',
+              vram_total_mb: 24576,
+              vram_used_mb: 12288,
+              vram_free_mb: 12288,
+              gpu_utilization_pct: null,
+              memory_utilization_pct: 20,
+              temperature_c: null,
+              power_w: null,
+            },
+          },
+        ],
+      }),
+    )
+
+    renderDetail()
+    const first = await screen.findByRole('article', { name: 'GPU 0' })
+    const second = screen.getByRole('article', { name: 'GPU 1' })
+    expect(screen.getByText('2 / 2개 측정')).toBeInTheDocument()
+    expect(within(first).getByText('4.0 GiB / 16.0 GiB')).toBeInTheDocument()
+    expect(within(second).getByText('12.0 GiB / 24.0 GiB')).toBeInTheDocument()
+    expect(within(first).getByText(/GPU 온도.*42.0 °C/)).toBeInTheDocument()
+    expect(within(second).getByText(/GPU 온도.*—/)).toBeInTheDocument()
+    expect(within(first).getByText(/2026.*10.*06.*01.*00.*00/)).toBeInTheDocument()
+    expect(within(second).getByText(/2026.*10.*06.*03.*00.*00/)).toBeInTheDocument()
+    expect(nodesApi.refreshNodeResources).not.toHaveBeenCalled()
+    expect(screen.queryByText(/합산 VRAM|전체 GPU 가용 메모리/)).not.toBeInTheDocument()
+  })
+
+  it('keeps zero measurements distinct from missing or invalid usage bars', async () => {
+    const gpu0 = makeGpu({ id: 'g0', device_index: 0, model_name: 'GPU-Zero' })
+    const gpu1 = makeGpu({ id: 'g1', device_index: 1, model_name: 'GPU-Empty' })
+    vi.mocked(nodesApi.getNode).mockResolvedValue(makeNode({ gpus: [gpu0, gpu1] }))
+    vi.mocked(nodesApi.getNodeResources).mockResolvedValue(
+      makeResources({
+        host: null,
+        gpus: [
+          {
+            gpu: gpu0,
+            snapshot: {
+              sampled_at: '2026-10-06T01:00:00Z',
+              vram_total_mb: 0,
+              vram_used_mb: 0,
+              vram_free_mb: 0,
+              gpu_utilization_pct: 0,
+              memory_utilization_pct: null,
+              temperature_c: 0,
+              power_w: 0,
+            },
+          },
+          { gpu: gpu1, snapshot: null },
+        ],
+      }),
+    )
+
+    renderDetail()
+    const measured = await screen.findByRole('article', { name: 'GPU 0' })
+    const missing = screen.getByRole('article', { name: 'GPU 1' })
+    expect(screen.getByText('1 / 2개 측정')).toBeInTheDocument()
+    expect(screen.getByText(/Host 자원이 미수집입니다/)).toBeInTheDocument()
+    expect(within(measured).getByText('0 MB / 0 MB')).toBeInTheDocument()
+    expect(
+      within(measured).queryByRole('progressbar', { name: /VRAM Used/ }),
+    ).not.toBeInTheDocument()
+    expect(
+      within(measured).getByRole('progressbar', { name: /GPU Utilization/ }),
+    ).toHaveAttribute('aria-valuenow', '0')
+    expect(
+      within(measured).queryByRole('progressbar', { name: /Memory Utilization/ }),
+    ).not.toBeInTheDocument()
+    expect(within(missing).getByText(/GPU 자원이 미수집입니다/)).toBeInTheDocument()
+  })
+
+  it('keeps GPU technical identifiers expandable without hiding measured status', async () => {
+    const user = userEvent.setup()
+    const gpu = makeGpu({ id: 'g0', device_index: 0, model_name: 'GPU-A' })
+    vi.mocked(nodesApi.getNode).mockResolvedValue(makeNode({ gpus: [gpu] }))
+    vi.mocked(nodesApi.getNodeResources).mockResolvedValue(
+      makeResources({ gpus: [{ gpu, snapshot: null }] }),
+    )
+    renderDetail()
+    const card = await screen.findByRole('article', { name: 'GPU 0' })
+    expect(within(card).getByText(/GPU 안전 여유/)).toBeInTheDocument()
+    const expand = within(card).getByText('GPU 식별·기술 정보')
+    const details = expand.closest('details')
+    expect(details).not.toHaveAttribute('open')
+    await user.click(expand)
+    expect(details).toHaveAttribute('open')
+    expect(within(details as HTMLElement).getByText(gpu.gpu_uuid)).toBeInTheDocument()
+  })
+
 })
