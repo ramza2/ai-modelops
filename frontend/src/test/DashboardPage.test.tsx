@@ -70,7 +70,7 @@ function baseSnap(
       group_by: 'deployment',
       items: [
         {
-          group_key: 'dep-1',
+          group_key: '11111111-1111-4111-8111-111111111111',
           deployment_name: 'chat-a',
           request_count: 10,
           success_count: 9,
@@ -80,7 +80,7 @@ function baseSnap(
           input_tokens_p95: 40,
         },
         {
-          group_key: 'dep-2',
+          group_key: '22222222-2222-4222-8222-222222222222',
           deployment_name: 'chat-b',
           request_count: 5,
           success_count: 5,
@@ -170,7 +170,7 @@ describe('DashboardPage', () => {
     )
     expect(screen.getByRole('link', { name: 'chat-a' })).toHaveAttribute(
       'href',
-      '/deployments/dep-1',
+      '/deployments/11111111-1111-4111-8111-111111111111',
     )
     expect(screen.getByRole('link', { name: /op-1/ })).toHaveAttribute(
       'href',
@@ -378,6 +378,11 @@ describe('DashboardPage', () => {
     expect(screen.getByText('마지막 갱신 —')).toBeInTheDocument()
     // No successful KPI values (unknown stays "—", not numeric totals).
     expect(screen.queryByText('15')).not.toBeInTheDocument()
+    // Must not claim "no attention items" when nothing could be checked.
+    expect(
+      screen.queryByText(/확인된 주의 항목이 없습니다/),
+    ).not.toBeInTheDocument()
+    expect(screen.queryByText('운영 요약')).not.toBeInTheDocument()
   })
 
   it('preserves prior data and timestamp when refresh totally fails', async () => {
@@ -402,6 +407,51 @@ describe('DashboardPage', () => {
     expect(screen.getByText('서버 ONLINE / 전체')).toBeInTheDocument()
     expect(screen.getByText('15')).toBeInTheDocument()
     expect(screen.getByText(/마지막 갱신/).textContent).toBe(stampBefore)
+    const stale = screen.getByTestId('dashboard-stale-banner')
+    expect(stale).toHaveTextContent(/이전 수집값/)
+    expect(stale).toHaveTextContent(/마지막 성공 수집/)
+  })
+
+  it('links deployment rows only when group_key is a deployment UUID', async () => {
+    vi.spyOn(dashboardApi, 'fetchDashboard').mockResolvedValue(
+      baseSnap({
+        invocations: {
+          hours: 24,
+          group_by: 'deployment',
+          items: [
+            {
+              group_key: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+              deployment_name: 'linked-dep',
+              request_count: 3,
+              success_count: 3,
+              error_count: 0,
+              tokenized_request_count: 3,
+              latency_ms_p95: 10,
+              input_tokens_p95: 1,
+            },
+            {
+              group_key: 'unknown',
+              deployment_name: 'orphan-bucket',
+              request_count: 2,
+              success_count: 1,
+              error_count: 1,
+              tokenized_request_count: 1,
+              latency_ms_p95: null,
+              input_tokens_p95: null,
+            },
+          ],
+        },
+      }),
+    )
+    renderPage()
+    expect(await screen.findByRole('link', { name: 'linked-dep' })).toHaveAttribute(
+      'href',
+      '/deployments/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+    )
+    expect(screen.getByText('orphan-bucket')).toBeInTheDocument()
+    expect(
+      screen.queryByRole('link', { name: 'orphan-bucket' }),
+    ).not.toBeInTheDocument()
   })
 
   it('keeps partial success as a successful refresh', async () => {

@@ -1891,6 +1891,23 @@ th {
   background: var(--surface-2);
 }
 
+.dashboard-v2__stale {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.dashboard-v2__stale-note {
+  margin: 0;
+  padding: 0.55rem 0.75rem;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--warn);
+  border-radius: 6px;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
 .dashboard-v2__attention {
   list-style: none;
   margin: 0;

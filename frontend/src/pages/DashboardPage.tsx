@@ -10,7 +10,12 @@ import { HelpHint } from '../components/HelpHint'
 import { LoadingBlock } from '../components/LoadingBlock'
 import { SectionError } from '../components/SectionError'
 import { StatusBadge } from '../components/StatusBadge'
-import { formatApiDateTime, operationElapsed, shortId } from '../utils/date'
+import {
+  formatApiDateTime,
+  formatClock,
+  operationElapsed,
+  shortId,
+} from '../utils/date'
 import { formatInt, formatMs, formatPercent } from '../utils/number'
 import {
   DASHBOARD_FIELD_HELP,
@@ -24,6 +29,16 @@ const FAILED_OP_STATUSES = new Set([
   'FAILED',
   'MANUAL_INTERVENTION_REQUIRED',
 ])
+
+/** Deployment PK shape only — arbitrary group_key strings are not linkable. */
+const DEPLOYMENT_UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+function isDeploymentId(raw: string | null | undefined): boolean {
+  if (!raw) return false
+  if (raw.toLowerCase() === 'unknown') return false
+  return DEPLOYMENT_UUID_RE.test(raw)
+}
 
 type AttentionItem = {
   id: string
@@ -289,12 +304,25 @@ export function DashboardPage() {
           />
         ) : null}
 
+        {/* Total outage: error-only surface — do not claim "no attention items". */}
+        {!(fatal && !data) ? (
+          <>
         {refreshError && data ? (
-          <SectionError
-            title="최근 새로고침 실패"
-            message={refreshError}
-            onRetry={refresh}
-          />
+          <div
+            className="dashboard-v2__stale"
+            role="status"
+            data-testid="dashboard-stale-banner"
+          >
+            <SectionError
+              title="최근 새로고침 실패"
+              message={refreshError}
+              onRetry={refresh}
+            />
+            <p className="dashboard-v2__stale-note">
+              아래는 <strong>이전 수집값</strong>입니다. 마지막 성공 수집{' '}
+              {formatClock(data.fetchedAt)}.
+            </p>
+          </div>
         ) : null}
 
         <section
@@ -413,6 +441,11 @@ export function DashboardPage() {
           </div>
           {loading && !data ? (
             <LoadingBlock rows={2} />
+          ) : !data ? (
+            <p className="dashboard-v2__quiet" role="status">
+              주의 항목을 판단할 집계가 아직 없습니다. 확인 불가 상태를
+              문제없음으로 보지 마세요.
+            </p>
           ) : attention.length === 0 ? (
             <p className="dashboard-v2__quiet" role="status">
               현재 목록·집계에서 확인된 주의 항목이 없습니다. 미조회 구간이나
@@ -645,28 +678,38 @@ export function DashboardPage() {
                       </tr>
                     </thead>
                     <tbody>
-                      {inv.topDeployments.map((row) => (
-                        <tr key={row.group_key}>
-                          <td
-                            className="table-cell-clip"
-                            title={row.group_key}
-                          >
-                            <Link
-                              className="dashboard-v2__link"
-                              to={`/deployments/${row.group_key}`}
+                      {inv.topDeployments.map((row) => {
+                        const label =
+                          row.deployment_name || shortId(row.group_key, 12)
+                        const linkable = isDeploymentId(row.group_key)
+                        return (
+                          <tr key={row.group_key}>
+                            <td
+                              className="table-cell-clip"
+                              title={row.group_key}
                             >
-                              {row.deployment_name ||
-                                shortId(row.group_key, 12)}
-                            </Link>
-                          </td>
-                          <td>{formatInt(row.request_count)}</td>
-                          <td>{formatInt(row.error_count)}</td>
-                          <td>{metricCell(row.latency_ms_p95 ?? null, 'ms')}</td>
-                          <td>
-                            {metricCell(row.input_tokens_p95 ?? null, 'int')}
-                          </td>
-                        </tr>
-                      ))}
+                              {linkable ? (
+                                <Link
+                                  className="dashboard-v2__link"
+                                  to={`/deployments/${row.group_key}`}
+                                >
+                                  {label}
+                                </Link>
+                              ) : (
+                                <span>{label}</span>
+                              )}
+                            </td>
+                            <td>{formatInt(row.request_count)}</td>
+                            <td>{formatInt(row.error_count)}</td>
+                            <td>
+                              {metricCell(row.latency_ms_p95 ?? null, 'ms')}
+                            </td>
+                            <td>
+                              {metricCell(row.input_tokens_p95 ?? null, 'int')}
+                            </td>
+                          </tr>
+                        )
+                      })}
                     </tbody>
                   </table>
                 </div>
@@ -777,6 +820,8 @@ export function DashboardPage() {
             </HelpHint>
           </div>
         </details>
+          </>
+        ) : null}
       </div>
     </AppShell>
   )
