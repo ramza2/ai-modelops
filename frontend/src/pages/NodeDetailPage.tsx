@@ -410,7 +410,7 @@ export function NodeDetailPage() {
           수집 성공과 메타데이터 재조회 실패는 따로 안내됩니다.
         </p>
 
-        <div className="node-resource-v2__overview" aria-label="자원 스냅샷 요약">
+        <div className="node-resource-v2__overview" role="group" aria-label="자원 스냅샷 요약">
           <div className="node-resource-v2__summary">
             <span className="node-resource-v2__eyebrow">자료 출처</span>
             <strong>DB 저장 스냅샷</strong>
