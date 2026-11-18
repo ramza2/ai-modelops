@@ -52,3 +52,18 @@ jobs:
 
       - name: Production build
         run: npm run build
+
+      - name: Isolated Chrome acceptance (Node/GPU snapshots)
+        run: node scripts/ux20c2-browser-acceptance.mjs
+        env:
+          CI_BROWSER_ARTIFACTS: ${{ runner.temp }}/modelops-browser-evidence
+          VITE_MODELOPS_API_BASE_URL: ''
+
+      - name: Upload browser evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: modelops-browser-evidence
+          path: ${{ runner.temp }}/modelops-browser-evidence/
+          if-no-files-found: ignore
+          retention-days: 7
