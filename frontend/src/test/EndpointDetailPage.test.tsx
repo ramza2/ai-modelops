@@ -1335,9 +1335,13 @@ describe('EndpointDetailPage', () => {
     await user.click(screen.getByRole('button', { name: /Preflight Preview/ }))
     await user.click(await screen.findByRole('button', { name: /Switch Enqueue/ }))
     expect(await screen.findByTestId('switch-op-active')).toBeInTheDocument()
-    expect(screen.getByTestId('search-probe')).toHaveTextContent(
-      /switch_operation_id=op-sw/,
-    )
+    // URL query update is asynchronous relative to the first active render.
+    // Wait for the router commit instead of asserting in the same tick.
+    await waitFor(() => {
+      expect(screen.getByTestId('search-probe')).toHaveTextContent(
+        /switch_operation_id=op-sw/,
+      )
+    })
     expect(endpointsApi.switchEndpoint).toHaveBeenCalledTimes(1)
 
     expect(await screen.findByTestId('switch-op-terminal')).toBeInTheDocument()
