@@ -2273,7 +2273,7 @@ th {
   stroke-width: 1;
 }
 
-.runtime-history-chart__grid {
+.runtime-history-chart__gridline {
   stroke: var(--border);
   stroke-width: 1;
   stroke-dasharray: 2 3;
