@@ -34,3 +34,8 @@
 - Vitest 전체 / typecheck / build PASS.
 - 격리 Chrome Mock: 다중 GPU의 서로 다른 VRAM 사용·sampled_at, 부분 미수집, 조회 실패, 리소스 갱신 실패·성공, 320/375/768/1280px, 다크·라이트, 가로 넘침·콘솔 오류 확인.
 - 로컬 Draft PR 상태까지만. 병합/운영 배포는 별도 확인. 기존 UX20-A/B/C1 기능 변경 금지.
+
+## 자동 검증 연결 (CI PR #107 병합 후)
+- Frontend 수정은 GitHub Actions의 `Frontend CI / Vitest / Typecheck / Build` 체크를 통과해야 한다.
+- PR #106은 `frontend/**` 변경을 포함하므로 pull_request 동기화 시 자동 검증 대상이다.
+- CI PASS는 브라우저 320/375/768/1280px 레이아웃 및 실제 수집 버튼의 Mock 안전성 검사를 대체하지 않는다.
