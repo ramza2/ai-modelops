@@ -965,3 +965,11 @@ MVP에서 미래 확장성을 이유로 불필요한 분산 시스템이나 추�
 - GPU별 VRAM/사용률/온도/전력/측정 시각/안전 여유 등 **실제 값**만 사용. 0/null/미수집/조회 실패 구별, 가짜 시계열·위험 임계값·합산 GPU 총가용량·예측치 금지.
 - Backend/API/DB/Gateway/Worker/Node Agent/GPU/vLLM Docker 및 신규 패키지 변경 금지. 임의 자동 POST 수집 실행 금지.
 - Draft PR+로컬 테스트/격리 Chrome까지. main 병합과 운영 배포는 별도 승인.
+
+## ModelOps UX20-D1 — 작업 이력 빠른 탐색 (2026-11-18)
+
+- 구현 기준: `docs/uiux/modelops-uiux-2.0-ux20d1.md`, 추적 Issue #102. 기존 Operations 목록 필터/URL API만 재사용한다.
+- `OperationsPage.tsx`, 해당 UI 스타일의 `.operation-triage` 전용 CSS, 목록 회귀 테스트만 수정한다. Frontend API/Backend/DB/Gateway/GPU/Node Agent/운영 Docker 변경 금지.
+- 전체/진행 중/실패/수동 확인 필요 바로가기는 기존 필터 상태를 조합한다. `status`·`active` 상호배타, `operation_type`·pagination·조회 실패·Abort·GET-only 유지.
+- `total`은 현재 필터 결과 전체 건수이지 시스템 전체 오류 건수 아님. 미수집/실패/0 구분하고 상태에 따라 실행·취소·재시도 자동 호출 금지.
+- ChatGPT에서 GitHub 코드 수정·CI 검증 우선. Cursor는 실제 브라우저 추가 조작 등 필수 때만 사용.
