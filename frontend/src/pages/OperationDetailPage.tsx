@@ -17,6 +17,11 @@ import { SectionError } from '../components/SectionError'
 import { StatusBadge } from '../components/StatusBadge'
 import { formatApiDateTime, operationElapsed, shortId } from '../utils/date'
 import {
+  filterDiagnosticSteps,
+  operationDiagnosticGuidance,
+  stepHasDiagnosticError,
+} from '../utils/operationDiagnostics'
+import {
   createDetailFetchGate,
   formatOperationError,
   isActiveOperationStatus,
@@ -63,6 +68,8 @@ export function OperationDetailPage() {
   const [mutating, setMutating] = useState<MutationKind | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
   const [cancelReason, setCancelReason] = useState('')
+  const [stepQuery, setStepQuery] = useState('')
+  const [errorStepsOnly, setErrorStepsOnly] = useState(false)
   const [retryChild, setRetryChild] = useState<RetryOperationResponse | null>(
     null,
   )
@@ -81,6 +88,8 @@ export function OperationDetailPage() {
     setRetryChild(null)
     setActionError(null)
     setCancelReason('')
+    setStepQuery('')
+    setErrorStepsOnly(false)
     setMutating(null)
     setError(null)
     setNotFound(false)
@@ -321,6 +330,8 @@ export function OperationDetailPage() {
     : false
   const showRetry = displayOperation ? canRetryGate(displayOperation) : false
   const steps = displayOperation?.steps ?? []
+  const diagnosticErrorCount = steps.filter(stepHasDiagnosticError).length
+  const visibleSteps = filterDiagnosticSteps(steps, stepQuery, errorStepsOnly)
   const polling = Boolean(
     displayOperation && isActiveOperationStatus(displayOperation.status),
   )
@@ -380,6 +391,57 @@ export function OperationDetailPage() {
 
       {displayOperation ? (
         <>
+          <section
+            className="detail-panel operation-diagnostics"
+            aria-labelledby="operation-diagnostics-heading"
+          >
+            <h2 id="operation-diagnostics-heading">작업 진단 요약</h2>
+            <div className="operation-diagnostics__summary">
+              <div>
+                <span>응답에 포함된 작업 단계</span>
+                <strong>{steps.length}건</strong>
+              </div>
+              <div>
+                <span>오류 기록이 있는 단계</span>
+                <strong>{diagnosticErrorCount}건</strong>
+              </div>
+              <div>
+                <span>작업 전체 오류</span>
+                <strong>
+                  {displayOperation.error?.code || displayOperation.error?.message
+                    ? '오류 정보 기록됨'
+                    : '기록 없음'}
+                </strong>
+              </div>
+            </div>
+            <p className="operation-diagnostics__guidance">
+              {operationDiagnosticGuidance(displayOperation.status)}
+            </p>
+            <p className="operation-diagnostics__disclaimer">
+              단계 오류는 Operation API에 저장된 진단 정보이며 Docker 컨테이너 로그가 아닙니다.
+              오류 기록이 0건이어도 운영 정상 상태를 보증하지 않습니다.
+            </p>
+            <div className="operation-diagnostics__links">
+              <a className="table-link" href="#operation-steps-heading">작업 단계·오류 확인</a>
+              <a className="table-link" href="#operation-identity-heading">작업 원본 정보</a>
+              {displayOperation.target_deployment_id ? (
+                <Link
+                  className="table-link"
+                  to={`/observability/deployments/${displayOperation.target_deployment_id}`}
+                >
+                  변경 대상 Runtime 측정 이력
+                </Link>
+              ) : displayOperation.source_deployment_id ? (
+                <Link
+                  className="table-link"
+                  to={`/observability/deployments/${displayOperation.source_deployment_id}`}
+                >
+                  기존 대상 Runtime 측정 이력
+                </Link>
+              ) : null}
+            </div>
+          </section>
+
           <section
             className="detail-panel"
             aria-labelledby="operation-identity-heading"
@@ -689,7 +751,35 @@ export function OperationDetailPage() {
               렌더링하지 않습니다. step_code 원본은 그대로 표시합니다.
             </p>
             {steps.length > 0 ? (
-              <div className="table-wrap">
+              <>
+                <div className="operation-diagnostics__filters">
+                  <label htmlFor="operation-step-query">
+                    단계·오류 검색
+                    <input
+                      id="operation-step-query"
+                      type="search"
+                      value={stepQuery}
+                      onChange={(event) => setStepQuery(event.target.value)}
+                      placeholder="단계 코드, 상태, 오류 코드·메시지"
+                    />
+                  </label>
+                  <button
+                    type="button"
+                    className={
+                      'operation-diagnostics__filter-button' +
+                      (errorStepsOnly ? ' operation-diagnostics__filter-button--active' : '')
+                    }
+                    aria-pressed={errorStepsOnly}
+                    onClick={() => setErrorStepsOnly((current) => !current)}
+                  >
+                    오류 기록 단계만
+                  </button>
+                  <p role="status" className="operation-diagnostics__filter-count">
+                    {steps.length}건 중 {visibleSteps.length}건 표시
+                  </p>
+                </div>
+                {visibleSteps.length > 0 ? (
+                <div className="table-wrap">
                 <table className="data-table">
                   <thead>
                     <tr>
@@ -717,9 +807,7 @@ export function OperationDetailPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {[...steps]
-                      .sort((a, b) => a.sequence_no - b.sequence_no)
-                      .map((step) => (
+                    {visibleSteps.map((step) => (
                         <tr key={step.id}>
                           <td>{step.sequence_no}</td>
                           <td className="mono">{step.step_code}</td>
@@ -734,7 +822,13 @@ export function OperationDetailPage() {
                       ))}
                   </tbody>
                 </table>
-              </div>
+                </div>
+                ) : (
+                  <p className="empty-state" role="status">
+                    표시 조건에 맞는 단계가 없습니다. 검색어 또는 오류 기록 필터를 변경하세요.
+                  </p>
+                )}
+              </>
             ) : (
               <p className="empty-state" role="status">
                 Step이 없습니다.

@@ -1,5 +1,5 @@
 /**
- * UX20-C2/D1 browser acceptance (Node.js 22 + Chrome CDP, no npm browser package).
+ * UX20-C2/D1/D2 browser acceptance (Node.js 22 + Chrome CDP, no npm browser package).
  * Mock server binds only 127.0.0.1. Never points Vite at a real Management API.
  */
 import assert from 'node:assert/strict'
@@ -75,6 +75,7 @@ let readFailure = false
 let postFailure = false
 let refreshed = false
 let operationReadFailure = false
+let operationDetailReadFailure = false
 const requests = []
 const exceptions = []
 const unexpectedRemoteRequests = []
@@ -183,6 +184,40 @@ async function run() {
       if (postFailure) return sendJson(res, 502, { error: { message: 'Mock collection failed' } })
       refreshed = true
       return sendJson(res, 200, resources())
+    }
+    if (/^\/api\/v1\/operations\/op-(fail-01|manual-02)$/.test(path) && method === 'GET') {
+      if (operationDetailReadFailure) {
+        return sendJson(res, 503, { error: { message: 'Mock diagnostic read failed' } })
+      }
+      const isManual = path.endsWith('op-manual-02')
+      const id = isManual ? 'op-manual-02' : 'op-fail-01'
+      const details = {
+        id, operation_type: 'SWITCH',
+        status: isManual ? 'MANUAL_INTERVENTION_REQUIRED' : 'FAILED',
+        switch_strategy: 'HOT',
+        endpoint_alias_id: null,
+        source_deployment_id: 'dep-source-01',
+        target_deployment_id: 'dep-target-01',
+        current_step: null, cancel_requested_at: null,
+        retry_of_operation_id: null, requested_by: 'mock-admin',
+        request_reason: null, created_at: samples.base,
+        started_at: samples.base, finished_at: samples.later,
+        error: { code: isManual ? 'MANUAL_REVIEW' : 'OP_FAILED', message: 'Mock operation diagnostic' },
+        steps: [
+          { id: 'step-v', sequence_no: 1, step_code: 'VALIDATE', status: 'SUCCEEDED',
+            attempt_no: 1, started_at: samples.base, finished_at: samples.base,
+            created_at: samples.base, error: null },
+          { id: 'step-s', sequence_no: 2, step_code: 'START_TARGET',
+            status: isManual ? 'SUCCEEDED' : 'FAILED',
+            attempt_no: 1, started_at: samples.base, finished_at: samples.later,
+            created_at: samples.base,
+            error: isManual ? null : { code: 'GPU_OOM', message: 'GPU out of memory' } },
+          { id: 'step-f', sequence_no: 3, step_code: 'FINALIZE', status: 'SUCCEEDED',
+            attempt_no: 1, started_at: samples.later, finished_at: samples.later,
+            created_at: samples.base, error: null },
+        ],
+      }
+      return sendJson(res, 200, details)
     }
     if (path === '/api/v1/operations' && method === 'GET') {
       if (operationReadFailure) return sendJson(res, 503, { error: { message: 'Mock operation read failed' } })
@@ -361,6 +396,58 @@ async function run() {
       "document.body.innerText.includes('Mock operation read failed') && document.querySelector('.operation-triage__results')?.textContent.includes('이전 조회 결과')"),
     'operation stale results')
     assert.equal(requests.filter((request) => request.startsWith('POST /api/v1/operations')).length, 0)
+    assert.equal(unexpectedRemoteRequests.length, 0)
+    assert.deepEqual(exceptions, [])
+  })
+
+  await check('Operation detail persisted diagnostics and local Step filtering', async () => {
+    operationReadFailure = false
+    operationDetailReadFailure = false
+    await cdp.call('Page.navigate', { url: 'http://127.0.0.1:3000/operations/op-fail-01' })
+    await waitUntil(async () => evaluate(cdp,
+      "document.querySelector('.operation-diagnostics__summary')?.innerText.includes('3건') && document.body.innerText.includes('START_TARGET')"),
+    'Operation diagnostics ready')
+    assert.equal(await evaluate(cdp, "document.body.innerText.includes('Docker 컨테이너 로그가 아닙니다')"), true)
+    const link = await evaluate(cdp, "Array.from(document.querySelectorAll('.operation-diagnostics__links a')).find(a => a.textContent.includes('변경 대상 Runtime'))?.getAttribute('href')")
+    assert.equal(link, '/observability/deployments/dep-target-01')
+    const beforeDetailFetches = requests.filter(x => x === 'GET /api/v1/operations/op-fail-01').length
+    const beforeMutations = requests.filter(x => x.startsWith('POST ')).length
+    // React controlled inputs use the native setter to trigger onChange in Chrome.
+    await evaluate(cdp, "(() => { const el = document.querySelector('#operation-step-query'); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(el, 'GPU_OOM'); el.dispatchEvent(new Event('input',{bubbles:true})); })()")
+    await waitUntil(async () => evaluate(cdp,
+      "document.querySelector('.operation-diagnostics__filter-count')?.innerText.includes('1건 표시')"),
+    'Operation client-side keyword filter')
+    const rows = await evaluate(cdp, "Array.from(document.querySelectorAll('table tbody')).flatMap(t=>Array.from(t.querySelectorAll('tr')).map(x=>x.innerText))")
+    assert.equal(rows.length, 1)
+    assert.ok(rows[0].includes('GPU_OOM'))
+    await evaluate(cdp, "document.querySelector('.operation-diagnostics__filter-button').click()")
+    await waitUntil(async () => evaluate(cdp,
+      "document.querySelector('.operation-diagnostics__filter-button')?.getAttribute('aria-pressed') === 'true'"),
+    'Operation error-only filter')
+    await evaluate(cdp, "(() => { const el = document.querySelector('#operation-step-query'); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(el, 'nothing-matches'); el.dispatchEvent(new Event('input',{bubbles:true})); })()")
+    await waitUntil(async () => evaluate(cdp,
+      "document.body.innerText.includes('표시 조건에 맞는 단계가 없습니다')"),
+    'Operation empty filtered result')
+    assert.equal(requests.filter(x => x === 'GET /api/v1/operations/op-fail-01').length, beforeDetailFetches)
+    assert.equal(requests.filter(x => x.startsWith('POST ')).length, beforeMutations)
+    assert.ok(!requests.some(x=>x.endsWith('/steps') || x.includes('/logs') || x.includes('/events')))
+    await cdp.call('Emulation.setDeviceMetricsOverride', { width: 320, height: 900, deviceScaleFactor: 1, mobile: false })
+    await sleep(100)
+    const overflow = await evaluate(cdp, "({client:document.documentElement.clientWidth,scroll:document.documentElement.scrollWidth})")
+    assert.ok(overflow.scroll <= overflow.client + 1, 'Operation detail horizontal overflow: '+JSON.stringify(overflow))
+    await screenshot(cdp, 'operation-detail-320-light')
+    await cdp.call('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false })
+    await cdp.call('Emulation.setEmulatedMedia', { features: [{ name:'prefers-color-scheme',value:'dark' }] })
+    await screenshot(cdp, 'operation-detail-1280-dark')
+  })
+
+  await check('Operation diagnostic GET failure preserves prior data with search', async () => {
+    operationDetailReadFailure = true
+    await evaluate(cdp, "Array.from(document.querySelectorAll('button')).find(b=>b.textContent.trim()==='새로고침').click()")
+    await waitUntil(async () => evaluate(cdp,
+      "document.body.innerText.includes('Mock diagnostic read failed') && document.querySelector('#operation-step-query')?.value==='nothing-matches'"),
+    'Operation detail stale read')
+    assert.equal(requests.filter(x => x.startsWith('POST /api/v1/operations')).length, 0)
     assert.equal(unexpectedRemoteRequests.length, 0)
     assert.deepEqual(exceptions, [])
   })

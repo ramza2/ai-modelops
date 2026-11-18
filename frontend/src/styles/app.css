@@ -2607,3 +2607,121 @@ th {
     flex: 1 1 auto;
   }
 }
+
+/* —— UX20-D2: Operation persisted diagnostics, not Docker/container logs —— */
+.operation-diagnostics {
+  display: grid;
+  gap: 0.7rem;
+  min-width: 0;
+}
+
+.operation-diagnostics > h2 {
+  margin: 0;
+}
+
+.operation-diagnostics__summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 13rem), 1fr));
+  gap: 0.7rem;
+}
+
+.operation-diagnostics__summary > div {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  min-width: 0;
+  padding: 0.75rem 0.85rem;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  overflow-wrap: anywhere;
+}
+
+.operation-diagnostics__summary span,
+.operation-diagnostics__disclaimer {
+  color: var(--muted);
+  font-size: 0.875rem;
+  line-height: 1.45;
+}
+
+.operation-diagnostics__summary strong {
+  font-size: 1.05rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.operation-diagnostics__guidance,
+.operation-diagnostics__disclaimer {
+  margin: 0;
+  line-height: 1.5;
+}
+
+.operation-diagnostics__links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem 1.15rem;
+  font-size: 0.9rem;
+}
+
+.operation-diagnostics__filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: end;
+  margin: 0.65rem 0 0.85rem;
+}
+
+.operation-diagnostics__filters label {
+  display: flex;
+  flex: 1 1 15rem;
+  min-width: 0;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.operation-diagnostics__filters input[type="search"] {
+  box-sizing: border-box;
+  min-width: 0;
+  width: 100%;
+  padding: 0.6rem 0.7rem;
+  font: inherit;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  border-radius: 6px;
+}
+
+.operation-diagnostics__filter-button {
+  background: var(--surface-2);
+  color: var(--text);
+  padding: 0.6rem 0.75rem;
+  font: inherit;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.operation-diagnostics__filter-button--active {
+  border-color: var(--accent);
+  color: var(--accent);
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+
+.operation-diagnostics__filter-button:focus-visible,
+.operation-diagnostics__filters input:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.operation-diagnostics__filter-count {
+  color: var(--muted);
+  font-size: 0.875rem;
+  margin: 0 0 0.2rem;
+}
+
+@media (max-width: 375px) {
+  .operation-diagnostics__summary {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

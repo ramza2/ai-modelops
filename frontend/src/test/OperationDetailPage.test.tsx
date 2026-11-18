@@ -718,4 +718,89 @@ describe('OperationDetailPage', () => {
     expect(screen.queryByText('STALE_STEP')).not.toBeInTheDocument()
     expect(screen.getByText('E: failed-b')).toBeInTheDocument()
   })
+  it('explores persisted Step errors locally and links to related Runtime history', async () => {
+    const user = userEvent.setup()
+    vi.mocked(operationsApi.getOperation).mockResolvedValue(makeOp({
+      status: 'FAILED',
+      error: { code: 'OP_FAIL', message: 'operation failed' },
+      steps: [
+        makeStep({ id: 's1', sequence_no: 1, step_code: 'VALIDATE', status: 'SUCCEEDED' }),
+        makeStep({
+          id: 's2', sequence_no: 2, step_code: 'START_TARGET', status: 'FAILED',
+          error: { code: 'GPU_OOM', message: 'GPU out of memory' },
+        }),
+        makeStep({ id: 's3', sequence_no: 3, step_code: 'CLEANUP', status: 'SUCCEEDED' }),
+      ],
+    }))
+    renderDetail()
+    expect(await screen.findByRole('heading', { name: '작업 진단 요약' })).toBeInTheDocument()
+    const summary = document.querySelector('.operation-diagnostics')
+    expect(summary).toHaveTextContent('3건')
+    expect(summary).toHaveTextContent('1건')
+    expect(summary).toHaveTextContent('Docker 컨테이너 로그가 아닙니다')
+    expect(screen.getByRole('link', { name: '변경 대상 Runtime 측정 이력' }))
+      .toHaveAttribute('href', '/observability/deployments/tgt-1')
+    const table = screen.getByRole('table')
+    expect(within(table).getByText('VALIDATE')).toBeInTheDocument()
+    expect(within(table).getByText('START_TARGET')).toBeInTheDocument()
+
+    const onlyErrors = screen.getByRole('button', { name: '오류 기록 단계만' })
+    expect(onlyErrors).toHaveAttribute('aria-pressed', 'false')
+    await user.click(onlyErrors)
+    expect(onlyErrors).toHaveAttribute('aria-pressed', 'true')
+    expect(within(screen.getByRole('table')).queryByText('VALIDATE')).not.toBeInTheDocument()
+    expect(within(screen.getByRole('table')).getByText('START_TARGET')).toBeInTheDocument()
+    expect(screen.getByText('3건 중 1건 표시')).toBeInTheDocument()
+
+    const input = screen.getByRole('searchbox', { name: '단계·오류 검색' })
+    await user.type(input, 'not-found')
+    expect(screen.getByText(/표시 조건에 맞는 단계가 없습니다/)).toBeInTheDocument()
+    await user.clear(input)
+    await user.type(input, 'oom')
+    expect(screen.getByText('3건 중 1건 표시')).toBeInTheDocument()
+    expect(within(screen.getByRole('table')).getByText('START_TARGET')).toBeInTheDocument()
+    expect(operationsApi.getOperation).toHaveBeenCalledTimes(1)
+    expect(operationsApi.listOperations).not.toHaveBeenCalled()
+    expect(operationsApi.cancelOperation).not.toHaveBeenCalled()
+    expect(operationsApi.retryOperation).not.toHaveBeenCalled()
+  })
+
+  it('does not interpret 0 recorded Step errors as proof of success', async () => {
+    vi.mocked(operationsApi.getOperation).mockResolvedValue(makeOp({
+      status: 'MANUAL_INTERVENTION_REQUIRED',
+      error: { code: 'NEEDS_REVIEW', message: 'manual review' },
+      steps: [makeStep({ id: 's1', sequence_no: 1, status: 'SUCCEEDED' })],
+    }))
+    renderDetail()
+    expect(await screen.findByRole('heading', { name: '작업 진단 요약' })).toBeInTheDocument()
+    expect(document.querySelector('.operation-diagnostics')).toHaveTextContent('오류 기록이 있는 단계')
+    expect(document.querySelector('.operation-diagnostics')).toHaveTextContent('0건')
+    expect(document.querySelector('.operation-diagnostics')).toHaveTextContent('오류 정보 기록됨')
+    expect(document.querySelector('.operation-diagnostics')).toHaveTextContent('수동 확인')
+  })
+
+  it('clears the local diagnostic search when navigating to another Operation ID', async () => {
+    const user = userEvent.setup()
+    vi.mocked(operationsApi.getOperation).mockImplementation(async (id) =>
+      makeOp({
+        id,
+        status: 'FAILED',
+        steps: [makeStep({
+          id: 's-' + id, sequence_no: 1,
+          step_code: id === 'op-a' ? 'OLD_CODE' : 'NEW_CODE',
+          status: 'FAILED',
+        })],
+      }),
+    )
+    renderNavigable('/operations/op-a')
+    expect(await screen.findByText('OLD_CODE')).toBeInTheDocument()
+    await user.type(screen.getByRole('searchbox', { name: '단계·오류 검색' }), 'OLD_CODE')
+    await user.click(screen.getByRole('button', { name: '오류 기록 단계만' }))
+    await user.click(screen.getByRole('button', { name: 'go-op-b' }))
+    expect(await screen.findByText('NEW_CODE')).toBeInTheDocument()
+    expect(screen.getByRole('searchbox', { name: '단계·오류 검색' })).toHaveValue('')
+    expect(screen.getByRole('button', { name: '오류 기록 단계만' }))
+      .toHaveAttribute('aria-pressed', 'false')
+  })
+
 })
