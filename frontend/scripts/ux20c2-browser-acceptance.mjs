@@ -1,5 +1,5 @@
 /**
- * UX20-C2 browser acceptance (Node.js 22 + Chrome CDP, no npm browser package).
+ * UX20-C2/D1 browser acceptance (Node.js 22 + Chrome CDP, no npm browser package).
  * Mock server binds only 127.0.0.1. Never points Vite at a real Management API.
  */
 import assert from 'node:assert/strict'
@@ -74,6 +74,7 @@ let scenario = 'rich'
 let readFailure = false
 let postFailure = false
 let refreshed = false
+let operationReadFailure = false
 const requests = []
 const exceptions = []
 const unexpectedRemoteRequests = []
@@ -183,6 +184,30 @@ async function run() {
       refreshed = true
       return sendJson(res, 200, resources())
     }
+    if (path === '/api/v1/operations' && method === 'GET') {
+      if (operationReadFailure) return sendJson(res, 503, { error: { message: 'Mock operation read failed' } })
+      const query = new URL(req.url || '/', 'http://127.0.0.1').searchParams
+      const operations = [
+        { id: 'op-fail-01', operation_type: 'SWITCH', status: 'FAILED', switch_strategy: 'HOT',
+          endpoint_alias_id: null, source_deployment_id: null, target_deployment_id: null,
+          created_at: samples.base },
+        { id: 'op-manual-02', operation_type: 'SWITCH',
+          status: 'MANUAL_INTERVENTION_REQUIRED', switch_strategy: null,
+          endpoint_alias_id: null, source_deployment_id: null, target_deployment_id: null,
+          created_at: samples.base },
+        { id: 'op-running-03', operation_type: 'SWITCH', status: 'RUNNING', switch_strategy: null,
+          endpoint_alias_id: null, source_deployment_id: null, target_deployment_id: null,
+          created_at: samples.base },
+      ]
+      const filtered = operations.filter((op) => {
+        if (query.has('status') && query.get('status') !== op.status) return false
+        if (query.get('active') === 'true' && op.status !== 'RUNNING') return false
+        if (query.get('active') === 'false' && op.status === 'RUNNING') return false
+        if (query.has('operation_type') && query.get('operation_type') !== op.operation_type) return false
+        return true
+      })
+      return sendJson(res, 200, { items: filtered, page: 1, page_size: 20, total: filtered.length })
+    }
     return sendJson(res, 404, { error: { message: 'Blocked by isolated mock backend' } })
   })
   await new Promise((ok) => server.listen(0, '127.0.0.1', ok))
@@ -291,7 +316,8 @@ async function run() {
     const postCount = requests.filter((x) => x === 'POST /api/v1/nodes/node-ux20c2/resources/refresh').length
     assert.equal(postCount, 1)
     postFailure = true
-    await evaluate(cdp, "Array.from(document.querySelectorAll('button')).find(b=>b.textContent.trim()==='리소스 갱신').click()")
+    await waitUntil(async () => evaluate(cdp, "Array.from(document.querySelectorAll('button')).some(b => b.textContent.trim() === '리소스 갱신' && !b.disabled)"), 'resource collection button re-enabled')
+    await evaluate(cdp, "Array.from(document.querySelectorAll('button')).find(b=>b.textContent.trim()==='리소스 갱신' && !b.disabled).click()")
     await waitUntil(async () => evaluate(cdp, "document.body.innerText.includes('Mock collection failed') && document.body.innerText.includes('이전에 조회한 스냅샷')"), 'mock POST error')
     assert.ok((await evaluate(cdp, "document.body.innerText")).includes('55.0%'))
     assert.equal(requests.filter((x) => x.startsWith('POST ')).length, 2)
@@ -299,6 +325,45 @@ async function run() {
     assert.deepEqual(exceptions, [], 'No uncaught Chrome exceptions')
   })
   await screenshot(cdp, 'node-final')
+
+  await check('operation triage filters preserve type and never mutate', async () => {
+    await cdp.call('Page.navigate', { url: 'http://127.0.0.1:3000/operations?operation_type=SWITCH' })
+    await waitUntil(async () => evaluate(cdp,
+      "document.querySelector('.operation-triage__options') !== null && document.querySelector('.operation-triage__results')?.textContent.includes('3건')"),
+    'operation triage initial result')
+    const beforePosts = requests.filter((request) => request.startsWith('POST ')).length
+    const scenarios = [
+      ['실패', 'status=FAILED', 'op-fail-01'],
+      ['진행 중', 'active=true', 'op-running-03'],
+      ['수동 확인 필요', 'status=MANUAL_INTERVENTION_REQUIRED', 'op-manual-02'],
+      ['전체 작업', '', 'op-fail-01'],
+    ]
+    for (const [label, queryPart, visibleId] of scenarios) {
+      await evaluate(cdp, "Array.from(document.querySelectorAll('.operation-triage__option')).find(el => el.textContent.trim() === " + JSON.stringify(label) + ").click()")
+      await waitUntil(async () => evaluate(cdp, "(() => { const chosen = Array.from(document.querySelectorAll('.operation-triage__option')).find(el => el.textContent.trim() === " + JSON.stringify(label) + "); return chosen?.getAttribute('aria-pressed') === 'true' && location.search.includes('operation_type=SWITCH') && " + (queryPart ? "location.search.includes(" + JSON.stringify(queryPart) + ")" : "!location.search.includes('status=') && !location.search.includes('active=')") + " && Array.from(document.querySelectorAll('a')).some(a => a.getAttribute('href') === '/operations/" + visibleId + "'); })()"), label + ' operation filter')
+    }
+    assert.equal(requests.filter((request) => request.startsWith('POST ')).length, beforePosts)
+    assert.ok(!requests.some((request) => /^GET \/api\/v1\/operations\//.test(request)), 'Operation list must avoid row N+1 detail fetches')
+    await cdp.call('Emulation.setDeviceMetricsOverride', { width: 320, height: 900, deviceScaleFactor: 1, mobile: false })
+    await sleep(100)
+    const bounds = await evaluate(cdp, "({viewport:document.documentElement.clientWidth,content:document.documentElement.scrollWidth})")
+    assert.ok(bounds.content <= bounds.viewport + 1, 'Operation mobile overflow: ' + JSON.stringify(bounds))
+    await screenshot(cdp, 'operations-320-light')
+    await cdp.call('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false })
+    await cdp.call('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: 'dark' }] })
+    await screenshot(cdp, 'operations-1280-dark')
+  })
+
+  await check('operation GET failure labels retained results without writes', async () => {
+    operationReadFailure = true
+    await evaluate(cdp, "Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim() === '새로고침').click()")
+    await waitUntil(async () => evaluate(cdp,
+      "document.body.innerText.includes('Mock operation read failed') && document.querySelector('.operation-triage__results')?.textContent.includes('이전 조회 결과')"),
+    'operation stale results')
+    assert.equal(requests.filter((request) => request.startsWith('POST /api/v1/operations')).length, 0)
+    assert.equal(unexpectedRemoteRequests.length, 0)
+    assert.deepEqual(exceptions, [])
+  })
 }
 try {
   await run()

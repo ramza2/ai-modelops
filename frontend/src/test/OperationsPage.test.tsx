@@ -116,6 +116,85 @@ describe('OperationsPage', () => {
     expect(operationsApi.retryOperation).not.toHaveBeenCalled()
   })
 
+  it('quick filters preserve type while clearing mutually exclusive status/active', async () => {
+    const user = userEvent.setup()
+    vi.mocked(operationsApi.listOperations).mockResolvedValue(pageResult([]))
+    renderAt('/operations?operation_type=SWITCH')
+    await screen.findByRole('button', { name: '실패' })
+
+    await user.click(screen.getByRole('button', { name: '실패' }))
+    await waitFor(() => {
+      expect(screen.getByTestId('location-search')).toHaveTextContent(
+        'status=FAILED&operation_type=SWITCH',
+      )
+      expect(vi.mocked(operationsApi.listOperations).mock.calls.at(-1)?.[0]).toEqual(
+        expect.objectContaining({ status: 'FAILED', active: null, operationType: 'SWITCH', page: 1 }),
+      )
+    })
+    expect(screen.getByRole('button', { name: '실패' })).toHaveAttribute('aria-pressed', 'true')
+
+    await user.click(screen.getByRole('button', { name: '진행 중' }))
+    await waitFor(() => {
+      expect(screen.getByTestId('location-search')).toHaveTextContent(
+        'active=true&operation_type=SWITCH',
+      )
+      expect(vi.mocked(operationsApi.listOperations).mock.calls.at(-1)?.[0]).toEqual(
+        expect.objectContaining({ status: null, active: true, operationType: 'SWITCH', page: 1 }),
+      )
+    })
+    expect(screen.getByRole('button', { name: '진행 중' })).toHaveAttribute('aria-pressed', 'true')
+
+    await user.click(screen.getByRole('button', { name: '수동 확인 필요' }))
+    await waitFor(() => {
+      expect(screen.getByTestId('location-search')).toHaveTextContent(
+        'status=MANUAL_INTERVENTION_REQUIRED&operation_type=SWITCH',
+      )
+    })
+    await user.click(screen.getByRole('button', { name: '전체 작업' }))
+    await waitFor(() => {
+      expect(screen.getByTestId('location-search')).toHaveTextContent('operation_type=SWITCH')
+      expect(vi.mocked(operationsApi.listOperations).mock.calls.at(-1)?.[0]).toEqual(
+        expect.objectContaining({ status: null, active: null, operationType: 'SWITCH', page: 1 }),
+      )
+    })
+    expect(screen.getByRole('button', { name: '전체 작업' })).toHaveAttribute('aria-pressed', 'true')
+    expect(operationsApi.getOperation).not.toHaveBeenCalled()
+    expect(operationsApi.cancelOperation).not.toHaveBeenCalled()
+    expect(operationsApi.retryOperation).not.toHaveBeenCalled()
+  })
+
+  it('shows filtered total separately from page size and labels retained results after GET failure', async () => {
+    const user = userEvent.setup()
+    vi.mocked(operationsApi.listOperations)
+      .mockResolvedValueOnce(pageResult([makeOp({ id: 'op-keep' })], { total: 84 }))
+      .mockRejectedValueOnce(new ApiError('read unavailable', { status: 503 }))
+    renderAt('/operations?status=FAILED')
+    expect(await screen.findByText(/현재 필터 결과/)).toHaveTextContent('84건')
+    expect(screen.getByText(/현재 필터 결과/)).toHaveTextContent('현재 표시 1건')
+    expect(screen.getByRole('button', { name: '실패' })).toHaveAttribute('aria-pressed', 'true')
+
+    await user.click(screen.getByRole('button', { name: '새로고침' }))
+    expect(await screen.findByText(/read unavailable/)).toBeInTheDocument()
+    expect(screen.getByText(/이전 조회 결과/)).toHaveTextContent('84건')
+    expect(screen.getByRole('link', { name: /op-keep/ })).toBeInTheDocument()
+  })
+
+  it('clarifies failed/manual action follow-up without triggering operation mutation', async () => {
+    vi.mocked(operationsApi.listOperations).mockResolvedValue(
+      pageResult([
+        makeOp({ id: 'op-fail', status: 'FAILED' }),
+        makeOp({ id: 'op-manual', status: 'MANUAL_INTERVENTION_REQUIRED' }),
+      ]),
+    )
+    renderAt('/operations')
+    expect(await screen.findByRole('link', { name: /op-fail/ })).toBeInTheDocument()
+    expect(screen.getByText('상세에서 실패 원인 확인')).toBeInTheDocument()
+    expect(screen.getByText('상세에서 수동 조치 필요 여부 확인')).toBeInTheDocument()
+    expect(operationsApi.getOperation).not.toHaveBeenCalled()
+    expect(operationsApi.cancelOperation).not.toHaveBeenCalled()
+    expect(operationsApi.retryOperation).not.toHaveBeenCalled()
+  })
+
   it('keeps unknown operation_type raw and filter option values as API codes', async () => {
     vi.mocked(operationsApi.listOperations).mockResolvedValue(
       pageResult([

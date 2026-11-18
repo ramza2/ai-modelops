@@ -53,7 +53,7 @@ jobs:
       - name: Production build
         run: npm run build
 
-      - name: Isolated Chrome acceptance (Node/GPU snapshots)
+      - name: Isolated Chrome acceptance (Node/GPU + operation triage)
         run: node scripts/ux20c2-browser-acceptance.mjs
         env:
           CI_BROWSER_ARTIFACTS: ${{ runner.temp }}/modelops-browser-evidence
