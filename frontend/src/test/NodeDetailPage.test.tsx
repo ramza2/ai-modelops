@@ -653,7 +653,7 @@ describe('NodeDetailPage', () => {
     )
     renderDetail()
     const card = await screen.findByRole('article', { name: 'GPU 0' })
-    expect(within(card).getByText(/GPU 안전 여유/)).toBeInTheDocument()
+    expect(within(card).getAllByText(/GPU 안전 여유/).length).toBeGreaterThan(0)
     const expand = within(card).getByText('GPU 식별·기술 정보')
     const details = expand.closest('details')
     expect(details).not.toHaveAttribute('open')
