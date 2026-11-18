@@ -412,16 +412,12 @@ async function run() {
     assert.equal(link, '/observability/deployments/dep-target-01')
     const beforeDetailFetches = requests.filter(x => x === 'GET /api/v1/operations/op-fail-01').length
     const beforeMutations = requests.filter(x => x.startsWith('POST ')).length
-    await evaluate(cdp, "document.querySelector('#operation-step-query').value = 'GPU_OOM'; document.querySelector('#operation-step-query').dispatchEvent(new Event('input', {bubbles:true}))")
     // React controlled inputs use the native setter to trigger onChange in Chrome.
-    await evaluate(cdp, "document.querySelector('#operation-step-query').value = ''")
     await evaluate(cdp, "(() => { const el = document.querySelector('#operation-step-query'); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(el, 'GPU_OOM'); el.dispatchEvent(new Event('input',{bubbles:true})); })()")
     await waitUntil(async () => evaluate(cdp,
       "document.querySelector('.operation-diagnostics__filter-count')?.innerText.includes('1건 표시')"),
     'Operation client-side keyword filter')
-    let rows = await evaluate(cdp, "Array.from(document.querySelectorAll('#operation-steps-heading + p + .operation-diagnostics__filters ~ .table-wrap tbody tr')).map(x=>x.innerText)")
-    // Use the table containing the Step code, rather than depending on CSS ancestry.
-    rows = await evaluate(cdp, "Array.from(document.querySelectorAll('table tbody')).flatMap(t=>Array.from(t.querySelectorAll('tr')).map(x=>x.innerText))")
+    const rows = await evaluate(cdp, "Array.from(document.querySelectorAll('table tbody')).flatMap(t=>Array.from(t.querySelectorAll('tr')).map(x=>x.innerText))")
     assert.equal(rows.length, 1)
     assert.ok(rows[0].includes('GPU_OOM'))
     await evaluate(cdp, "document.querySelector('.operation-diagnostics__filter-button').click()")
