@@ -29,7 +29,7 @@ export function runtimeInstanceKey(
 ): string {
   const ri = snap.runtime_instance
   if (!ri) return 'unknown'
-  return `${ri.container_id ?? ''}|${ri.started_at ?? ''}`
+  return `${ri.container_id ?? ''}|${ri.started_at ?? ''}|${ri.restart_count ?? 'unknown'}`
 }
 
 /** Measured non-negative finite values only; null/NaN/Inf/negative excluded. */
@@ -46,7 +46,7 @@ export function kvRatioToPercent(
   ratio: number | null | undefined,
 ): number | null {
   const v = measuredNonNegative(ratio)
-  if (v === null) return null
+  if (v === null || v > 1) return null
   return v * 100
 }
 
@@ -77,9 +77,11 @@ export function computeGapThresholdMs(timesAsc: number[]): number {
     const d = timesAsc[i]! - timesAsc[i - 1]!
     if (d > 0) deltas.push(d)
   }
-  if (deltas.length === 0) return RUNTIME_HISTORY_DEFAULT_GAP_MS
+  if (deltas.length < 2) return RUNTIME_HISTORY_DEFAULT_GAP_MS
   deltas.sort((a, b) => a - b)
-  const median = deltas[Math.floor(deltas.length / 2)]!
+  // Lower median prevents a single long gap from defining the threshold
+  // when only two positive intervals are observed.
+  const median = deltas[Math.floor((deltas.length - 1) / 2)]!
   return Math.max(median * 3, RUNTIME_HISTORY_MIN_GAP_MS)
 }
 
