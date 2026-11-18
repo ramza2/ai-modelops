@@ -139,7 +139,7 @@ function Sparkline({
           return (
             <g key={`y-${i}`}>
               <line
-                className="runtime-history-chart__grid"
+                className="runtime-history-chart__gridline"
                 x1={PAD.left}
                 x2={PAD.left + INNER_W}
                 y1={y}
