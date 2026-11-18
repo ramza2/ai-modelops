@@ -385,7 +385,7 @@ export function NodeDetailPage() {
         </section>
       ) : null}
 
-      <section className="detail-panel" aria-labelledby="resource-heading">
+      <section className="detail-panel node-resource-v2" aria-labelledby="resource-heading">
         <div className="detail-panel__header">
           <h2 id="resource-heading">서버 및 GPU 자원</h2>
           <button
