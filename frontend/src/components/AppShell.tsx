@@ -31,6 +31,16 @@ const FOCUSABLE_SELECTOR = [
   '[tabindex]:not([tabindex="-1"])',
 ].join(',')
 
+/** Matches UX20-B CSS: desktop sidebar at >=1024px; mobile drawer below. */
+export const SHELL_DESKTOP_MEDIA_QUERY = '(min-width: 1024px)'
+
+function isDesktopShellViewport(): boolean {
+  return (
+    typeof window.matchMedia === 'function' &&
+    window.matchMedia(SHELL_DESKTOP_MEDIA_QUERY).matches
+  )
+}
+
 function routeActiveFlags(pathname: string): Record<string, boolean> {
   const modelsActive =
     pathname === '/models' ||
@@ -86,10 +96,18 @@ export function AppShell({
   const navPanelRef = useRef<HTMLElement>(null)
   const previouslyFocused = useRef<HTMLElement | null>(null)
   const hadNavOpen = useRef(false)
+  const focusFrameRef = useRef<number | null>(null)
+
+  const cancelScheduledFocus = useCallback(() => {
+    if (focusFrameRef.current == null) return
+    window.cancelAnimationFrame(focusFrameRef.current)
+    focusFrameRef.current = null
+  }, [])
 
   const closeNav = useCallback(() => {
+    cancelScheduledFocus()
     setNavOpen(false)
-  }, [])
+  }, [cancelScheduledFocus])
 
   const openNav = useCallback(() => {
     previouslyFocused.current =
@@ -112,6 +130,25 @@ export function AppShell({
     setNavOpen(false)
   }, [location.pathname])
 
+  // Mobile drawer must not stay open after a resize to desktop sidebar layout.
+  useEffect(() => {
+    if (typeof window.matchMedia !== 'function') return
+    const media = window.matchMedia(SHELL_DESKTOP_MEDIA_QUERY)
+    const syncDesktop = () => {
+      if (media.matches) {
+        closeNav()
+      }
+    }
+    syncDesktop()
+    if (typeof media.addEventListener === 'function') {
+      media.addEventListener('change', syncDesktop)
+      return () => media.removeEventListener('change', syncDesktop)
+    }
+    // Safari < 14
+    media.addListener(syncDesktop)
+    return () => media.removeListener(syncDesktop)
+  }, [closeNav])
+
   // Body scroll lock while the mobile drawer is open.
   useEffect(() => {
     if (!navOpen) return
@@ -124,24 +161,34 @@ export function AppShell({
 
   // Focus first control when opening; restore focus only after a real close.
   useEffect(() => {
+    cancelScheduledFocus()
     if (navOpen) {
       hadNavOpen.current = true
       const panel = navPanelRef.current
       const focusables = panel?.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)
       const target = focusables?.[0]
-      window.requestAnimationFrame(() => {
-        target?.focus()
+      focusFrameRef.current = window.requestAnimationFrame(() => {
+        focusFrameRef.current = null
+        // Drawer may have closed before the frame ran.
+        if (!target || !document.contains(target)) return
+        if (isDesktopShellViewport()) return
+        target.focus()
       })
-      return
+      return () => {
+        cancelScheduledFocus()
+      }
     }
     if (!hadNavOpen.current) return
     hadNavOpen.current = false
     const restore = previouslyFocused.current ?? menuButtonRef.current
+    previouslyFocused.current = null
+    // After a mobile→desktop resize the toggle is CSS-hidden; keep focus in the
+    // persistent sidebar rather than forcing it onto the hidden control.
+    if (isDesktopShellViewport()) return
     if (restore && document.contains(restore)) {
       restore.focus()
     }
-    previouslyFocused.current = null
-  }, [navOpen])
+  }, [navOpen, cancelScheduledFocus])
 
   useEffect(() => {
     if (!navOpen) return

@@ -1,9 +1,59 @@
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
-import { AppShell } from '../components/AppShell'
+import {
+  AppShell,
+  SHELL_DESKTOP_MEDIA_QUERY,
+} from '../components/AppShell'
 import { NAV_ITEMS } from '../utils/uiLabels'
+
+type MediaListener = (event: MediaQueryListEvent) => void
+
+let desktopMatches = false
+const mediaListeners = new Set<MediaListener>()
+const originalMatchMedia = window.matchMedia
+
+function installMatchMediaMock() {
+  desktopMatches = false
+  mediaListeners.clear()
+  window.matchMedia = vi.fn((query: string) => {
+    const media = {
+      get matches() {
+        return query === SHELL_DESKTOP_MEDIA_QUERY ? desktopMatches : false
+      },
+      media: query,
+      onchange: null,
+      addEventListener: (type: string, listener: EventListenerOrEventListenerObject) => {
+        if (type !== 'change') return
+        mediaListeners.add(listener as MediaListener)
+      },
+      removeEventListener: (
+        type: string,
+        listener: EventListenerOrEventListenerObject,
+      ) => {
+        if (type !== 'change') return
+        mediaListeners.delete(listener as MediaListener)
+      },
+      addListener: (listener: MediaListener) => {
+        mediaListeners.add(listener)
+      },
+      removeListener: (listener: MediaListener) => {
+        mediaListeners.delete(listener)
+      },
+      dispatchEvent: () => false,
+    }
+    return media as MediaQueryList
+  }) as unknown as typeof window.matchMedia
+}
+
+function setDesktopViewport(matches: boolean) {
+  desktopMatches = matches
+  const event = { matches, media: SHELL_DESKTOP_MEDIA_QUERY } as MediaQueryListEvent
+  for (const listener of [...mediaListeners]) {
+    listener(event)
+  }
+}
 
 function renderShell(
   initialPath: string,
@@ -47,9 +97,15 @@ function menuToggle() {
   return screen.getByRole('button', { name: '주 메뉴' })
 }
 
+beforeEach(() => {
+  installMatchMediaMock()
+})
+
 afterEach(() => {
   cleanup()
   document.body.style.overflow = ''
+  window.matchMedia = originalMatchMedia
+  vi.unstubAllGlobals()
 })
 
 describe('AppShell (UX20-B)', () => {
@@ -185,5 +241,56 @@ describe('AppShell (UX20-B)', () => {
     await waitFor(() => {
       expect(document.activeElement).toBe(menuToggle())
     })
+  })
+
+  it('clears drawer backdrop, scroll lock, and trap when resizing to desktop', async () => {
+    const user = userEvent.setup()
+    renderShell('/dashboard')
+    await user.click(menuToggle())
+    expect(menuToggle()).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.getByRole('button', { name: '메뉴 배경 닫기' })).toBeInTheDocument()
+    expect(document.body.style.overflow).toBe('hidden')
+
+    setDesktopViewport(true)
+
+    await waitFor(() => {
+      expect(menuToggle()).toHaveAttribute('aria-expanded', 'false')
+    })
+    expect(screen.queryByRole('button', { name: '메뉴 배경 닫기' })).not.toBeInTheDocument()
+    expect(document.body.style.overflow).toBe('')
+    expect(menuToggle()).toHaveAttribute('aria-expanded', 'false')
+  })
+
+  it('cancels a scheduled open-focus frame when the drawer closes first', async () => {
+    const user = userEvent.setup()
+    const pending: Array<FrameRequestCallback | null> = []
+    const cancelled = new Set<number>()
+    vi.stubGlobal(
+      'requestAnimationFrame',
+      (cb: FrameRequestCallback) => {
+        pending.push(cb)
+        return pending.length
+      },
+    )
+    vi.stubGlobal('cancelAnimationFrame', (id: number) => {
+      cancelled.add(id)
+      pending[id - 1] = null
+    })
+
+    renderShell('/dashboard')
+    const toggle = menuToggle()
+    toggle.focus()
+    await user.click(toggle)
+    expect(pending.some(Boolean)).toBe(true)
+    await user.keyboard('{Escape}')
+    await waitFor(() => {
+      expect(menuToggle()).toHaveAttribute('aria-expanded', 'false')
+    })
+    expect(cancelled.size).toBeGreaterThan(0)
+
+    for (const cb of pending) {
+      cb?.(0)
+    }
+    expect(document.activeElement).toBe(menuToggle())
   })
 })
