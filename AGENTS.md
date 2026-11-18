@@ -957,3 +957,11 @@ MVP에서 미래 확장성을 이유로 불필요한 분산 시스템이나 추�
 - CI가 FAIL일 때는 해당 Step과 오류 출력만 확인해 최소 수정한다. CI가 실행되지 않았으면 PASS로 간주하지 않는다.
 - CI는 Node/npm만 실행한다. 비밀 값, `.env`, 운영 서버, GPU/DB/Docker 접근 권한을 부여하지 않는다.
 - UI의 브라우저 상호작용·반응형 수용검사는 별도이며 CI 통과가 이를 대체하지 않는다.
+
+## ModelOps UI/UX 2.0 — UX20-C2 구현 전용 지침 (2026-11-18)
+
+- 기준 문서: `docs/uiux/modelops-uiux-2.0-ux20c2.md`. UX20-C2는 Node 상세의 **persisted 최신 Host/GPU 스냅샷 가독성**에만 집중한다.
+- `NodeDetailPage.tsx`, 필요한 해당 CSS/표시 컴포넌트, Node 상세 회귀 테스트만 최소 변경. `getNodeResources`는 GET(DB 조회), `refreshNodeResources`는 POST(사용자가 누를 때 실수집). 기존 중복 잠금·오류/404/Abort 계약 보존.
+- GPU별 VRAM/사용률/온도/전력/측정 시각/안전 여유 등 **실제 값**만 사용. 0/null/미수집/조회 실패 구별, 가짜 시계열·위험 임계값·합산 GPU 총가용량·예측치 금지.
+- Backend/API/DB/Gateway/Worker/Node Agent/GPU/vLLM Docker 및 신규 패키지 변경 금지. 임의 자동 POST 수집 실행 금지.
+- Draft PR+로컬 테스트/격리 Chrome까지. main 병합과 운영 배포는 별도 승인.

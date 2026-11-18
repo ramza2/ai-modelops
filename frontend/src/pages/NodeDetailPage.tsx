@@ -30,6 +30,14 @@ function memoryPair(
   return `${formatMemoryMb(used)} / ${formatMemoryMb(total)}`
 }
 
+/** An invalid/missing measurement must not be shown as a 0% progress bar. */
+function measuredUtilization(value: number | null | undefined): number | null {
+  if (value === null || value === undefined) return null
+  return Number.isFinite(value) && value >= 0 && value <= 100
+    ? value
+    : null
+}
+
 export function NodeDetailPage() {
   const { nodeId = '' } = useParams<{ nodeId: string }>()
 
@@ -241,6 +249,7 @@ export function NodeDetailPage() {
 
   const host = resources?.host ?? null
   const gpuItems = resources?.gpus ?? []
+  const gpuMeasuredCount = gpuItems.filter(({ snapshot }) => snapshot !== null).length
 
   return (
     <AppShell
@@ -376,7 +385,7 @@ export function NodeDetailPage() {
         </section>
       ) : null}
 
-      <section className="detail-panel" aria-labelledby="resource-heading">
+      <section className="detail-panel node-resource-v2" aria-labelledby="resource-heading">
         <div className="detail-panel__header">
           <h2 id="resource-heading">서버 및 GPU 자원</h2>
           <button
@@ -401,6 +410,40 @@ export function NodeDetailPage() {
           수집 성공과 메타데이터 재조회 실패는 따로 안내됩니다.
         </p>
 
+        <div className="node-resource-v2__overview" role="group" aria-label="자원 스냅샷 요약">
+          <div className="node-resource-v2__summary">
+            <span className="node-resource-v2__eyebrow">자료 출처</span>
+            <strong>DB 저장 스냅샷</strong>
+            <span>실시간 GPU 조회가 아닙니다.</span>
+          </div>
+          <div className="node-resource-v2__summary">
+            <span className="node-resource-v2__eyebrow">호스트 측정 시각</span>
+            <strong>
+              {host
+                ? formatApiDateTime(host.sampled_at)
+                : resourceLoading && !resources
+                  ? '조회 중…'
+                  : resources
+                    ? '미수집'
+                    : '확인 불가'}
+            </strong>
+            <span>상단 마지막 갱신은 DB 조회 시각입니다.</span>
+          </div>
+          <div className="node-resource-v2__summary">
+            <span className="node-resource-v2__eyebrow">GPU 스냅샷</span>
+            <strong>
+              {resources
+                ? gpuItems.length === 0
+                  ? '등록 GPU 없음'
+                  : `${gpuMeasuredCount} / ${gpuItems.length}개 측정`
+                : resourceLoading
+                  ? '조회 중…'
+                  : '확인 불가'}
+            </strong>
+            <span>GPU마다 측정 시각과 가용 메모리가 다릅니다.</span>
+          </div>
+        </div>
+
         {metadataWarning ? (
           <SectionError
             title="메타데이터 재조회 실패 (수집은 성공)"
@@ -417,6 +460,13 @@ export function NodeDetailPage() {
           />
         ) : null}
 
+        {resources && (resourceError || refreshError) ? (
+          <p className="node-resource-v2__stale" role="status">
+            이전에 조회한 스냅샷을 표시하고 있습니다. 새 조회·수집 실패와
+            별개로 각 자원의 측정 시각을 확인하세요.
+          </p>
+        ) : null}
+
         {resourceLoading && !resources ? (
           <LoadingBlock label="자원 스냅샷을 불러오는 중…" />
         ) : null}
@@ -429,40 +479,46 @@ export function NodeDetailPage() {
         ) : null}
 
         {host ? (
-          <div className="host-metrics">
-            <p className="sampled-at">
-              자원 측정 시각 (Snapshot Sampled At){' '}
-              {formatApiDateTime(host.sampled_at)}
-            </p>
-            <UsageBar
-              label="CPU 사용률 (CPU Utilization)"
-              displayValue={formatUtilizationPct(host.cpu_utilization_pct)}
-              percentage={
-                host.cpu_utilization_pct !== null &&
-                Number.isFinite(host.cpu_utilization_pct)
-                  ? Math.min(100, Math.max(0, host.cpu_utilization_pct))
-                  : null
-              }
-            />
-            <UsageBar
-              label="시스템 메모리 사용량 / 전체 (RAM Used / Total)"
-              displayValue={memoryPair(host.ram_used_mb, host.ram_total_mb)}
-              percentage={usagePercent(host.ram_used_mb, host.ram_total_mb)}
-            />
-            <p className="metric-line">
-              남은 시스템 메모리 (RAM Free):{' '}
-              {formatMemoryMb(host.ram_free_mb)}
-            </p>
-            <UsageBar
-              label="디스크 사용량 / 전체 (Disk Used / Total)"
-              displayValue={memoryPair(host.disk_used_mb, host.disk_total_mb)}
-              percentage={usagePercent(host.disk_used_mb, host.disk_total_mb)}
-            />
-            <p className="metric-line">
-              남은 디스크 공간 (Disk Free):{' '}
-              {formatMemoryMb(host.disk_free_mb)}
-            </p>
-          </div>
+          <section className="node-resource-v2__host" aria-label="호스트 최신 측정값">
+            <div className="node-resource-v2__section-head">
+              <h3>호스트 자원</h3>
+              <p className="sampled-at">
+                자원 측정 시각 (Snapshot Sampled At){' '}
+                {formatApiDateTime(host.sampled_at)}
+              </p>
+            </div>
+            <div className="node-resource-v2__host-grid">
+              <div className="node-resource-v2__metric-card">
+                <UsageBar
+                  label="CPU 사용률 (CPU Utilization)"
+                  displayValue={formatUtilizationPct(host.cpu_utilization_pct)}
+                  percentage={measuredUtilization(host.cpu_utilization_pct)}
+                />
+              </div>
+              <div className="node-resource-v2__metric-card">
+                <UsageBar
+                  label="시스템 메모리 사용량 / 전체 (RAM Used / Total)"
+                  displayValue={memoryPair(host.ram_used_mb, host.ram_total_mb)}
+                  percentage={usagePercent(host.ram_used_mb, host.ram_total_mb)}
+                />
+                <p className="metric-line">
+                  남은 시스템 메모리 (RAM Free):{' '}
+                  {formatMemoryMb(host.ram_free_mb)}
+                </p>
+              </div>
+              <div className="node-resource-v2__metric-card">
+                <UsageBar
+                  label="디스크 사용량 / 전체 (Disk Used / Total)"
+                  displayValue={memoryPair(host.disk_used_mb, host.disk_total_mb)}
+                  percentage={usagePercent(host.disk_used_mb, host.disk_total_mb)}
+                />
+                <p className="metric-line">
+                  남은 디스크 공간 (Disk Free):{' '}
+                  {formatMemoryMb(host.disk_free_mb)}
+                </p>
+              </div>
+            </div>
+          </section>
         ) : null}
 
         <h3 className="section-subheading">GPU</h3>
@@ -476,11 +532,11 @@ export function NodeDetailPage() {
           </p>
         ) : null}
 
-        <div className="gpu-grid">
+        <div className="gpu-grid node-resource-v2__gpu-grid">
           {gpuItems.map(({ gpu, snapshot }) => (
             <article
               key={gpu.id}
-              className="gpu-card"
+              className="gpu-card node-resource-v2__gpu-card"
               aria-label={`GPU ${gpu.device_index}`}
             >
               <header className="gpu-card__header">
@@ -489,83 +545,97 @@ export function NodeDetailPage() {
                 </h4>
                 <StatusBadge status={gpu.status} />
               </header>
-              <dl className="meta-grid meta-grid--compact">
-                <div>
-                  <dt>
-                    <TermLabel text="GPU UUID" apiTerm="GPU UUID" />
-                  </dt>
-                  <dd className="mono">{gpu.gpu_uuid}</dd>
-                </div>
-                <div>
-                  <dt>
-                    <TermLabel
-                      text="GPU 연산 지원 버전"
-                      apiTerm="Compute Capability"
-                    />
-                  </dt>
-                  <dd>{gpu.compute_capability || '—'}</dd>
-                </div>
-                <div>
-                  <dt>
-                    <TermLabel text="마지막 확인" apiTerm="Last Seen" />
-                  </dt>
-                  <dd>{formatApiDateTime(gpu.last_seen_at)}</dd>
-                </div>
-                <div>
-                  <dt>
-                    <TermLabel
-                      text="GPU 안전 여유"
-                      apiTerm="Safety Margin"
-                      help={NODE_FIELD_HELP.safetyMargin}
-                    />
-                  </dt>
-                  <dd>{formatMemoryMb(gpu.safety_margin_mb)}</dd>
-                </div>
-              </dl>
-
               {!snapshot ? (
                 <p className="empty-state" role="status">
                   GPU 자원이 미수집입니다. 0으로 대체하지 않습니다. 「리소스
                   갱신」으로 수집하세요.
                 </p>
               ) : (
-                <>
-                  <UsageBar
-                    label="GPU 메모리 사용량 / 전체 (VRAM Used / Total)"
-                    displayValue={memoryPair(
-                      snapshot.vram_used_mb,
-                      snapshot.vram_total_mb,
-                    )}
-                    percentage={usagePercent(
-                      snapshot.vram_used_mb,
-                      snapshot.vram_total_mb,
-                    )}
-                  />
-                  <p className="metric-line">
-                    남은 GPU 메모리 (VRAM Free):{' '}
-                    {formatMemoryMb(snapshot.vram_free_mb)}
-                  </p>
-                  <p className="metric-line">
-                    GPU 연산 사용률 (GPU Utilization):{' '}
-                    {formatUtilizationPct(snapshot.gpu_utilization_pct)}
-                  </p>
-                  <p className="metric-line">
-                    GPU 메모리 컨트롤러 사용률 (Memory Utilization):{' '}
-                    {formatUtilizationPct(snapshot.memory_utilization_pct)}
-                  </p>
-                  <p className="metric-line">
-                    GPU 온도 (Temperature):{' '}
-                    {formatTemperatureC(snapshot.temperature_c)}
-                  </p>
-                  <p className="metric-line">
-                    GPU 소비 전력 (Power): {formatPowerW(snapshot.power_w)}
-                  </p>
+                <div className="node-resource-v2__gpu-readings">
                   <p className="sampled-at">
                     자원 측정 시각 (Snapshot Sampled At){' '}
                     {formatApiDateTime(snapshot.sampled_at)}
                   </p>
-                </>
+                  <div className="node-resource-v2__metric-card node-resource-v2__vram">
+                    <UsageBar
+                      label="GPU 메모리 사용량 / 전체 (VRAM Used / Total)"
+                      displayValue={memoryPair(
+                        snapshot.vram_used_mb,
+                        snapshot.vram_total_mb,
+                      )}
+                      percentage={usagePercent(
+                        snapshot.vram_used_mb,
+                        snapshot.vram_total_mb,
+                      )}
+                    />
+                    <p className="metric-line">
+                      남은 GPU 메모리 (VRAM Free):{' '}
+                      {formatMemoryMb(snapshot.vram_free_mb)}
+                    </p>
+                  </div>
+                  <div className="node-resource-v2__util-grid">
+                    <div className="node-resource-v2__metric-card">
+                      <UsageBar
+                        label="GPU 연산 사용률 (GPU Utilization)"
+                        displayValue={formatUtilizationPct(
+                          snapshot.gpu_utilization_pct,
+                        )}
+                        percentage={measuredUtilization(
+                          snapshot.gpu_utilization_pct,
+                        )}
+                      />
+                    </div>
+                    <div className="node-resource-v2__metric-card">
+                      <UsageBar
+                        label="GPU 메모리 컨트롤러 사용률 (Memory Utilization)"
+                        displayValue={formatUtilizationPct(
+                          snapshot.memory_utilization_pct,
+                        )}
+                        percentage={measuredUtilization(
+                          snapshot.memory_utilization_pct,
+                        )}
+                      />
+                    </div>
+                  </div>
+                  <div className="node-resource-v2__facts">
+                    <p className="metric-line">
+                      GPU 온도 (Temperature): {formatTemperatureC(snapshot.temperature_c)}
+                    </p>
+                    <p className="metric-line">
+                      GPU 소비 전력 (Power): {formatPowerW(snapshot.power_w)}
+                    </p>
+                  </div>
+                </div>
               )}
+              <p className="node-resource-v2__safety">
+                <TermLabel
+                  text="GPU 안전 여유 (Safety Margin)"
+                  help={NODE_FIELD_HELP.safetyMargin}
+                />:{' '}
+                <strong>{formatMemoryMb(gpu.safety_margin_mb)}</strong>
+              </p>
+              <details className="node-resource-v2__gpu-identity">
+                <summary>GPU 식별·기술 정보</summary>
+                <dl className="meta-grid meta-grid--compact">
+                  <div>
+                    <dt><TermLabel text="GPU UUID" apiTerm="GPU UUID" /></dt>
+                    <dd className="mono">{gpu.gpu_uuid}</dd>
+                  </div>
+                  <div>
+                    <dt>
+                      <TermLabel
+                        text="GPU 연산 지원 버전"
+                        apiTerm="Compute Capability"
+                      />
+                    </dt>
+                    <dd>{gpu.compute_capability || '—'}</dd>
+                  </div>
+                  <div>
+                    <dt><TermLabel text="마지막 확인" apiTerm="Last Seen" /></dt>
+                    <dd>{formatApiDateTime(gpu.last_seen_at)}</dd>
+                  </div>
+                </dl>
+              </details>
             </article>
           ))}
         </div>
