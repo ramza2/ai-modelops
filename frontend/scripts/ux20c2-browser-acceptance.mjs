@@ -1,0 +1,317 @@
+/**
+ * UX20-C2 browser acceptance (Node.js 22 + Chrome CDP, no npm browser package).
+ * Mock server binds only 127.0.0.1. Never points Vite at a real Management API.
+ */
+import assert from 'node:assert/strict'
+import { spawn, spawnSync } from 'node:child_process'
+import { createServer } from 'node:http'
+import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join, resolve } from 'node:path'
+
+const sleep = (ms) => new Promise((done) => setTimeout(done, ms))
+const evidence = resolve(process.env.CI_BROWSER_ARTIFACTS || join(tmpdir(), 'modelops-ux20c2-browser'))
+const samples = { base: '2026-11-18T02:00:00Z', later: '2026-11-18T04:00:00Z' }
+const gpu = (index) => ({
+  id: 'gpu-' + index, node_id: 'node-ux20c2',
+  gpu_uuid: 'GPU-UUID-' + index, device_index: index,
+  model_name: 'TEST-GPU-' + index, vram_total_mb: index ? 24576 : 16384,
+  compute_capability: '8.6', safety_margin_mb: 1024, status: 'AVAILABLE',
+  last_seen_at: samples.base, created_at: samples.base, updated_at: samples.base,
+})
+const host = () => ({
+  sampled_at: samples.base, cpu_utilization_pct: 12.5,
+  ram_total_mb: 65536, ram_used_mb: 16384, ram_free_mb: 49152,
+  disk_total_mb: 512000, disk_used_mb: 128000, disk_free_mb: 384000,
+})
+const measured = (index) => ({
+  gpu: gpu(index),
+  snapshot: {
+    sampled_at: index ? samples.later : samples.base,
+    vram_total_mb: index ? 24576 : 16384,
+    vram_used_mb: index ? 12288 : 4096,
+    vram_free_mb: index ? 12288 : 12288,
+    gpu_utilization_pct: index ? null : 40,
+    memory_utilization_pct: index ? 20 : 0,
+    temperature_c: index ? null : 42,
+    power_w: index ? null : 80,
+  },
+})
+const resources = () => {
+  if (scenario === 'empty') {
+    return { node_id: 'node-ux20c2', source: 'persisted_snapshot', host: null, gpus: [] }
+  }
+  if (scenario === 'partial') {
+    return {
+      node_id: 'node-ux20c2', source: 'persisted_snapshot', host: null,
+      gpus: [{
+        gpu: gpu(0),
+        snapshot: {
+          sampled_at: samples.base, vram_total_mb: 0, vram_used_mb: 0,
+          vram_free_mb: 0, gpu_utilization_pct: 0, memory_utilization_pct: null,
+          temperature_c: 0, power_w: 0,
+        },
+      }, { gpu: gpu(1), snapshot: null }],
+    }
+  }
+  const currentHost = host()
+  if (refreshed) currentHost.cpu_utilization_pct = 55
+  return {
+    node_id: 'node-ux20c2', source: 'persisted_snapshot',
+    host: currentHost, gpus: [measured(0), measured(1)],
+  }
+}
+const node = () => ({
+  id: 'node-ux20c2', name: 'gpu-node-mock', hostname: 'mock.local',
+  agent_base_url: 'http://never-called.invalid', environment: 'test',
+  region: 'isolated', status: 'ONLINE', last_heartbeat_at: samples.base,
+  cpu_model: 'Mock CPU', ram_total_mb: 65536, disk_total_mb: 512000,
+  labels_json: null, created_at: samples.base, updated_at: samples.base,
+  gpus: resources().gpus.map((item) => item.gpu),
+})
+
+let scenario = 'rich'
+let readFailure = false
+let postFailure = false
+let refreshed = false
+const requests = []
+const exceptions = []
+const unexpectedRemoteRequests = []
+const passes = []
+let server, vite, chrome, websocket, chromeProfile
+
+function sendJson(res, status, body) {
+  const data = JSON.stringify(body)
+  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' })
+  res.end(data)
+}
+async function waitUntil(condition, label, timeout = 15000) {
+  const deadline = Date.now() + timeout
+  let lastError
+  while (Date.now() < deadline) {
+    try { if (await condition()) return } catch (error) { lastError = error }
+    await sleep(80)
+  }
+  throw new Error('Timed out: ' + label + (lastError ? ' — ' + String(lastError) : ''))
+}
+function chromeBinary() {
+  if (process.env.CHROME_BIN) return process.env.CHROME_BIN
+  for (const name of ['google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser']) {
+    if (spawnSync('which', [name], { stdio: 'ignore' }).status === 0) return name
+  }
+  throw new Error('Headless Chrome/Chromium is not available on the runner')
+}
+async function connectCdp(port) {
+  const targets = await (await fetch('http://127.0.0.1:' + port + '/json/list')).json()
+  const page = targets.find((target) => target.type === 'page')
+  assert.ok(page?.webSocketDebuggerUrl, 'Chrome page target is available')
+  const ws = new WebSocket(page.webSocketDebuggerUrl)
+  await new Promise((ok, fail) => { ws.onopen = ok; ws.onerror = fail })
+  websocket = ws
+  let id = 0
+  const pending = new Map()
+  ws.onmessage = ({ data }) => {
+    const message = JSON.parse(String(data))
+    if (message.id) {
+      const handler = pending.get(message.id)
+      if (handler) { pending.delete(message.id); handler(message) }
+      return
+    }
+    if (message.method === 'Runtime.exceptionThrown') {
+      exceptions.push(message.params?.exceptionDetails?.text || 'Runtime exception')
+    }
+    if (message.method === 'Network.requestWillBeSent') {
+      const url = message.params?.request?.url || ''
+      if (/^https?:/i.test(url) && !url.startsWith('http://127.0.0.1:3000/')) {
+        unexpectedRemoteRequests.push(url)
+      }
+    }
+  }
+  return {
+    call: (method, params = {}) => new Promise((ok, fail) => {
+      const requestId = ++id
+      const timeout = setTimeout(() => { pending.delete(requestId); fail(new Error('CDP timeout: ' + method)) }, 12000)
+      pending.set(requestId, (response) => {
+        clearTimeout(timeout)
+        if (response.error) fail(new Error(method + ': ' + response.error.message))
+        else ok(response.result)
+      })
+      ws.send(JSON.stringify({ id: requestId, method, params }))
+    }),
+  }
+}
+async function evaluate(cdp, expression) {
+  const result = await cdp.call('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true })
+  if (result.exceptionDetails) {
+    throw new Error('Browser JavaScript: ' + (result.result?.description || result.exceptionDetails.text))
+  }
+  return result.result?.value
+}
+async function ready(cdp) {
+  await waitUntil(async () => evaluate(cdp, "document.querySelector('.node-resource-v2__overview') !== null"), 'Node resource overview')
+  await waitUntil(async () => evaluate(cdp, "document.querySelectorAll('.node-resource-v2__gpu-card').length === " + (scenario === 'empty' ? '0' : '2')), 'GPU cards')
+}
+async function navigate(cdp, tag) {
+  await cdp.call('Page.navigate', { url: 'http://127.0.0.1:3000/nodes/node-ux20c2?accept=' + tag })
+  await ready(cdp)
+}
+async function screenshot(cdp, name) {
+  const shot = await cdp.call('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false })
+  await writeFile(join(evidence, name + '.png'), Buffer.from(shot.data, 'base64'))
+}
+async function check(name, task) {
+  await task()
+  passes.push(name)
+  console.log('PASS ' + name)
+}
+async function run() {
+  await mkdir(evidence, { recursive: true })
+  server = createServer((req, res) => {
+    const path = new URL(req.url || '/', 'http://127.0.0.1').pathname
+    const method = req.method || 'GET'
+    requests.push(method + ' ' + path)
+    if (path === '/api/v1/nodes/node-ux20c2' && method === 'GET') {
+      return sendJson(res, 200, node())
+    }
+    if (path === '/api/v1/nodes/node-ux20c2/resources/latest' && method === 'GET') {
+      return readFailure
+        ? sendJson(res, 503, { error: { message: 'Mock read unavailable' } })
+        : sendJson(res, 200, resources())
+    }
+    if (path === '/api/v1/nodes/node-ux20c2/resources/refresh' && method === 'POST') {
+      if (postFailure) return sendJson(res, 502, { error: { message: 'Mock collection failed' } })
+      refreshed = true
+      return sendJson(res, 200, resources())
+    }
+    return sendJson(res, 404, { error: { message: 'Blocked by isolated mock backend' } })
+  })
+  await new Promise((ok) => server.listen(0, '127.0.0.1', ok))
+  const port = server.address().port
+  vite = spawn(process.execPath, ['node_modules/vite/bin/vite.js', '--host', '127.0.0.1', '--port', '3000', '--strictPort'], {
+    cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env, VITE_MODELOPS_API_BASE_URL: '', VITE_DEV_PROXY_TARGET: 'http://127.0.0.1:' + port },
+  })
+  let viteError = ''
+  vite.stderr.on('data', (chunk) => { viteError += String(chunk).slice(-2000) })
+  await waitUntil(async () => {
+    if (vite.exitCode !== null) throw new Error('Vite exited: ' + viteError)
+    const response = await fetch('http://127.0.0.1:3000')
+    return response.ok
+  }, 'isolated Vite')
+  chromeProfile = await mkdtemp(join(tmpdir(), 'modelops-browser-'))
+  chrome = spawn(chromeBinary(), [
+    '--headless=new', '--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu',
+    '--no-first-run', '--no-default-browser-check', '--disable-background-networking',
+    '--disable-extensions', '--disable-sync', '--disable-component-update',
+    '--remote-allow-origins=*', '--remote-debugging-port=0',
+    '--user-data-dir=' + chromeProfile, 'about:blank',
+  ], { stdio: 'ignore' })
+  let chromePort = 0
+  await waitUntil(async () => {
+    if (chrome.exitCode !== null) throw new Error('Chrome exited unexpectedly')
+    try {
+      const contents = await readFile(join(chromeProfile, 'DevToolsActivePort'), 'utf8')
+      chromePort = Number(contents.split('\n')[0])
+      return chromePort > 0
+    } catch { return false }
+  }, 'Chrome DevTools port')
+  const cdp = await connectCdp(chromePort)
+  await cdp.call('Page.enable')
+  await cdp.call('Runtime.enable')
+  await cdp.call('Network.enable')
+
+  await check('rich independent GPU snapshots and timestamps', async () => {
+    scenario = 'rich'
+    await navigate(cdp, 'rich')
+    await waitUntil(async () => evaluate(cdp, "document.body.innerText.includes('4.0 GiB / 16.0 GiB') && document.body.innerText.includes('12.0 GiB / 24.0 GiB')"), 'rich measurements')
+    const values = await evaluate(cdp, "Array.from(document.querySelectorAll('.node-resource-v2__gpu-card')).map(el => ({text:el.innerText, sampled:el.querySelector('.sampled-at')?.innerText}))")
+    assert.equal(values.length, 2)
+    assert.notEqual(values[0].sampled, values[1].sampled, 'Per-GPU timestamps must not be merged')
+    assert.ok(values[0].text.includes('42.0 °C'))
+    assert.ok(values[1].text.includes('—'))
+    assert.ok((await evaluate(cdp, "document.body.innerText")).includes('DB 저장 스냅샷'))
+    const countBefore = requests.filter(x => x.includes('POST')).length
+    assert.equal(countBefore, 0, 'Viewing snapshots must never collect new data')
+    await evaluate(cdp, "document.querySelector('.node-resource-v2__gpu-identity summary').click()")
+    assert.equal(await evaluate(cdp, "document.querySelector('.node-resource-v2__gpu-identity').open"), true)
+  })
+
+  await check('320/375/768/1024/1280 responsive and light/dark', async () => {
+    for (const width of [320, 375, 768, 1024, 1280]) {
+      await cdp.call('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: false })
+      await sleep(120)
+      const sizes = await evaluate(cdp, "({width:document.documentElement.clientWidth,scroll:document.documentElement.scrollWidth,inner:window.innerWidth})")
+      assert.equal(sizes.inner, width)
+      assert.ok(sizes.scroll <= sizes.width + 1, width + 'px horizontal overflow: ' + JSON.stringify(sizes))
+      if (width === 320) await screenshot(cdp, 'node-320-light')
+    }
+    await cdp.call('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: 'dark' }] })
+    assert.equal(await evaluate(cdp, "matchMedia('(prefers-color-scheme: dark)').matches"), true)
+    await screenshot(cdp, 'node-1280-dark')
+    await cdp.call('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: 'light' }] })
+  })
+
+  await check('missing GPU, measured zero versus null', async () => {
+    scenario = 'partial'
+    await navigate(cdp, 'partial')
+    await waitUntil(async () => evaluate(cdp, "document.body.innerText.includes('1 / 2개 측정')"), 'partial snapshots')
+    const states = await evaluate(cdp, "Array.from(document.querySelectorAll('.node-resource-v2__gpu-card')).map(el => ({text:el.innerText, bars:Array.from(el.querySelectorAll('[role=progressbar]')).map(bar => ({label:bar.getAttribute('aria-label'),value:bar.getAttribute('aria-valuenow')}))}))")
+    assert.ok(states[0].text.includes('0 MB / 0 MB'))
+    assert.ok(states[1].text.includes('미수집'))
+    assert.ok(states[0].bars.some(b => b.label.includes('GPU Utilization') && b.value === '0'))
+    assert.ok(!states[0].bars.some(b => b.label.includes('VRAM Used')))
+    assert.ok(!states[0].bars.some(b => b.label.includes('Memory Utilization')))
+  })
+
+  await check('zero registered GPU and host uncollected', async () => {
+    scenario = 'empty'
+    await navigate(cdp, 'empty')
+    await waitUntil(async () => evaluate(cdp, "document.body.innerText.includes('등록된 GPU가 없습니다.')"), 'empty GPU')
+    assert.ok((await evaluate(cdp, "document.body.innerText")).includes('Host 자원이 미수집'))
+  })
+
+  await check('GET read failure keeps prior data with warning', async () => {
+    scenario = 'rich'
+    readFailure = false
+    refreshed = false
+    await navigate(cdp, 'get-ok')
+    await waitUntil(async () => evaluate(cdp, "document.body.innerText.includes('12.5%')"), 'GET baseline')
+    readFailure = true
+    await evaluate(cdp, "Array.from(document.querySelectorAll('button')).find(b=>b.textContent.trim()==='새로고침').click()")
+    await waitUntil(async () => evaluate(cdp, "document.body.innerText.includes('Mock read unavailable') && document.body.innerText.includes('이전에 조회한 스냅샷')"), 'retained GET warning')
+    assert.ok((await evaluate(cdp, "document.body.innerText")).includes('12.5%'))
+    readFailure = false
+  })
+
+  await check('POST is opt-in and routes only to mock server', async () => {
+    await evaluate(cdp, "Array.from(document.querySelectorAll('button')).find(b=>b.textContent.trim()==='리소스 갱신').click()")
+    await waitUntil(async () => evaluate(cdp, "document.body.innerText.includes('55.0%')"), 'mock-only resource refresh')
+    const postCount = requests.filter((x) => x === 'POST /api/v1/nodes/node-ux20c2/resources/refresh').length
+    assert.equal(postCount, 1)
+    postFailure = true
+    await evaluate(cdp, "Array.from(document.querySelectorAll('button')).find(b=>b.textContent.trim()==='리소스 갱신').click()")
+    await waitUntil(async () => evaluate(cdp, "document.body.innerText.includes('Mock collection failed') && document.body.innerText.includes('이전에 조회한 스냅샷')"), 'mock POST error')
+    assert.ok((await evaluate(cdp, "document.body.innerText")).includes('55.0%'))
+    assert.equal(requests.filter((x) => x.startsWith('POST ')).length, 2)
+    assert.equal(unexpectedRemoteRequests.length, 0, 'External requests are forbidden: ' + unexpectedRemoteRequests.join(', '))
+    assert.deepEqual(exceptions, [], 'No uncaught Chrome exceptions')
+  })
+  await screenshot(cdp, 'node-final')
+}
+try {
+  await run()
+  await writeFile(join(evidence, 'result.json'), JSON.stringify({ status: 'PASS', passes, requests, unexpectedRemoteRequests, exceptions }, null, 2))
+  console.log('UX20C2_BROWSER_ACCEPTANCE_PASS (' + passes.length + ' checks)')
+} catch (error) {
+  console.error(error)
+  await mkdir(evidence, { recursive: true })
+  await writeFile(join(evidence, 'result.json'), JSON.stringify({ status: 'FAIL', message: String(error), passes, requests, unexpectedRemoteRequests, exceptions }, null, 2))
+  process.exitCode = 1
+} finally {
+  websocket?.close()
+  chrome?.kill('SIGTERM')
+  vite?.kill('SIGTERM')
+  server?.closeAllConnections?.()
+  server?.close()
+  if (chromeProfile) await rm(chromeProfile, { recursive: true, force: true, maxRetries: 3 }).catch(() => {})
+}
