@@ -2209,3 +2209,117 @@ th {
     flex-direction: column;
   }
 }
+
+/* —— UX20-C1: Runtime history measured trends (SVG, no chart package) —— */
+.runtime-history-chart {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+  margin: 0 0 1rem;
+  min-width: 0;
+}
+
+.runtime-history-chart__heading {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 650;
+}
+
+.runtime-history-chart__status {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.runtime-history-chart__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 18rem), 1fr));
+  gap: 0.85rem;
+  min-width: 0;
+}
+
+.runtime-history-chart__figure {
+  margin: 0;
+  min-width: 0;
+  padding: 0.65rem 0.7rem 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+
+.runtime-history-chart__caption {
+  margin: 0 0 0.2rem;
+  font-size: 0.88rem;
+  font-weight: 650;
+}
+
+.runtime-history-chart__note {
+  margin: 0 0 0.45rem;
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.4;
+}
+
+.runtime-history-chart__svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-width: 100%;
+}
+
+.runtime-history-chart__plot {
+  fill: var(--surface);
+  stroke: var(--border);
+  stroke-width: 1;
+}
+
+.runtime-history-chart__grid {
+  stroke: var(--border);
+  stroke-width: 1;
+  stroke-dasharray: 2 3;
+  opacity: 0.85;
+}
+
+.runtime-history-chart__tick {
+  fill: var(--muted);
+  font-size: 9px;
+}
+
+.runtime-history-chart__line {
+  fill: none;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.runtime-history-chart__point {
+  stroke: var(--surface);
+  stroke-width: 1;
+}
+
+.runtime-history-chart__legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+  margin: 0.35rem 0 0;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.runtime-history-chart__swatch {
+  display: inline-block;
+  width: 0.65rem;
+  height: 0.65rem;
+  border-radius: 2px;
+}
+
+@media (max-width: 375px) {
+  .runtime-history-chart__grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .runtime-history-chart__tick {
+    font-size: 8px;
+  }
+}

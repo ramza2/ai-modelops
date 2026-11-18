@@ -508,4 +508,75 @@ describe('DeploymentObservabilityPage', () => {
     expect(rows[2]?.textContent).toMatch(/PARTIAL/)
     expect(screen.getAllByText(/MATCH/).length).toBeGreaterThan(0)
   })
+
+  it('shows measured history trends above the preserved history table (UX20-C1)', async () => {
+    vi.mocked(observabilityApi.getRuntimeLatest).mockResolvedValue(makeLatest())
+    vi.mocked(observabilityApi.getRuntimeHistory).mockResolvedValue(
+      makeHistory(),
+    )
+    vi.mocked(observabilityApi.getCapacityProfile).mockResolvedValue(
+      makeProfile(),
+    )
+    renderAt('/observability/deployments/dep-a')
+    expect(
+      await screen.findByTestId('runtime-history-chart'),
+    ).toBeInTheDocument()
+    expect(screen.getByText(/실측 시간 추이/)).toBeInTheDocument()
+    expect(screen.getByText(/보간·예측하지/)).toBeInTheDocument()
+    // makeHistory has an instance change between samples → still drawable KV/running
+    expect(
+      screen.getByRole('img', { name: /KV 캐시 사용률/ }),
+    ).toBeInTheDocument()
+    const historyHeading = screen.getByRole('heading', {
+      name: /History \(oldest → newest\)/,
+    })
+    const historySection = historyHeading.closest('section')!
+    expect(
+      within(historySection).getByRole('table'),
+    ).toBeInTheDocument()
+  })
+
+  it('keeps the history table and explains when chart points are insufficient', async () => {
+    vi.mocked(observabilityApi.getRuntimeLatest).mockResolvedValue(makeLatest())
+    vi.mocked(observabilityApi.getRuntimeHistory).mockResolvedValue({
+      deployment_id: 'dep-a',
+      hours: 24,
+      limit: 500,
+      ordering: 'oldest_to_newest',
+      items: [
+        {
+          deployment_id: 'dep-a',
+          sampled_at: '2026-10-07T00:00:00Z',
+          availability: 'AVAILABLE',
+          kv_cache_usage_ratio: 0.1,
+          num_requests_running: 0,
+          num_requests_waiting: 0,
+          prompt_tokens_total: 1,
+          generation_tokens_total: 1,
+          error_code: null,
+          error_message: null,
+          runtime_instance: null,
+        },
+      ],
+    })
+    vi.mocked(observabilityApi.getCapacityProfile).mockResolvedValue(
+      makeProfile(),
+    )
+    renderAt('/observability/deployments/dep-a')
+    expect(
+      await screen.findByTestId('runtime-history-chart'),
+    ).toBeInTheDocument()
+    expect(
+      screen.getByText(/차트용 실측 점이 2개 미만/),
+    ).toBeInTheDocument()
+    expect(screen.queryByRole('img', { name: /KV 캐시/ })).not.toBeInTheDocument()
+    const historyHeading = screen.getByRole('heading', {
+      name: /History \(oldest → newest\)/,
+    })
+    expect(
+      within(historyHeading.closest('section') as HTMLElement).getByRole(
+        'table',
+      ),
+    ).toBeInTheDocument()
+  })
 })
