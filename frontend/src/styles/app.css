@@ -2516,3 +2516,94 @@ th {
     padding: 0.7rem;
   }
 }
+
+/* —— UX20-D1: read-only operation triage —— */
+.operation-triage {
+  display: grid;
+  gap: 0.65rem;
+  margin: 0 0 1rem;
+  padding: 0.85rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.operation-triage__heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.45rem 0.9rem;
+}
+
+.operation-triage__heading strong {
+  font-size: 1rem;
+}
+
+.operation-triage__heading span,
+.operation-triage__note {
+  color: var(--muted);
+  font-size: 0.875rem;
+  line-height: 1.45;
+}
+
+.operation-triage__note {
+  margin: 0;
+}
+
+.operation-triage__options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.operation-triage__option {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-2);
+  color: var(--text);
+  padding: 0.52rem 0.8rem;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  min-width: 0;
+}
+
+.operation-triage__option--active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--surface);
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+
+.operation-triage__option:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.operation-triage__results {
+  margin: 0.4rem 0 0.8rem;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.operation-triage__results strong {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.operation-triage__row-hint {
+  display: block;
+  margin-top: 0.3rem;
+  color: var(--muted);
+  font-size: 0.83rem;
+  line-height: 1.35;
+}
+
+@media (max-width: 375px) {
+  .operation-triage {
+    padding: 0.75rem 0.7rem;
+  }
+  .operation-triage__option {
+    flex: 1 1 auto;
+  }
+}
