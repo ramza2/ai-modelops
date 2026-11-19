@@ -995,3 +995,12 @@ MVP에서 미래 확장성을 이유로 불필요한 분산 시스템이나 추�
 - ChatGPT에서 GitHub 코드·문서/CI를 직접 처리하고 Cursor 사용을 최소화한다. 실제 운영 서버에 대한 원격 실행 권한은 없으므로 GitHub Actions의 Mock PASS를 운영 확인으로 간주하지 않는다.
 - 환경 파일/토큰/전체 Docker Env·Config·로그를 출력하지 않는다. 컨테이너 조회+3개 동일 Origin GET 외에는 운영 동작 변경 금지.
 - Frontend-only 배포는 사용자 명시 승인, 실제 이미지/태그/롤백/Compose project 확인 이후 별도 진행한다. 전체 `deploy-server.sh` 또는 `docker compose up -d --build`를 실행하지 않는다.
+
+
+## ModelOps UX21-A — 대시보드 GPU 저장 스냅샷 (2026-11-19)
+
+- 기준: `docs/uiux/modelops-uiux-2.1-ux21a.md`, 추적 Issue #113. UX20-E 운영 UI 인수검사 완료; 이번 브랜치는 **Frontend-only** 대시보드 GPU 요약이며 시계열 구축 아님.
+- `GET /nodes?page_size=5`와 노드별 `GET /nodes/{id}/resources/latest`를 최대 5대 조회. `POST /resources/refresh` 자동/수동 호출 추가 금지. GPU·Node Agent·Backend·DB·Worker·Gateway 변경 금지.
+- 각 GPU별 persisted VRAM 사용/전체, 연산 사용률, `sampled_at`만 표시. 0/null/오류와 오래된 샘플 구분, 복수 GPU VRAM 합산·가짜 trend·실시간 레이블 금지.
+- 기존 Dashboard 15초 polling/Abort/partial success·KPI·링크 유지. 신규 조회 실패가 전체 페이지를 실패하게 하지 않는다.
+- ChatGPT GitHub 직접 수정/Frontend CI·격리 브라우저 테스트 우선, Cursor 최소화. Draft PR/테스트까지 진행하고 main 병합·운영 배포는 **별도 승인**.
