@@ -256,8 +256,10 @@ describe('AppShell (UX20-B)', () => {
     await waitFor(() => {
       expect(menuToggle()).toHaveAttribute('aria-expanded', 'false')
     })
-    expect(screen.queryByRole('button', { name: '메뉴 배경 닫기' })).not.toBeInTheDocument()
-    expect(document.body.style.overflow).toBe('')
+    await waitFor(() => {
+      expect(screen.queryByRole('button', { name: '메뉴 배경 닫기' })).not.toBeInTheDocument()
+      expect(document.body.style.overflow).toBe('')
+    })
     expect(menuToggle()).toHaveAttribute('aria-expanded', 'false')
   })
 
