@@ -15,6 +15,7 @@ from app.domain.models import OperationJob
 from app.repositories.operations import OperationJobRepository
 from app.services.operation_executor import OperationExecutor
 from app.services.runtime_metrics_collector import RuntimeMetricsCollector
+from app.services.host_gpu_snapshot_collector import HostGpuSnapshotCollector
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +43,7 @@ class JobRunner:
         stop_event: asyncio.Event | None = None,
         engine: Any | None = None,
         metrics_collector: RuntimeMetricsCollector | None = None,
+        host_gpu_collector: HostGpuSnapshotCollector | None = None,
     ) -> None:
         self._settings = settings or get_settings()
         self._session_factory = session_factory or get_sessionmaker()
@@ -82,10 +84,26 @@ class JobRunner:
                 transport=self._transport,
                 stop_event=self._stop_event,
             )
+        self._host_gpu_collector = (
+            host_gpu_collector
+            if host_gpu_collector is not None
+            else (
+                HostGpuSnapshotCollector(
+                    settings=self._settings,
+                    session_factory=self._session_factory,
+                    engine=resolved_engine or get_engine(),
+                    stop_event=self._stop_event,
+                )
+                if self._settings.host_gpu_collector_enabled
+                else None
+            )
+        )
 
     def request_shutdown(self) -> None:
         self._stop_event.set()
         self._metrics_collector.request_shutdown()
+        if self._host_gpu_collector is not None:
+            self._host_gpu_collector.request_shutdown()
 
     async def run_forever(self) -> None:
         logger.info(
@@ -100,6 +118,11 @@ class JobRunner:
             self._run_metrics_collector(),
             name="runtime-metrics-collector",
         )
+        host_gpu_task = (
+            asyncio.create_task(self._run_host_gpu_collector(), name="host-gpu-collector")
+            if self._host_gpu_collector is not None
+            else None
+        )
         try:
             while not self._stop_event.is_set():
                 worked = await self.poll_once()
@@ -113,6 +136,10 @@ class JobRunner:
                         pass
         finally:
             self._metrics_collector.request_shutdown()
+            if self._host_gpu_collector is not None:
+                self._host_gpu_collector.request_shutdown()
+            if host_gpu_task is not None:
+                await self._stop_collector(host_gpu_task)
             await self._stop_collector(collector_task)
         logger.info("Worker %s shut down.", self._settings.worker_id)
 
@@ -123,6 +150,14 @@ class JobRunner:
             logger.exception(
                 "Runtime metrics collector task crashed; operation loop continues."
             )
+
+    async def _run_host_gpu_collector(self) -> None:
+        if self._host_gpu_collector is None:
+            return
+        try:
+            await self._host_gpu_collector.run_forever()
+        except Exception:  # noqa: BLE001 - isolate from operation loop
+            logger.exception("Host/GPU collector task crashed; operation loop continues.")
 
     @staticmethod
     async def _stop_collector(task: asyncio.Task[None]) -> None:
