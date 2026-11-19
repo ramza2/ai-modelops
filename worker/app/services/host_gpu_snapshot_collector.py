@@ -125,8 +125,9 @@ class HostGpuSnapshotCollector:
         while not self._stop_event.is_set():
             try:
                 await self.collect_once()
-            except Exception:  # noqa: BLE001 - never crash the operation Worker loop
-                logger.exception("Host/GPU collector sweep failed.")
+            except Exception as exc:  # noqa: BLE001 - never crash the operation Worker loop
+                # Do not serialize upstream/DB errors, which could contain URLs or secrets.
+                logger.warning("Host/GPU collector sweep failed: %s", type(exc).__name__)
             try:
                 await asyncio.wait_for(
                     self._stop_event.wait(),
