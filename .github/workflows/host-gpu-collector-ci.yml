@@ -53,3 +53,46 @@ jobs:
       - name: Isolated collector tests
         working-directory: worker
         run: python -m pytest -q tests/test_host_gpu_snapshot_collector.py
+
+  regression:
+    name: Existing Worker regression
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: modelops_test
+          POSTGRES_USER: modelops_test
+          POSTGRES_PASSWORD: modelops_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U modelops_test -d modelops_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      MODELOPS_DATABASE_URL: postgresql+asyncpg://modelops_test:modelops_test@127.0.0.1:5432/modelops_test
+      MODELOPS_HOST_GPU_COLLECTOR_ENABLED: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            worker/requirements.txt
+            backend/requirements.txt
+      - name: Install Worker and Backend migration dependencies
+        run: |
+          python -m pip install -r backend/requirements.txt
+          python -m pip install -r worker/requirements.txt
+          python -m pip install pytest==8.3.5 pytest-asyncio==0.25.3
+      - name: Initialize isolated Management schema
+        working-directory: backend
+        run: python -m alembic upgrade head
+      - name: Existing Worker focused regression
+        working-directory: worker
+        run: |
+          python -m pytest -q \
+            tests/test_runtime_metrics_collector.py \
+            tests/test_job_lease_heartbeat.py \
+            tests/test_operation_worker.py
