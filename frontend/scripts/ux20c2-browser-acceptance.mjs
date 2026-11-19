@@ -78,6 +78,8 @@ let operationReadFailure = false
 let operationDetailReadFailure = false
 let dashboardDeploymentsFailure = false
 const unexpectedApiPaths = []
+const responsesFinished = []
+const networkResponses = []
 const requests = []
 const exceptions = []
 const unexpectedRemoteRequests = []
@@ -86,7 +88,7 @@ let server, vite, chrome, websocket, chromeProfile
 
 function sendJson(res, status, body) {
   const data = JSON.stringify(body)
-  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' })
+  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'Connection': 'close', 'Content-Length': Buffer.byteLength(data) })
   res.end(data)
 }
 async function waitUntil(condition, label, timeout = 15000) {
@@ -123,6 +125,12 @@ async function connectCdp(port) {
     }
     if (message.method === 'Runtime.exceptionThrown') {
       exceptions.push(message.params?.exceptionDetails?.text || 'Runtime exception')
+    }
+    if (message.method === 'Network.responseReceived') {
+      const response = message.params?.response
+      if (response?.url?.includes('/api/') || response?.url?.endsWith('/health') || response?.url?.endsWith('/ready')) {
+        networkResponses.push({ url: response.url, status: response.status })
+      }
     }
     if (message.method === 'Network.requestWillBeSent') {
       const url = message.params?.request?.url || ''
@@ -174,6 +182,7 @@ async function run() {
     const path = new URL(req.url || '/', 'http://127.0.0.1').pathname
     const method = req.method || 'GET'
     requests.push(method + ' ' + path)
+    res.on('finish', () => responsesFinished.push(method + ' ' + path))
     // UX20-E: public read-only API contracts, with a real empty/zero payload.
     // No fallback to production and no made-up observed metrics.
     if (method === 'GET') {
@@ -519,7 +528,7 @@ async function run() {
           "({path:location.pathname,title:document.querySelector('main h1')?.textContent,body:document.body.innerText.slice(0,1400),apiBase:import.meta?.env})".replace(',apiBase:import.meta?.env', ''))
         console.error('UX20-E MOCK API TRACE', JSON.stringify({
           path, api, before: requestsBefore, observed: requests.filter(x => x === 'GET ' + api).length,
-          latestRequests: requests.slice(-50), browserState, unexpectedApiPaths,
+          latestRequests: requests.slice(-50), finished: responsesFinished.slice(-50), responses: networkResponses.slice(-50), browserState, unexpectedApiPaths,
         }))
         throw error
       }
@@ -611,12 +620,12 @@ async function run() {
 }
 try {
   await run()
-  await writeFile(join(evidence, 'result.json'), JSON.stringify({ status: 'PASS', passes, requests, unexpectedApiPaths, unexpectedRemoteRequests, exceptions }, null, 2))
+  await writeFile(join(evidence, 'result.json'), JSON.stringify({ status: 'PASS', passes, requests, responsesFinished, networkResponses, unexpectedApiPaths, unexpectedRemoteRequests, exceptions }, null, 2))
   console.log('MODELOPS_BROWSER_ACCEPTANCE_PASS (' + passes.length + ' checks)')
 } catch (error) {
   console.error(error)
   await mkdir(evidence, { recursive: true })
-  await writeFile(join(evidence, 'result.json'), JSON.stringify({ status: 'FAIL', message: String(error), passes, requests, unexpectedApiPaths, unexpectedRemoteRequests, exceptions }, null, 2))
+  await writeFile(join(evidence, 'result.json'), JSON.stringify({ status: 'FAIL', message: String(error), passes, requests, responsesFinished, networkResponses, unexpectedApiPaths, unexpectedRemoteRequests, exceptions }, null, 2))
   process.exitCode = 1
 } finally {
   websocket?.close()
