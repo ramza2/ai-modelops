@@ -2725,3 +2725,50 @@ th {
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+/* —— UX21-A: bounded, read-only persisted GPU summary on dashboard —— */
+.dashboard-v2__gpu-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 19rem), 1fr));
+  gap: 0.75rem;
+  min-width: 0;
+}
+.dashboard-v2__gpu-node {
+  min-width: 0;
+  padding: 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-2);
+}
+.dashboard-v2__gpu-node h3 {
+  margin: 0 0 0.6rem;
+  font-size: 0.95rem;
+  overflow-wrap: anywhere;
+}
+.dashboard-v2__gpu-list {
+  display: grid;
+  gap: 0.75rem;
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+.dashboard-v2__gpu-item {
+  display: grid;
+  gap: 0.45rem;
+  padding: 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  min-width: 0;
+}
+.dashboard-v2__gpu-name {
+  margin: 0;
+  font-weight: 600;
+  font-size: 0.86rem;
+  overflow-wrap: anywhere;
+}
+.dashboard-v2__gpu-time {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+  overflow-wrap: anywhere;
+}

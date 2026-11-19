@@ -77,6 +77,7 @@ let refreshed = false
 let operationReadFailure = false
 let operationDetailReadFailure = false
 let dashboardDeploymentsFailure = false
+let dashboardGpuScenario = false
 const unexpectedApiPaths = []
 const responsesFinished = []
 const networkResponses = []
@@ -233,6 +234,12 @@ async function run() {
           return sendJson(res, 503, { error: { message: 'Mock deployments temporarily unavailable' } })
         }
         const query = new URL(req.url || '/', 'http://127.0.0.1').searchParams
+        if (path === '/api/v1/nodes' && dashboardGpuScenario) {
+          return sendJson(res, 200, {
+            items: [node()], page: Number(query.get('page') || '1'),
+            page_size: Number(query.get('page_size') || '20'), total: 1,
+          })
+        }
         return sendJson(res, 200, {
           items: [], page: Number(query.get('page') || '1'),
           page_size: Number(query.get('page_size') || '20'), total: 0,
@@ -634,6 +641,40 @@ async function run() {
     'UX20-E route change closes drawer')
     await screenshot(cdp, 'integrated-nodes-375-after-menu')
     assert.deepEqual(unexpectedApiPaths, [])
+    assert.deepEqual(exceptions, [])
+  })
+
+  await check('UX21-A GPU dashboard is persisted-only, responsive and GET-only', async () => {
+    dashboardGpuScenario = true
+    scenario = 'partial'
+    readFailure = false
+    const beforePostCount = requests.filter(x => !x.startsWith('GET ')).length
+    const beforeLatest = requests.filter(x => x === 'GET /api/v1/nodes/node-ux20c2/resources/latest').length
+    await cdp.call('Page.navigate', { url: 'http://127.0.0.1:3000/dashboard' })
+    await waitUntil(async () => evaluate(cdp,
+      "document.querySelector('[data-testid=dashboard-gpu-summary]')?.innerText.includes('GPU 0') && document.querySelector('[data-testid=dashboard-gpu-summary]')?.innerText.includes('측정값 미수집')"),
+    'UX21-A measured and missing GPU cards')
+    const body = await evaluate(cdp, "document.querySelector('[data-testid=dashboard-gpu-summary]').innerText")
+    assert.ok(body.includes('0.0%'), 'measured zero GPU util remains zero')
+    assert.ok(body.includes('0 MB / 0 MB'), 'zero VRAM is measured, not fabricated')
+    assert.ok(body.includes('오래된 저장값'), 'persisted age is visible')
+    assert.ok(body.includes('실시간 GPU 상태가 아니며'), 'not falsely live')
+    for (const width of [320, 375, 768, 1280]) {
+      await cdp.call('Emulation.setDeviceMetricsOverride', {
+        width, height: 900, deviceScaleFactor: 1, mobile: false,
+      })
+      const dims = await evaluate(cdp,
+        "({width:document.documentElement.clientWidth,scroll:document.documentElement.scrollWidth})")
+      assert.ok(dims.scroll <= dims.width + 1,
+        'UX21-A dashboard GPU horizontal overflow ' + width + ': ' + JSON.stringify(dims))
+      if (width === 375) await screenshot(cdp, 'ux21a-dashboard-gpu-375-light')
+    }
+    assert.ok(requests.filter(x => x === 'GET /api/v1/nodes/node-ux20c2/resources/latest').length > beforeLatest)
+    assert.equal(requests.filter(x => !x.startsWith('GET ')).length, beforePostCount)
+    dashboardGpuScenario = false
+    scenario = 'rich'
+    assert.deepEqual(unexpectedApiPaths, [])
+    assert.deepEqual(unexpectedRemoteRequests, [])
     assert.deepEqual(exceptions, [])
   })
 

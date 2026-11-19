@@ -6,6 +6,7 @@ import {
   type DashboardSnapshot,
 } from '../api/dashboard'
 import { AppShell } from '../components/AppShell'
+import { DashboardGpuSnapshot } from '../components/DashboardGpuSnapshot'
 import { HelpHint } from '../components/HelpHint'
 import { LoadingBlock } from '../components/LoadingBlock'
 import { SectionError } from '../components/SectionError'
@@ -598,6 +599,13 @@ export function DashboardPage() {
             </div>
           )}
         </section>
+
+        {data ? (
+          <DashboardGpuSnapshot
+            nodes={data.gpuNodes}
+            truncated={data.gpuTruncated}
+          />
+        ) : null}
 
         <section
           className="dashboard-v2__section"

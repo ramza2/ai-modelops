@@ -5,6 +5,7 @@ import type {
   HealthResponse,
   InvocationSummaryResponse,
   NodeSummary,
+  NodeResourcesLatest,
   OperationSummary,
   Paginated,
   ReadyResponse,
@@ -17,6 +18,16 @@ export class DashboardUnavailableError extends Error {
   }
 }
 
+/** Bounded read-only GPU snapshot from existing Management API; never live. */
+export type DashboardGpuNode = {
+  nodeId: string
+  nodeName: string
+  resources: NodeResourcesLatest | null
+  error: string | null
+}
+
+const GPU_NODE_LIMIT = 5
+
 export type DashboardSnapshot = {
   health: HealthResponse | null
   healthError: string | null
@@ -25,6 +36,8 @@ export type DashboardSnapshot = {
   nodesTotal: number | null
   nodesOnline: number | null
   nodesError: string | null
+  gpuNodes: DashboardGpuNode[] | null
+  gpuTruncated: boolean
   deploymentsActive: number | null
   deploymentsRunning: number | null
   deploymentsHealthy: number | null
@@ -84,7 +97,7 @@ export async function fetchDashboard(
     settle(apiGet<ReadyResponse>('/ready', { signal })),
     settle(
       apiGet<Paginated<NodeSummary>>('/api/v1/nodes', {
-        query: { page: 1, page_size: 1 },
+        query: { page: 1, page_size: GPU_NODE_LIMIT },
         signal,
       }),
     ),
@@ -183,6 +196,27 @@ export async function fetchDashboard(
     throw new DashboardUnavailableError()
   }
 
+  // At most five per-node GETs, DB-persisted latest only; no Agent refresh POST.
+  // A failed snapshot cannot mask success of Health/Ready/other dashboard areas.
+  const gpuNodes: DashboardGpuNode[] | null = nodesTotal.value
+    ? await Promise.all(
+        nodesTotal.value.items.slice(0, GPU_NODE_LIMIT).map(async (node) => {
+          const res = await settle(
+            apiGet<NodeResourcesLatest>(
+              `/api/v1/nodes/${node.id}/resources/latest`,
+              { signal },
+            ),
+          )
+          return {
+            nodeId: node.id,
+            nodeName: node.name,
+            resources: res.value,
+            error: res.error,
+          }
+        }),
+      )
+    : null
+
   const nodesError = nodesTotal.error || nodesOnline.error
   const deploymentsError =
     depActive.error || depRunning.error || depHealthy.error
@@ -197,6 +231,8 @@ export async function fetchDashboard(
     nodesTotal: nodesTotal.value?.total ?? null,
     nodesOnline: nodesOnline.value?.total ?? null,
     nodesError,
+    gpuNodes,
+    gpuTruncated: (nodesTotal.value?.total ?? 0) > GPU_NODE_LIMIT,
     deploymentsActive: depActive.value?.total ?? null,
     deploymentsRunning: depRunning.value?.total ?? null,
     deploymentsHealthy: depHealthy.value?.total ?? null,
