@@ -56,6 +56,12 @@ class Settings(BaseSettings):
     runtime_metrics_batch_size: int = 50
     runtime_metrics_timeout_seconds: float = 10.0
 
+    # OBS115: Host/GPU persisted samples; opt-in ONLY after operator approval.
+    host_gpu_collector_enabled: bool = False
+    host_gpu_collector_poll_seconds: float = Field(default=60.0, ge=30, le=3600)
+    host_gpu_collector_batch_size: int = Field(default=10, ge=1, le=100)
+    host_gpu_collector_timeout_seconds: float = Field(default=10.0, ge=1, le=30)
+
 
 @lru_cache
 def get_settings() -> Settings:
