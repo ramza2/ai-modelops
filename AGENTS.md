@@ -988,3 +988,10 @@ MVP에서 미래 확장성을 이유로 불필요한 분산 시스템이나 추�
 - 기존 운영 동작을 부르는 POST(리소스 갱신, Cancel, Retry, Purge, Stop/Start, Switch, Publish)는 격리 Mock 없이 호출하지 않는다. 실측/미수집/이전 값 구분 유지. 새 API/DB/GPU/Worker/Gateway 변경 금지.
 - `scripts/deploy-server.sh`는 전체 Compose 빌드/기동이므로 frontend-only 운영 배포에 사용하지 않는다. 배포는 **별도 승인**과 실제 서버/이전 이미지/롤백 확인 후 Frontend 서비스만 변경.
 - QA 완료와 운영 반영 완료를 구분하며 실운영 브라우저를 확인하지 않고 배포 PASS를 주장하지 않는다.
+
+## ModelOps UX20-E2 — 운영 Frontend 조회-only 사전 점검 (2026-11-19)
+
+- 사용 근거: `docs/uiux/modelops-uiux-2.0-ux20e2-preflight.md`. `scripts/uiux20e-frontend-readonly-preflight.sh`는 서버 담당자가 실행하는 **조회 전용** 검사다.
+- ChatGPT에서 GitHub 코드·문서/CI를 직접 처리하고 Cursor 사용을 최소화한다. 실제 운영 서버에 대한 원격 실행 권한은 없으므로 GitHub Actions의 Mock PASS를 운영 확인으로 간주하지 않는다.
+- 환경 파일/토큰/전체 Docker Env·Config·로그를 출력하지 않는다. 컨테이너 조회+3개 동일 Origin GET 외에는 운영 동작 변경 금지.
+- Frontend-only 배포는 사용자 명시 승인, 실제 이미지/태그/롤백/Compose project 확인 이후 별도 진행한다. 전체 `deploy-server.sh` 또는 `docker compose up -d --build`를 실행하지 않는다.
