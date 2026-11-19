@@ -511,8 +511,18 @@ async function run() {
         " && document.body.innerText.includes(" + JSON.stringify(evidenceText) + ")" +
         " && !!document.querySelector('a.nav-link--active[href=" + JSON.stringify(path) + "]')" +
         "; })()"), 'UX20-E route ' + path)
-      await waitUntil(async () => requests.filter(x => x === 'GET ' + api).length > requestsBefore,
-        'UX20-E API called: ' + api)
+      try {
+        await waitUntil(async () => requests.filter(x => x === 'GET ' + api).length > requestsBefore,
+          'UX20-E API called: ' + api, 8000)
+      } catch (error) {
+        const browserState = await evaluate(cdp,
+          "({path:location.pathname,title:document.querySelector('main h1')?.textContent,body:document.body.innerText.slice(0,1400),apiBase:import.meta?.env})".replace(',apiBase:import.meta?.env', ''))
+        console.error('UX20-E MOCK API TRACE', JSON.stringify({
+          path, api, before: requestsBefore, observed: requests.filter(x => x === 'GET ' + api).length,
+          latestRequests: requests.slice(-50), browserState, unexpectedApiPaths,
+        }))
+        throw error
+      }
       for (const width of [320, 375, 768, 1024, 1280]) {
         await cdp.call('Emulation.setDeviceMetricsOverride', {
           width, height: 900, deviceScaleFactor: 1, mobile: false,
