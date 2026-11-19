@@ -17,6 +17,8 @@ function baseSnap(
     nodesTotal: 2,
     nodesOnline: 1,
     nodesError: null,
+    gpuNodes: [],
+    gpuTruncated: false,
     deploymentsActive: 3,
     deploymentsRunning: 2,
     deploymentsHealthy: 2,
