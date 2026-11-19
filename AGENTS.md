@@ -980,3 +980,11 @@ MVP에서 미래 확장성을 이유로 불필요한 분산 시스템이나 추�
 - Operation 상세 검색·오류 단계 필터는 **클라이언트 측**. `GET /operations/{id}` 외 신규 원격 조회 금지. `/operations/{id}/steps`, `/logs` 가정 금지.
 - Safe Cancel/Explicit Retry 기존 게이트·4초 폴링·Abort·ID 가드·오류 후 이전 값·입력 유지. 검색/링크 조작은 POST 불가. Backend/DB/GPU/Gateway/Node Agent/Docker 동작 변경 금지.
 - 관련 테스트와 GitHub CI + 격리 Chrome Mock 검증까지 ChatGPT 직접 수행. 병합과 Frontend 운영 배포는 각각 별도 게이트.
+
+## ModelOps UX20-E — 통합 QA 및 운영 분리 (2026-11-18)
+
+- 기준: `docs/uiux/modelops-uiux-2.0-ux20e.md`, Issue #102. UX20-A/B/C/D는 main 병합 완료, 운영 Frontend 미배포.
+- 새 기능 추가보다 주요 경로 8개·모바일·다크·조회 상태·필터/링크 회귀·안전한 Chrome Mock 검사 우선. ChatGPT GitHub 직접 수정 → GitHub Actions → 필요 시 최후에만 Cursor.
+- 기존 운영 동작을 부르는 POST(리소스 갱신, Cancel, Retry, Purge, Stop/Start, Switch, Publish)는 격리 Mock 없이 호출하지 않는다. 실측/미수집/이전 값 구분 유지. 새 API/DB/GPU/Worker/Gateway 변경 금지.
+- `scripts/deploy-server.sh`는 전체 Compose 빌드/기동이므로 frontend-only 운영 배포에 사용하지 않는다. 배포는 **별도 승인**과 실제 서버/이전 이미지/롤백 확인 후 Frontend 서비스만 변경.
+- QA 완료와 운영 반영 완료를 구분하며 실운영 브라우저를 확인하지 않고 배포 PASS를 주장하지 않는다.

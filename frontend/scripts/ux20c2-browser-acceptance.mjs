@@ -1,13 +1,13 @@
 /**
- * UX20-C2/D1/D2 browser acceptance (Node.js 22 + Chrome CDP, no npm browser package).
- * Mock server binds only 127.0.0.1. Never points Vite at a real Management API.
+ * UX20-C2/D1/D2 and UX20-E browser acceptance (Node.js 22 + Chrome CDP, no npm browser package).
+ * Serves built dist/ and mock APIs on the SAME loopback origin (no Vite proxy, no real Management API).
  */
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
 import { createServer } from 'node:http'
 import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { extname, join, resolve, sep } from 'node:path'
 
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms))
 const evidence = resolve(process.env.CI_BROWSER_ARTIFACTS || join(tmpdir(), 'modelops-ux20c2-browser'))
@@ -76,15 +76,53 @@ let postFailure = false
 let refreshed = false
 let operationReadFailure = false
 let operationDetailReadFailure = false
+let dashboardDeploymentsFailure = false
+const unexpectedApiPaths = []
+const responsesFinished = []
+const networkResponses = []
 const requests = []
 const exceptions = []
 const unexpectedRemoteRequests = []
 const passes = []
-let server, vite, chrome, websocket, chromeProfile
+let server, chrome, websocket, chromeProfile
+
+const distRoot = resolve(process.cwd(), 'dist')
+async function serveBuiltFrontend(res, pathname) {
+  const assetRequest = pathname.startsWith('/assets/') || /\.[a-z0-9]+$/i.test(pathname)
+  const relative = assetRequest ? pathname.slice(1) : 'index.html'
+  const fullPath = resolve(distRoot, relative)
+  if (!fullPath.startsWith(distRoot + sep)) {
+    res.writeHead(403)
+    res.end('Forbidden')
+    return
+  }
+  try {
+    const content = await readFile(fullPath)
+    const type = {
+      '.html': 'text/html; charset=utf-8',
+      '.js': 'text/javascript; charset=utf-8',
+      '.css': 'text/css; charset=utf-8',
+      '.svg': 'image/svg+xml',
+      '.png': 'image/png',
+      '.ico': 'image/x-icon',
+      '.woff2': 'font/woff2',
+      '.json': 'application/json; charset=utf-8',
+    }[extname(fullPath)] || 'application/octet-stream'
+    res.writeHead(200, {
+      'Content-Type': type,
+      'Cache-Control': 'no-store',
+      'Content-Length': content.length,
+    })
+    res.end(content)
+  } catch {
+    res.writeHead(404)
+    res.end('Build asset missing')
+  }
+}
 
 function sendJson(res, status, body) {
   const data = JSON.stringify(body)
-  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' })
+  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'Connection': 'close', 'Content-Length': Buffer.byteLength(data) })
   res.end(data)
 }
 async function waitUntil(condition, label, timeout = 15000) {
@@ -121,6 +159,12 @@ async function connectCdp(port) {
     }
     if (message.method === 'Runtime.exceptionThrown') {
       exceptions.push(message.params?.exceptionDetails?.text || 'Runtime exception')
+    }
+    if (message.method === 'Network.responseReceived') {
+      const response = message.params?.response
+      if (response?.url?.includes('/api/') || response?.url?.endsWith('/health') || response?.url?.endsWith('/ready')) {
+        networkResponses.push({ url: response.url, status: response.status })
+      }
     }
     if (message.method === 'Network.requestWillBeSent') {
       const url = message.params?.request?.url || ''
@@ -171,7 +215,41 @@ async function run() {
   server = createServer((req, res) => {
     const path = new URL(req.url || '/', 'http://127.0.0.1').pathname
     const method = req.method || 'GET'
+    if (method === 'GET' && path !== '/health' && path !== '/ready' && !path.startsWith('/api/')) {
+      void serveBuiltFrontend(res, path)
+      return
+    }
     requests.push(method + ' ' + path)
+    res.on('finish', () => responsesFinished.push(method + ' ' + path))
+    // UX20-E: public read-only API contracts, with a real empty/zero payload.
+    // No fallback to production and no made-up observed metrics.
+    if (method === 'GET') {
+      if (path === '/health') return sendJson(res, 200, { status: 'ok' })
+      if (path === '/ready') return sendJson(res, 200, { status: 'ready' })
+      if (path === '/api/v1/nodes' || path === '/api/v1/models' ||
+          path === '/api/v1/deployments' || path === '/api/v1/endpoints' ||
+          path === '/api/v1/clients') {
+        if (path === '/api/v1/deployments' && dashboardDeploymentsFailure) {
+          return sendJson(res, 503, { error: { message: 'Mock deployments temporarily unavailable' } })
+        }
+        const query = new URL(req.url || '/', 'http://127.0.0.1').searchParams
+        return sendJson(res, 200, {
+          items: [], page: Number(query.get('page') || '1'),
+          page_size: Number(query.get('page_size') || '20'), total: 0,
+        })
+      }
+      if (path === '/api/v1/observability/invocations/summary') {
+        const query = new URL(req.url || '/', 'http://127.0.0.1').searchParams
+        return sendJson(res, 200, {
+          hours: Number(query.get('hours') || '24'),
+          group_by: query.get('group_by') || 'client',
+          items: [], window_start: samples.base, window_end: samples.later,
+        })
+      }
+      if (path === '/api/v1/observability/runtime/latest') {
+        return sendJson(res, 200, { items: [] })
+      }
+    }
     if (path === '/api/v1/nodes/node-ux20c2' && method === 'GET') {
       return sendJson(res, 200, node())
     }
@@ -243,21 +321,21 @@ async function run() {
       })
       return sendJson(res, 200, { items: filtered, page: 1, page_size: 20, total: filtered.length })
     }
+    if (path.startsWith('/api/') || path === '/health' || path === '/ready') {
+      unexpectedApiPaths.push(method + ' ' + path)
+    }
     return sendJson(res, 404, { error: { message: 'Blocked by isolated mock backend' } })
   })
-  await new Promise((ok) => server.listen(0, '127.0.0.1', ok))
-  const port = server.address().port
-  vite = spawn(process.execPath, ['node_modules/vite/bin/vite.js', '--host', '127.0.0.1', '--port', '3000', '--strictPort'], {
-    cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, VITE_MODELOPS_API_BASE_URL: '', VITE_DEV_PROXY_TARGET: 'http://127.0.0.1:' + port },
+  // Production bundle is built by the preceding GitHub CI job step.
+  // A single local server eliminates Vite proxy socket/pipelining artifacts.
+  await new Promise((ok, fail) => {
+    server.once('error', fail)
+    server.listen(3000, '127.0.0.1', ok)
   })
-  let viteError = ''
-  vite.stderr.on('data', (chunk) => { viteError += String(chunk).slice(-2000) })
   await waitUntil(async () => {
-    if (vite.exitCode !== null) throw new Error('Vite exited: ' + viteError)
-    const response = await fetch('http://127.0.0.1:3000')
-    return response.ok
-  }, 'isolated Vite')
+    const response = await fetch('http://127.0.0.1:3000/')
+    return response.ok && (await response.text()).includes('id="root"')
+  }, 'isolated production bundle')
   chromeProfile = await mkdtemp(join(tmpdir(), 'modelops-browser-'))
   chrome = spawn(chromeBinary(), [
     '--headless=new', '--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu',
@@ -451,20 +529,142 @@ async function run() {
     assert.equal(unexpectedRemoteRequests.length, 0)
     assert.deepEqual(exceptions, [])
   })
+
+  await check('UX20-E eight primary routes load truthful empty/zero mock data', async () => {
+    operationReadFailure = false
+    operationDetailReadFailure = false
+    dashboardDeploymentsFailure = false
+    const routes = [
+      ['/dashboard', '대시보드', '운영 요약', '/api/v1/observability/invocations/summary'],
+      ['/nodes', '서버 및 GPU', '등록된 서버가 없습니다.', '/api/v1/nodes'],
+      ['/models', '등록된 모델 관리', '등록된 모델이 없습니다.', '/api/v1/models'],
+      ['/deployments', '모델 배포 관리', '등록된 모델 배포가 없습니다.', '/api/v1/deployments'],
+      ['/endpoints', 'API 연결 관리', '등록된 API 연결이 없습니다.', '/api/v1/endpoints'],
+      ['/operations', '작업 이력', 'op-fail-01', '/api/v1/operations'],
+      ['/observability', '운영 모니터링', 'AI 요청 사용 현황', '/api/v1/observability/runtime/latest'],
+      ['/clients', 'AI 사용 시스템', '등록된 AI 사용 시스템이 없습니다.', '/api/v1/clients'],
+    ]
+    const log = []
+    const beforePostCount = requests.filter(x => !x.startsWith('GET ')).length
+    for (const [path, heading, evidenceText, api] of routes) {
+      const requestsBefore = requests.filter(x => x === 'GET ' + api).length
+      const exceptionsBefore = exceptions.length
+      await cdp.call('Page.navigate', { url: 'http://127.0.0.1:3000' + path })
+      await waitUntil(async () => evaluate(cdp, "(() => { const h = document.querySelector('main h1'); return location.pathname===" + JSON.stringify(path) +
+        " && h?.textContent.trim()===" + JSON.stringify(heading) +
+        " && document.body.innerText.includes(" + JSON.stringify(evidenceText) + ")" +
+        " && !!document.querySelector('a.nav-link--active[href=" + JSON.stringify(path) + "]')" +
+        "; })()"), 'UX20-E route ' + path)
+      try {
+        await waitUntil(async () => requests.filter(x => x === 'GET ' + api).length > requestsBefore,
+          'UX20-E API called: ' + api, 8000)
+      } catch (error) {
+        const browserState = await evaluate(cdp,
+          "({path:location.pathname,title:document.querySelector('main h1')?.textContent,body:document.body.innerText.slice(0,1400),apiBase:import.meta?.env})".replace(',apiBase:import.meta?.env', ''))
+        console.error('UX20-E MOCK API TRACE', JSON.stringify({
+          path, api, before: requestsBefore, observed: requests.filter(x => x === 'GET ' + api).length,
+          latestRequests: requests.slice(-50), finished: responsesFinished.slice(-50), responses: networkResponses.slice(-50), browserState, unexpectedApiPaths,
+        }))
+        throw error
+      }
+      for (const width of [320, 375, 768, 1024, 1280]) {
+        await cdp.call('Emulation.setDeviceMetricsOverride', {
+          width, height: 900, deviceScaleFactor: 1, mobile: false,
+        })
+        const dims = await evaluate(cdp, "({width:document.documentElement.clientWidth,scroll:document.documentElement.scrollWidth})")
+        assert.ok(dims.scroll <= dims.width + 1,
+          path + ' / ' + width + 'px horizontal overflow: ' + JSON.stringify(dims))
+      }
+      assert.equal(exceptions.length, exceptionsBefore, path + ' uncaught exceptions')
+      log.push({ route: path, heading, evidenceText, api, widths: [320, 375, 768, 1024, 1280] })
+      if (path === '/dashboard') {
+        const message = await evaluate(cdp, "document.body.innerText")
+        assert.ok(message.includes('요청 0건은 100% 성공이 아닙니다'))
+        await cdp.call('Emulation.setDeviceMetricsOverride',
+          { width: 375, height: 900, deviceScaleFactor: 1, mobile: false })
+        await screenshot(cdp, 'integrated-dashboard-375-light')
+      }
+      if (path === '/observability') {
+        await cdp.call('Emulation.setEmulatedMedia',
+          { features: [{ name: 'prefers-color-scheme', value: 'dark' }] })
+        assert.ok(await evaluate(cdp, "matchMedia('(prefers-color-scheme: dark)').matches"))
+        await screenshot(cdp, 'integrated-observability-1280-dark')
+        await cdp.call('Emulation.setEmulatedMedia',
+          { features: [{ name: 'prefers-color-scheme', value: 'light' }] })
+      }
+    }
+    assert.equal(requests.filter(x => !x.startsWith('GET ')).length, beforePostCount)
+    assert.deepEqual(unexpectedApiPaths, [], 'Unhandled API calls: ' + unexpectedApiPaths.join(', '))
+    assert.deepEqual(unexpectedRemoteRequests, [])
+    await writeFile(join(evidence, 'ux20e-route-matrix.json'), JSON.stringify(log, null, 2))
+  })
+
+  await check('UX20-E mobile drawer keyboard focus, route and desktop resize', async () => {
+    await cdp.call('Page.navigate', { url: 'http://127.0.0.1:3000/dashboard' })
+    await waitUntil(async () => evaluate(cdp, "document.querySelector('main h1')?.textContent === '대시보드'"),
+      'UX20-E drawer dashboard')
+    await cdp.call('Emulation.setDeviceMetricsOverride',
+      { width: 375, height: 900, deviceScaleFactor: 1, mobile: false })
+    await evaluate(cdp, "document.querySelector('.shell__menu-toggle').click()")
+    await waitUntil(async () => evaluate(cdp,
+      "document.querySelector('.shell__menu-toggle')?.getAttribute('aria-expanded')==='true' && !!document.querySelector('.shell__backdrop') && document.body.style.overflow==='hidden'"),
+    'UX20-E mobile menu opened')
+    await waitUntil(async () => evaluate(cdp,
+      "document.querySelector('.shell__nav')?.contains(document.activeElement)"),
+    'UX20-E drawer autofocus')
+    const firstFocused = await evaluate(cdp,
+      "document.activeElement?.getAttribute('aria-label') || document.activeElement?.textContent.trim()")
+    assert.ok(firstFocused, 'drawer first focus must exist')
+    await cdp.call('Input.dispatchKeyEvent', { type:'keyDown', key:'Tab', code:'Tab', windowsVirtualKeyCode:9 })
+    await cdp.call('Input.dispatchKeyEvent', { type:'keyUp', key:'Tab', code:'Tab', windowsVirtualKeyCode:9 })
+    assert.equal(await evaluate(cdp, "document.querySelector('.shell__nav')?.contains(document.activeElement)"), true)
+    await cdp.call('Emulation.setDeviceMetricsOverride',
+      { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false })
+    await waitUntil(async () => evaluate(cdp,
+      "document.querySelector('.shell__menu-toggle')?.getAttribute('aria-expanded')==='false' && !document.querySelector('.shell__backdrop') && document.body.style.overflow!=='hidden'"),
+    'UX20-E desktop resize drawer cleanup')
+    await cdp.call('Emulation.setDeviceMetricsOverride',
+      { width: 375, height: 900, deviceScaleFactor: 1, mobile: false })
+    await evaluate(cdp, "document.querySelector('.shell__menu-toggle').click()")
+    await waitUntil(async () => evaluate(cdp, "document.querySelector('.shell__menu-toggle').getAttribute('aria-expanded')==='true'"),
+      'UX20-E reopened drawer')
+    await evaluate(cdp, "document.querySelector('.shell__nav a[href=\"/nodes\"]').click()")
+    await waitUntil(async () => evaluate(cdp,
+      "location.pathname==='/nodes' && document.querySelector('.shell__menu-toggle')?.getAttribute('aria-expanded')==='false' && !document.querySelector('.shell__backdrop') && !!document.querySelector('.shell__nav a.nav-link--active[href=\"/nodes\"]')"),
+    'UX20-E route change closes drawer')
+    await screenshot(cdp, 'integrated-nodes-375-after-menu')
+    assert.deepEqual(unexpectedApiPaths, [])
+    assert.deepEqual(exceptions, [])
+  })
+
+  await check('UX20-E dashboard partial failure is not presented as healthy', async () => {
+    dashboardDeploymentsFailure = true
+    await cdp.call('Page.navigate', { url: 'http://127.0.0.1:3000/dashboard' })
+    await waitUntil(async () => evaluate(cdp,
+      "document.body.innerText.includes('Mock deployments temporarily unavailable') && document.body.innerText.includes('운영 요약')"),
+    'UX20-E partial dashboard error')
+    const body = await evaluate(cdp, "document.body.innerText")
+    assert.ok(body.includes('확인 불가'))
+    assert.ok(!body.includes('Management API를 사용할 수 없습니다'),
+      'Partial error should not be treated as total Management failure')
+    dashboardDeploymentsFailure = false
+    assert.deepEqual(unexpectedApiPaths, [])
+    assert.deepEqual(unexpectedRemoteRequests, [])
+    assert.deepEqual(exceptions, [])
+  })
 }
 try {
   await run()
-  await writeFile(join(evidence, 'result.json'), JSON.stringify({ status: 'PASS', passes, requests, unexpectedRemoteRequests, exceptions }, null, 2))
-  console.log('UX20C2_BROWSER_ACCEPTANCE_PASS (' + passes.length + ' checks)')
+  await writeFile(join(evidence, 'result.json'), JSON.stringify({ status: 'PASS', passes, requests, responsesFinished, networkResponses, unexpectedApiPaths, unexpectedRemoteRequests, exceptions }, null, 2))
+  console.log('MODELOPS_BROWSER_ACCEPTANCE_PASS (' + passes.length + ' checks)')
 } catch (error) {
   console.error(error)
   await mkdir(evidence, { recursive: true })
-  await writeFile(join(evidence, 'result.json'), JSON.stringify({ status: 'FAIL', message: String(error), passes, requests, unexpectedRemoteRequests, exceptions }, null, 2))
+  await writeFile(join(evidence, 'result.json'), JSON.stringify({ status: 'FAIL', message: String(error), passes, requests, responsesFinished, networkResponses, unexpectedApiPaths, unexpectedRemoteRequests, exceptions }, null, 2))
   process.exitCode = 1
 } finally {
   websocket?.close()
   chrome?.kill('SIGTERM')
-  vite?.kill('SIGTERM')
   server?.closeAllConnections?.()
   server?.close()
   if (chromeProfile) await rm(chromeProfile, { recursive: true, force: true, maxRetries: 3 }).catch(() => {})
