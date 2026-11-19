@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import datetime as dt
 import os
@@ -313,3 +314,78 @@ async def test_job_runner_can_attach_opt_in_collector_without_mutating_operation
     assert runner._host_gpu_collector is dummy
     runner.request_shutdown()
     assert runtime.shutdown and dummy.shutdown
+
+
+@pytest.mark.asyncio
+async def test_worker_runs_runtime_and_host_collectors_concurrently_without_db_mutation(db):
+    engine, sessions = db
+
+    class _Collector:
+        def __init__(self):
+            self.started = asyncio.Event()
+            self.stopped = asyncio.Event()
+        async def run_forever(self):
+            self.started.set()
+            await self.stopped.wait()
+        def request_shutdown(self):
+            self.stopped.set()
+
+    runtime, host = _Collector(), _Collector()
+    runner = JobRunner(
+        settings=_settings(host_gpu_collector_enabled=True),
+        session_factory=sessions, engine=engine,
+        metrics_collector=runtime, host_gpu_collector=host,
+    )
+
+    async def fake_poll_once():
+        await asyncio.wait_for(
+            asyncio.gather(runtime.started.wait(), host.started.wait()), timeout=2
+        )
+        runner.request_shutdown()
+        return False
+
+    runner.poll_once = fake_poll_once
+    await asyncio.wait_for(runner.run_forever(), timeout=3)
+    assert runtime.started.is_set() and host.started.is_set()
+    assert runtime.stopped.is_set() and host.stopped.is_set()
+
+
+@pytest.mark.asyncio
+async def test_host_collector_task_crash_does_not_kill_operation_runner(db, caplog):
+    engine, sessions = db
+
+    class _FailingHost:
+        def __init__(self):
+            self.started = asyncio.Event()
+        async def run_forever(self):
+            self.started.set()
+            raise RuntimeError("PRIVATE_UPSTREAM_BODY_MUST_NOT_LOG")
+        def request_shutdown(self):
+            pass
+
+    class _Runtime:
+        def __init__(self):
+            self.started = asyncio.Event()
+            self.stopped = asyncio.Event()
+        async def run_forever(self):
+            self.started.set()
+            await self.stopped.wait()
+        def request_shutdown(self):
+            self.stopped.set()
+
+    host, runtime = _FailingHost(), _Runtime()
+    runner = JobRunner(
+        settings=_settings(host_gpu_collector_enabled=True),
+        session_factory=sessions, engine=engine,
+        metrics_collector=runtime, host_gpu_collector=host,
+    )
+    async def fake_poll_once():
+        await asyncio.wait_for(
+            asyncio.gather(runtime.started.wait(), host.started.wait()), timeout=2
+        )
+        runner.request_shutdown()
+        return False
+    runner.poll_once = fake_poll_once
+    await asyncio.wait_for(runner.run_forever(), timeout=3)
+    assert "PRIVATE_UPSTREAM_BODY_MUST_NOT_LOG" not in caplog.text
+    assert "RuntimeError" in caplog.text
