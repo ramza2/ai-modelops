@@ -1004,3 +1004,12 @@ MVP에서 미래 확장성을 이유로 불필요한 분산 시스템이나 추�
 - 각 GPU별 persisted VRAM 사용/전체, 연산 사용률, `sampled_at`만 표시. 0/null/오류와 오래된 샘플 구분, 복수 GPU VRAM 합산·가짜 trend·실시간 레이블 금지.
 - 기존 Dashboard 15초 polling/Abort/partial success·KPI·링크 유지. 신규 조회 실패가 전체 페이지를 실패하게 하지 않는다.
 - ChatGPT GitHub 직접 수정/Frontend CI·격리 브라우저 테스트 우선, Cursor 최소화. Draft PR/테스트까지 진행하고 main 병합·운영 배포는 **별도 승인**.
+
+
+## OBS115 — Host/GPU Worker 스냅샷 수집 (2026-11-19)
+
+- Source: `docs/observability/obs115-host-gpu-collector.md`, 추적 #115. **운영 Gateway/Frontend/Backend/PostgreSQL/Node Agent/GPU/모델 변경 금지**. PR은 Draft/테스트 단계로 유지.
+- Worker 신규 수집은 `MODELOPS_HOST_GPU_COLLECTOR_ENABLED=false` 기본 비활성화; 운영 설정 활성화·Worker 재생성은 각각 별도 승인. 수집 시 오직 Node Agent GET `/internal/v1/resources` + 기존 DB snapshots만 사용, API POST/인벤토리 변경/모델 제어 금지.
+- 수집 중복 방지는 advisory lock+최신 sampled_at, Node별 예외 격리, batch cap. Timestamp skew/중복/0/null/NaN/미등록 GPU 인지, 로그 민감정보 차단; 별도 RuntimeMetricsCollector는 그대로.
+- PostgreSQL 임시 서비스/Mock Agent 테스트 CI로 검증. 기존 production GPU 자료·실 API로 개발 테스트 금지.
+- 데이터 보존/삭제는 이번 PR 제외. 운영 자동수집 활성화 전 보존 정책 승인 필수. 개발 완료와 운영 배포 완료는 별도.
