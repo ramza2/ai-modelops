@@ -6,11 +6,13 @@ on:
     paths:
       - 'frontend/**'
       - '.github/workflows/frontend-ci.yml'
+      - 'scripts/uiux20e-frontend-readonly-preflight.sh'
   push:
     branches: [main]
     paths:
       - 'frontend/**'
       - '.github/workflows/frontend-ci.yml'
+      - 'scripts/uiux20e-frontend-readonly-preflight.sh'
 
 permissions:
   contents: read
@@ -43,6 +45,11 @@ jobs:
 
       - name: Install locked dependencies
         run: npm ci --no-audit --no-fund
+
+      - name: Read-only rollout preflight script syntax
+        run: |
+          bash -n ../scripts/uiux20e-frontend-readonly-preflight.sh
+          bash ../scripts/uiux20e-frontend-readonly-preflight.sh --help >/dev/null
 
       - name: Run frontend tests
         run: npm test
