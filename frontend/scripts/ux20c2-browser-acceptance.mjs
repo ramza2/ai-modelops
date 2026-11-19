@@ -601,12 +601,12 @@ async function run() {
 }
 try {
   await run()
-  await writeFile(join(evidence, 'result.json'), JSON.stringify({ status: 'PASS', passes, requests, unexpectedRemoteRequests, exceptions }, null, 2))
-  console.log('UX20C2_BROWSER_ACCEPTANCE_PASS (' + passes.length + ' checks)')
+  await writeFile(join(evidence, 'result.json'), JSON.stringify({ status: 'PASS', passes, requests, unexpectedApiPaths, unexpectedRemoteRequests, exceptions }, null, 2))
+  console.log('MODELOPS_BROWSER_ACCEPTANCE_PASS (' + passes.length + ' checks)')
 } catch (error) {
   console.error(error)
   await mkdir(evidence, { recursive: true })
-  await writeFile(join(evidence, 'result.json'), JSON.stringify({ status: 'FAIL', message: String(error), passes, requests, unexpectedRemoteRequests, exceptions }, null, 2))
+  await writeFile(join(evidence, 'result.json'), JSON.stringify({ status: 'FAIL', message: String(error), passes, requests, unexpectedApiPaths, unexpectedRemoteRequests, exceptions }, null, 2))
   process.exitCode = 1
 } finally {
   websocket?.close()
