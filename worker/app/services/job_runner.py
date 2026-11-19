@@ -156,8 +156,12 @@ class JobRunner:
             return
         try:
             await self._host_gpu_collector.run_forever()
-        except Exception:  # noqa: BLE001 - isolate from operation loop
-            logger.exception("Host/GPU collector task crashed; operation loop continues.")
+        except Exception as exc:  # noqa: BLE001 - isolate from operation loop
+            # Never leak raw Node Agent/DB errors through collector task diagnostics.
+            logger.warning(
+                "Host/GPU collector task crashed; operation loop continues: %s",
+                type(exc).__name__,
+            )
 
     @staticmethod
     async def _stop_collector(task: asyncio.Task[None]) -> None:
