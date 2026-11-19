@@ -16,6 +16,7 @@ from app.clients.node_agent import NodeAgentClient
 from app.core.config import Settings
 from app.core.db import Base
 from app.domain.models import GPUDevice, GPUResourceSnapshot, Node, NodeResourceSnapshot
+from app.services.job_runner import JobRunner
 from app.services.host_gpu_snapshot_collector import (
     HOST_GPU_LOCK_KEY,
     HostGpuSnapshotCollector,
@@ -268,3 +269,47 @@ def test_agent_timestamp_rejects_missing_naive_stale_and_future():
                 (now + dt.timedelta(minutes=2)).isoformat()]:
         with pytest.raises(ValueError):
             _agent_time(bad, now)
+
+
+@pytest.mark.asyncio
+async def test_job_runner_keeps_host_gpu_collector_off_unless_configured(db):
+    engine, sessions = db
+    class _DummyMetrics:
+        def __init__(self):
+            self.shutdown = False
+        def request_shutdown(self):
+            self.shutdown = True
+        async def run_forever(self):
+            raise AssertionError("This test must not start a Worker loop")
+
+    runtime = _DummyMetrics()
+    runner = JobRunner(
+        settings=_settings(host_gpu_collector_enabled=False),
+        session_factory=sessions, engine=engine, metrics_collector=runtime,
+    )
+    assert runner._host_gpu_collector is None
+    runner.request_shutdown()
+    assert runtime.shutdown is True
+
+
+@pytest.mark.asyncio
+async def test_job_runner_can_attach_opt_in_collector_without_mutating_operations(db):
+    engine, sessions = db
+    class _DummyMetrics:
+        def __init__(self):
+            self.shutdown = False
+        def request_shutdown(self):
+            self.shutdown = True
+        async def run_forever(self):
+            raise AssertionError("No running Worker loop in this test")
+
+    dummy = _DummyMetrics()
+    runtime = _DummyMetrics()
+    runner = JobRunner(
+        settings=_settings(host_gpu_collector_enabled=True),
+        session_factory=sessions, engine=engine,
+        metrics_collector=runtime, host_gpu_collector=dummy,
+    )
+    assert runner._host_gpu_collector is dummy
+    runner.request_shutdown()
+    assert runtime.shutdown and dummy.shutdown
