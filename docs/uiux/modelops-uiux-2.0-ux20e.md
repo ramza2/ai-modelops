@@ -16,6 +16,15 @@
 6. GET 기반 링크만 검증; 서버 존재 여부를 알 수 없는 화면의 결과는 N/A 또는 Mock 상태로 구분하고 실제 운영 동작 PASS로 오인하지 않는다.
 7. 전체 Vitest/typecheck/build + GitHub CI Chrome PASS. 스크린샷/리포트 보존. Cursor 토큰 사용하지 않고 ChatGPT + GitHub CI로 최대한 해결한다.
 
+
+## E1 구현 결과 — 2026-11-19
+- 검증 방식: `npm run build`로 만든 **프로덕션 번들 `frontend/dist`**과 Mock API를 `127.0.0.1:3000` 단일 Origin에서 제공. Dev Vite 프록시는 사용하지 않는다. CI 전용 테스트로 운영 URL·인증정보·GPU 접근 없음.
+- 확인된 8개 기본 경로: Dashboard / Nodes / Models / Deployments / Endpoints / Operations / Observability / Clients.
+- 각 경로마다 실제 화면 heading/활성 메뉴/해당 GET 호출/Mock 응답 후 빈 목록·0건/320·375·768·1024·1280px 가로 overflow 검사. `ux20e-route-matrix.json`과 스크린샷 보관.
+- 모바일 Drawer: 첫 포커스·Tab·열린 상태 Desktop 리사이즈·스크롤 잠금 정리·메뉴 링크 이동·닫힘. Dashboard: 부분 API 실패를 전체 장애나 정상으로 오인하지 않음.
+- 기존 10개 Node/GPU/Operation Chrome 회귀에 신규 3개 통합 시나리오 추가, **총 13/13 PASS**. Vitest **585/585**, typecheck/build PASS. 최초 성공 증거: [GitHub Actions #44432367341](https://github.com/ramza2/ai-modelops/actions/runs/44432367341).
+- 격리 검사는 실제 데이터 수집·실운영 사용자 세션·서버/네트워크 장애·API 인증/RBAC까지 검증하지 않는다. 그 범위는 E2 운영 브라우저에서 별도 확인한다.
+
 ## E2 운영 배포 전 안전 게이트 — 아직 미실행
 - 실제 서버 환경/compose project name, Git HEAD, Frontend 이미지/롤백 태그, Admin LAN 바인딩 및 nginx 동일-origin proxy 확인(조회-only).
 - `scripts/deploy-server.sh`는 Backend/Worker/Gateway/Postgres 포함 `docker compose up -d --build`를 실행하므로 **Frontend-only 변경에 그대로 사용하지 않는다**.
