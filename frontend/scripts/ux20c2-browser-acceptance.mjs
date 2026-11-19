@@ -1,13 +1,13 @@
 /**
  * UX20-C2/D1/D2 and UX20-E browser acceptance (Node.js 22 + Chrome CDP, no npm browser package).
- * Mock server binds only 127.0.0.1. Never points Vite at a real Management API.
+ * Serves built dist/ and mock APIs on the SAME loopback origin (no Vite proxy, no real Management API).
  */
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
 import { createServer } from 'node:http'
 import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { extname, join, resolve, sep } from 'node:path'
 
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms))
 const evidence = resolve(process.env.CI_BROWSER_ARTIFACTS || join(tmpdir(), 'modelops-ux20c2-browser'))
@@ -84,7 +84,41 @@ const requests = []
 const exceptions = []
 const unexpectedRemoteRequests = []
 const passes = []
-let server, vite, chrome, websocket, chromeProfile
+let server, chrome, websocket, chromeProfile
+
+const distRoot = resolve(process.cwd(), 'dist')
+async function serveBuiltFrontend(res, pathname) {
+  const assetRequest = pathname.startsWith('/assets/') || /\.[a-z0-9]+$/i.test(pathname)
+  const relative = assetRequest ? pathname.slice(1) : 'index.html'
+  const fullPath = resolve(distRoot, relative)
+  if (!fullPath.startsWith(distRoot + sep)) {
+    res.writeHead(403)
+    res.end('Forbidden')
+    return
+  }
+  try {
+    const content = await readFile(fullPath)
+    const type = {
+      '.html': 'text/html; charset=utf-8',
+      '.js': 'text/javascript; charset=utf-8',
+      '.css': 'text/css; charset=utf-8',
+      '.svg': 'image/svg+xml',
+      '.png': 'image/png',
+      '.ico': 'image/x-icon',
+      '.woff2': 'font/woff2',
+      '.json': 'application/json; charset=utf-8',
+    }[extname(fullPath)] || 'application/octet-stream'
+    res.writeHead(200, {
+      'Content-Type': type,
+      'Cache-Control': 'no-store',
+      'Content-Length': content.length,
+    })
+    res.end(content)
+  } catch {
+    res.writeHead(404)
+    res.end('Build asset missing')
+  }
+}
 
 function sendJson(res, status, body) {
   const data = JSON.stringify(body)
@@ -181,6 +215,10 @@ async function run() {
   server = createServer((req, res) => {
     const path = new URL(req.url || '/', 'http://127.0.0.1').pathname
     const method = req.method || 'GET'
+    if (method === 'GET' && path !== '/health' && path !== '/ready' && !path.startsWith('/api/')) {
+      void serveBuiltFrontend(res, path)
+      return
+    }
     requests.push(method + ' ' + path)
     res.on('finish', () => responsesFinished.push(method + ' ' + path))
     // UX20-E: public read-only API contracts, with a real empty/zero payload.
@@ -288,19 +326,16 @@ async function run() {
     }
     return sendJson(res, 404, { error: { message: 'Blocked by isolated mock backend' } })
   })
-  await new Promise((ok) => server.listen(0, '127.0.0.1', ok))
-  const port = server.address().port
-  vite = spawn(process.execPath, ['node_modules/vite/bin/vite.js', '--host', '127.0.0.1', '--port', '3000', '--strictPort'], {
-    cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, VITE_MODELOPS_API_BASE_URL: '', VITE_DEV_PROXY_TARGET: 'http://127.0.0.1:' + port },
+  // Production bundle is built by the preceding GitHub CI job step.
+  // A single local server eliminates Vite proxy socket/pipelining artifacts.
+  await new Promise((ok, fail) => {
+    server.once('error', fail)
+    server.listen(3000, '127.0.0.1', ok)
   })
-  let viteError = ''
-  vite.stderr.on('data', (chunk) => { viteError += String(chunk).slice(-2000) })
   await waitUntil(async () => {
-    if (vite.exitCode !== null) throw new Error('Vite exited: ' + viteError)
-    const response = await fetch('http://127.0.0.1:3000')
-    return response.ok
-  }, 'isolated Vite')
+    const response = await fetch('http://127.0.0.1:3000/')
+    return response.ok && (await response.text()).includes('id="root"')
+  }, 'isolated production bundle')
   chromeProfile = await mkdtemp(join(tmpdir(), 'modelops-browser-'))
   chrome = spawn(chromeBinary(), [
     '--headless=new', '--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu',
@@ -630,7 +665,6 @@ try {
 } finally {
   websocket?.close()
   chrome?.kill('SIGTERM')
-  vite?.kill('SIGTERM')
   server?.closeAllConnections?.()
   server?.close()
   if (chromeProfile) await rm(chromeProfile, { recursive: true, force: true, maxRetries: 3 }).catch(() => {})
