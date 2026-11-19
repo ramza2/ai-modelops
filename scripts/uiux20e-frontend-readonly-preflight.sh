@@ -106,6 +106,7 @@ else
 fi
 
 echo "Current Frontend rollback reference: $FRONTEND_IMAGE"
-echo "No environment variables, tokens, container logs, secrets, or config were read."
-echo "No image tags, containers, Git refs, or filesystem contents were changed."
+echo "No secret env values, full Docker configs, or container logs were printed."
+echo "No image tags, containers, Git refs, or project files were intentionally changed."
+echo "HTTP GET checks may generate ordinary Nginx/Backend access logs."
 echo "MODELOPS_UX20E2_FRONTEND_READONLY_PREFLIGHT_PASS"
