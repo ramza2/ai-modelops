@@ -322,6 +322,40 @@ class OperationStep(Base):
     )
 
 
+class NodeResourceSnapshot(Base):
+    """Existing Management API table; Worker writes only measured snapshots."""
+
+    __tablename__ = "node_resource_snapshot"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    node_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    sampled_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    cpu_utilization_pct: Mapped[float | None] = mapped_column(Numeric(5, 2))
+    ram_total_mb: Mapped[int | None] = mapped_column(BigInteger)
+    ram_used_mb: Mapped[int | None] = mapped_column(BigInteger)
+    ram_free_mb: Mapped[int | None] = mapped_column(BigInteger)
+    disk_total_mb: Mapped[int | None] = mapped_column(BigInteger)
+    disk_used_mb: Mapped[int | None] = mapped_column(BigInteger)
+    disk_free_mb: Mapped[int | None] = mapped_column(BigInteger)
+
+
+class GPUResourceSnapshot(Base):
+    """Existing Management API table; GPU records stay device-scoped."""
+
+    __tablename__ = "gpu_resource_snapshot"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    gpu_device_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    sampled_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    vram_total_mb: Mapped[int | None] = mapped_column(BigInteger)
+    vram_used_mb: Mapped[int | None] = mapped_column(BigInteger)
+    vram_free_mb: Mapped[int | None] = mapped_column(BigInteger)
+    gpu_utilization_pct: Mapped[float | None] = mapped_column(Numeric(5, 2))
+    memory_utilization_pct: Mapped[float | None] = mapped_column(Numeric(5, 2))
+    temperature_c: Mapped[float | None] = mapped_column(Numeric(5, 2))
+    power_w: Mapped[float | None] = mapped_column(Numeric(10, 2))
+
+
 class DeploymentRuntimeMetricSnapshot(Base):
     """M6-A2 normalized vLLM runtime metrics (Worker-persisted)."""
 
