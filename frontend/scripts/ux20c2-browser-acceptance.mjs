@@ -1,5 +1,5 @@
 /**
- * UX20-C2/D1/D2 browser acceptance (Node.js 22 + Chrome CDP, no npm browser package).
+ * UX20-C2/D1/D2 and UX20-E browser acceptance (Node.js 22 + Chrome CDP, no npm browser package).
  * Mock server binds only 127.0.0.1. Never points Vite at a real Management API.
  */
 import assert from 'node:assert/strict'
@@ -76,6 +76,8 @@ let postFailure = false
 let refreshed = false
 let operationReadFailure = false
 let operationDetailReadFailure = false
+let dashboardDeploymentsFailure = false
+const unexpectedApiPaths = []
 const requests = []
 const exceptions = []
 const unexpectedRemoteRequests = []
@@ -172,6 +174,35 @@ async function run() {
     const path = new URL(req.url || '/', 'http://127.0.0.1').pathname
     const method = req.method || 'GET'
     requests.push(method + ' ' + path)
+    // UX20-E: public read-only API contracts, with a real empty/zero payload.
+    // No fallback to production and no made-up observed metrics.
+    if (method === 'GET') {
+      if (path === '/health') return sendJson(res, 200, { status: 'ok' })
+      if (path === '/ready') return sendJson(res, 200, { status: 'ready' })
+      if (path === '/api/v1/nodes' || path === '/api/v1/models' ||
+          path === '/api/v1/deployments' || path === '/api/v1/endpoints' ||
+          path === '/api/v1/clients') {
+        if (path === '/api/v1/deployments' && dashboardDeploymentsFailure) {
+          return sendJson(res, 503, { error: { message: 'Mock deployments temporarily unavailable' } })
+        }
+        const query = new URL(req.url || '/', 'http://127.0.0.1').searchParams
+        return sendJson(res, 200, {
+          items: [], page: Number(query.get('page') || '1'),
+          page_size: Number(query.get('page_size') || '20'), total: 0,
+        })
+      }
+      if (path === '/api/v1/observability/invocations/summary') {
+        const query = new URL(req.url || '/', 'http://127.0.0.1').searchParams
+        return sendJson(res, 200, {
+          hours: Number(query.get('hours') || '24'),
+          group_by: query.get('group_by') || 'client',
+          items: [], window_start: samples.base, window_end: samples.later,
+        })
+      }
+      if (path === '/api/v1/observability/runtime/latest') {
+        return sendJson(res, 200, { items: [] })
+      }
+    }
     if (path === '/api/v1/nodes/node-ux20c2' && method === 'GET') {
       return sendJson(res, 200, node())
     }
@@ -242,6 +273,9 @@ async function run() {
         return true
       })
       return sendJson(res, 200, { items: filtered, page: 1, page_size: 20, total: filtered.length })
+    }
+    if (path.startsWith('/api/') || path === '/health' || path === '/ready') {
+      unexpectedApiPaths.push(method + ' ' + path)
     }
     return sendJson(res, 404, { error: { message: 'Blocked by isolated mock backend' } })
   })
@@ -449,6 +483,119 @@ async function run() {
     'Operation detail stale read')
     assert.equal(requests.filter(x => x.startsWith('POST /api/v1/operations')).length, 0)
     assert.equal(unexpectedRemoteRequests.length, 0)
+    assert.deepEqual(exceptions, [])
+  })
+
+  await check('UX20-E eight primary routes load truthful empty/zero mock data', async () => {
+    operationReadFailure = false
+    operationDetailReadFailure = false
+    dashboardDeploymentsFailure = false
+    const routes = [
+      ['/dashboard', '대시보드', '운영 요약', '/api/v1/observability/invocations/summary'],
+      ['/nodes', '서버 및 GPU', '등록된 서버가 없습니다.', '/api/v1/nodes'],
+      ['/models', '등록된 모델 관리', '등록된 모델이 없습니다.', '/api/v1/models'],
+      ['/deployments', '모델 배포 관리', '등록된 모델 배포가 없습니다.', '/api/v1/deployments'],
+      ['/endpoints', 'API 연결 관리', '등록된 API 연결이 없습니다.', '/api/v1/endpoints'],
+      ['/operations', '작업 이력', 'op-fail-01', '/api/v1/operations'],
+      ['/observability', '운영 모니터링', 'AI 요청 사용 현황', '/api/v1/observability/runtime/latest'],
+      ['/clients', 'AI 사용 시스템', '등록된 AI 사용 시스템이 없습니다.', '/api/v1/clients'],
+    ]
+    const log = []
+    const beforePostCount = requests.filter(x => !x.startsWith('GET ')).length
+    for (const [path, heading, evidenceText, api] of routes) {
+      const requestsBefore = requests.filter(x => x === 'GET ' + api).length
+      const exceptionsBefore = exceptions.length
+      await cdp.call('Page.navigate', { url: 'http://127.0.0.1:3000' + path })
+      await waitUntil(async () => evaluate(cdp, "(() => { const h = document.querySelector('main h1'); return location.pathname===" + JSON.stringify(path) +
+        " && h?.textContent.trim()===" + JSON.stringify(heading) +
+        " && document.body.innerText.includes(" + JSON.stringify(evidenceText) + ")" +
+        " && !!document.querySelector('a.nav-link--active[href=" + JSON.stringify(path) + "]')" +
+        "; })()"), 'UX20-E route ' + path)
+      await waitUntil(async () => requests.filter(x => x === 'GET ' + api).length > requestsBefore,
+        'UX20-E API called: ' + api)
+      for (const width of [320, 375, 768, 1024, 1280]) {
+        await cdp.call('Emulation.setDeviceMetricsOverride', {
+          width, height: 900, deviceScaleFactor: 1, mobile: false,
+        })
+        const dims = await evaluate(cdp, "({width:document.documentElement.clientWidth,scroll:document.documentElement.scrollWidth})")
+        assert.ok(dims.scroll <= dims.width + 1,
+          path + ' / ' + width + 'px horizontal overflow: ' + JSON.stringify(dims))
+      }
+      assert.equal(exceptions.length, exceptionsBefore, path + ' uncaught exceptions')
+      log.push({ route: path, heading, evidenceText, api, widths: [320, 375, 768, 1024, 1280] })
+      if (path === '/dashboard') {
+        const message = await evaluate(cdp, "document.body.innerText")
+        assert.ok(message.includes('요청 0건은 100% 성공이 아닙니다'))
+        await cdp.call('Emulation.setDeviceMetricsOverride',
+          { width: 375, height: 900, deviceScaleFactor: 1, mobile: false })
+        await screenshot(cdp, 'integrated-dashboard-375-light')
+      }
+      if (path === '/observability') {
+        await cdp.call('Emulation.setEmulatedMedia',
+          { features: [{ name: 'prefers-color-scheme', value: 'dark' }] })
+        assert.ok(await evaluate(cdp, "matchMedia('(prefers-color-scheme: dark)').matches"))
+        await screenshot(cdp, 'integrated-observability-1280-dark')
+        await cdp.call('Emulation.setEmulatedMedia',
+          { features: [{ name: 'prefers-color-scheme', value: 'light' }] })
+      }
+    }
+    assert.equal(requests.filter(x => !x.startsWith('GET ')).length, beforePostCount)
+    assert.deepEqual(unexpectedApiPaths, [], 'Unhandled API calls: ' + unexpectedApiPaths.join(', '))
+    assert.deepEqual(unexpectedRemoteRequests, [])
+    await writeFile(join(evidence, 'ux20e-route-matrix.json'), JSON.stringify(log, null, 2))
+  })
+
+  await check('UX20-E mobile drawer keyboard focus, route and desktop resize', async () => {
+    await cdp.call('Page.navigate', { url: 'http://127.0.0.1:3000/dashboard' })
+    await waitUntil(async () => evaluate(cdp, "document.querySelector('main h1')?.textContent === '대시보드'"),
+      'UX20-E drawer dashboard')
+    await cdp.call('Emulation.setDeviceMetricsOverride',
+      { width: 375, height: 900, deviceScaleFactor: 1, mobile: false })
+    await evaluate(cdp, "document.querySelector('.shell__menu-toggle').click()")
+    await waitUntil(async () => evaluate(cdp,
+      "document.querySelector('.shell__menu-toggle')?.getAttribute('aria-expanded')==='true' && !!document.querySelector('.shell__backdrop') && document.body.style.overflow==='hidden'"),
+    'UX20-E mobile menu opened')
+    await waitUntil(async () => evaluate(cdp,
+      "document.querySelector('.shell__nav')?.contains(document.activeElement)"),
+    'UX20-E drawer autofocus')
+    const firstFocused = await evaluate(cdp,
+      "document.activeElement?.getAttribute('aria-label') || document.activeElement?.textContent.trim()")
+    assert.ok(firstFocused, 'drawer first focus must exist')
+    await cdp.call('Input.dispatchKeyEvent', { type:'keyDown', key:'Tab', code:'Tab', windowsVirtualKeyCode:9 })
+    await cdp.call('Input.dispatchKeyEvent', { type:'keyUp', key:'Tab', code:'Tab', windowsVirtualKeyCode:9 })
+    assert.equal(await evaluate(cdp, "document.querySelector('.shell__nav')?.contains(document.activeElement)"), true)
+    await cdp.call('Emulation.setDeviceMetricsOverride',
+      { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false })
+    await waitUntil(async () => evaluate(cdp,
+      "document.querySelector('.shell__menu-toggle')?.getAttribute('aria-expanded')==='false' && !document.querySelector('.shell__backdrop') && document.body.style.overflow!=='hidden'"),
+    'UX20-E desktop resize drawer cleanup')
+    await cdp.call('Emulation.setDeviceMetricsOverride',
+      { width: 375, height: 900, deviceScaleFactor: 1, mobile: false })
+    await evaluate(cdp, "document.querySelector('.shell__menu-toggle').click()")
+    await waitUntil(async () => evaluate(cdp, "document.querySelector('.shell__menu-toggle').getAttribute('aria-expanded')==='true'"),
+      'UX20-E reopened drawer')
+    await evaluate(cdp, "document.querySelector('.shell__nav a[href=\"/nodes\"]').click()")
+    await waitUntil(async () => evaluate(cdp,
+      "location.pathname==='/nodes' && document.querySelector('.shell__menu-toggle')?.getAttribute('aria-expanded')==='false' && !document.querySelector('.shell__backdrop') && !!document.querySelector('.shell__nav a.nav-link--active[href=\"/nodes\"]')"),
+    'UX20-E route change closes drawer')
+    await screenshot(cdp, 'integrated-nodes-375-after-menu')
+    assert.deepEqual(unexpectedApiPaths, [])
+    assert.deepEqual(exceptions, [])
+  })
+
+  await check('UX20-E dashboard partial failure is not presented as healthy', async () => {
+    dashboardDeploymentsFailure = true
+    await cdp.call('Page.navigate', { url: 'http://127.0.0.1:3000/dashboard' })
+    await waitUntil(async () => evaluate(cdp,
+      "document.body.innerText.includes('Mock deployments temporarily unavailable') && document.body.innerText.includes('운영 요약')"),
+    'UX20-E partial dashboard error')
+    const body = await evaluate(cdp, "document.body.innerText")
+    assert.ok(body.includes('확인 불가'))
+    assert.ok(!body.includes('Management API를 사용할 수 없습니다'),
+      'Partial error should not be treated as total Management failure')
+    dashboardDeploymentsFailure = false
+    assert.deepEqual(unexpectedApiPaths, [])
+    assert.deepEqual(unexpectedRemoteRequests, [])
     assert.deepEqual(exceptions, [])
   })
 }
