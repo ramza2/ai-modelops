@@ -16,7 +16,7 @@
 - 신규 `HostGpuRetentionSweeper`는 두 설정이 모두 true일 때만 동작한다.
   - `MODELOPS_HOST_GPU_COLLECTOR_ENABLED=false` (기본 OFF)
   - `MODELOPS_HOST_GPU_RETENTION_ENABLED=false` (**별도 기본 OFF**)
-- 30일은 코드 상수이므로 환경변수로 줄일 수 없다. 1시간당 1회 sweep, 각각의 테이블에서 최대 1,000건(기본값) `FOR UPDATE SKIP LOCKED` 후 대상 조건을 다시 확인하여 DELETE. batch 1~500, poll 300~86400초로 범위를 제한한다.
+- 30일은 코드 상수이므로 환경변수로 줄일 수 없다. 1시간당 1회 sweep, 각각의 테이블에서 최대 1,000건(기본값) `FOR UPDATE SKIP LOCKED` 후 대상 조건을 다시 확인하여 DELETE. batch 1~5000, poll 300~86400초로 범위를 제한한다.
 - 여러 Worker의 정리는 PostgreSQL Session Advisory Lock으로 보호한다. Host와 GPU 삭제는 **같은 트랜잭션**에 커밋되며, 두 번째 DELETE 실패 시 첫 번째 DELETE도 ROLLBACK.
 - `preview_once`는 `SET TRANSACTION READ ONLY` 적용 후 삭제 대상 개수만 계산한다. 활성화 여부와 관계없이 DB 변경 없이 미리 검토 가능하다. 정상 Worker loop, vLLM RuntimeMetricsCollector는 정리기 오류와 격리한다.
 - 한번에 삭제하는 최대량이 제한되어 backlog가 있을 경우 여러 sweep이 필요할 수 있다. 30일 초과 데이터가 잠시 남는 것은 안전한 배치 정책의 결과이며 전체 테이블 DELETE를 절대 수행하지 않는다.
