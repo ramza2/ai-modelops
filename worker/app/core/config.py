@@ -65,7 +65,7 @@ class Settings(BaseSettings):
     # 30-day deletion: a second OFF-by-default opt-in independent of collection.
     host_gpu_retention_enabled: bool = False
     host_gpu_retention_poll_seconds: float = Field(default=3600, ge=300, le=86400)
-    host_gpu_retention_batch_size: int = Field(default=100, ge=1, le=500)
+    host_gpu_retention_batch_size: int = Field(default=1000, ge=1, le=5000)
 
 
 @lru_cache
