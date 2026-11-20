@@ -1020,5 +1020,5 @@ MVP에서 미래 확장성을 이유로 불필요한 분산 시스템이나 추�
 - Alembic `b8c9d0e1f2a3`으로 Host/GPU 기존 스냅샷 테이블에 `retention_managed BOOLEAN NOT NULL DEFAULT false` 추가(운영 migration 별도 승인). **마이그레이션 자체에 DELETE/기존 데이터 백필 절대 금지**.
 - Worker 자동 수집 INSERT에만 `retention_managed=True`. 정리기는 `MODELOPS_HOST_GPU_COLLECTOR_ENABLED` **AND** `MODELOPS_HOST_GPU_RETENTION_ENABLED` 두 설정 모두 true일 때만 작동; 두 기본값 false.
 - 실제 삭제 조건은 `retention_managed IS TRUE AND sampled_at < UTC now - 30 days`로 이중 제한. Host/GPU 각각 최대 batch, 하나의 DB 트랜잭션/lock 사용; preview read-only. 타 테이블(특히 Runtime Metrics)/Legacy/manual 데이터·모델/Node Agent/Gateway 건드리지 않는다.
-- **운영 마이그레이션·Worker 교체·수집 ON·정리 ON/DELETE는 각각 별도 명시 승인**. ChatGPT는 GitHub에서 PR/CI/Mock 테스트까지 처리하고 운영 DB를 직접 사용하지 않으며 Cursor 사용을 최소화한다.
+- **운영 마이그레이션·Worker 교체·수집 ON·정리 ON/DELETE는 각각 별도 명시 승인**. 현재 Backend Compose는 시작 시 `alembic upgrade head` 수행: PR 병합 이후 Backend 재배포로 migration이 자동 적용될 수 있으므로 운영 변경 게이트에서 반드시 검토. ChatGPT는 GitHub에서 PR/CI/Mock 테스트까지 처리하고 운영 DB를 직접 사용하지 않으며 Cursor 사용을 최소화한다.
 
