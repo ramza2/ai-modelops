@@ -62,6 +62,11 @@ class Settings(BaseSettings):
     host_gpu_collector_batch_size: int = Field(default=10, ge=1, le=100)
     host_gpu_collector_timeout_seconds: float = Field(default=10.0, ge=1, le=30)
 
+    # 30-day deletion: a second OFF-by-default opt-in independent of collection.
+    host_gpu_retention_enabled: bool = False
+    host_gpu_retention_poll_seconds: float = Field(default=3600, ge=300, le=86400)
+    host_gpu_retention_batch_size: int = Field(default=100, ge=1, le=500)
+
 
 @lru_cache
 def get_settings() -> Settings:
