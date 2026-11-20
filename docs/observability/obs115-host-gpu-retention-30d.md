@@ -24,7 +24,7 @@
 ## 운영 배포/승인 경계
 
 1. **현재 작업 범위는 Draft PR 개발·CI뿐**. 기존 운영 DB, Worker 컨테이너, 모델, Gateway 모두 변경하지 않는다.
-2. 후속 별도 승인 후 DB 백업·잠금/스키마 사전검사를 거쳐 migration 적용. **마이그레이션만으로 DELETE는 절대 실행되지 않음**.
+2. 후속 별도 승인 후 DB 백업·잠금/스키마 사전검사를 거쳐 migration 적용. **마이그레이션만으로 DELETE는 절대 실행되지 않음**. 현재 Backend Compose 시작 명령에 `alembic upgrade head`가 포함되므로, PR 병합 후 Backend를 재빌드·재시작하면 이 migration이 자동 적용될 수 있다. 따라서 Backend 서비스 재배포도 별도 게이트에서 검토해야 한다.
 3. migration 선반영 확인 후 신규 Worker 단독 이미지 빌드·교체를 별도 승인. `MODELOPS_HOST_GPU_COLLECTOR_ENABLED=false` / `MODELOPS_HOST_GPU_RETENTION_ENABLED=false` 유지.
 4. 운영에서 자동 수집 ON은 별도 승인, 최신 샘플/Node Agent 부하·DB 증가량 확인. **삭제 기능은 여전히 OFF**.
 5. 최초 자동 수집 기록이 30일을 넘기 전까지 **정리기 별도 opt-in 승인**. 보존 점검에서 실제 protected/managed 분포와 예상 삭제 대상 dry-run 증거 확보 후 ON. 실행 후 snapshot·runtime metrics·service ID·타임스탬프 불변 여부 확인.
