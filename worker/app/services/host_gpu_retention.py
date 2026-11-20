@@ -67,6 +67,7 @@ class HostGpuRetentionSweeper:
         async with self._session_factory() as session:
             # This session is explicitly READ ONLY, even when called by operators.
             await session.execute(text("SET TRANSACTION READ ONLY"))
+            await session.execute(text("SET LOCAL statement_timeout = '10s'"))
             for model in _TABLES:
                 count = await session.scalar(
                     select(func.count())
@@ -94,6 +95,8 @@ class HostGpuRetentionSweeper:
             # One short transaction for at most batch_size rows *per table*.
             # No unbounded DELETE; concurrent workers skip locked rows.
             async with self._session_factory() as session:
+                await session.execute(text("SET LOCAL lock_timeout = '2s'"))
+                await session.execute(text("SET LOCAL statement_timeout = '15s'"))
                 for model in _TABLES:
                     if self._stop_event.is_set():
                         raise RuntimeError("retention interrupted")
