@@ -12,7 +12,7 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.core.advisory_lock import SessionAdvisoryLockSet
@@ -66,7 +66,7 @@ class HostGpuRetentionSweeper:
         result: dict[str, Any] = {"retention_days": RETENTION_DAYS, "cutoff": cutoff}
         async with self._session_factory() as session:
             # This session is explicitly READ ONLY, even when called by operators.
-            await session.connection(execution_options={"postgresql_readonly": True})
+            await session.execute(text("SET TRANSACTION READ ONLY"))
             for model in _TABLES:
                 count = await session.scalar(
                     select(func.count())
