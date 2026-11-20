@@ -244,10 +244,12 @@ class HostGpuSnapshotCollector:
                 if gpu.device_index != index:
                     raise ValueError("GPU device index mismatch")
                 snapshots.append(GPUResourceSnapshot(
-                    gpu_device_id=gpu.id, sampled_at=sampled_at, **metrics,
+                    gpu_device_id=gpu.id, sampled_at=sampled_at,
+                    retention_managed=True, **metrics,
                 ))
             session.add(NodeResourceSnapshot(
-                node_id=node_id, sampled_at=sampled_at, **host_values,
+                node_id=node_id, sampled_at=sampled_at,
+                retention_managed=True, **host_values,
             ))
             session.add_all(snapshots)
             await session.commit()
