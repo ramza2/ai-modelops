@@ -66,7 +66,7 @@ def _settings(**overrides):
     v = {
         "host_gpu_collector_enabled": True,
         "host_gpu_retention_enabled": True,
-        "host_gpu_retention_batch_size": 100,
+        "host_gpu_retention_batch_size": 1000,
         "host_gpu_retention_poll_seconds": 3600,
         "database_url": _db_url(),
     }
