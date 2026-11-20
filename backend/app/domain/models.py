@@ -716,6 +716,9 @@ class NodeResourceSnapshot(Base):
     disk_total_mb: Mapped[int | None] = mapped_column(BigInteger)
     disk_used_mb: Mapped[int | None] = mapped_column(BigInteger)
     disk_free_mb: Mapped[int | None] = mapped_column(BigInteger)
+    retention_managed: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
 
     __table_args__ = (
         Index(
@@ -745,6 +748,9 @@ class GPUResourceSnapshot(Base):
     memory_utilization_pct: Mapped[float | None] = mapped_column(Numeric(5, 2))
     temperature_c: Mapped[float | None] = mapped_column(Numeric(5, 2))
     power_w: Mapped[float | None] = mapped_column(Numeric(10, 2))
+    retention_managed: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
 
     __table_args__ = (
         Index(

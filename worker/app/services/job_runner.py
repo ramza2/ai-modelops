@@ -16,6 +16,7 @@ from app.repositories.operations import OperationJobRepository
 from app.services.operation_executor import OperationExecutor
 from app.services.runtime_metrics_collector import RuntimeMetricsCollector
 from app.services.host_gpu_snapshot_collector import HostGpuSnapshotCollector
+from app.services.host_gpu_retention import HostGpuRetentionSweeper
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,7 @@ class JobRunner:
         engine: Any | None = None,
         metrics_collector: RuntimeMetricsCollector | None = None,
         host_gpu_collector: HostGpuSnapshotCollector | None = None,
+        host_gpu_retention: HostGpuRetentionSweeper | None = None,
     ) -> None:
         self._settings = settings or get_settings()
         self._session_factory = session_factory or get_sessionmaker()
@@ -99,11 +101,31 @@ class JobRunner:
             )
         )
 
+        self._host_gpu_retention = (
+            host_gpu_retention
+            if host_gpu_retention is not None
+            else (
+                HostGpuRetentionSweeper(
+                    settings=self._settings,
+                    session_factory=self._session_factory,
+                    engine=resolved_engine or get_engine(),
+                    stop_event=self._stop_event,
+                )
+                if (
+                    self._settings.host_gpu_collector_enabled
+                    and self._settings.host_gpu_retention_enabled
+                )
+                else None
+            )
+        )
+
     def request_shutdown(self) -> None:
         self._stop_event.set()
         self._metrics_collector.request_shutdown()
         if self._host_gpu_collector is not None:
             self._host_gpu_collector.request_shutdown()
+        if self._host_gpu_retention is not None:
+            self._host_gpu_retention.request_shutdown()
 
     async def run_forever(self) -> None:
         logger.info(
@@ -123,6 +145,11 @@ class JobRunner:
             if self._host_gpu_collector is not None
             else None
         )
+        retention_task = (
+            asyncio.create_task(self._run_host_gpu_retention(), name="host-gpu-retention")
+            if self._host_gpu_retention is not None
+            else None
+        )
         try:
             while not self._stop_event.is_set():
                 worked = await self.poll_once()
@@ -138,6 +165,10 @@ class JobRunner:
             self._metrics_collector.request_shutdown()
             if self._host_gpu_collector is not None:
                 self._host_gpu_collector.request_shutdown()
+            if self._host_gpu_retention is not None:
+                self._host_gpu_retention.request_shutdown()
+            if retention_task is not None:
+                await self._stop_collector(retention_task)
             if host_gpu_task is not None:
                 await self._stop_collector(host_gpu_task)
             await self._stop_collector(collector_task)
@@ -160,6 +191,17 @@ class JobRunner:
             # Never leak raw Node Agent/DB errors through collector task diagnostics.
             logger.warning(
                 "Host/GPU collector task crashed; operation loop continues: %s",
+                type(exc).__name__,
+            )
+
+    async def _run_host_gpu_retention(self) -> None:
+        if self._host_gpu_retention is None:
+            return
+        try:
+            await self._host_gpu_retention.run_forever()
+        except Exception as exc:  # noqa: BLE001 - never break job loop
+            logger.warning(
+                "Host/GPU retention task crashed; operation loop continues: %s",
                 type(exc).__name__,
             )
 

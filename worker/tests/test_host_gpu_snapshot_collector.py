@@ -167,6 +167,8 @@ async def test_persists_host_and_per_gpu_zero_null_no_processes_and_skips_duplic
             )
         ).scalars().all()
     assert len(hosts) == 1 and len(cards) == 2
+    assert hosts[0].retention_managed is True
+    assert all(c.retention_managed is True for c in cards)
     assert hosts[0].cpu_utilization_pct == 0
     assert {r.vram_used_mb for r in cards} == {0}
     assert {r.gpu_utilization_pct for r in cards} == {0, None}

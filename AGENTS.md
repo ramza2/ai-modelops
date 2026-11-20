@@ -1013,3 +1013,12 @@ MVP에서 미래 확장성을 이유로 불필요한 분산 시스템이나 추�
 - 수집 중복 방지는 advisory lock+최신 sampled_at, Node별 예외 격리, batch cap. Timestamp skew/중복/0/null/NaN/미등록 GPU 인지, 로그 민감정보 차단; 별도 RuntimeMetricsCollector는 그대로.
 - PostgreSQL 임시 서비스/Mock Agent 테스트 CI로 검증. 기존 production GPU 자료·실 API로 개발 테스트 금지.
 - 데이터 보존/삭제는 이번 PR 제외. 운영 자동수집 활성화 전 보존 정책 승인 필수. 개발 완료와 운영 배포 완료는 별도.
+
+## OBS115-B — 기존 기록 보호형 Host/GPU 30일 보존 (2026-11-20)
+
+- 참고: `docs/observability/obs115-host-gpu-retention-30d.md`. 자동 수집 데이터의 **30일 보존**, 레거시·수동 측정값은 영구 보호(`retention_managed=false`).
+- Alembic `b8c9d0e1f2a3`으로 Host/GPU 기존 스냅샷 테이블에 `retention_managed BOOLEAN NOT NULL DEFAULT false` 추가(운영 migration 별도 승인). **마이그레이션 자체에 DELETE/기존 데이터 백필 절대 금지**.
+- Worker 자동 수집 INSERT에만 `retention_managed=True`. 정리기는 `MODELOPS_HOST_GPU_COLLECTOR_ENABLED` **AND** `MODELOPS_HOST_GPU_RETENTION_ENABLED` 두 설정 모두 true일 때만 작동; 두 기본값 false.
+- 실제 삭제 조건은 `retention_managed IS TRUE AND sampled_at < UTC now - 30 days`로 이중 제한. Host/GPU 각각 최대 batch, 하나의 DB 트랜잭션/lock 사용; preview read-only. 타 테이블(특히 Runtime Metrics)/Legacy/manual 데이터·모델/Node Agent/Gateway 건드리지 않는다.
+- **운영 마이그레이션·Worker 교체·수집 ON·정리 ON/DELETE는 각각 별도 명시 승인**. 현재 Backend Compose는 시작 시 `alembic upgrade head` 수행: PR 병합 이후 Backend 재배포로 migration이 자동 적용될 수 있으므로 운영 변경 게이트에서 반드시 검토. ChatGPT는 GitHub에서 PR/CI/Mock 테스트까지 처리하고 운영 DB를 직접 사용하지 않으며 Cursor 사용을 최소화한다.
+
