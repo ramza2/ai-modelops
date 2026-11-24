@@ -18,10 +18,14 @@
 
 services:
   postgres:
+    restart: unless-stopped
     # No host publish — Control Plane internal only.
     ports: !reset []
 
   backend:
+    # Normal server startup checks exact revision, never upgrades the DB.
+    command: ["python", "-m", "app.core.server_startup"]
+    restart: unless-stopped
     # Loopback-only publish for host-side /health + /ready during deploy.
     # Not bound on all interfaces; Traefik does not route Backend directly.
     ports: !override
@@ -52,7 +56,7 @@ services:
 
   frontend:
     # Restart the Admin UI after daemon restart; explicit stops stay stopped.
-    # Backend remains independently managed; no migration/restart policy change.
+    # Backend remains independently managed.
     restart: unless-stopped
     # Admin UI is intentionally LAN-only on the server path; no Traefik router.
     ports: !override
