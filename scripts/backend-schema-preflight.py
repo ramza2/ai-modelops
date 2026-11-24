@@ -20,6 +20,8 @@ IMAGE_ID = re.compile(r"sha256:[0-9a-f]{64}\Z")
 CID = re.compile(r"[0-9a-f]{12,64}\Z")
 GRAPH_PROBE = """
 import json
+import warnings
+warnings.filterwarnings("error")
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 graph = ScriptDirectory.from_config(Config('/app/alembic.ini'))
