@@ -119,8 +119,9 @@ def snapshot(project, env_file):
     require(existing is not None, "NO_EXISTING_DATABASE")
     cid, info = existing
     gate.verify_connection(cfg, info)
-    require(states["postgres"]["container_id"] == info["Id"] == cid,
-            "POSTGRES_ID_CHANGED")
+    require(states["postgres"]["container_id"] == info["Id"] and
+            info["Id"].startswith(cid), "POSTGRES_ID_CHANGED")
+    cid = info["Id"]
     backend = json.loads(run(["docker", "inspect", states["backend"]["container_id"]]))
     require(len(backend) == 1 and backend[0]["Id"] == states["backend"]["container_id"],
             "BACKEND_ID_CHANGED")
