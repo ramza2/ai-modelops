@@ -30,6 +30,10 @@ Usage: ./scripts/deploy-server.sh --env-file <path> [--down|--help]
                       TRAEFIK_CERTRESOLVER
                     Same secret must also be set as NODE_AGENT_TOKEN on the
                     host Node Agent EnvironmentFile (separate namespace).
+  Normal up is for a fresh database only (REC-04A).
+  Existing installations: use scripts/backend-schema-preflight.py and an
+  explicitly approved service-scoped deployment. No full up --build.
+
   --down            Stop server Control Plane compose services (volumes kept).
                     Does not re-validate production secrets.
   --help            Show this help
@@ -245,11 +249,22 @@ BACKEND_PORT="$(env_get BACKEND_PORT)"
 BACKEND_PORT="${BACKEND_PORT:-8000}"
 
 echo "Validating server compose config..."
-if ! compose config >/tmp/modelops_server_compose.config.yml; then
+if ! compose config -q; then
   echo "error: docker compose config failed" >&2
   exit 1
 fi
 echo "Compose config: OK"
+
+# REC-04A: never use this all-service bootstrap helper on an existing DB.
+# A stopped/missing PostgreSQL container with its retained volume also fails
+# closed. The separate read-only gate checks an exact candidate image.
+TARGET_KIND="$(python3 "${ROOT_DIR}/scripts/backend-schema-preflight.py" \
+  --env-file "${ENV_FILE}" --classify-target)"
+if [[ "$TARGET_KIND" != "FRESH" ]]; then
+  echo "MODELOPS_FULL_DEPLOY_BLOCKED_EXISTING_DATABASE" >&2
+  echo "Use Backend schema preflight and a separately approved service-scoped deployment." >&2
+  exit 1
+fi
 
 echo "Starting ModelOps server Control Plane..."
 if ! compose up -d --build; then
