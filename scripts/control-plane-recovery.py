@@ -121,6 +121,13 @@ def snapshot(project, env_file):
     gate.verify_connection(cfg, info)
     require(states["postgres"]["container_id"] == info["Id"] == cid,
             "POSTGRES_ID_CHANGED")
+    backend = json.loads(run(["docker", "inspect", states["backend"]["container_id"]]))
+    require(len(backend) == 1 and backend[0]["Id"] == states["backend"]["container_id"],
+            "BACKEND_ID_CHANGED")
+    backend_env = dict(item.split("=", 1) for item in backend[0]["Config"]["Env"] if "=" in item)
+    require(backend_env.get("MODELOPS_DATABASE_URL") ==
+            cfg["services"]["backend"]["environment"]["MODELOPS_DATABASE_URL"],
+            "LIVE_BACKEND_DATABASE_TARGET_MISMATCH")
     revision = gate.read_db_revision(cid)
     require(all(states[s]["status"] == "running" for s in SERVICES),
             "CONTROL_PLANE_NOT_RUNNING")
@@ -167,6 +174,9 @@ def verify(before, after, replacements, postgres_policy=False):
             require(svc in REPLACEABLE, "REPLACEMENT_SERVICE_INVALID")
             require(new["image_id"] == replacements[svc],
                     "IMAGE_MISMATCH_" + svc.upper())
+            require(new["image_id"] != old["image_id"] and
+                    new["container_id"] != old["container_id"],
+                    "REPLACEMENT_NOT_OBSERVED_" + svc.upper())
             require(new["restart_policy"] == "unless-stopped",
                     "RESTART_POLICY_MISMATCH_" + svc.upper())
             if svc == "backend":
@@ -206,6 +216,8 @@ def plan(project, env_file, baseline, service, candidate, revision):
     require(gate.resolve_image(tag) == old, "ROLLBACK_TAG_CHANGED")
     return {"project": project, "service": service, "candidate": meta,
             "rollback_image": old, "rollback_tag": tag,
+            "rollback_backend_gate_observed": live["services"][service]["server_startup_gate"]
+                if service == "backend" else None,
             "db_revision": live["db_revision"],
             "status": "PLAN_VERIFIED_NOT_DEPLOYED"}
 
