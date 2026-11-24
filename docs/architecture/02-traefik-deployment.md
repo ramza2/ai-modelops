@@ -12,6 +12,8 @@ deploy/compose/docker-compose.server.yml     # Traefik + Linux host-gateway over
 ./scripts/deploy-server.sh --env-file <server.env>
 ```
 
+REC-04A: 위 normal up은 신규 DB/volume bootstrap 전용이다. 기존 설치의 Backend 교체는 [revision 사전 검사](../deployment/rec04a-backend-schema-preflight.md)와 별도 승인된 서비스 단독 배포 절차를 따른다.
+
 로컬 개발용 `./scripts/deploy.sh`는 host-port 기반이며 Traefik label을 붙이지 않는다.
 
 ## 2. 권장 역할 분리
