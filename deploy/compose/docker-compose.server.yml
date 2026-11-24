@@ -51,6 +51,9 @@ services:
       - "traefik.http.services.modelops-gateway.loadbalancer.server.port=8080"
 
   frontend:
+    # Restart the Admin UI after daemon restart; explicit stops stay stopped.
+    # Backend remains independently managed; no migration/restart policy change.
+    restart: unless-stopped
     # Admin UI is intentionally LAN-only on the server path; no Traefik router.
     ports: !override
       - "${MODELOPS_ADMIN_BIND_IP}:${FRONTEND_PORT:-3000}:80"

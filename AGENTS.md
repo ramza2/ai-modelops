@@ -1028,3 +1028,9 @@ MVP에서 미래 확장성을 이유로 불필요한 분산 시스템이나 추�
 - DB revision missing, 복수 HEAD, read-only 조회 실패, DB target/volume mismatch, forward migration 필요는 BLOCK. upgrade/downgrade/stamp 및 DB 직접 수정/자동 rollback 금지. migration은 백업·격리 실복원·별도 승인 절차.
 - 기존 DB가 있는 운영 설치에서 전체 `deploy-server.sh` normal up 금지; 신규 project/volume bootstrap 전용. 운영 service-scoped 배포는 별도 승인. REC-04B/C 및 GPU 관측 기능은 이번 scope 제외.
 - Mock tests와 운영 read-only gate를 구분하고 실제 운영 image build/recreate는 수행하지 않는다. Cursor 최소화, ChatGPT GitHub Draft PR 및 검증 우선. DQA 및 다른 프로젝트 변경 금지.
+
+## REC-04B1 — Frontend 재부팅/Backend DNS 장애 복원력 (2026-11-24)
+
+- 기준: `docs/deployment/rec04b1-frontend-startup-resilience.md`, #115. Nginx는 Compose 내부 Docker DNS에서 고정 backend:8000을 요청 시점에 해석; SPA는 Backend 부재에도 유지하고 /api/, /health, /ready는 실제 오류/응답 및 원래 URI/query를 보존. 사용자 입력 upstream 금지.
+- Server overlay Frontend만 restart: unless-stopped. Backend/PostgreSQL/Gateway/Worker 정책·명령, 모델 lifecycle, DB migration, Node Agent, Collector/Retention 변경 금지. Compose depends_on은 daemon 재부팅 순서를 보장하지 않음. Backend 자동 migration/재부팅 정책은 REC-04B2 별도.
+- `scripts/test_frontend_startup_docker.py`는 격리 Docker host/context 및 로컬 후보 이미지 전용. 내부 임시 network/Mock만, 실제 운영 장애 재현 금지. 모의 DNS 검사와 실제 Docker 검증은 구분; Draft PR/병합/운영 배포 별도 게이트. Ubuntu 업데이트 중 운영 변경 금지, 다른 프로젝트 무변경.
