@@ -268,7 +268,8 @@ if [[ "$TARGET_KIND" != "FRESH" ]]; then
 fi
 
 # No existing project services may be adopted by the fresh bootstrap.
-if [[ -n "$(compose ps -a -q)" ]]; then
+EXISTING_SERVICES="$(compose ps -a -q)"
+if [[ -n "$EXISTING_SERVICES" ]]; then
   echo "MODELOPS_FRESH_BOOTSTRAP_BLOCKED_EXISTING_SERVICES" >&2
   exit 1
 fi
@@ -277,7 +278,8 @@ compose build backend worker gateway frontend
 # Repeat the fresh gate after the potentially lengthy build.
 TARGET_KIND="$(python3 "${ROOT_DIR}/scripts/backend-schema-preflight.py" \
   --env-file "${ENV_FILE}" --classify-target)"
-if [[ "$TARGET_KIND" != "FRESH" || -n "$(compose ps -a -q)" ]]; then
+EXISTING_SERVICES="$(compose ps -a -q)"
+if [[ "$TARGET_KIND" != "FRESH" || -n "$EXISTING_SERVICES" ]]; then
   echo "MODELOPS_FRESH_BOOTSTRAP_BLOCKED_TARGET_CHANGED" >&2
   exit 1
 fi
