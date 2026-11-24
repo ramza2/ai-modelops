@@ -17,6 +17,8 @@ DB_URL="postgresql+asyncpg://modelops:ci-only@postgres:5432/modelops"
 HEAD=b8c9d0e1f2a3
 OLD=a7c8d9e0f1a2
 NET_CREATED=0
+VOL="$TOKEN-pgdata"
+VOL_CREATED=0
 
 cleanup() {
   if [[ "$NET_CREATED" = 1 ]]; then
@@ -24,14 +26,17 @@ cleanup() {
     if (( ${#ids[@]} )); then docker rm -f "${ids[@]}" >/dev/null; fi
     docker network rm "$NET" >/dev/null
   fi
+  if [[ "$VOL_CREATED" = 1 ]]; then docker volume rm "$VOL" >/dev/null; fi
 }
 trap cleanup EXIT
 docker network create --internal --label "$LABEL" "$NET" >/dev/null
 NET_CREATED=1
+docker volume create --label "$LABEL" "$VOL" >/dev/null
+VOL_CREATED=1
 docker run -d --pull never --name "$PG" --label "$LABEL" \
   --network "$NET" --network-alias postgres \
   -e POSTGRES_USER=modelops -e POSTGRES_DB=modelops -e POSTGRES_PASSWORD=ci-only \
-  --tmpfs /var/lib/postgresql/data:rw "$PG_IMAGE" >/dev/null
+  --mount "type=volume,src=$VOL,dst=/var/lib/postgresql/data" "$PG_IMAGE" >/dev/null
 
 sql() {
   docker exec "$PG" psql -X -qAt -v ON_ERROR_STOP=1 -U modelops -d modelops -c "$1"
