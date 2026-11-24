@@ -105,6 +105,8 @@ Node Agent는 host process로 유지한다. Worker 기동/크래시 로그는
 ./scripts/deploy-server.sh --env-file /path/to/server.env
 ```
 
+REC-04A: 위 normal up은 신규 DB/volume bootstrap 전용이다. 기존 설치는 [Backend 이미지/DB revision 사전 검사](docs/deployment/rec04a-backend-schema-preflight.md) 및 별도 승인된 서비스 단독 배포 절차를 사용한다.
+
 Required in server env (non-empty; no unresolved `${...}`):
 
 - `MODELOPS_ENVIRONMENT` (not `local`)
