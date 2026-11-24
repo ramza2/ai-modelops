@@ -54,7 +54,11 @@ jobs:
               "postgres", "backend", "worker", "gateway", "frontend"}
           assert local["frontend"].get("restart", "no") == "no"
           assert server["frontend"]["restart"] == "unless-stopped"
-          for svc in ("postgres", "backend", "worker", "gateway"):
+          assert server["postgres"]["restart"] == "unless-stopped"
+          assert server["backend"]["restart"] == "unless-stopped"
+          assert server["backend"]["command"] == ["python", "-m", "app.core.server_startup"]
+          assert "alembic upgrade head" in " ".join(local["backend"]["command"])
+          for svc in ("worker", "gateway"):
               assert local[svc].get("restart", "no") == server[svc].get("restart", "no")
               assert local[svc].get("command") == server[svc].get("command")
           assert not server["postgres"].get("ports")
