@@ -144,5 +144,9 @@ Stdlib mock tests cover evidence validation, exact identities, target/volume
 and non-target drift, restart-policy-only change, rollback tag/provenance
 mismatch, dual Backend graph checks. Hosted Docker builds exact tracked
 Backend/Frontend source and verifies labels, then runs existing REC-04B1/B2
-isolated smoke against those images. This does not prove production image
+isolated smoke against those images. A disposable Compose project with real
+Backend, Frontend, PostgreSQL and mock Worker/Gateway additionally exercises
+actual metadata capture, missing rollback tag refusal, dual graph plan,
+Backend-only replacement verification and stopped-service audit. It does
+not execute a real rollback. This does not prove production image
 provenance, backup/restore, actual reboot or end-to-end rollback.
