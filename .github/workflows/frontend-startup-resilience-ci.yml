@@ -1,0 +1,74 @@
+name: Frontend Startup Resilience CI
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'frontend/**'
+      - 'deploy/compose/docker-compose.yml'
+      - 'deploy/compose/docker-compose.server.yml'
+      - 'scripts/test_frontend_startup_docker.py'
+      - '.github/workflows/frontend-startup-resilience-ci.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: frontend-startup-resilience-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  isolated-docker:
+    name: Compose contract and isolated Docker DNS smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out sources
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Validate Compose config without starting services
+        env:
+          MODELOPS_ENVIRONMENT: ci
+          POSTGRES_PASSWORD: ci-placeholder-not-a-secret
+          MODELOPS_ADMIN_BIND_IP: 127.0.0.2
+          MODELOPS_GATEWAY_HOST: gateway.invalid
+          TRAEFIK_CERTRESOLVER: ci-placeholder
+          MODELOPS_NODE_AGENT_TOKEN: ci-placeholder
+        run: |
+          python3 -B - <<'PY'
+          import json
+          import subprocess
+
+          base = ["docker", "compose", "--env-file", "/dev/null",
+                  "-p", "modelops-rec04b1-ci",
+                  "-f", "deploy/compose/docker-compose.yml"]
+          def config(args):
+              result = subprocess.run(args + ["config", "--format", "json"],
+                                      check=True, capture_output=True, text=True)
+              return json.loads(result.stdout)["services"]
+
+          local = config(base)
+          server = config(base + ["-f", "deploy/compose/docker-compose.server.yml"])
+          assert set(local) == set(server) == {
+              "postgres", "backend", "worker", "gateway", "frontend"}
+          assert local["frontend"].get("restart", "no") == "no"
+          assert server["frontend"]["restart"] == "unless-stopped"
+          for svc in ("postgres", "backend", "worker", "gateway"):
+              assert local[svc].get("restart", "no") == server[svc].get("restart", "no")
+              assert local[svc].get("command") == server[svc].get("command")
+          assert not server["postgres"].get("ports")
+          assert not server["gateway"].get("ports")
+          assert server["backend"]["ports"][0]["host_ip"] == "127.0.0.1"
+          assert server["frontend"]["ports"][0]["host_ip"] == "127.0.0.2"
+          assert set(server["frontend"]["networks"]) == {"modelops-control"}
+          assert not server["frontend"].get("labels")
+          assert server["frontend"].get("depends_on") == local["frontend"].get("depends_on")
+          print("MODELOPS_REC04B1_COMPOSE_CONTRACT_PASS")
+          PY
+      - name: Build actual candidate Frontend image
+        run: docker build --tag modelops-rec04b1-ci:local frontend
+      - name: Isolated Docker DNS recovery smoke
+        run: |
+          python3 -B scripts/test_frontend_startup_docker.py \
+            --isolated-docker --image modelops-rec04b1-ci:local
