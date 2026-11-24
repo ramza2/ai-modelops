@@ -1,0 +1,57 @@
+name: Control Plane Recovery CI
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'scripts/control-plane-recovery.py'
+      - 'scripts/build-control-plane-image.sh'
+      - 'scripts/test_control_plane_recovery.py'
+      - 'scripts/test_control_plane_recovery_docker.sh'
+      - '.github/workflows/control-plane-recovery-ci.yml'
+      - 'backend/**'
+      - 'frontend/**'
+      - 'deploy/compose/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: control-plane-recovery-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  isolated-recovery:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Recovery contract and prior schema gate tests
+        run: |
+          python3 -B -m unittest discover -s scripts -p test_control_plane_recovery.py -v
+          python3 -B -m unittest discover -s scripts -p test_backend_schema_preflight.py -v
+          bash -n scripts/build-control-plane-image.sh
+          bash -n scripts/test_control_plane_recovery_docker.sh
+      - name: Pinned Backend and Frontend provenance
+        run: |
+          set -Eeuo pipefail
+          REV="$(git rev-parse HEAD)"
+          for service in backend frontend; do
+            bash scripts/build-control-plane-image.sh --isolated-build "$service" "$REV" | tee "$RUNNER_TEMP/rec04c-$service.log"
+            image="$(sed -n 's/^IMAGE_ID=//p' "$RUNNER_TEMP/rec04c-$service.log")"
+            tag="$(sed -n 's/^CANDIDATE_TAG=//p' "$RUNNER_TEMP/rec04c-$service.log")"
+            [[ "$image" =~ ^sha256:[0-9a-f]{64}$ ]]
+            test "$(docker image inspect --format '{{.Id}}' "$tag")" = "$image"
+            printf '%s_IMAGE=%s\n%s_TAG=%s\n' "${service^^}" "$image" "${service^^}" "$tag" >> "$GITHUB_ENV"
+          done
+      - name: Existing Backend and Frontend Docker recovery tests
+        run: |
+          docker pull postgres:16
+          bash scripts/test_backend_startup_docker.sh --isolated-docker "$BACKEND_IMAGE"
+          python3 -B scripts/test_frontend_startup_docker.py --isolated-docker --image "$FRONTEND_IMAGE"
+      - name: Actual Docker metadata, DB baseline and rollback plan
+        run: |
+          bash scripts/test_control_plane_recovery_docker.sh --isolated-ci "$BACKEND_TAG" "$FRONTEND_TAG"
