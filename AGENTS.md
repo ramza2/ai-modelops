@@ -1034,3 +1034,10 @@ MVP에서 미래 확장성을 이유로 불필요한 분산 시스템이나 추�
 - 기준: `docs/deployment/rec04b1-frontend-startup-resilience.md`, #115. Nginx는 Compose 내부 Docker DNS에서 고정 backend:8000을 요청 시점에 해석; SPA는 Backend 부재에도 유지하고 /api/, /health, /ready는 실제 오류/응답 및 원래 URI/query를 보존. 사용자 입력 upstream 금지.
 - Server overlay Frontend만 restart: unless-stopped. Backend/PostgreSQL/Gateway/Worker 정책·명령, 모델 lifecycle, DB migration, Node Agent, Collector/Retention 변경 금지. Compose depends_on은 daemon 재부팅 순서를 보장하지 않음. Backend 자동 migration/재부팅 정책은 REC-04B2 별도.
 - `scripts/test_frontend_startup_docker.py`는 격리 Docker host/context 및 로컬 후보 이미지 전용. 내부 임시 network/Mock만, 실제 운영 장애 재현 금지. 모의 DNS 검사와 실제 Docker 검증은 구분; Draft PR/병합/운영 배포 별도 게이트. Ubuntu 업데이트 중 운영 변경 금지, 다른 프로젝트 무변경.
+
+## REC-04B2 — 서버 Backend startup / DB migration 분리 (2026-11-24)
+
+- 기준: `docs/deployment/rec04b2-backend-startup-safety.md`, #115. 운영 overlay에서만 Backend 일반 시작은 `python -m app.core.server_startup`; DB read-only revision 단일 exact head 확인 후 exec Uvicorn. 일반 startup에서 upgrade/downgrade/stamp/DDL 금지. 기존 local Compose 개발 동작 유지.
+- PostgreSQL/Backend server restart unless-stopped, DB 연결 지연 bounded retry, revision 불일치 fail closed, 고정 진단 코드만 출력. Gateway/Worker 정책/명령 변경 금지. REC-04A 배포 전 gate 유지, startup 검사와 지속 readiness/schema drift 감시는 구분.
+- Fresh-only deploy-server normal up은 기존 서비스·DB/volume 없는 경우만 허용. 명시 one-shot --bootstrap-empty는 표준 빈 DB 검증과 advisory lock, 동일 connection/transaction의 Alembic, exact head 확인. 기존 DB migration은 백업·실복원·별도 승인 절차로 분리, 자동 rollback/재시도/volume 삭제 금지.
+- 실제 Backend 후보 Docker 이미지 + 일회용 PostgreSQL CI, synthetic revision fault injection, delayed DB/restart, REC-04A 회귀. 운영 DB, GPU, 모델, 다른 프로젝트, Docker 전역 변경 금지. Draft PR, 병합, 운영 배포 별도 승인. Cursor 최소화.

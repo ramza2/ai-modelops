@@ -1,0 +1,40 @@
+name: Backend Startup Safety CI
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'backend/**'
+      - 'deploy/compose/docker-compose*.yml'
+      - 'scripts/deploy-server.sh'
+      - 'scripts/*schema_preflight*'
+      - 'scripts/backend-schema-preflight.py'
+      - 'scripts/test_backend_startup_docker.sh'
+      - '.github/workflows/backend-startup-safety-ci.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backend-startup-safety-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  isolated-docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: REC-04A regression and shell syntax
+        run: |
+          python3 -B -m unittest discover -s scripts -p test_backend_schema_preflight.py -v
+          bash -n scripts/deploy-server.sh
+          bash -n scripts/test_backend_startup_docker.sh
+      - name: Build actual Backend image
+        run: docker build --tag modelops-rec04b2-ci:local backend
+      - name: Startup guard and explicit bootstrap in isolated PostgreSQL
+        run: |
+          docker pull postgres:16
+          bash scripts/test_backend_startup_docker.sh --isolated-docker modelops-rec04b2-ci:local

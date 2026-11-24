@@ -30,7 +30,8 @@ Usage: ./scripts/deploy-server.sh --env-file <path> [--down|--help]
                       TRAEFIK_CERTRESOLVER
                     Same secret must also be set as NODE_AGENT_TOKEN on the
                     host Node Agent EnvironmentFile (separate namespace).
-  Normal up is for a fresh database only (REC-04A).
+  Normal up is for a fresh database only (REC-04A/B2).
+  Explicit empty-schema initialization precedes ordinary service startup.
   Existing installations: use scripts/backend-schema-preflight.py and an
   explicitly approved service-scoped deployment. No full up --build.
 
@@ -266,8 +267,28 @@ if [[ "$TARGET_KIND" != "FRESH" ]]; then
   exit 1
 fi
 
+# No existing project services may be adopted by the fresh bootstrap.
+EXISTING_SERVICES="$(compose ps -a -q)"
+if [[ -n "$EXISTING_SERVICES" ]]; then
+  echo "MODELOPS_FRESH_BOOTSTRAP_BLOCKED_EXISTING_SERVICES" >&2
+  exit 1
+fi
+echo "Preparing fresh Control Plane images..."
+compose build backend worker gateway frontend
+# Repeat the fresh gate after the potentially lengthy build.
+TARGET_KIND="$(python3 "${ROOT_DIR}/scripts/backend-schema-preflight.py" \
+  --env-file "${ENV_FILE}" --classify-target)"
+EXISTING_SERVICES="$(compose ps -a -q)"
+if [[ "$TARGET_KIND" != "FRESH" || -n "$EXISTING_SERVICES" ]]; then
+  echo "MODELOPS_FRESH_BOOTSTRAP_BLOCKED_TARGET_CHANGED" >&2
+  exit 1
+fi
+compose up -d --wait --wait-timeout 120 postgres
+# Explicit one-shot empty bootstrap; no migration on ordinary Backend start.
+compose run --rm --no-deps --pull never backend \
+  python -m app.core.server_startup --bootstrap-empty
 echo "Starting ModelOps server Control Plane..."
-if ! compose up -d --build; then
+if ! compose up -d --no-build --pull never; then
   echo "error: docker compose up failed" >&2
   print_failure_diagnostics
   exit 1
