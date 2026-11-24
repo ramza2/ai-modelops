@@ -1022,3 +1022,9 @@ MVP에서 미래 확장성을 이유로 불필요한 분산 시스템이나 추�
 - 실제 삭제 조건은 `retention_managed IS TRUE AND sampled_at < UTC now - 30 days`로 이중 제한. Host/GPU 각각 최대 batch, 하나의 DB 트랜잭션/lock 사용; preview read-only. 타 테이블(특히 Runtime Metrics)/Legacy/manual 데이터·모델/Node Agent/Gateway 건드리지 않는다.
 - **운영 마이그레이션·Worker 교체·수집 ON·정리 ON/DELETE는 각각 별도 명시 승인**. 현재 Backend Compose는 시작 시 `alembic upgrade head` 수행: PR 병합 이후 Backend 재배포로 migration이 자동 적용될 수 있으므로 운영 변경 게이트에서 반드시 검토. ChatGPT는 GitHub에서 PR/CI/Mock 테스트까지 처리하고 운영 DB를 직접 사용하지 않으며 Cursor 사용을 최소화한다.
 
+## REC-04A — Backend/DB revision 배포 게이트 (2026-11-24)
+
+- 기준: `docs/deployment/rec04a-backend-schema-preflight.md`, 복구 이력 #115. 기존 설치의 Backend 이미지 교체/롤백은 `scripts/backend-schema-preflight.py`로 실제 DB 단일 revision과 후보 이미지 단일 HEAD의 exact match를 검증한다. 후보는 immutable image ID로 고정하고 검사 직전/배포 직전 재확인.
+- DB revision missing, 복수 HEAD, read-only 조회 실패, DB target/volume mismatch, forward migration 필요는 BLOCK. upgrade/downgrade/stamp 및 DB 직접 수정/자동 rollback 금지. migration은 백업·격리 실복원·별도 승인 절차.
+- 기존 DB가 있는 운영 설치에서 전체 `deploy-server.sh` normal up 금지; 신규 project/volume bootstrap 전용. 운영 service-scoped 배포는 별도 승인. REC-04B/C 및 GPU 관측 기능은 이번 scope 제외.
+- Mock tests와 운영 read-only gate를 구분하고 실제 운영 image build/recreate는 수행하지 않는다. Cursor 최소화, ChatGPT GitHub Draft PR 및 검증 우선. DQA 및 다른 프로젝트 변경 금지.
