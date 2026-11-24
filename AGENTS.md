@@ -1041,3 +1041,10 @@ MVP에서 미래 확장성을 이유로 불필요한 분산 시스템이나 추�
 - PostgreSQL/Backend server restart unless-stopped, DB 연결 지연 bounded retry, revision 불일치 fail closed, 고정 진단 코드만 출력. Gateway/Worker 정책/명령 변경 금지. REC-04A 배포 전 gate 유지, startup 검사와 지속 readiness/schema drift 감시는 구분.
 - Fresh-only deploy-server normal up은 기존 서비스·DB/volume 없는 경우만 허용. 명시 one-shot --bootstrap-empty는 표준 빈 DB 검증과 advisory lock, 동일 connection/transaction의 Alembic, exact head 확인. 기존 DB migration은 백업·실복원·별도 승인 절차로 분리, 자동 rollback/재시도/volume 삭제 금지.
 - 실제 Backend 후보 Docker 이미지 + 일회용 PostgreSQL CI, synthetic revision fault injection, delayed DB/restart, REC-04A 회귀. 운영 DB, GPU, 모델, 다른 프로젝트, Docker 전역 변경 금지. Draft PR, 병합, 운영 배포 별도 승인. Cursor 최소화.
+
+## REC-04C — Control Plane 이미지 출처 및 복구 증거 (2026-11-24)
+
+- 기준: `docs/deployment/rec04c-control-plane-recovery.md`, #115. 후보 Backend/Frontend는 승인된 Git commit의 tracked archive로만 build, Git revision/service label 및 immutable image ID 확인. 기존 label 부재는 unknown, 출처 추정/가짜 증빙 금지. CI 이미지와 운영 host 이미지는 별개.
+- `scripts/control-plane-recovery.py` audit/capture/plan/verify는 명시 project/표준 DB 대상, 5개 서비스 selected metadata만. capture의 process/DB revision 검사와 실제 HTTP/모델 readiness 분리. 운영 증거는 Git 외부 0700/0600, secret/전체 inspect/config/내부 주소 공개 금지.
+- 별도 승인된 tag로 기존 실제 이미지 보존, plan은 exact tag/후보 label/immutable ID 및 REC-04A 후보+rollback revision 검증. 기존 이미지에 startup gate 없는 경우 legacy rollback command를 격리 검증 후 별도 승인; 자동 migration/rollback 금지. PostgreSQL policy-only in-place 변경도 별도 승인.
+- 운영 반영은 Backend/Frontend service-only, no-deps/no-build/pull-never, 이전/이후 증거 및 non-target 불변 확인. Gateway/Worker/DB schema/GPU/모델/다른 프로젝트 변경 금지. 전체 up/down/prune/reboot 금지. Draft PR + hosted CI 후 병합·운영 배포 별도 승인.
